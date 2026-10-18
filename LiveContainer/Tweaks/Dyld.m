@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <pthread.h>
 #import "../../litehook/src/litehook.h"
 #import "LCMachOUtils.h"
 #include "mach_excServer.h"
@@ -620,16 +621,26 @@ void* jitless_hook_mmap(void *addr, size_t len, int prot, int flags, int fd, off
     if (map != MAP_FAILED || !(prot & PROT_EXEC) || fd < 0) return map;
     
     // to get around `file system sandbox blocked mmap()` we temporarily move it to permitted path
+    // Use a mutex to prevent race conditions when multiple threads mmap concurrently
+    static pthread_mutex_t mmap_mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mmap_mutex);
     char filePath[PATH_MAX];
-    if (fcntl(fd, F_GETPATH, filePath) != 0) return map;
+    if (fcntl(fd, F_GETPATH, filePath) != 0) {
+        pthread_mutex_unlock(&mmap_mutex);
+        return map;
+    }
     char newTmpPath[PATH_MAX];
     const char *homePath = getenv("LP_HOME_PATH");
     if (!homePath) homePath = getenv("HOME");
-    if (!homePath) return map;
+    if (!homePath) {
+        pthread_mutex_unlock(&mmap_mutex);
+        return map;
+    }
     sprintf(newTmpPath, "%s/Documents/.fd%d.dylib", homePath, fd);
     rename(filePath, newTmpPath);
     map = __mmap(addr, len, prot, flags, fd, offset);
     rename(newTmpPath, filePath);
+    pthread_mutex_unlock(&mmap_mutex);
     
     return map;
 }

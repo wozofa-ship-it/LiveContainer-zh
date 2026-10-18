@@ -494,6 +494,7 @@ struct LCDataManagementView : View {
         do {
             let appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
             var restoredCount = 0
+            var missingApps: [String] = []
             let allApps = sharedModel.apps + sharedModel.hiddenApps
             for appFolder in appFolders {
                 let folderName = appFolder.lastPathComponent
@@ -501,7 +502,18 @@ struct LCDataManagementView : View {
                 guard let app = allApps.first(where: {
                     ($0.appInfo.displayName() ?? "") == folderName ||
                     ($0.appInfo.bundleIdentifier() ?? "") == folderName
-                }) else { continue }
+                }) else {
+                    // 尝试读 manifest.json 获取应用名
+                    let manifestURL = appFolder.appendingPathComponent("manifest.json")
+                    var appName = folderName
+                    if let data = try? Data(contentsOf: manifestURL),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                       let displayName = json["displayName"], !displayName.isEmpty {
+                        appName = displayName
+                    }
+                    missingApps.append(appName)
+                    continue
+                }
                 let containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
                 for containerFolder in containerFolders {
                     for container in app.uiContainers {
@@ -517,7 +529,11 @@ struct LCDataManagementView : View {
                 }
                 restoredCount += 1
             }
-            successInfo = String(format: "lc.settings.restoreComplete".loc, restoredCount)
+            var msg = String(format: "lc.settings.restoreComplete".loc, restoredCount)
+            if !missingApps.isEmpty {
+                msg += "\n\n未安装的 App（请先安装 IPA）：\n" + missingApps.joined(separator: "\n")
+            }
+            successInfo = msg
             successShow = true
         } catch {
             errorInfo = error.localizedDescription
