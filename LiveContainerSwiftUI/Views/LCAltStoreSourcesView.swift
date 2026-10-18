@@ -637,7 +637,8 @@ struct LCSourcesView: View {
         .searchable(text: $searchContext.query, placement: .navigationBarDrawer(displayMode: .always))
 
         .onAppear {
-            expandedSources = []
+            // 默认自动展开所有源
+            expandedSources = Set(viewModel.sources.map { $0.id })
             if !isViewAppeared {
                 guard sharedModel.selectedTab == .sources, let link = sharedModel.deepLink else { return }
                 sharedModel.deepLink = nil
@@ -647,7 +648,8 @@ struct LCSourcesView: View {
         }
         .onChange(of: viewModel.sources) { newSources in
             let newSet = Set(newSources.map { $0.id })
-            expandedSources = expandedSources.intersection(newSet)
+            // 新加入的源自动展开，保留已有的展开状态
+            expandedSources = expandedSources.intersection(newSet).union(newSet)
         }
         .onChange(of: sharedModel.deepLink) { link in
             guard sharedModel.selectedTab == .sources, let link else { return }
@@ -989,6 +991,9 @@ private struct AltStoreSourceSectionView: View {
                 } else {
                     Menu {
                         Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
+                        Button("复制源链接", systemImage: "doc.on.doc") {
+                            UIPasteboard.general.string = item.url.absoluteString
+                        }
                         Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
                     } label: {
                         Image(systemName: "ellipsis.circle")

@@ -271,6 +271,17 @@ struct LCDataManagementView : View {
                             .foregroundColor(.blue)
                         }
                         .buttonStyle(.bordered)
+                        Button {
+                            showRestoreSelect = false
+                            Task { await installMissingApps(from: folderURL) }
+                        } label: {
+                            HStack {
+                                Image(systemName: "arrow.down.circle")
+                                Text("安装")
+                            }
+                            .foregroundColor(.green)
+                        }
+                        .buttonStyle(.bordered)
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
@@ -529,6 +540,7 @@ struct LCDataManagementView : View {
             let appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
             var restoredCount = 0
             var missingApps: [String] = []
+            var missingFolders: [URL] = []
             let allApps = sharedModel.apps + sharedModel.hiddenApps
             for appFolder in appFolders {
                 let folderName = appFolder.lastPathComponent
@@ -569,9 +581,63 @@ struct LCDataManagementView : View {
             }
             successInfo = msg
             successShow = true
+            // 恢复为0时自动触发安装流程
+            if restoredCount == 0 && !missingApps.isEmpty {
+                await installMissingApps(from: backupURL)
+            }
         } catch {
             errorInfo = error.localizedDescription
             errorShow = true
+        }
+    }
+
+    func installMissingApps(from backupURL: URL) async {
+        let fm = FileManager.default
+        do {
+            let appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+            let allApps = sharedModel.apps + sharedModel.hiddenApps
+            var toInstall: [(name: String, bundleID: String)] = []
+            for appFolder in appFolders {
+                let folderName = appFolder.lastPathComponent
+                // 跳过 manifest.json 和 .app bundle，只处理数据文件夹
+                if folderName == "manifest.json" || folderName.hasSuffix(".app") { continue }
+                let manifestURL = appFolder.appendingPathComponent("manifest.json")
+                var bundleID = ""
+                var displayName = folderName
+                // 尝试从 manifest 读取
+                if let data = try? Data(contentsOf: manifestURL),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                    bundleID = json["bundleIdentifier"] ?? ""
+                    if let dn = json["displayName"], !dn.isEmpty { displayName = dn }
+                }
+                // 检查是否已安装
+                let installed = allApps.contains {
+                    ($0.appInfo.displayName() ?? "") == folderName ||
+                    ($0.appInfo.bundleIdentifier() ?? "") == folderName ||
+                    (!(bundleID.isEmpty) && ($0.appInfo.bundleIdentifier() ?? "") == bundleID)
+                }
+                if !installed {
+                    toInstall.append((name: displayName, bundleID: bundleID))
+                }
+            }
+            if toInstall.isEmpty {
+                await MainActor.run {
+                    successInfo = "所有 App 均已安装，无需安装"
+                    successShow = true
+                }
+            } else {
+                // 显示待安装列表，由用户逐个选择从源安装或选文件
+                let names = toInstall.map { $0.name }.joined(separator: "\n")
+                await MainActor.run {
+                    successInfo = "发现 \(toInstall.count) 个未安装的 App：\n\(names)\n\n请到「源」标签页搜索安装，或到「App」页导入 IPA 文件。"
+                    successShow = true
+                }
+            }
+        } catch {
+            await MainActor.run {
+                errorInfo = "扫描备份失败：\(error.localizedDescription)"
+                errorShow = true
+            }
         }
     }
 
