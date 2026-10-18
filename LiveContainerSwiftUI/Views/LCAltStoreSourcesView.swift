@@ -487,6 +487,8 @@ struct LCSourcesView: View {
     @ObservedObject public var searchContext: SearchContext = SearchContext()
     @State private var expandedSources: Set<URL> = []
     @State private var isManagingSources = false
+    @State private var isBatchMode = false
+    @State private var selectedIDs = Set<String>()
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -520,7 +522,17 @@ struct LCSourcesView: View {
                                     onInstall: install(app:),
                                     onDownload: download(app:),
                                     onRemove: { sourcePendingRemoval = item },
-                                    toggleExpanded: { toggleExpansion(for: item.id) }
+                                    toggleExpanded: { toggleExpansion(for: item.id) },
+                                    isBatchMode: isBatchMode,
+                                    selectedIDs: selectedIDs,
+                                    onToggleSelect: { app in
+                                        let bid = app.bundleIdentifier
+                                        if selectedIDs.contains(bid) {
+                                            selectedIDs.remove(bid)
+                                        } else {
+                                            selectedIDs.insert(bid)
+                                        }
+                                    }
                                 )
                                 .padding(.horizontal)
                                 .animation(.easeInOut, value: apps.count)
@@ -553,8 +565,22 @@ struct LCSourcesView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("lc.sources.addSource".loc, systemImage: "plus") {
-                        isManagingSources = true
+                    HStack {
+                        if isBatchMode {
+                            Button("lc.common.install".loc) {
+                                batchInstallSelected()
+                            }
+                            .disabled(selectedIDs.isEmpty)
+                        }
+                        Button(isBatchMode ? "lc.common.cancel".loc : "lc.sources.batchSelect".loc, systemImage: isBatchMode ? "xmark" : "checkmark.circle") {
+                            isBatchMode.toggle()
+                            if !isBatchMode {
+                                selectedIDs.removeAll()
+                            }
+                        }
+                        Button("lc.sources.addSource".loc, systemImage: "plus") {
+                            isManagingSources = true
+                        }
                     }
                 }
             }
@@ -674,6 +700,19 @@ struct LCSourcesView: View {
             return false
         }
         return true
+    }
+    
+    @MainActor
+    private func batchInstallSelected() {
+        let appsToInstall = viewModel.sources.flatMap { item -> [AltStoreSourceApp] in
+            guard let source = item.source else { return [] }
+            return source.apps.filter { selectedIDs.contains($0.bundleIdentifier) }
+        }
+        for app in appsToInstall {
+            install(app: app)
+        }
+        isBatchMode = false
+        selectedIDs.removeAll()
     }
     
     @MainActor
@@ -924,6 +963,9 @@ private struct AltStoreSourceSectionView: View {
     let onDownload: (AltStoreSourceApp) -> Void
     let onRemove: () -> Void
     let toggleExpanded: () -> Void
+    let isBatchMode: Bool
+    let selectedIDs: Set<String>
+    let onToggleSelect: (AltStoreSourceApp) -> Void
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -984,7 +1026,7 @@ private struct AltStoreSourceSectionView: View {
             } else if let source = item.source, isExpanded || isFiltering {
                 VStack(spacing: 12) {
                     ForEach(filteredApps[0..<min(50, filteredApps.count)]) { app in
-                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, downloadAction: onDownload)
+                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, downloadAction: onDownload, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
                     }
                     if filteredApps.isEmpty {
                         if source.apps.isEmpty || isFiltering {
@@ -1013,6 +1055,9 @@ private struct LCSourceAppBanner: View {
     let source: AltStoreSource
     let installAction: (AltStoreSourceApp) -> Void
     let downloadAction: (AltStoreSourceApp) -> Void
+    let isBatchMode: Bool
+    let isSelected: Bool
+    let onToggleSelect: () -> Void
     
     @AppStorage("dynamicColors") private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
@@ -1085,44 +1130,56 @@ private struct LCSourceAppBanner: View {
             }
             .allowsHitTesting(false)
             Spacer()
-            Button {
-                downloadAction(app)
-            } label: {
-                Text("lc.common.download".loc)
-                    .bold()
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                    .frame(height: 32)
-                    .minimumScaleFactor(0.1)
+            if isBatchMode {
+                Button {
+                    onToggleSelect()
+                } label: {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 28))
+                        .foregroundColor(isSelected ? .blue : .gray)
+                }
+                .buttonStyle(BasicButtonStyle())
+                .padding(.trailing, 8)
+            } else {
+                Button {
+                    downloadAction(app)
+                } label: {
+                    Text("lc.common.download".loc)
+                        .bold()
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .frame(height: 32)
+                        .minimumScaleFactor(0.1)
+                }
+                .buttonStyle(BasicButtonStyle())
+                .padding(.trailing, 8)
+                .frame(idealWidth: 70)
+                .frame(height: 32)
+                .fixedSize()
+                .background(
+                    Capsule().fill(Color.gray)
+                )
+                .clipShape(Capsule())
+                Button {
+                    installAction(app)
+                } label: {
+                    Text("lc.common.install".loc)
+                        .bold()
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .frame(height: 32)
+                        .minimumScaleFactor(0.1)
+                }
+                .buttonStyle(BasicButtonStyle())
+                .padding()
+                .frame(idealWidth: 70)
+                .frame(height: 32)
+                .fixedSize()
+                .background(
+                    Capsule().fill(dynamicColors ? primaryColor : Color("FontColor"))
+                )
+                .clipShape(Capsule())
             }
-            .buttonStyle(BasicButtonStyle())
-            .padding(.trailing, 8)
-            .frame(idealWidth: 70)
-            .frame(height: 32)
-            .fixedSize()
-            .background(
-                Capsule().fill(Color.gray)
-            )
-            .clipShape(Capsule())
-            Button {
-                installAction(app)
-            } label: {
-                Text("lc.common.install".loc)
-                    .bold()
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                    .frame(height: 32)
-                    .minimumScaleFactor(0.1)
-            }
-            .buttonStyle(BasicButtonStyle())
-            .padding()
-            .frame(idealWidth: 70)
-            .frame(height: 32)
-            .fixedSize()
-            .background(
-                Capsule().fill(dynamicColors ? primaryColor : Color("FontColor"))
-            )
-            .clipShape(Capsule())
         }
         .padding()
         .frame(height: 88)

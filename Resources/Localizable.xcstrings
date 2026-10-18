@@ -32900,6 +32900,22 @@
           }
         }
       }
+    },
+    "lc.sources.batchSelect": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Batch Select"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批量选择"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
