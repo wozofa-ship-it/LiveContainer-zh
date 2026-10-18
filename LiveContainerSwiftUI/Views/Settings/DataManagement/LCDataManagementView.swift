@@ -487,9 +487,11 @@ struct LCDataManagementView : View {
             var restoredCount = 0
             let allApps = sharedModel.apps + sharedModel.hiddenApps
             for appFolder in appFolders {
-                let appName = appFolder.lastPathComponent
+                let folderName = appFolder.lastPathComponent
+                // 先按显示名匹配，再按 Bundle ID 匹配
                 guard let app = allApps.first(where: {
-                    ($0.appInfo.displayName() ?? $0.appInfo.bundleIdentifier() ?? "") == appName
+                    ($0.appInfo.displayName() ?? "") == folderName ||
+                    ($0.appInfo.bundleIdentifier() ?? "") == folderName
                 }) else { continue }
                 let containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
                 for containerFolder in containerFolders {
