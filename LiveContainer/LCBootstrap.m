@@ -569,9 +569,10 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         appHandle = dlopen_nolock(appExecPath, RTLD_LAZY|RTLD_GLOBAL|RTLD_FIRST);
     };
     
-    BOOL is27up = false;
-    if(@available(iOS 27, *)) { is27up = true; }
-    if(is27up && [guestAppInfo[@"segCountMismatch"] boolValue]) {
+    BOOL is26up = false;
+    if(@available(iOS 26, *)) { is26up = true; }
+    if(is26up) {
+        // iOS 26+ 需要 mmap hook 绕过沙盒限制
         bypass_seg_count_check(dlopenBlock);
     } else {
         dlopenBlock();
