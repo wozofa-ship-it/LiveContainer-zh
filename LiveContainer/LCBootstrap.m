@@ -506,11 +506,12 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     
     // hook NSUserDefault before running libraries' initializers
     NUDGuestHooksInit();
-    if(!isSideStore) {
-        SecItemGuestHooksInit();
-        NSFMGuestHooksInit();
-        initDead10ccFix();
-    }
+    // 跳过三个hook以匹配二合一版行为，修复后台"App已被终止"（2026-10-19）
+    // if(!isSideStore) {
+    //     SecItemGuestHooksInit();
+    //     NSFMGuestHooksInit();
+    //     initDead10ccFix();
+    // }
     if(isLiveProcess) {
         NSURLSCGuestHooksInit();
     }

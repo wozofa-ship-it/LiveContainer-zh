@@ -462,6 +462,15 @@ struct LCDataManagementView : View {
                 let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                 let appBackupURL = backupRoot.appendingPathComponent(appName)
                 try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
+                // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
+                let manifest: [String: String] = [
+                    "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
+                    "displayName": app.appInfo.displayName() ?? "",
+                    "version": app.appInfo.version() ?? ""
+                ]
+                if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
+                    try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
+                }
                 for container in app.uiContainers {
                     let srcURL = container.containerURL
                     let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
