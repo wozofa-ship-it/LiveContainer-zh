@@ -682,6 +682,10 @@ struct LCSourcesView: View {
             errorMessage = "lc.sources.error.missingDownload".loc
             return
         }
+        if downloadURL.pathExtension.lowercased() == "dylib" {
+            Task { await installTweak(from: downloadURL) }
+            return
+        }
         withAnimation {
             DataManager.shared.model.selectedTab = .apps
         }
@@ -690,6 +694,25 @@ struct LCSourcesView: View {
         }
 
 
+    }
+
+    @MainActor
+    private func installTweak(from url: URL) async {
+        do {
+            let (tempURL, _) = try await URLSession.shared.download(from: url)
+            let tweakPath = LCPath.tweakPath
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: tweakPath.path) {
+                try fm.createDirectory(at: tweakPath, withIntermediateDirectories: true)
+            }
+            let destURL = tweakPath.appendingPathComponent(url.lastPathComponent)
+            if fm.fileExists(atPath: destURL.path) {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.moveItem(at: tempURL, to: destURL)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     @MainActor
