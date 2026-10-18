@@ -1062,6 +1062,18 @@ private struct LCSourceAppBanner: View {
     
     @AppStorage("dynamicColors") private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
+    @EnvironmentObject private var sharedModel: SharedModel
+    
+    private var isInstalled: Bool {
+        (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+    }
+    
+    private var isPluginInstalled: Bool {
+        guard let downloadURL = app.latestVersion?.downloadURL,
+              downloadURL.pathExtension.lowercased() == "dylib" else { return false }
+        let pluginURL = LCPath.tweakPath.appendingPathComponent("解剖自我 🅥").appendingPathComponent(downloadURL.lastPathComponent)
+        return FileManager.default.fileExists(atPath: pluginURL.path)
+    }
     
     private var primaryColor: Color {
         guard dynamicColors else { return Color("FontColor") }
@@ -1161,25 +1173,63 @@ private struct LCSourceAppBanner: View {
                     Capsule().fill(Color.gray)
                 )
                 .clipShape(Capsule())
-                Button {
-                    installAction(app)
-                } label: {
-                    Text("lc.common.install".loc)
+                let isDylib = (app.latestVersion?.downloadURL?.pathExtension.lowercased() == "dylib")
+                if isDylib && isPluginInstalled {
+                    Text("lc.common.installed".loc)
                         .bold()
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .frame(height: 32)
                         .minimumScaleFactor(0.1)
+                        .padding()
+                        .frame(idealWidth: 70)
+                        .frame(height: 32)
+                        .fixedSize()
+                        .background(Capsule().fill(Color.green))
+                        .clipShape(Capsule())
+                } else if !isDylib && isInstalled {
+                    Button {
+                        if let installedApp = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) {
+                            Task { try? await installedApp.runApp() }
+                        }
+                    } label: {
+                        Text("lc.common.open".loc)
+                            .bold()
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .frame(height: 32)
+                            .minimumScaleFactor(0.1)
+                    }
+                    .buttonStyle(BasicButtonStyle())
+                    .padding()
+                    .frame(idealWidth: 70)
+                    .frame(height: 32)
+                    .fixedSize()
+                    .background(
+                        Capsule().fill(Color.green)
+                    )
+                    .clipShape(Capsule())
+                } else {
+                    Button {
+                        installAction(app)
+                    } label: {
+                        Text("lc.common.install".loc)
+                            .bold()
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .frame(height: 32)
+                            .minimumScaleFactor(0.1)
+                    }
+                    .buttonStyle(BasicButtonStyle())
+                    .padding()
+                    .frame(idealWidth: 70)
+                    .frame(height: 32)
+                    .fixedSize()
+                    .background(
+                        Capsule().fill(dynamicColors ? primaryColor : Color("FontColor"))
+                    )
+                    .clipShape(Capsule())
                 }
-                .buttonStyle(BasicButtonStyle())
-                .padding()
-                .frame(idealWidth: 70)
-                .frame(height: 32)
-                .fixedSize()
-                .background(
-                    Capsule().fill(dynamicColors ? primaryColor : Color("FontColor"))
-                )
-                .clipShape(Capsule())
             }
         }
         .padding()

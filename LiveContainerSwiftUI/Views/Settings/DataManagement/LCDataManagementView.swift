@@ -31,6 +31,7 @@ struct LCDataManagementView : View {
     @State var successInfo = ""
     @State private var showBackupSelect = false
     @State private var backupSelectedIDs = Set<String>()
+    @State private var showRestoreSelect = false
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -100,6 +101,11 @@ struct LCDataManagementView : View {
                     showBackupSelect = true
                 } label: {
                     Text("lc.settings.backupSelected".loc)
+                }
+                Button {
+                    showRestoreSelect = true
+                } label: {
+                    Text("lc.settings.restoreBackup".loc)
                 }
             }
             
@@ -432,6 +438,40 @@ struct LCDataManagementView : View {
         }
     }
 
+
+    func restoreFromBackup(at backupURL: URL) async {
+        let fm = FileManager.default
+        do {
+            let appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+            var restoredCount = 0
+            let allApps = sharedModel.apps + sharedModel.hiddenApps
+            for appFolder in appFolders {
+                let appName = appFolder.lastPathComponent
+                guard let app = allApps.first(where: {
+                    ($0.appInfo.displayName() ?? $0.appInfo.bundleIdentifier() ?? "") == appName
+                }) else { continue }
+                let containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
+                for containerFolder in containerFolders {
+                    for container in app.uiContainers {
+                        if container.containerURL.lastPathComponent == containerFolder.lastPathComponent {
+                            let destURL = container.containerURL
+                            if fm.fileExists(atPath: destURL.path) {
+                                try fm.removeItem(at: destURL)
+                            }
+                            try fm.copyItem(at: containerFolder, to: destURL)
+                            break
+                        }
+                    }
+                }
+                restoredCount += 1
+            }
+            successInfo = String(format: "lc.settings.restoreComplete".loc, restoredCount)
+            successShow = true
+        } catch {
+            errorInfo = error.localizedDescription
+            errorShow = true
+        }
+    }
 
     func moveDanglingFolders() async {
         let fm = FileManager()
