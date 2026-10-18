@@ -246,6 +246,38 @@ struct LCDataManagementView : View {
                 }
             }
         }
+        .sheet(isPresented: $showRestoreSelect) {
+            NavigationView {
+                List(backupFolders(), id: \.self) { folderURL in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(folderURL.lastPathComponent)
+                                .font(.headline)
+                            Text(folderURL.path)
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: "arrow.clockwise.circle")
+                            .foregroundColor(.blue)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showRestoreSelect = false
+                        Task { await restoreFromBackup(at: folderURL) }
+                    }
+                }
+                .navigationTitle("lc.settings.restoreBackup".loc)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("lc.common.cancel".loc) {
+                            showRestoreSelect = false
+                        }
+                    }
+                }
+            }
+        }
     }
     
     func onAppearFunc() {
@@ -398,6 +430,15 @@ struct LCDataManagementView : View {
         }
     }
 
+    func backupFolders() -> [URL] {
+        let fm = FileManager.default
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return [] }
+        let backupsURL = docsURL.appendingPathComponent("Backups")
+        guard let folders = try? fm.contentsOfDirectory(at: backupsURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) else { return [] }
+        return folders.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { (try? $0.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast > (try? $1.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast }
+    }
+
     func backupAllApps() async {
         let allApps = sharedModel.apps + sharedModel.hiddenApps
         await backupApps(allApps)
@@ -430,7 +471,7 @@ struct LCDataManagementView : View {
                 }
                 count += 1
             }
-            successInfo = String(format: "lc.settings.backupComplete".loc, count)
+            successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n" + backupRoot.path
             successShow = true
         } catch {
             errorInfo = error.localizedDescription
