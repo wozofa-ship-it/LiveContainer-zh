@@ -325,53 +325,53 @@ struct LCSettingsView: View {
                             Text("lc.settings.injectLCItself".loc)
                         }
                         Toggle(isOn: $ignoreJITOnLaunch) {
-                            Text("Ignore JIT on Launching App")
+                            Text("lc.settings.ignoreJITOnLaunch".loc)
                         }
                         Toggle(isOn: $keepSelectedWhenQuit) {
-                            Text("Keep Selected App when Quit")
+                            Text("lc.settings.keepSelectedAppOnQuit".loc)
                         }
                         Toggle(isOn: $waitForDebugger) {
-                            Text("Wait For Debugger")
+                            Text("lc.settings.waitForDebugger".loc)
                         }
                         Toggle(isOn: $sharePrivateDataWithLiveProcess) {
-                            Text("Allow Private Data access from LiveProcess")
+                            Text("lc.settings.allowPrivateDataAccess".loc)
                         }
                         Toggle(isOn: $disableLiveProcessWatchdog) {
-                            Text("Disable LiveProcess watchdog termination")
+                            Text("lc.settings.disableWatchdogTermination".loc)
                         }
                         Button {
                             export()
                         } label: {
-                            Text("Export Cert")
+                            Text("lc.settings.exportCert".loc)
                         }
                         Button {
                             exportDyld()
                         } label: {
-                            Text("Export Dyld")
+                            Text("lc.settings.exportDyld".loc)
                         }
                         Button {
                             Task { await nukeSideStore() }
                         } label: {
-                            Text("Nuke SideStore")
+                            Text("lc.settings.nukeSideStore".loc)
                         }
                         Button {
                             exportMainBundle()
                         } label: {
-                            Text("Export Main Bundle")
+                            Text("lc.settings.exportMainBundle".loc)
                         }
                         Button {
                             resetSymbolOffsets()
                         } label: {
-                            Text("Reset Symbol Offsets")
+                            Text("lc.settings.resetSymbolOffsets".loc)
                         }
                         Button {
                             presentFLEXOverlay()
                         } label: {
-                            Text("Show FLEX Overlay")
+                            Text("lc.settings.showFlexOverlay".loc)
                         }
                         .disabled(NSClassFromString("FLEXManager") == nil)
                     } header: {
-                        Text("Developer Settings")
+                        Text("lc.settings.developerSettings".loc)
                     } footer: {
                         Text("lc.settings.injectLCItselfDesc".loc)
                     }

@@ -518,6 +518,7 @@ struct LCSourcesView: View {
                                     isExpanded: expandedSources.contains(item.id),
                                     onRefresh: { Task { await viewModel.refreshSource(item) } },
                                     onInstall: install(app:),
+                                    onDownload: download(app:),
                                     onRemove: { sourcePendingRemoval = item },
                                     toggleExpanded: { toggleExpansion(for: item.id) }
                                 )
@@ -690,6 +691,46 @@ struct LCSourcesView: View {
 
 
     }
+
+    @MainActor
+    private func download(app: AltStoreSourceApp) {
+        guard let downloadURL = app.latestVersion?.downloadURL else {
+            errorMessage = "lc.sources.error.missingDownload".loc
+            return
+        }
+        Task {
+            do {
+                let (tempURL, _) = try await URLSession.shared.download(from: downloadURL)
+                let fileName = downloadURL.lastPathComponent
+                let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let destURL = docsURL.appendingPathComponent(fileName)
+                if FileManager.default.fileExists(atPath: destURL.path) {
+                    try FileManager.default.removeItem(at: destURL)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: destURL)
+                await MainActor.run {
+                    shareFile(at: destURL)
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func shareFile(at url: URL) {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootVC = windowScene.windows.first?.rootViewController else { return }
+        let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = rootVC.view
+            popover.sourceRect = CGRect(x: rootVC.view.bounds.midX, y: rootVC.view.bounds.midY, width: 0, height: 0)
+            popover.permittedArrowDirections = []
+        }
+        rootVC.present(activityVC, animated: true)
+    }
     
     private func toggleExpansion(for id: URL) {
         withAnimation(.easeInOut) {
@@ -857,6 +898,7 @@ private struct AltStoreSourceSectionView: View {
     let isExpanded: Bool
     let onRefresh: () -> Void
     let onInstall: (AltStoreSourceApp) -> Void
+    let onDownload: (AltStoreSourceApp) -> Void
     let onRemove: () -> Void
     let toggleExpanded: () -> Void
     
@@ -919,7 +961,7 @@ private struct AltStoreSourceSectionView: View {
             } else if let source = item.source, isExpanded || isFiltering {
                 VStack(spacing: 12) {
                     ForEach(filteredApps[0..<min(50, filteredApps.count)]) { app in
-                        LCSourceAppBanner(app: app, source: source, installAction: onInstall)
+                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, downloadAction: onDownload)
                     }
                     if filteredApps.isEmpty {
                         if source.apps.isEmpty || isFiltering {
@@ -947,6 +989,7 @@ private struct LCSourceAppBanner: View {
     let app: AltStoreSourceApp
     let source: AltStoreSource
     let installAction: (AltStoreSourceApp) -> Void
+    let downloadAction: (AltStoreSourceApp) -> Void
     
     @AppStorage("dynamicColors") private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
@@ -1019,6 +1062,25 @@ private struct LCSourceAppBanner: View {
             }
             .allowsHitTesting(false)
             Spacer()
+            Button {
+                downloadAction(app)
+            } label: {
+                Text("lc.common.download".loc)
+                    .bold()
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .frame(height: 32)
+                    .minimumScaleFactor(0.1)
+            }
+            .buttonStyle(BasicButtonStyle())
+            .padding(.trailing, 8)
+            .frame(idealWidth: 70)
+            .frame(height: 32)
+            .fixedSize()
+            .background(
+                Capsule().fill(Color.gray)
+            )
+            .clipShape(Capsule())
             Button {
                 installAction(app)
             } label: {
