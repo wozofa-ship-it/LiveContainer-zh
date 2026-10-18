@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct LCFolderPath {
     var path : URL
@@ -281,6 +282,13 @@ struct LCDataManagementView : View {
                         }
                         .buttonStyle(.bordered)
                     }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            deleteBackup(at: folderURL)
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
                 }
                 .navigationTitle("lc.settings.restoreBackup".loc)
                 .toolbar {
@@ -464,6 +472,22 @@ struct LCDataManagementView : View {
                 popover.permittedArrowDirections = []
             }
             rootVC.present(activityVC, animated: true)
+        }
+    }
+
+    func deleteBackup(at backupURL: URL) {
+        do {
+            try FileManager.default.removeItem(at: backupURL)
+            successInfo = "已删除备份：\(backupURL.lastPathComponent)"
+            successShow = true
+            // 关闭再打开 sheet 以刷新列表
+            showRestoreSelect = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                showRestoreSelect = true
+            }
+        } catch {
+            errorInfo = "删除失败：\(error.localizedDescription)"
+            errorShow = true
         }
     }
 
