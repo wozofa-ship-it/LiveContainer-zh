@@ -1173,7 +1173,7 @@ private struct LCSourceAppBanner: View {
                     Capsule().fill(Color.gray)
                 )
                 .clipShape(Capsule())
-                let isDylib = (app.latestVersion?.downloadURL?.pathExtension.lowercased() == "dylib")
+                let isDylib = (app.latestVersion?.downloadURL.pathExtension.lowercased() == "dylib")
                 if isDylib && isPluginInstalled {
                     Text("lc.common.installed".loc)
                         .bold()
