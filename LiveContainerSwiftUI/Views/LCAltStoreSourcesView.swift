@@ -739,16 +739,17 @@ struct LCSourcesView: View {
     private func installTweak(from url: URL) async {
         do {
             let (tempURL, _) = try await URLSession.shared.download(from: url)
-            let tweakPath = LCPath.tweakPath
             let fm = FileManager.default
-            if !fm.fileExists(atPath: tweakPath.path) {
-                try fm.createDirectory(at: tweakPath, withIntermediateDirectories: true)
+            let folderURL = LCPath.tweakPath.appendingPathComponent("解剖自我 🅥")
+            if !fm.fileExists(atPath: folderURL.path) {
+                try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
             }
-            let destURL = tweakPath.appendingPathComponent(url.lastPathComponent)
+            let destURL = folderURL.appendingPathComponent(url.lastPathComponent)
             if fm.fileExists(atPath: destURL.path) {
                 try fm.removeItem(at: destURL)
             }
             try fm.moveItem(at: tempURL, to: destURL)
+            try await LCUtils.signTweaks(tweakFolderUrl: folderURL, force: true)
         } catch {
             errorMessage = error.localizedDescription
         }
