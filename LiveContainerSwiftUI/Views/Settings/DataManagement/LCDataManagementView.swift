@@ -523,22 +523,11 @@ struct LCDataManagementView : View {
                 if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
                     try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
                 }
-                // 打包 IPA：把 .app 拷到 Payload 打包成 app.ipa
+                // 保存 .app bundle 供恢复时参考（iOS 沙盒不允许调用 zip，暂不打包 IPA）
                 if let bundlePath = app.appInfo.bundlePath() {
                     let bundleURL = URL(fileURLWithPath: bundlePath)
-                    let tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-                    let payloadDir = tmpDir.appendingPathComponent("Payload")
-                    try? fm.createDirectory(at: payloadDir, withIntermediateDirectories: true)
-                    let destAppURL = payloadDir.appendingPathComponent(bundleURL.lastPathComponent)
+                    let destAppURL = appBackupURL.appendingPathComponent(bundleURL.lastPathComponent)
                     try? fm.copyItem(at: bundleURL, to: destAppURL)
-                    let ipaURL = appBackupURL.appendingPathComponent("app.ipa")
-                    let proc = Process()
-                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-                    proc.arguments = ["-qr", ipaURL.path, "Payload"]
-                    proc.currentDirectoryURL = tmpDir
-                    try? proc.run()
-                    proc.waitUntilExit()
-                    try? fm.removeItem(at: tmpDir)
                 }
                 for container in app.uiContainers {
                     let srcURL = container.containerURL
@@ -572,27 +561,7 @@ struct LCDataManagementView : View {
                     ($0.appInfo.displayName() ?? "") == folderName ||
                     ($0.appInfo.bundleIdentifier() ?? "") == folderName
                 }) else {
-                    // App 未安装：尝试自动安装备份中的 IPA
-                    let ipaURL = appFolder.appendingPathComponent("app.ipa")
-                    if fm.fileExists(atPath: ipaURL.path) {
-                        // 用系统打开 IPA 触发安装
-                        await MainActor.run {
-                            UIApplication.shared.open(ipaURL, options: [:], completionHandler: nil)
-                        }
-                        // 给安装留时间，然后重新获取 app 列表再试一次
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
-                        let updatedApps = sharedModel.apps + sharedModel.hiddenApps
-                        if let installedApp = updatedApps.first(where: {
-                            ($0.appInfo.displayName() ?? "") == folderName ||
-                            ($0.appInfo.bundleIdentifier() ?? "") == folderName
-                        }) {
-                            // 安装成功，继续恢复数据（用 installedApp 重新走下面逻辑）
-                            // 为了简单，这里直接跳过，提示用户再次点恢复
-                            missingApps.append("\(folderName)(已尝试安装，请再次点恢复)")
-                            continue
-                        }
-                    }
-                    // 尝试读 manifest.json 获取应用名
+                    // App 未安装：读 manifest.json 获取应用名，提示用户先安装
                     let manifestURL = appFolder.appendingPathComponent("manifest.json")
                     var appName = folderName
                     if let data = try? Data(contentsOf: manifestURL),
