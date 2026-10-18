@@ -271,16 +271,6 @@ struct LCDataManagementView : View {
                             .foregroundColor(.blue)
                         }
                         .buttonStyle(.bordered)
-                        Button {
-                            exportBackup(at: folderURL)
-                        } label: {
-                            HStack {
-                                Image(systemName: "square.and.arrow.up")
-                                Text("导出")
-                            }
-                            .foregroundColor(.green)
-                        }
-                        .buttonStyle(.bordered)
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
@@ -459,20 +449,6 @@ struct LCDataManagementView : View {
         guard let folders = try? fm.contentsOfDirectory(at: backupsURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) else { return [] }
         return folders.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             .sorted { (try? $0.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast > (try? $1.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast }
-    }
-
-    func exportBackup(at backupURL: URL) {
-        let activityVC = UIActivityViewController(activityItems: [backupURL], applicationActivities: nil)
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = windowScene.windows.first?.rootViewController {
-            // iPad 需要 popover
-            if let popover = activityVC.popoverPresentationController {
-                popover.sourceView = rootVC.view
-                popover.sourceRect = CGRect(x: rootVC.view.bounds.midX, y: rootVC.view.bounds.midY, width: 0, height: 0)
-                popover.permittedArrowDirections = []
-            }
-            rootVC.present(activityVC, animated: true)
-        }
     }
 
     func deleteBackup(at backupURL: URL) {
