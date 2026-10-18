@@ -119,8 +119,12 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 }
 
 + (NSString *)certificatePassword {
-    NSUserDefaults* nud = NSUserDefaults.lcSharedDefaults ?: NSUserDefaults.standardUserDefaults;
-    return [nud objectForKey:@"LCCertificatePassword"];
+    NSUserDefaults* nud = NSUserDefaults.lcSharedDefaults;
+    NSString *pwd = [nud objectForKey:@"LCCertificatePassword"];
+    if (!pwd) {
+        pwd = [NSUserDefaults.standardUserDefaults objectForKey:@"LCCertificatePassword"];
+    }
+    return pwd;
 }
 
 + (BOOL)launchToGuestAppWithClassicMode:(NSUInteger)classicMode {
