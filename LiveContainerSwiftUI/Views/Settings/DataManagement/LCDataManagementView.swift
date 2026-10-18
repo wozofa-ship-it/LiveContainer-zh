@@ -29,6 +29,8 @@ struct LCDataManagementView : View {
     @State var errorInfo = ""
     @State var successShow = false
     @State var successInfo = ""
+    @State private var showBackupSelect = false
+    @State private var backupSelectedIDs = Set<String>()
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -86,6 +88,19 @@ struct LCDataManagementView : View {
                     Text("lc.settings.cleanCaches".loc) 
                 }
 
+            }
+            
+            Section(header: Text("lc.settings.backupRestore".loc)) {
+                Button {
+                    Task { await backupAllApps() }
+                } label: {
+                    Text("lc.settings.backupAll".loc)
+                }
+                Button {
+                    showBackupSelect = true
+                } label: {
+                    Text("lc.settings.backupSelected".loc)
+                }
             }
             
             Section {
@@ -191,6 +206,39 @@ struct LCDataManagementView : View {
 
         .onAppear {
             onAppearFunc()
+        }
+        .sheet(isPresented: $showBackupSelect) {
+            NavigationView {
+                List(sharedModel.apps + sharedModel.hiddenApps, id: \.self) { app in
+                    HStack {
+                        Text(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
+                        Spacer()
+                        Image(systemName: backupSelectedIDs.contains(app.appInfo.bundleIdentifier() ?? "") ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(.blue)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        let bid = app.appInfo.bundleIdentifier() ?? ""
+                        if backupSelectedIDs.contains(bid) {
+                            backupSelectedIDs.remove(bid)
+                        } else {
+                            backupSelectedIDs.insert(bid)
+                        }
+                    }
+                }
+                .navigationTitle("lc.settings.backupSelected".loc)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("lc.settings.backup".loc) {
+                            let selected = (sharedModel.apps + sharedModel.hiddenApps).filter {
+                                backupSelectedIDs.contains($0.appInfo.bundleIdentifier() ?? "")
+                            }
+                            showBackupSelect = false
+                            Task { await backupApps(selected) }
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -337,6 +385,46 @@ struct LCDataManagementView : View {
             } else {
                 successInfo = "lc.settings.cleanCacheComplete".loc
             }
+            successShow = true
+        } catch {
+            errorInfo = error.localizedDescription
+            errorShow = true
+        }
+    }
+
+    func backupAllApps() async {
+        let allApps = sharedModel.apps + sharedModel.hiddenApps
+        await backupApps(allApps)
+    }
+
+    func backupApps(_ apps: [LCAppModel]) async {
+        let fm = FileManager.default
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            errorInfo = "lc.settings.backupFail".loc
+            errorShow = true
+            return
+        }
+        let backupRoot = docsURL.appendingPathComponent("Backups").appendingPathComponent(timestamp)
+        do {
+            try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+            var count = 0
+            for app in apps {
+                let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                let appBackupURL = backupRoot.appendingPathComponent(appName)
+                try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
+                for container in app.uiContainers {
+                    let srcURL = container.containerURL
+                    let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
+                    if fm.fileExists(atPath: srcURL.path) {
+                        try fm.copyItem(at: srcURL, to: destURL)
+                    }
+                }
+                count += 1
+            }
+            successInfo = String(format: "lc.settings.backupComplete".loc, count)
             successShow = true
         } catch {
             errorInfo = error.localizedDescription
