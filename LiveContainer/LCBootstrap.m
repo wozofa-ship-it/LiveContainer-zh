@@ -517,7 +517,7 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     // ignore setting handler from guest app
     litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, NSSetUncaughtExceptionHandler, hook_do_nothing, nil);
     
-    BOOL hookDlopen = !isSideStore && !isSharedBundle && LCSharedUtils.certificatePassword && isLiveProcess;
+    BOOL hookDlopen = !isSideStore && !isSharedBundle && isLiveProcess;
     DyldHooksInit([guestAppInfo[@"hideLiveContainer"] boolValue], hookDlopen, [guestAppInfo[@"spoofSDKVersion"] unsignedIntValue]);
     
     if([guestContainerInfo[@"spoofIdentifierForVendor"] boolValue]) {
