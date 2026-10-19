@@ -626,10 +626,29 @@ struct LCDataManagementView : View {
                     successShow = true
                 }
             } else {
-                // 显示待安装列表，由用户逐个选择从源安装或选文件
-                let names = toInstall.map { $0.name }.joined(separator: "\n")
+                // 优先从已添加的源查找 IPA
+                var installedCount = 0
+                var notFound: [String] = []
+                for item in toInstall {
+                    if let downloadURL = await searchSourceForApp(bundleID: item.bundleID, name: item.name) {
+                        // 找到源，通过通知触发安装
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL])
+                        }
+                        installedCount += 1
+                    } else {
+                        notFound.append(item.name)
+                    }
+                }
+                var msg = ""
+                if installedCount > 0 {
+                    msg += "已从源找到 \(installedCount) 个 App 并开始安装\n"
+                }
+                if !notFound.isEmpty {
+                    msg += "\n未在源中找到（请手动到 App 页导入 IPA）：\n" + notFound.joined(separator: "\n")
+                }
                 await MainActor.run {
-                    successInfo = "发现 \(toInstall.count) 个未安装的 App：\n\(names)\n\n请到「源」标签页搜索安装，或到「App」页导入 IPA 文件。"
+                    successInfo = msg.isEmpty ? "未找到可安装的 App" : msg
                     successShow = true
                 }
             }
@@ -639,6 +658,40 @@ struct LCDataManagementView : View {
                 errorShow = true
             }
         }
+    }
+
+    /// 从已添加的源中按 bundleID 或名字查找 App 的下载链接
+    func searchSourceForApp(bundleID: String, name: String) async -> URL? {
+        let defaults = UserDefaults.standard
+        let stored = defaults.array(forKey: "LCAltStoreSourceURLs") as? [String] ?? []
+        for urlString in stored {
+            guard let sourceURL = URL(string: urlString) else { continue }
+            do {
+                let (data, _) = try await URLSession.shared.data(from: sourceURL)
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let apps = json["apps"] as? [[String: Any]] else { continue }
+                for app in apps {
+                    let appBundleID = app["bundleIdentifier"] as? String ?? ""
+                    let appName = app["name"] as? String ?? ""
+                    let match = (!bundleID.isEmpty && appBundleID == bundleID) || (!name.isEmpty && appName == name)
+                    if match {
+                        // 优先取 versions[0].downloadURL，兼容顶层 downloadURL
+                        var downloadString: String? = app["downloadURL"] as? String
+                        if downloadString == nil,
+                           let versions = app["versions"] as? [[String: Any]],
+                           let first = versions.first {
+                            downloadString = first["downloadURL"] as? String
+                        }
+                        if let ds = downloadString, let url = URL(string: ds) {
+                            return url
+                        }
+                    }
+                }
+            } catch {
+                continue
+            }
+        }
+        return nil
     }
 
     func moveDanglingFolders() async {

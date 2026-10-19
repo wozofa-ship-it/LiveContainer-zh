@@ -431,6 +431,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Task { await installFromUrl(urlStr: installUrl.absoluteString) }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.LaunchAppNotification)) { obj in
+            if let obj2 = obj.object as? [String: Any], let bundleId = obj2["bundleId"] as? String {
+                Task { await launchAppWithBundleId(bundleId: bundleId, container: nil) }
+            }
+        }
         .searchable(text: $searchContext.query)
 
     }

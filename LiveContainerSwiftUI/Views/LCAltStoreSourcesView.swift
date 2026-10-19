@@ -724,7 +724,7 @@ struct LCSourcesView: View {
             return
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
-            Task { await installTweak(from: downloadURL) }
+            Task { await installTweak(from: downloadURL, name: app.name) }
             return
         }
         withAnimation {
@@ -738,11 +738,12 @@ struct LCSourcesView: View {
     }
 
     @MainActor
-    private func installTweak(from url: URL) async {
+    private func installTweak(from url: URL, name: String) async {
         do {
             let (tempURL, _) = try await URLSession.shared.download(from: url)
             let fm = FileManager.default
-            let folderURL = LCPath.tweakPath.appendingPathComponent("解剖自我 🅥")
+            // 按插件名字建文件夹，不全塞一个
+            let folderURL = LCPath.tweakPath.appendingPathComponent(name)
             if !fm.fileExists(atPath: folderURL.path) {
                 try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
             }
@@ -1076,7 +1077,7 @@ private struct LCSourceAppBanner: View {
     private var isPluginInstalled: Bool {
         guard let downloadURL = app.latestVersion?.downloadURL,
               downloadURL.pathExtension.lowercased() == "dylib" else { return false }
-        let pluginURL = LCPath.tweakPath.appendingPathComponent("解剖自我 🅥").appendingPathComponent(downloadURL.lastPathComponent)
+        let pluginURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
         return FileManager.default.fileExists(atPath: pluginURL.path)
     }
     
