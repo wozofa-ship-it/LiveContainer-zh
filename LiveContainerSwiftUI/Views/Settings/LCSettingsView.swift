@@ -65,6 +65,9 @@ struct LCSettingsView: View {
     @AppStorage("LCSelected32BitEmulator", store: LCUtils.appGroupUserDefault) var selected32BitEmulator : String = ""
     @AppStorage("LCKeepSelectedWhenQuit") var keepSelectedWhenQuit = false
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
+    @AppStorage("LCAudioKeepAlive") var audioKeepAlive = false
+    @AppStorage("LCBackgroundWork") var backgroundWork = false
+    @AppStorage("LCDead10ccFix") var dead10ccFix = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
     
@@ -280,6 +283,32 @@ struct LCSettingsView: View {
                         LCDataManagementView()
                     } label: {
                         Text("lc.settings.dataManagement".loc)
+                    }
+                }
+                
+                Section(header: Text("后台保活")) {
+                    Toggle(isOn: $audioKeepAlive) {
+                        Text("音频保活（耗电）")
+                    }
+                    .onChange(of: audioKeepAlive) { newValue in
+                        if newValue {
+                            AudioKeepAlive.shared.start()
+                        } else {
+                            AudioKeepAlive.shared.stop()
+                        }
+                    }
+                    Toggle(isOn: $backgroundWork) {
+                        Text("后台任务（模仿 SideStore）")
+                    }
+                    .onChange(of: backgroundWork) { newValue in
+                        if newValue {
+                            UIApplication.shared.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+                        } else {
+                            UIApplication.shared.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalNever)
+                        }
+                    }
+                    Toggle(isOn: $dead10ccFix) {
+                        Text("防终止（Dead10ccFix）")
                     }
                 }
                 

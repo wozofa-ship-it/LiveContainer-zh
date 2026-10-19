@@ -512,6 +512,10 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     //     NSFMGuestHooksInit();
     //     initDead10ccFix();
     // }
+    // 防终止开关（用户手动开启）
+    if([lcUserDefaults boolForKey:@"LCDead10ccFix"]) {
+        initDead10ccFix();
+    }
     if(isLiveProcess) {
         NSURLSCGuestHooksInit();
     }

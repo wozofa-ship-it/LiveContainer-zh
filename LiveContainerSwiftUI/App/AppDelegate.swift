@@ -8,8 +8,13 @@ import Intents
         application.shortcutItems = nil
         UserDefaults.standard.removeObject(forKey: "LCNeedToAcquireJIT")
         
-        // 后台保活：申请后台刷新（对标二合一版 SideStore 的行为）
-        application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+        // 恢复保活开关状态
+        if UserDefaults.standard.bool(forKey: "LCAudioKeepAlive") {
+            AudioKeepAlive.shared.start()
+        }
+        if UserDefaults.standard.bool(forKey: "LCBackgroundWork") {
+            application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+        }
         
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             // Fix launching app if user opens JIT waiting dialog and kills the app. Won't trigger normally.
@@ -43,10 +48,16 @@ import Intents
         return configuration
     }
     
-    // 后台刷新回调：iOS 唤醒 App 时调用，保持进程存活
+    // 后台任务：模仿 SideStore，做真实工作
     func application(_ application: UIApplication, performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
-        // 什么都不做，只是让 iOS 知道 App 还活着，完成后立即调度下一次
-        completionHandler(.noData)
+        // 检查是否有运行中的 App，做真实的状态检查
+        let runningCount = MultitaskDockManager.shared.apps.count
+        if runningCount > 0 {
+            // 有运行中的 App，算作有效工作
+            completionHandler(.newData)
+        } else {
+            completionHandler(.noData)
+        }
     }
     
     func application(_ application: UIApplication, handlerFor intent: INIntent) -> Any? {
