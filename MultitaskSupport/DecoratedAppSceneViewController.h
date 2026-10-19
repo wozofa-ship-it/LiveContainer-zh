@@ -16,6 +16,7 @@ API_AVAILABLE(ios(16.0))
 - (void)minimizeWindow;
 - (void)minimizeWindowPiP;
 - (void)unminimizeWindowPiP;
+- (void)closeWindow;
 - (void)updateVerticalConstraints;
 @property(nonatomic, copy) void (^pidAvailableHandler)(NSNumber *pid, NSError *error);
 @end
