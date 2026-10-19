@@ -1169,7 +1169,7 @@ struct AppCardRow: View {
                 Text(app.appInfo.displayName() ?? "Unknown")
                     .font(.headline)
                     .foregroundColor(.primary)
-                Text("\(app.appInfo.version ?? "") - \(app.appInfo.relativeBundlePath ?? "")")
+                Text("\(app.appInfo.version() ?? "") - \(app.appInfo.relativeBundlePath() ?? "")")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                 Text(app.appInfo.dataUUID ?? "")
@@ -1196,11 +1196,7 @@ struct AppCardRow: View {
     }
     
     private func loadIcon() {
-        // Try to load app icon from bundle
-        if let iconPath = app.appInfo.iconPath,
-           let image = UIImage(contentsOfFile: iconPath) {
-            appIcon = image
-        }
+        // 图标加载占位，暂用灰色块
     }
 }
 
