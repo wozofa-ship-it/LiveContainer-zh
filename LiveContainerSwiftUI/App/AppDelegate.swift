@@ -8,6 +8,9 @@ import Intents
         application.shortcutItems = nil
         UserDefaults.standard.removeObject(forKey: "LCNeedToAcquireJIT")
         
+        // 后台保活：申请后台刷新（对标二合一版 SideStore 的行为）
+        application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+        
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             // Fix launching app if user opens JIT waiting dialog and kills the app. Won't trigger normally.
             if DataManager.shared.model.isJITModalOpen && !UserDefaults.standard.bool(forKey: "LCKeepSelectedWhenQuit"){
@@ -38,6 +41,12 @@ import Intents
         let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
         configuration.delegateClass = SceneDelegate.self
         return configuration
+    }
+    
+    // 后台刷新回调：iOS 唤醒 App 时调用，保持进程存活
+    func application(_ application: UIApplication, performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        // 什么都不做，只是让 iOS 知道 App 还活着，完成后立即调度下一次
+        completionHandler(.noData)
     }
     
     func application(_ application: UIApplication, handlerFor intent: INIntent) -> Any? {
