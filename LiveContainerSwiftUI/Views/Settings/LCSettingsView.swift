@@ -65,7 +65,6 @@ struct LCSettingsView: View {
     @AppStorage("LCSelected32BitEmulator", store: LCUtils.appGroupUserDefault) var selected32BitEmulator : String = ""
     @AppStorage("LCKeepSelectedWhenQuit") var keepSelectedWhenQuit = false
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
-    @AppStorage("LCAudioKeepAlive") var audioKeepAlive = false
     @AppStorage("LCBackgroundWork") var backgroundWork = false
     @AppStorage("LCDead10ccFix") var dead10ccFix = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
@@ -287,16 +286,6 @@ struct LCSettingsView: View {
                 }
                 
                 Section(header: Text("后台保活")) {
-                    Toggle(isOn: $audioKeepAlive) {
-                        Text("音频保活（耗电）")
-                    }
-                    .onChange(of: audioKeepAlive) { newValue in
-                        if newValue {
-                            AudioKeepAlive.shared.start()
-                        } else {
-                            AudioKeepAlive.shared.stop()
-                        }
-                    }
                     Toggle(isOn: $backgroundWork) {
                         Text("后台任务（模仿 SideStore）")
                     }

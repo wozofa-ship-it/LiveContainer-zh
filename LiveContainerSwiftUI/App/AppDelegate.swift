@@ -1,7 +1,6 @@
 import UIKit
 import SwiftUI
 import Intents
-import AVFoundation
 
 @objc class AppDelegate: UIResponder, UIApplicationDelegate {
         
@@ -10,9 +9,6 @@ import AVFoundation
         UserDefaults.standard.removeObject(forKey: "LCNeedToAcquireJIT")
         
         // 恢复保活开关状态
-        if UserDefaults.standard.bool(forKey: "LCAudioKeepAlive") {
-            AudioKeepAlive.shared.start()
-        }
         if UserDefaults.standard.bool(forKey: "LCBackgroundWork") {
             application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
         }
@@ -106,56 +102,3 @@ public class ViewAppIntentHandler: NSObject, ViewAppIntentHandling
     }
 }
 
-// 音频保活：后台播放无声音频，防止 iOS 杀进程
-class AudioKeepAlive {
-    static let shared = AudioKeepAlive()
-    private var audioPlayer: AVAudioPlayer?
-    private var isRunning = false
-    private init() {}
-    func start() {
-        guard !isRunning else { return }
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-            let silence = generateSilence(duration: 1.0)
-            audioPlayer = try AVAudioPlayer(data: silence)
-            audioPlayer?.numberOfLoops = -1
-            audioPlayer?.volume = 0.0
-            audioPlayer?.play()
-            isRunning = true
-        } catch {
-            print("[AudioKeepAlive] 启动失败: \(error)")
-        }
-    }
-    func stop() {
-        audioPlayer?.stop()
-        audioPlayer = nil
-        isRunning = false
-        do {
-            try AVAudioSession.sharedInstance().setActive(false)
-        } catch {
-            print("[AudioKeepAlive] 停止失败: \(error)")
-        }
-    }
-    private func generateSilence(duration: Double) -> Data {
-        let sampleRate = 44100.0
-        let samples = Int(sampleRate * duration)
-        var data = Data()
-        data.append(contentsOf: "RIFF".utf8)
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(36 + samples * 2).littleEndian) { Data($0) })
-        data.append(contentsOf: "WAVE".utf8)
-        data.append(contentsOf: "fmt ".utf8)
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate).littleEndian) { Data($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate * 2).littleEndian) { Data($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt16(2).littleEndian) { Data($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Data($0) })
-        data.append(contentsOf: "data".utf8)
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(samples * 2).littleEndian) { Data($0) })
-        data.append(Data(count: samples * 2))
-        return data
-    }
-}
