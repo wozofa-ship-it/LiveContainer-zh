@@ -738,6 +738,16 @@ class AppInfoProvider {
         }
     }
     
+    @objc public func closeAllWindows() {
+        DispatchQueue.main.async {
+            self.apps.forEach { app in
+                if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController {
+                    vc.closeWindow()
+                }
+            }
+        }
+    }
+    
     @objc public func toggleDockCollapse() {
         DispatchQueue.main.async {
             self.isCollapsed.toggle()
@@ -846,6 +856,11 @@ public struct MultitaskDockSwiftView: View {
                         }
                 } else {
                     VStack(spacing: 8) {
+                        AllAppsButtonView()
+                            .onTapGesture {
+                                showAllApps = true
+                            }
+                        
                         CollapseButtonView()
                             .onTapGesture {
                                 dockManager.toggleDockCollapse()
@@ -856,14 +871,14 @@ public struct MultitaskDockSwiftView: View {
                                 dockManager.minimizeAllWindows()
                             }
                         
-                        AllAppsButtonView()
-                            .onTapGesture {
-                                showAllApps = true
-                            }
-                        
                         ForEach(dockManager.apps) { app in
                             AppIconView(app: app)
                         }
+                        
+                        CloseAllButtonView()
+                            .onTapGesture {
+                                dockManager.closeAllWindows()
+                            }
                     }
                 }
             }
@@ -1114,17 +1129,40 @@ struct AllAppsButtonView: View {
     }
 }
 
+// MARK: - Close All Button (red X)
+@available(iOS 16.0, *)
+struct CloseAllButtonView: View {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.red.opacity(0.8))
+                .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
+            
+            Image(systemName: "xmark")
+                .foregroundColor(.white)
+                .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .bold))
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        )
+    }
+}
+
 // MARK: - All Apps List View
 @available(iOS 16.0, *)
 struct AllAppsListView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var dockManager: MultitaskDockManager
+    @ObservedObject var sortManager = LCAppSortManager.shared
     
     var body: some View {
         NavigationView {
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    ForEach(DataManager.shared.model.apps, id: \.self) { app in
+                    ForEach(sortManager.sortedApps, id: \.self) { app in
                         AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
                         }, onMinimizeOpen: {
