@@ -1152,14 +1152,32 @@ struct AllAppsListView: View {
     }
     
     private func minimizeOpenApp(_ app: LCAppModel) {
-        // 如果已在运行，最小化它的窗口
-        if let runningApp = dockManager.apps.first(where: { $0.appUUID == app.appInfo.dataUUID }) {
+        let dataUUID = app.appInfo.dataUUID
+        // 如果已在运行，直接最小化它的窗口
+        if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
             dockManager.minimizeWindow(uuid: runningApp.appUUID)
             dismiss()
             return
         }
-        // 未运行，先启动再最小化（启动后用户可手动最小化）
-        launchApp(app)
+        // 未运行：先启动，延迟后最小化窗口
+        dismiss()
+        let bundleId = app.appInfo.relativeBundlePath ?? ""
+        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
+            #if !os(visionOS)
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            #endif
+        }
+        // 轮询等待窗口出现，最多等5秒，找到后最小化
+        DispatchQueue.global(qos: .userInitiated).async {
+            for _ in 0..<50 {
+                Thread.sleep(forTimeInterval: 0.1)
+                let found = self.dockManager.apps.contains(where: { $0.appUUID == dataUUID })
+                if found {
+                    self.dockManager.minimizeWindow(uuid: dataUUID)
+                    break
+                }
+            }
+        }
     }
 }
 
