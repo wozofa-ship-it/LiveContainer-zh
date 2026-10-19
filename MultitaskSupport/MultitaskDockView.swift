@@ -816,6 +816,7 @@ public struct MultitaskDockSwiftView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     @State private var dragOffset = CGSize.zero
     @State private var isMoving: Bool = false
+    @State private var showAllApps = false
     @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
     
     // Calculate dynamic padding based on user settings
@@ -845,6 +846,11 @@ public struct MultitaskDockSwiftView: View {
                                 dockManager.minimizeAllWindows()
                             }
                         
+                        AllAppsButtonView()
+                            .onTapGesture {
+                                showAllApps = true
+                            }
+                        
                         ForEach(dockManager.apps) { app in
                             AppIconView(app: app)
                         }
@@ -852,6 +858,9 @@ public struct MultitaskDockSwiftView: View {
                 }
             }
             .padding(dynamicPadding)
+            .sheet(isPresented: $showAllApps) {
+                AllAppsListView()
+            }
             .modifier { content in
                 if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
                     content.glassEffect(.regular, in: .rect(cornerRadius: 15))
@@ -1061,6 +1070,137 @@ struct MinimizeAllButtonView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.white.opacity(0.2), lineWidth: 1)
         )
+    }
+}
+
+// MARK: - All Apps Button View
+@available(iOS 16.0, *)
+struct AllAppsButtonView: View {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.blue.opacity(0.8))
+                .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
+            
+            Image(systemName: "apps.iphone")
+                .foregroundColor(.white)
+                .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - All Apps List View
+@available(iOS 16.0, *)
+struct AllAppsListView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(DataManager.shared.model.apps, id: \.self) { app in
+                        AppCardRow(app: app, dockManager: dockManager) {
+                            launchApp(app)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("App")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+            .searchable(text: .constant(""), prompt: "搜索")
+        }
+    }
+    
+    private func launchApp(_ app: LCAppModel) {
+        let bundleId = app.appInfo.relativeBundlePath ?? ""
+        if let runningApp = dockManager.apps.first(where: { $0.appUUID == app.appInfo.dataUUID }) {
+            let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+            dismiss()
+            return
+        }
+        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
+            #if !os(visionOS)
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            #endif
+        }
+        dismiss()
+    }
+}
+
+// MARK: - App Card Row (same style as App tab)
+@available(iOS 16.0, *)
+struct AppCardRow: View {
+    let app: LCAppModel
+    let dockManager: MultitaskDockManager
+    let onLaunch: () -> Void
+    @State private var appIcon: UIImage?
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // App icon
+            Group {
+                if let icon = appIcon {
+                    Image(uiImage: icon)
+                        .resizable()
+                } else {
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(Color.gray.opacity(0.3))
+                }
+            }
+            .frame(width: 60, height: 60)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .onAppear { loadIcon() }
+            
+            // Name + version + bundle ID
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app.appInfo.displayName() ?? "Unknown")
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Text("\(app.appInfo.version ?? "") - \(app.appInfo.relativeBundlePath ?? "")")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                Text(app.appInfo.dataUUID ?? "")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            // Launch button
+            Button(action: onLaunch) {
+                Text(dockManager.apps.contains(where: { $0.appUUID == app.appInfo.dataUUID }) ? "打开" : "启动")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Color.blue)
+                    .clipShape(Capsule())
+            }
+        }
+        .padding(12)
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+    }
+    
+    private func loadIcon() {
+        // Try to load app icon from bundle
+        if let iconPath = app.appInfo.iconPath,
+           let image = UIImage(contentsOfFile: iconPath) {
+            appIcon = image
+        }
     }
 }
 
