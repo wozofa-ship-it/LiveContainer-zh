@@ -1169,7 +1169,7 @@ struct AppCardRow: View {
                 Text(app.appInfo.displayName() ?? "Unknown")
                     .font(.headline)
                     .foregroundColor(.primary)
-                Text("\(app.appInfo.version() ?? "") - \(app.appInfo.relativeBundlePath() ?? "")")
+                Text("\(app.appInfo.version() ?? "") - \(app.appInfo.relativeBundlePath ?? "")")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                 Text(app.appInfo.dataUUID ?? "")
