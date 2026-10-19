@@ -41,7 +41,6 @@ struct LCDataManagementView : View {
     @State private var scheduleMinute = 0
     @State private var scheduleSelectedIDs = Set<String>()
     @State private var exportBackupURL: URL? = nil
-    @State private var showExportPicker = false
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -306,8 +305,7 @@ struct LCDataManagementView : View {
                         }
                         .buttonStyle(.bordered)
                         Button {
-                            exportBackupURL = folderURL
-                            showExportPicker = true
+                            presentExportPicker(for: folderURL)
                         } label: {
                             HStack {
                                 Image(systemName: "square.and.arrow.up")
@@ -335,14 +333,6 @@ struct LCDataManagementView : View {
                             showRestoreSelect = false
                         }
                     }
-                }
-            }
-        }
-        .sheet(isPresented: $showExportPicker) {
-            if let url = exportBackupURL {
-                DocumentExportPicker(url: url) {
-                    successInfo = "已导出：\(url.lastPathComponent)"
-                    successShow = true
                 }
             }
         }
@@ -713,7 +703,15 @@ struct LCDataManagementView : View {
     func installMissingApps(from backupURL: URL) async {
         let fm = FileManager.default
         do {
-            let appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+            // 新结构：backupURL 直接是单个 App 的备份文件夹；兼容旧时间戳结构
+            let manifestURL = backupURL.appendingPathComponent("manifest.json")
+            let isSingleAppFolder = fm.fileExists(atPath: manifestURL.path)
+            let appFolders: [URL]
+            if isSingleAppFolder {
+                appFolders = [backupURL]
+            } else {
+                appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+            }
             let allApps = sharedModel.apps + sharedModel.hiddenApps
             var toInstall: [(name: String, bundleID: String)] = []
             for appFolder in appFolders {
@@ -1014,33 +1012,20 @@ struct LCDataManagementView : View {
             app.appInfo.clearIconCache()
         }
     }
-
-}
-
-// 导出到 iCloud 云盘（系统文件选择器，用户手动选位置）
-struct DocumentExportPicker: UIViewControllerRepresentable {
-    let url: URL
-    let onComplete: () -> Void
     
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+    // 直接用 rootViewController 弹出文件选择器（避免 SwiftUI 套娃 sheet 冲突）
+    func presentExportPicker(for url: URL) {
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
-        picker.delegate = context.coordinator
-        return picker
-    }
-    
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onComplete: onComplete)
-    }
-    
-    class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let onComplete: () -> Void
-        init(onComplete: @escaping () -> Void) {
-            self.onComplete = onComplete
+        // 找到最顶层的 VC
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = windowScene.windows.first,
+              var topVC = window.rootViewController else { return }
+        while let presented = topVC.presentedViewController {
+            topVC = presented
         }
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            onComplete()
-        }
+        topVC.present(picker, animated: true)
+        successInfo = "请选择导出位置（可存到 iCloud 云盘）"
+        successShow = true
     }
+
 }
