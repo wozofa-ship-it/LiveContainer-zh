@@ -1,6 +1,7 @@
 import UIKit
 import SwiftUI
 import Intents
+import AVFoundation
 
 @objc class AppDelegate: UIResponder, UIApplicationDelegate {
         
@@ -106,7 +107,6 @@ public class ViewAppIntentHandler: NSObject, ViewAppIntentHandling
 }
 
 // 音频保活：后台播放无声音频，防止 iOS 杀进程
-import AVFoundation
 class AudioKeepAlive {
     static let shared = AudioKeepAlive()
     private var audioPlayer: AVAudioPlayer?
