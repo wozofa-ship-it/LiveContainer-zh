@@ -8,7 +8,6 @@ import Intents
         application.shortcutItems = nil
         UserDefaults.standard.removeObject(forKey: "LCNeedToAcquireJIT")
         
-        // 恢复保活开关状态
         if UserDefaults.standard.bool(forKey: "LCBackgroundWork") {
             application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
         }
@@ -45,16 +44,8 @@ import Intents
         return configuration
     }
     
-    // 后台任务：模仿 SideStore，做真实工作
     func application(_ application: UIApplication, performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
-        // 检查是否有运行中的 App，做真实的状态检查
-        let runningCount = MultitaskDockManager.shared.apps.count
-        if runningCount > 0 {
-            // 有运行中的 App，算作有效工作
-            completionHandler(.newData)
-        } else {
-            completionHandler(.noData)
-        }
+        completionHandler(.noData)
     }
     
     func application(_ application: UIApplication, handlerFor intent: INIntent) -> Any? {

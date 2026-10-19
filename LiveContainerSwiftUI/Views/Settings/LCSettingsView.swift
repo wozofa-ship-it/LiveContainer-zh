@@ -287,7 +287,7 @@ struct LCSettingsView: View {
                 
                 Section(header: Text("后台保活")) {
                     Toggle(isOn: $backgroundWork) {
-                        Text("后台任务（模仿 SideStore）")
+                        Text("后台任务")
                     }
                     .onChange(of: backgroundWork) { newValue in
                         if newValue {
