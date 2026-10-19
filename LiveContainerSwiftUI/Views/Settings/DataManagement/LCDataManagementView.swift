@@ -7,6 +7,7 @@
 
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct LCFolderPath {
     var path : URL
@@ -33,6 +34,14 @@ struct LCDataManagementView : View {
     @State private var showBackupSelect = false
     @State private var backupSelectedIDs = Set<String>()
     @State private var showRestoreSelect = false
+    @State private var backupFolderList: [URL] = []
+    @State private var showScheduleBackup = false
+    @State private var scheduleEnabled = false
+    @State private var scheduleHour = 3
+    @State private var scheduleMinute = 0
+    @State private var scheduleSelectedIDs = Set<String>()
+    @State private var exportBackupURL: URL? = nil
+    @State private var showExportPicker = false
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -102,6 +111,20 @@ struct LCDataManagementView : View {
                     showBackupSelect = true
                 } label: {
                     Text("lc.settings.backupSelected".loc)
+                }
+                Button {
+                    loadScheduleSettings()
+                    showScheduleBackup = true
+                } label: {
+                    HStack {
+                        Text("定时备份")
+                        Spacer()
+                        if scheduleEnabled {
+                            Text(String(format: "%02d:%02d", scheduleHour, scheduleMinute))
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
                 }
                 Button {
                     showRestoreSelect = true
@@ -249,7 +272,7 @@ struct LCDataManagementView : View {
         }
         .sheet(isPresented: $showRestoreSelect) {
             NavigationView {
-                List(backupFolders(), id: \.self) { folderURL in
+                List(backupFolderList, id: \.self) { folderURL in
                     HStack {
                         VStack(alignment: .leading) {
                             Text(folderURL.lastPathComponent)
@@ -282,6 +305,17 @@ struct LCDataManagementView : View {
                             .foregroundColor(.green)
                         }
                         .buttonStyle(.bordered)
+                        Button {
+                            exportBackupURL = folderURL
+                            showExportPicker = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "square.and.arrow.up")
+                                Text("导出")
+                            }
+                            .foregroundColor(.orange)
+                        }
+                        .buttonStyle(.bordered)
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
@@ -292,10 +326,84 @@ struct LCDataManagementView : View {
                     }
                 }
                 .navigationTitle("lc.settings.restoreBackup".loc)
+                .onAppear {
+                    backupFolderList = backupFolders()
+                }
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("lc.common.cancel".loc) {
                             showRestoreSelect = false
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showExportPicker) {
+            if let url = exportBackupURL {
+                DocumentExportPicker(url: url) {
+                    successInfo = "已导出：\(url.lastPathComponent)"
+                    successShow = true
+                }
+            }
+        }
+        .sheet(isPresented: $showScheduleBackup) {
+            NavigationView {
+                Form {
+                    Section {
+                        Toggle("启用定时备份", isOn: $scheduleEnabled)
+                    }
+                    Section(header: Text("备份时间（每天）")) {
+                        HStack {
+                            Picker("时", selection: $scheduleHour) {
+                                ForEach(0..<24, id: \.self) { h in
+                                    Text(String(format: "%02d", h)).tag(h)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(maxWidth: .infinity)
+                            Text(":")
+                            Picker("分", selection: $scheduleMinute) {
+                                ForEach(0..<60, id: \.self) { m in
+                                    Text(String(format: "%02d", m)).tag(m)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .frame(height: 120)
+                    }
+                    Section(header: Text("选择要备份的 App")) {
+                        ForEach(sharedModel.apps + sharedModel.hiddenApps, id: \.self) { app in
+                            HStack {
+                                Text(app.appInfo.displayName() ?? "")
+                                Spacer()
+                                let bid = app.appInfo.bundleIdentifier() ?? ""
+                                Image(systemName: scheduleSelectedIDs.contains(bid) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(.blue)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                let bid = app.appInfo.bundleIdentifier() ?? ""
+                                if scheduleSelectedIDs.contains(bid) {
+                                    scheduleSelectedIDs.remove(bid)
+                                } else {
+                                    scheduleSelectedIDs.insert(bid)
+                                }
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("定时备份")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { showScheduleBackup = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveScheduleSettings()
+                            showScheduleBackup = false
+                            successInfo = scheduleEnabled ? "定时备份已启用，每天 \(String(format: "%02d:%02d", scheduleHour, scheduleMinute)) 执行" : "定时备份已关闭"
+                            successShow = true
                         }
                     }
                 }
@@ -313,6 +421,8 @@ struct LCDataManagementView : View {
             }
             appeared = true
         }
+        // 检查定时备份
+        Task { await checkAndRunScheduledBackup() }
     }
     
     func cleanUpUnusedFolders() async {
@@ -465,13 +575,10 @@ struct LCDataManagementView : View {
     func deleteBackup(at backupURL: URL) {
         do {
             try FileManager.default.removeItem(at: backupURL)
+            // 直接从列表移除，不开关 sheet
+            backupFolderList.removeAll { $0 == backupURL }
             successInfo = "已删除备份：\(backupURL.lastPathComponent)"
             successShow = true
-            // 关闭再打开 sheet 以刷新列表
-            showRestoreSelect = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                showRestoreSelect = true
-            }
         } catch {
             errorInfo = "删除失败：\(error.localizedDescription)"
             errorShow = true
@@ -843,10 +950,97 @@ struct LCDataManagementView : View {
         }
     }
     
+    func loadScheduleSettings() {
+        let defaults = UserDefaults.standard
+        scheduleEnabled = defaults.bool(forKey: "LCScheduleBackupEnabled")
+        scheduleHour = defaults.integer(forKey: "LCScheduleBackupHour")
+        scheduleMinute = defaults.integer(forKey: "LCScheduleBackupMinute")
+        if let ids = defaults.stringArray(forKey: "LCScheduleBackupAppIDs") {
+            scheduleSelectedIDs = Set(ids)
+        }
+        // 默认 3:00
+        if defaults.object(forKey: "LCScheduleBackupHour") == nil {
+            scheduleHour = 3
+            scheduleMinute = 0
+        }
+    }
+    
+    func saveScheduleSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(scheduleEnabled, forKey: "LCScheduleBackupEnabled")
+        defaults.set(scheduleHour, forKey: "LCScheduleBackupHour")
+        defaults.set(scheduleMinute, forKey: "LCScheduleBackupMinute")
+        defaults.set(Array(scheduleSelectedIDs), forKey: "LCScheduleBackupAppIDs")
+        defaults.synchronize()
+    }
+    
+    func checkAndRunScheduledBackup() async {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: "LCScheduleBackupEnabled") else { return }
+        guard let ids = defaults.stringArray(forKey: "LCScheduleBackupAppIDs"), !ids.isEmpty else { return }
+        
+        let hour = defaults.integer(forKey: "LCScheduleBackupHour")
+        let minute = defaults.integer(forKey: "LCScheduleBackupMinute")
+        
+        // 检查今天是否已备份
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd"
+        let today = dateFormatter.string(from: Date())
+        let lastBackup = defaults.string(forKey: "LCScheduleBackupLastDate") ?? ""
+        if lastBackup == today { return }
+        
+        // 检查是否已到设定时间
+        let calendar = Calendar.current
+        let now = Date()
+        let nowHour = calendar.component(.hour, from: now)
+        let nowMinute = calendar.component(.minute, from: now)
+        let nowTotal = nowHour * 60 + nowMinute
+        let scheduleTotal = hour * 60 + minute
+        if nowTotal < scheduleTotal { return }
+        
+        // 执行备份
+        let selected = (sharedModel.apps + sharedModel.hiddenApps).filter {
+            ids.contains($0.appInfo.bundleIdentifier() ?? "")
+        }
+        if !selected.isEmpty {
+            await backupApps(selected)
+            defaults.set(today, forKey: "LCScheduleBackupLastDate")
+            defaults.synchronize()
+        }
+    }
+    
     func clearIconCache() async {
         for app in sharedModel.apps {
             app.appInfo.clearIconCache()
         }
     }
 
+}
+
+// 导出到 iCloud 云盘（系统文件选择器，用户手动选位置）
+struct DocumentExportPicker: UIViewControllerRepresentable {
+    let url: URL
+    let onComplete: () -> Void
+    
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onComplete: onComplete)
+    }
+    
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onComplete: () -> Void
+        init(onComplete: @escaping () -> Void) {
+            self.onComplete = onComplete
+        }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onComplete()
+        }
+    }
 }

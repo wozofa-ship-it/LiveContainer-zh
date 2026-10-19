@@ -1087,7 +1087,7 @@ struct MinimizeAllButtonView: View {
 @available(iOS 16.0, *)
 struct AllAppsButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
-    private let appIcon = UIImage(named: "AppIcon")
+    private let appIcon = UIImage(named: "DockAppIcon")
     
     var body: some View {
         ZStack {
