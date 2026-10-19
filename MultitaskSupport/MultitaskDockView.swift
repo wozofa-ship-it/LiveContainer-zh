@@ -1152,7 +1152,7 @@ struct AllAppsListView: View {
     }
     
     private func minimizeOpenApp(_ app: LCAppModel) {
-        let dataUUID = app.appInfo.dataUUID
+        guard let dataUUID = app.appInfo.dataUUID else { return }
         // 如果已在运行，直接最小化它的窗口
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
             dockManager.minimizeWindow(uuid: runningApp.appUUID)
