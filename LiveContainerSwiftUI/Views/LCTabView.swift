@@ -12,7 +12,6 @@ struct LCTabView: View {
     @State var errorShow = false
     @State var crashReportShow = false
     @State var errorInfo = ""
-    @State private var showInstalledApps = false
     
     @EnvironmentObject var sharedModel : SharedModel
     @EnvironmentObject var sceneDelegate: SceneDelegate
@@ -53,44 +52,8 @@ struct LCTabView: View {
         .overlay(
             VStack {
                 Spacer()
-                HStack {
-                    Spacer()
-                    Button(action: { showInstalledApps = true }) {
-                        Image(systemName: "apps.iphone")
-                            .font(.title2)
-                            .foregroundColor(.white)
-                            .padding(14)
-                            .background(Color.blue)
-                            .clipShape(Circle())
-                            .shadow(radius: 4)
-                    }
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 90)
-                }
             }
         )
-        .sheet(isPresented: $showInstalledApps) {
-            NavigationView {
-                List(sharedModel.apps, id: \.self) { app in
-                    HStack {
-                        Text(app.appInfo.displayName() ?? "Unknown")
-                        Spacer()
-                        Button("打开") {
-                            showInstalledApps = false
-                            let bundleId = app.appInfo.relativeBundlePath ?? ""
-                            NotificationCenter.default.post(name: NSNotification.LaunchAppNotification, object: ["bundleId": bundleId])
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-                .navigationTitle("已安装 IPA")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("关闭") { showInstalledApps = false }
-                    }
-                }
-            }
-        }
         .downloadAlert(helper: downloadHelper)
         .environmentObject(downloadHelper)
         .alert("lc.common.error".loc, isPresented: $errorShow){

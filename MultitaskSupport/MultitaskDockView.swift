@@ -728,6 +728,16 @@ class AppInfoProvider {
         }
     }
     
+    @objc public func minimizeWindow(uuid: String) {
+        DispatchQueue.main.async {
+            if let app = self.apps.first(where: { $0.appUUID == uuid }),
+               let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController {
+                app.view?.layer.removeAllAnimations()
+                vc.minimizeWindow()
+            }
+        }
+    }
+    
     @objc public func toggleDockCollapse() {
         DispatchQueue.main.async {
             self.isCollapsed.toggle()
@@ -1106,9 +1116,11 @@ struct AllAppsListView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(DataManager.shared.model.apps, id: \.self) { app in
-                        AppCardRow(app: app, dockManager: dockManager) {
+                        AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
-                        }
+                        }, onMinimizeOpen: {
+                            minimizeOpenApp(app)
+                        })
                     }
                 }
                 .padding()
@@ -1138,6 +1150,17 @@ struct AllAppsListView: View {
         }
         dismiss()
     }
+    
+    private func minimizeOpenApp(_ app: LCAppModel) {
+        // 如果已在运行，最小化它的窗口
+        if let runningApp = dockManager.apps.first(where: { $0.appUUID == app.appInfo.dataUUID }) {
+            dockManager.minimizeWindow(uuid: runningApp.appUUID)
+            dismiss()
+            return
+        }
+        // 未运行，先启动再最小化（启动后用户可手动最小化）
+        launchApp(app)
+    }
 }
 
 // MARK: - App Card Row (same style as App tab)
@@ -1146,6 +1169,7 @@ struct AppCardRow: View {
     let app: LCAppModel
     let dockManager: MultitaskDockManager
     let onLaunch: () -> Void
+    let onMinimizeOpen: () -> Void
     @State private var appIcon: UIImage?
     
     var body: some View {
@@ -1179,6 +1203,17 @@ struct AppCardRow: View {
             
             Spacer()
             
+            // Minimize-open button
+            Button(action: onMinimizeOpen) {
+                Text("最小化")
+                    .font(.subheadline)
+                    .foregroundColor(.blue)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.blue.opacity(0.15))
+                    .clipShape(Capsule())
+            }
+            
             // Launch button
             Button(action: onLaunch) {
                 Text(dockManager.apps.contains(where: { $0.appUUID == app.appInfo.dataUUID }) ? "打开" : "启动")
@@ -1196,7 +1231,12 @@ struct AppCardRow: View {
     }
     
     private func loadIcon() {
-        // 图标加载占位，暂用灰色块
+        DispatchQueue.global(qos: .userInitiated).async {
+            let icon = app.appInfo.iconIsDarkIcon(false)
+            DispatchQueue.main.async {
+                self.appIcon = icon
+            }
+        }
     }
 }
 
