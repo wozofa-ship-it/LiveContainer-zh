@@ -1087,16 +1087,25 @@ struct MinimizeAllButtonView: View {
 @available(iOS 16.0, *)
 struct AllAppsButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
+    private let appIcon = UIImage(named: "AppIcon")
     
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.blue.opacity(0.8))
-                .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-            
-            Image(systemName: "apps.iphone")
-                .foregroundColor(.white)
-                .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
+            if let icon = appIcon {
+                Image(uiImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.8))
+                    .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
+                
+                Image(systemName: "apps.iphone")
+                    .foregroundColor(.white)
+                    .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
+            }
         }
         .overlay(
             RoundedRectangle(cornerRadius: 8)

@@ -485,21 +485,22 @@ struct LCDataManagementView : View {
 
     func backupApps(_ apps: [LCAppModel]) async {
         let fm = FileManager.default
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
-        let timestamp = dateFormatter.string(from: Date())
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
             errorInfo = "lc.settings.backupFail".loc
             errorShow = true
             return
         }
-        let backupRoot = docsURL.appendingPathComponent("Backups").appendingPathComponent(timestamp)
+        let backupRoot = docsURL.appendingPathComponent("Backups")
         do {
             try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
             var count = 0
             for app in apps {
                 let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
                 let appBackupURL = backupRoot.appendingPathComponent(appName)
+                if fm.fileExists(atPath: appBackupURL.path) {
+                    try fm.removeItem(at: appBackupURL)
+                }
                 try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
                 // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
                 let manifest: [String: String] = [
@@ -520,7 +521,7 @@ struct LCDataManagementView : View {
                     let srcURL = container.containerURL
                     let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
                     if fm.fileExists(atPath: srcURL.path) {
-                        try fm.copyItem(at: srcURL, to: destURL)
+                        try? fm.copyItem(at: srcURL, to: destURL)
                     }
                 }
                 count += 1
@@ -537,7 +538,18 @@ struct LCDataManagementView : View {
     func restoreFromBackup(at backupURL: URL) async {
         let fm = FileManager.default
         do {
-            let appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+            // 新结构：backupURL 直接是单个 App 的备份文件夹（如 Backups/GitHub/）
+            // 兼容旧结构：如果是时间戳文件夹，里面是多个 App 文件夹
+            let folderName = backupURL.lastPathComponent
+            let manifestURL = backupURL.appendingPathComponent("manifest.json")
+            let isSingleAppFolder = fm.fileExists(atPath: manifestURL.path)
+            
+            let appFolders: [URL]
+            if isSingleAppFolder {
+                appFolders = [backupURL]
+            } else {
+                appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+            }
             var restoredCount = 0
             var missingApps: [String] = []
             var missingFolders: [URL] = []
