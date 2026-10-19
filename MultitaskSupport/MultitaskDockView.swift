@@ -1167,15 +1167,15 @@ struct AllAppsListView: View {
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
             #endif
         }
-        // 轮询等待窗口出现，最多等5秒，找到后最小化
-        DispatchQueue.global(qos: .userInitiated).async {
-            for _ in 0..<50 {
-                Thread.sleep(forTimeInterval: 0.1)
-                let found = self.dockManager.apps.contains(where: { $0.appUUID == dataUUID })
-                if found {
-                    self.dockManager.minimizeWindow(uuid: dataUUID)
-                    break
-                }
+        // 主线程轮询等待窗口出现，找到后最小化
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+            attempts += 1
+            if self.dockManager.apps.contains(where: { $0.appUUID == dataUUID }) {
+                self.dockManager.minimizeWindow(uuid: dataUUID)
+                timer.invalidate()
+            } else if attempts >= 20 {
+                timer.invalidate()
             }
         }
     }
