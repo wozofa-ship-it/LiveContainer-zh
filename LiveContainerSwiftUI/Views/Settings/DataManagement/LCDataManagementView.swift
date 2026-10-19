@@ -41,6 +41,10 @@ struct LCDataManagementView : View {
     @State private var scheduleMinute = 0
     @State private var scheduleSelectedIDs = Set<String>()
     @State private var exportBackupURL: URL? = nil
+    @State private var showScheduleCache = false
+    @State private var cacheScheduleEnabled = false
+    @State private var cacheScheduleHour = 3
+    @State private var cacheScheduleMinute = 0
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -137,6 +141,25 @@ struct LCDataManagementView : View {
                     Task { await clearIconCache() }
                 } label: {
                     Text("lc.settings.clearIconCache".loc)
+                }
+                Button {
+                    cacheScheduleEnabled = UserDefaults.standard.bool(forKey: "LCScheduleCacheEnabled")
+                    cacheScheduleHour = UserDefaults.standard.integer(forKey: "LCScheduleCacheHour")
+                    cacheScheduleMinute = UserDefaults.standard.integer(forKey: "LCScheduleCacheMinute")
+                    if UserDefaults.standard.object(forKey: "LCScheduleCacheHour") == nil {
+                        cacheScheduleHour = 3
+                        cacheScheduleMinute = 0
+                    }
+                    showScheduleCache = true
+                } label: {
+                    HStack {
+                        Text("定时清理缓存")
+                        Spacer()
+                        if cacheScheduleEnabled {
+                            Text(String(format: "%02d:%02d", cacheScheduleHour, cacheScheduleMinute))
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
             }
             
@@ -399,6 +422,50 @@ struct LCDataManagementView : View {
                 }
             }
         }
+        .sheet(isPresented: $showScheduleCache) {
+            NavigationView {
+                Form {
+                    Section {
+                        Toggle("启用定时清理缓存", isOn: $cacheScheduleEnabled)
+                    }
+                    Section(header: Text("执行时间")) {
+                        HStack {
+                            Picker("时", selection: $cacheScheduleHour) {
+                                ForEach(0..<24, id: \.self) { h in
+                                    Text(String(format: "%02d", h)).tag(h)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(maxWidth: .infinity)
+                            Picker("分", selection: $cacheScheduleMinute) {
+                                ForEach(0..<60, id: \.self) { m in
+                                    Text(String(format: "%02d", m)).tag(m)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(maxWidth: .infinity)
+                        }
+                    }
+                    Section(footer: Text("每天到点自动清理图标缓存。打开数据管理页时补执行。")) {
+                        EmptyView()
+                    }
+                }
+                .navigationTitle("定时清理缓存")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { showScheduleCache = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveCacheScheduleSettings()
+                            showScheduleCache = false
+                            successInfo = cacheScheduleEnabled ? "定时清理已启用，每天 \(String(format: "%02d:%02d", cacheScheduleHour, cacheScheduleMinute)) 执行" : "定时清理已关闭"
+                            successShow = true
+                        }
+                    }
+                }
+            }
+        }
     }
     
     func onAppearFunc() {
@@ -413,9 +480,10 @@ struct LCDataManagementView : View {
         }
         // 检查定时备份
         Task { await checkAndRunScheduledBackup() }
+        // 检查定时清理缓存
+        Task { await checkAndRunScheduledCache() }
     }
-    
-    func cleanUpUnusedFolders() async {
+        func cleanUpUnusedFolders() async {
         
         var folderNameToAppDict : [String:LCAppModel] = [:]
         for app in sharedModel.apps {
@@ -970,6 +1038,35 @@ struct LCDataManagementView : View {
         defaults.set(scheduleMinute, forKey: "LCScheduleBackupMinute")
         defaults.set(Array(scheduleSelectedIDs), forKey: "LCScheduleBackupAppIDs")
         defaults.synchronize()
+    }
+    
+    func saveCacheScheduleSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(cacheScheduleEnabled, forKey: "LCScheduleCacheEnabled")
+        defaults.set(cacheScheduleHour, forKey: "LCScheduleCacheHour")
+        defaults.set(cacheScheduleMinute, forKey: "LCScheduleCacheMinute")
+        defaults.synchronize()
+    }
+    
+    func checkAndRunScheduledCache() async {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: "LCScheduleCacheEnabled") else { return }
+        // 今天已清理过就跳过
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd"
+        let today = formatter.string(from: Date())
+        if defaults.string(forKey: "LCScheduleCacheLastDate") == today { return }
+        // 还没到设定时间就跳过
+        let hour = defaults.integer(forKey: "LCScheduleCacheHour")
+        let minute = defaults.integer(forKey: "LCScheduleCacheMinute")
+        let now = Date()
+        let cal = Calendar.current
+        let nowHour = cal.component(.hour, from: now)
+        let nowMinute = cal.component(.minute, from: now)
+        if nowHour * 60 + nowMinute < hour * 60 + minute { return }
+        // 执行清理
+        await clearIconCache()
+        defaults.set(today, forKey: "LCScheduleCacheLastDate")
     }
     
     func checkAndRunScheduledBackup() async {

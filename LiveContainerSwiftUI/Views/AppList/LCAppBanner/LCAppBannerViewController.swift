@@ -202,6 +202,22 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             self?.openSettings()
         })
 
+        // Tweak/Module Picker (direct in context menu)
+        let tweakActions = [nil as String?] + DataManager.shared.model.tweakFolderNames.map { $0 as String? }
+        let tweakMenuActions = tweakActions.map { [weak self] folderName in
+            UIAction(
+                title: folderName ?? "lc.common.none".loc,
+                state: model.uiTweakFolder == folderName ? .on : .off
+            ) { _ in
+                model.uiTweakFolder = folderName
+            }
+        }
+        sectionChildren.append(UIMenu(
+            title: "lc.appSettings.tweakFolder".loc,
+            image: UIImage(systemName: "wrench.and.screwdriver"),
+            children: tweakMenuActions
+        ))
+
         if !model.uiIsShared {
             sectionChildren.append(UIAction(
                 title: "lc.appBanner.uninstall".loc,
