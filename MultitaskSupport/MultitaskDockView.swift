@@ -1228,12 +1228,13 @@ struct AllAppsListView: View {
         }
     }
 
-    // 直接以小窗口（多任务）打开：不走全屏再缩小那一套
+    // 直接以小窗口（多任务）打开：窗口若被设置成最大化打开，还原成小窗口尺寸
     private func smallWindowOpenApp(_ app: LCAppModel) {
         guard let dataUUID = app.appInfo.dataUUID else { return }
-        // 已在运行：把它的窗口带到前面
+        // 已在运行：把它的窗口带到前面，并还原为小窗口
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
             let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+            unmaximizeWindow(uuid: dataUUID)
             dismiss()
             return
         }
@@ -1241,6 +1242,26 @@ struct AllAppsListView: View {
         Task {
             try? await app.runApp(multitask: true, containerFolderName: dataUUID)
         }
+        // 等窗口建好后还原为小窗口（轮询窗口出现）
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+            attempts += 1
+            if self.dockManager.apps.contains(where: { $0.appUUID == dataUUID }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    self.unmaximizeWindow(uuid: dataUUID)
+                }
+                timer.invalidate()
+            } else if attempts >= 30 {
+                timer.invalidate()
+            }
+        }
+    }
+
+    private func unmaximizeWindow(uuid: String) {
+        guard let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }),
+              let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
+              vc.isMaximized else { return }
+        vc.maximizeWindow()
     }
 }
 
