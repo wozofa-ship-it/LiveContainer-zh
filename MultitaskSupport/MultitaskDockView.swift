@@ -793,52 +793,69 @@ class AppInfoProvider {
         }
     }
     
-    // MARK: - 全局甩动手势（App 内任意位置横甩 隐藏/显示 快捷栏）
-    // 拖拽手势只覆盖快捷栏本身、边缘手势只认最边缘起手，用户在 App 里
-    // 任意位置滑动都够不着。这里在窗口层挂一个只观察不拦截的 UIPan：
-    // 结束时速度够快、横向占优才触发，普通刷内容不会误触。
-    private var globalSwipeRecognizer: UIPanGestureRecognizer?
+    // MARK: - 边缘拖动手势（边缘起手横拖 隐藏/显示 快捷栏）
+    // 只认从屏幕边缘一条（44pt）起手的横拖：栏在右时，边缘往右拖隐藏、
+    // 往左拖显示；其他区域完全不碰，不干扰 App 内容。
+    // 注意：游客 App 的内容是独立场景窗口，触摸不经过宿主窗口，
+    // 所以必须给每个场景的每个窗口都挂上，宿主窗口一个不够。
+    private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
 
     private func setupGlobalSwipeRecognizer() {
-        guard let window = keyWindow else { return }
-        if let existing = globalSwipeRecognizer, existing.view === window {
-            return
+        globalSwipeRecognizers.removeAll { $0.view == nil }
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+        for window in windows {
+            if globalSwipeRecognizers.contains(where: { $0.view === window }) {
+                continue
+            }
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handleGlobalSwipe(_:)))
+            pan.cancelsTouchesInView = false
+            pan.delegate = self
+            window.addGestureRecognizer(pan)
+            globalSwipeRecognizers.append(pan)
         }
-        globalSwipeRecognizer?.view?.removeGestureRecognizer(globalSwipeRecognizer!)
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleGlobalSwipe(_:)))
-        pan.cancelsTouchesInView = false
-        pan.delegate = self
-        window.addGestureRecognizer(pan)
-        globalSwipeRecognizer = pan
     }
 
     @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {
         guard gesture.state == .ended, isVisible else { return }
-        let velocity = gesture.velocity(in: gesture.view)
         let translation = gesture.translation(in: gesture.view)
-        // 快速横甩：速度 >700、位移 >40、横向至少是纵向 2.5 倍
-        guard abs(velocity.x) > 700, abs(translation.x) > 40,
-              abs(velocity.x) > 2.5 * abs(velocity.y) else { return }
+        // 边缘横拖：位移 >30 且横向至少是纵向 2 倍才算数
+        guard abs(translation.x) > 30, abs(translation.x) > 2 * abs(translation.y) else { return }
         let screenWidth = keyWindow?.bounds.width ?? 0
         // 隐藏时 frame 在屏幕外，midX 依然能判出栏在哪一侧
         let isOnRightSide = (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
-        let swipingRight = velocity.x > 0
+        let swipingRight = translation.x > 0
         if isDockHidden {
-            // 向屏幕内侧甩 = 显示
+            // 向屏幕内侧拖 = 显示
             if (isOnRightSide && !swipingRight) || (!isOnRightSide && swipingRight) {
                 showDockFromHidden()
             }
         } else {
-            // 向屏幕外侧甩 = 隐藏
+            // 向屏幕外侧拖 = 隐藏
             if (isOnRightSide && swipingRight) || (!isOnRightSide && !swipingRight) {
                 hideDockToSide()
             }
         }
     }
 
+    // 只接收从快捷栏所在一侧边缘 44pt 内起手的触摸，其余一律不碰
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
+              let window = gestureRecognizer.view as? UIWindow else { return true }
+        let x = touch.location(in: window).x
+        let screenWidth = keyWindow?.bounds.width ?? window.bounds.width
+        let isOnRightSide = (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
+        if isOnRightSide {
+            return x >= window.bounds.width - 44
+        } else {
+            return x <= 44
+        }
+    }
+
     // 全局甩动手势只观察、不同步拦截：与 App 自己的手势同时识别
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return gestureRecognizer === globalSwipeRecognizer
+        return globalSwipeRecognizers.contains { $0 === gestureRecognizer }
     }
 
     // Add edge gesture recognition areas when dock is hidden
@@ -936,6 +953,8 @@ public struct MultitaskDockSwiftView: View {
             .padding(dynamicPadding)
             .sheet(isPresented: $showAllApps) {
                 AllAppsListView()
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
             }
             .modifier { content in
                 if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
@@ -1212,7 +1231,7 @@ struct AllAppsListView: View {
     var body: some View {
         NavigationView {
             ScrollView {
-                LazyVStack(spacing: 12) {
+                LazyVStack(spacing: 10) {
                     ForEach(sortManager.sortedApps, id: \.self) { app in
                         AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
@@ -1334,25 +1353,19 @@ struct AppCardRow: View {
                     Image(uiImage: icon)
                         .resizable()
                 } else {
-                    RoundedRectangle(cornerRadius: 14)
+                    RoundedRectangle(cornerRadius: 12)
                         .fill(Color.gray.opacity(0.3))
                 }
             }
-            .frame(width: 60, height: 60)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .frame(width: 52, height: 52)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
             .onAppear { loadIcon() }
             
-            // Name + version + bundle ID
+            // 只显示 App 名字（用户要求：版本号/包名/UUID 不再显示）
             VStack(alignment: .leading, spacing: 2) {
                 Text(app.appInfo.displayName() ?? "Unknown")
                     .font(.headline)
                     .foregroundColor(.primary)
-                Text("\(app.appInfo.version() ?? "") - \(app.appInfo.relativeBundlePath ?? "")")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                Text(app.appInfo.dataUUID ?? "")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
             }
             
             Spacer()
@@ -1362,8 +1375,10 @@ struct AppCardRow: View {
                 Text("最小化")
                     .font(.subheadline)
                     .foregroundColor(.blue)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .background(Color.blue.opacity(0.15))
                     .clipShape(Capsule())
             }
@@ -1373,26 +1388,30 @@ struct AppCardRow: View {
                 Text("小窗口")
                     .font(.subheadline)
                     .foregroundColor(.purple)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .background(Color.purple.opacity(0.15))
                     .clipShape(Capsule())
             }
-            
+
             // Launch button
             Button(action: onLaunch) {
                 Text(dockManager.apps.contains(where: { $0.appUUID == app.appInfo.dataUUID }) ? "打开" : "启动")
                     .font(.headline)
                     .foregroundColor(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                     .background(Color.blue)
                     .clipShape(Capsule())
             }
         }
-        .padding(12)
+        .padding(10)
         .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
     
     private func loadIcon() {
