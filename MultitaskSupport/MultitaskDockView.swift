@@ -163,13 +163,14 @@ class AppInfoProvider {
         static let maxHeightRatioOfAvailableArea: CGFloat = 0.85
         
         // MARK: - Animation & Interaction
+        // 完全隐藏：偏移量 = 整条栏宽度 + 4，整条滑出屏幕不留边
         static var dockHiddenOffset: CGFloat {
             get {
                 let ans = LCUtils.appGroupUserDefault.double(forKey: "LCDockWidth")
                 if ans != 0 {
-                    return ans * 2 / 3
+                    return ans + 4
                 } else {
-                    return 50
+                    return defaultDockWidth + 4
                 }
             }
         }
@@ -771,6 +772,7 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             self.isDockHidden.toggle()
             self.updateDockFrame()
+            self.setupEdgeGestureRecognizers()
         }
     }
     
@@ -901,7 +903,7 @@ public struct MultitaskDockSwiftView: View {
                 }
             }
             .scaleEffect(dockManager.isVisible ? 1.0 : 0.8)
-            .opacity(dockManager.isDockHidden ? (hideCollapsedDock && dockManager.isCollapsed ? 0.01 : 0.4) : 1.0)
+            .opacity(dockManager.isDockHidden ? 0.0 : 1.0)
             .offset(dragOffset)
             .position(x: g.size.width / 2, y: g.size.height / 2)
         }
