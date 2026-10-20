@@ -1167,6 +1167,8 @@ struct AllAppsListView: View {
                             launchApp(app)
                         }, onMinimizeOpen: {
                             minimizeOpenApp(app)
+                        }, onSmallWindowOpen: {
+                            smallWindowOpenApp(app)
                         })
                     }
                 }
@@ -1205,8 +1207,7 @@ struct AllAppsListView: View {
             dockManager.minimizeWindow(uuid: runningApp.appUUID)
             dismiss()
             return
-        }
-        // 未运行：先启动，延迟后最小化窗口
+        }        // 未运行：先启动，延迟后最小化窗口
         dismiss()
         let bundleId = app.appInfo.relativeBundlePath ?? ""
         if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
@@ -1226,6 +1227,21 @@ struct AllAppsListView: View {
             }
         }
     }
+
+    // 直接以小窗口（多任务）打开：不走全屏再缩小那一套
+    private func smallWindowOpenApp(_ app: LCAppModel) {
+        guard let dataUUID = app.appInfo.dataUUID else { return }
+        // 已在运行：把它的窗口带到前面
+        if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
+            let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+            dismiss()
+            return
+        }
+        dismiss()
+        Task {
+            try? await app.runApp(multitask: true, containerFolderName: dataUUID)
+        }
+    }
 }
 
 // MARK: - App Card Row (same style as App tab)
@@ -1235,6 +1251,7 @@ struct AppCardRow: View {
     let dockManager: MultitaskDockManager
     let onLaunch: () -> Void
     let onMinimizeOpen: () -> Void
+    let onSmallWindowOpen: () -> Void
     @State private var appIcon: UIImage?
     
     var body: some View {
@@ -1276,6 +1293,17 @@ struct AppCardRow: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(Color.blue.opacity(0.15))
+                    .clipShape(Capsule())
+            }
+
+            // Small-window-open button
+            Button(action: onSmallWindowOpen) {
+                Text("小窗口")
+                    .font(.subheadline)
+                    .foregroundColor(.purple)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.purple.opacity(0.15))
                     .clipShape(Capsule())
             }
             
