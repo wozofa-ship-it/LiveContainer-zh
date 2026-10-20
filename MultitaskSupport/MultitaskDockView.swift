@@ -288,6 +288,7 @@ class AppInfoProvider {
     override init() {
         super.init()
         Self.deployDockGestureTweak()
+        registerDockEdgeDarwinObservers()
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
         NotificationCenter.default.addObserver(
@@ -872,6 +873,29 @@ class AppInfoProvider {
     // 全局甩动手势只观察、不同步拦截：与 App 自己的手势同时识别
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         return globalSwipeRecognizers.contains { $0 === gestureRecognizer }
+    }
+
+    // 游客 App 是独立进程，插件的手势信号通过 Darwin 跨进程通知送达这里
+    private func registerDockEdgeDarwinObservers() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftInward", "czf.dock.leftOutward"]
+        for name in names {
+            CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
+                guard let observerPtr = observerPtr, let cfName = cfName else { return }
+                let manager = Unmanaged<MultitaskDockManager>.fromOpaque(observerPtr).takeUnretainedValue()
+                let notificationName = cfName as String
+                DispatchQueue.main.async {
+                    switch notificationName {
+                    case "czf.dock.rightInward": manager.czfEdgeRightInward()
+                    case "czf.dock.rightOutward": manager.czfEdgeRightOutward()
+                    case "czf.dock.leftInward": manager.czfEdgeLeftInward()
+                    case "czf.dock.leftOutward": manager.czfEdgeLeftOutward()
+                    default: break
+                    }
+                }
+            }, name as CFString, nil, .deliverImmediately)
+        }
     }
 
     // MARK: - 游客侧边缘手势回调（CZFDockGesture 插件在 App 内部触发）

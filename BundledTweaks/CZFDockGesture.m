@@ -70,6 +70,16 @@ static BOOL gCZFEdgeIsRight = YES;
     UIImpactFeedbackGenerator *buzz = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [buzz impactOccurred];
     BOOL draggingRight = translation.x > 0;
+    NSString *notificationName = nil;
+    if (gCZFEdgeIsRight) {
+        notificationName = draggingRight ? @"czf.dock.rightOutward" : @"czf.dock.rightInward";
+    } else {
+        notificationName = draggingRight ? @"czf.dock.leftInward" : @"czf.dock.leftOutward";
+    }
+    // 游客 App 是独立进程（LiveProcess），按类名找宿主管理器必然落空；
+    // 改发 Darwin 跨进程通知，宿主注册同名观察者接收。
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)notificationName, NULL, NULL, YES);
+    // 同进程模式兜底（若某些场景游客与宿主同进程）：直调宿主入口
     NSString *selectorName = nil;
     if (gCZFEdgeIsRight) {
         selectorName = draggingRight ? @"czfEdgeRightOutward" : @"czfEdgeRightInward";
