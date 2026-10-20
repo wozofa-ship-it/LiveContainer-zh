@@ -47,6 +47,9 @@ struct LCDataManagementView : View {
     @State private var cacheScheduleMinute = 0
     @State private var showFolderPicker = false
     @State private var externalFolderName: String? = nil
+    @State private var showRestoreSourceDialog = false
+    @State private var restoreFromExternal = false
+    @State private var showDeleteAllBackupsConfirm = false
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -132,7 +135,13 @@ struct LCDataManagementView : View {
                     }
                 }
                 Button {
-                    showRestoreSelect = true
+                    // 设了外部文件夹就先让用户选从哪恢复，没设直接开本地
+                    if Self.externalBackupFolderURL() != nil {
+                        showRestoreSourceDialog = true
+                    } else {
+                        restoreFromExternal = false
+                        showRestoreSelect = true
+                    }
                 } label: {
                     Text("lc.settings.restoreBackup".loc)
                 }
@@ -278,6 +287,17 @@ struct LCDataManagementView : View {
                 saveExternalBackupFolder(url)
             }
         }
+        .confirmationDialog("选择从哪个文件夹恢复", isPresented: $showRestoreSourceDialog, titleVisibility: .visible) {
+            Button("本地备份") {
+                restoreFromExternal = false
+                showRestoreSelect = true
+            }
+            Button("iCloud 文件夹（\(externalFolderName ?? "")）") {
+                restoreFromExternal = true
+                showRestoreSelect = true
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {}
+        }
         .sheet(isPresented: $showBackupSelect) {
             NavigationView {
                 List(sharedModel.apps + sharedModel.hiddenApps, id: \.self) { app in
@@ -318,7 +338,7 @@ struct LCDataManagementView : View {
                         VStack(alignment: .leading) {
                             Text(folderURL.lastPathComponent)
                                 .font(.headline)
-                            Text(folderURL.path)
+                            Text(backupDateText(for: folderURL))
                                 .font(.caption)
                                 .foregroundColor(.gray)
                                 .lineLimit(1)
@@ -392,10 +412,23 @@ struct LCDataManagementView : View {
                             } label: {
                                 Label("一键导出全部", systemImage: "square.and.arrow.up")
                             }
+                            Button(role: .destructive) {
+                                showDeleteAllBackupsConfirm = true
+                            } label: {
+                                Label("一键删除全部", systemImage: "trash")
+                            }
                         } label: {
                             Text("全部")
                         }
                     }
+                }
+                .confirmationDialog("确定删除全部备份？", isPresented: $showDeleteAllBackupsConfirm, titleVisibility: .visible) {
+                    Button("删除全部", role: .destructive) {
+                        deleteAllBackups()
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {}
+                } message: {
+                    Text("将删除当前列表里的全部 \(backupFolderList.count) 个备份，此操作不可恢复")
                 }
             }
         }
@@ -518,7 +551,11 @@ struct LCDataManagementView : View {
             }
             appeared = true
         }
-        externalFolderName = externalBackupFolderURL()?.lastPathComponent
+        externalFolderName = Self.externalBackupFolderURL()?.lastPathComponent
+        // 兜底：把本地备份补齐同步到外部文件夹（后台线程，避免大备份拷贝卡界面）
+        Task.detached {
+            Self.syncAllLocalBackupsToExternalFolder()
+        }
         // 检查定时备份
         Task { await checkAndRunScheduledBackup() }
         // 检查定时清理缓存
@@ -536,6 +573,10 @@ struct LCDataManagementView : View {
             UserDefaults.standard.set(data, forKey: "LCExternalBackupFolderBookmark")
             Self.cachedExternalFolderURL = nil
             externalFolderName = url.lastPathComponent
+            // 立即把已有本地备份同步过去（后台线程）
+            Task.detached {
+                Self.syncAllLocalBackupsToExternalFolder()
+            }
             successInfo = "备份文件夹已设置：\(url.lastPathComponent)\n之后的备份会同步到该文件夹，恢复时也会从该文件夹读取"
             successShow = true
         } else {
@@ -544,7 +585,7 @@ struct LCDataManagementView : View {
         }
     }
 
-    func externalBackupFolderURL() -> URL? {
+    static func externalBackupFolderURL() -> URL? {
         if let cached = Self.cachedExternalFolderURL {
             return cached
         }
@@ -559,12 +600,35 @@ struct LCDataManagementView : View {
 
     // 把刚备份好的 App 文件夹同步到外部文件夹（同名覆盖）
     func syncBackupsToExternalFolder(appNames: [String], backupRoot: URL) {
-        guard let extURL = externalBackupFolderURL() else { return }
+        guard let extURL = Self.externalBackupFolderURL() else { return }
         let fm = FileManager.default
         for name in appNames {
             let src = backupRoot.appendingPathComponent(name)
             let dest = extURL.appendingPathComponent(name)
             if fm.fileExists(atPath: dest.path) {
+                try? fm.removeItem(at: dest)
+            }
+            try? fm.copyItem(at: src, to: dest)
+        }
+    }
+
+    // 兜底同步：把本地备份里外部文件夹还缺的/过期的补过去（选文件夹后、打开数据管理页时调用）
+    static func syncAllLocalBackupsToExternalFolder() {
+        guard let extURL = Self.externalBackupFolderURL() else { return }
+        let fm = FileManager.default
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let backupRoot = docsURL.appendingPathComponent("Backups")
+        guard let localFolders = try? fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else { return }
+        for src in localFolders {
+            guard (try? src.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            let dest = extURL.appendingPathComponent(src.lastPathComponent)
+            if fm.fileExists(atPath: dest.path) {
+                // 两边都有：比较 manifest 修改时间，本地更新才覆盖
+                let srcManifest = src.appendingPathComponent("manifest.json")
+                let destManifest = dest.appendingPathComponent("manifest.json")
+                let srcDate = (try? fm.attributesOfItem(atPath: srcManifest.path))?[.modificationDate] as? Date ?? Date.distantPast
+                let destDate = (try? fm.attributesOfItem(atPath: destManifest.path))?[.modificationDate] as? Date ?? Date.distantPast
+                if destDate >= srcDate { continue }
                 try? fm.removeItem(at: dest)
             }
             try? fm.copyItem(at: src, to: dest)
@@ -709,18 +773,41 @@ struct LCDataManagementView : View {
     }
 
     func backupFolders() -> [URL] {
+        return backupFolders(fromExternal: restoreFromExternal)
+    }
+
+    // 备份时间显示：优先 manifest 里记录的，旧备份没有就用 manifest 文件修改时间
+    func backupDateText(for folderURL: URL) -> String {
+        let manifestURL = folderURL.appendingPathComponent("manifest.json")
+        if let data = try? Data(contentsOf: manifestURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+           let dateStr = json["backupDate"], !dateStr.isEmpty {
+            return "备份时间：\(dateStr)"
+        }
+        let fm = FileManager.default
+        let date = (try? fm.attributesOfItem(atPath: manifestURL.path))?[.modificationDate] as? Date
+            ?? (try? fm.attributesOfItem(atPath: folderURL.path))?[.modificationDate] as? Date
+        if let date {
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyy-MM-dd HH:mm"
+            return "备份时间：\(fmt.string(from: date))"
+        }
+        return ""
+    }
+
+    func backupFolders(fromExternal: Bool) -> [URL] {
         let fm = FileManager.default
         var allFolders: [URL] = []
-        if let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+        if fromExternal {
+            if let extURL = Self.externalBackupFolderURL(),
+               let folders = try? fm.contentsOfDirectory(at: extURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) {
+                allFolders += folders
+            }
+        } else if let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
             let backupsURL = docsURL.appendingPathComponent("Backups")
             if let folders = try? fm.contentsOfDirectory(at: backupsURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) {
                 allFolders += folders
             }
-        }
-        // 合并外部备份文件夹（iCloud）里的备份，恢复时直接从那边读
-        if let extURL = externalBackupFolderURL(),
-           let folders = try? fm.contentsOfDirectory(at: extURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) {
-            allFolders += folders
         }
         return allFolders.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             .sorted { (try? $0.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast > (try? $1.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast }
@@ -737,6 +824,19 @@ struct LCDataManagementView : View {
             errorInfo = "删除失败：\(error.localizedDescription)"
             errorShow = true
         }
+    }
+
+    func deleteAllBackups() {
+        let fm = FileManager.default
+        var deleted = 0
+        for url in backupFolderList {
+            if (try? fm.removeItem(at: url)) != nil {
+                deleted += 1
+            }
+        }
+        backupFolderList = backupFolders()
+        successInfo = "已删除 \(deleted) 个备份"
+        successShow = true
     }
 
     func backupAllApps() async {
@@ -765,10 +865,13 @@ struct LCDataManagementView : View {
                 }
                 try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
                 // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
+                let dateFmt = DateFormatter()
+                dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
                 let manifest: [String: String] = [
                     "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
                     "displayName": app.appInfo.displayName() ?? "",
-                    "version": app.appInfo.version() ?? ""
+                    "version": app.appInfo.version() ?? "",
+                    "backupDate": dateFmt.string(from: Date())
                 ]
                 if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
                     try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
