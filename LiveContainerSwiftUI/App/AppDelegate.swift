@@ -31,9 +31,9 @@ import Intents
             LCUtils.appGroupUserDefault.setValue(UIDevice.current.buildVersion, forKey: "LCLastIOSBuildVersion")
         }
         
-        // 清掉旧版本部署到全局 Tweaks 的手势插件（手势已改走宿主悬浮边条窗，赶在任何游客 App 启动前）
+        // 部署快捷栏边缘手势插件到全局 Tweaks 并签名（赶在任何游客 App 启动前）
         if #available(iOS 16.0, *) {
-            MultitaskDockManager.removeDockGestureTweak()
+            MultitaskDockManager.deployDockGestureTweak()
         }
 
         return true
