@@ -947,8 +947,8 @@ final class CZFEdgeGestureWindow: UIWindow {
         guard hostingController?.presentedViewController == nil,
               keyWindow?.rootViewController?.presentedViewController == nil else { return nil }
         let hasFullscreenApp = apps.contains { app in
-            guard !app.view.isHidden,
-                  let decoratedVC = app.view._viewDelegate() as? DecoratedAppSceneViewController else { return false }
+            guard let appView = app.view, !appView.isHidden,
+                  let decoratedVC = appView._viewDelegate() as? DecoratedAppSceneViewController else { return false }
             return decoratedVC.isMaximized
         }
         guard hasFullscreenApp else { return nil }
