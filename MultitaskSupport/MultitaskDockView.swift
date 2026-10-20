@@ -127,7 +127,7 @@ class AppInfoProvider {
 
 // MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
-@objc public class MultitaskDockManager: NSObject, ObservableObject {
+@objc public class MultitaskDockManager: NSObject, ObservableObject, UIGestureRecognizerDelegate {
     @objc public static let shared = MultitaskDockManager()
     
     @Published var apps: [DockAppModel] = []
@@ -338,6 +338,7 @@ class AppInfoProvider {
 
     private func updateDockFrame(animated: Bool = true) {
         guard let hostingController = hostingController else { return }
+        setupGlobalSwipeRecognizer()
 
         let screenBounds = keyWindow!.bounds
         let currentDockWidth = self.dockWidth
@@ -792,6 +793,54 @@ class AppInfoProvider {
         }
     }
     
+    // MARK: - 全局甩动手势（App 内任意位置横甩 隐藏/显示 快捷栏）
+    // 拖拽手势只覆盖快捷栏本身、边缘手势只认最边缘起手，用户在 App 里
+    // 任意位置滑动都够不着。这里在窗口层挂一个只观察不拦截的 UIPan：
+    // 结束时速度够快、横向占优才触发，普通刷内容不会误触。
+    private var globalSwipeRecognizer: UIPanGestureRecognizer?
+
+    private func setupGlobalSwipeRecognizer() {
+        guard let window = keyWindow else { return }
+        if let existing = globalSwipeRecognizer, existing.view === window {
+            return
+        }
+        globalSwipeRecognizer?.view?.removeGestureRecognizer(globalSwipeRecognizer!)
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleGlobalSwipe(_:)))
+        pan.cancelsTouchesInView = false
+        pan.delegate = self
+        window.addGestureRecognizer(pan)
+        globalSwipeRecognizer = pan
+    }
+
+    @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {
+        guard gesture.state == .ended, isVisible else { return }
+        let velocity = gesture.velocity(in: gesture.view)
+        let translation = gesture.translation(in: gesture.view)
+        // 快速横甩：速度 >700、位移 >40、横向至少是纵向 2.5 倍
+        guard abs(velocity.x) > 700, abs(translation.x) > 40,
+              abs(velocity.x) > 2.5 * abs(velocity.y) else { return }
+        let screenWidth = keyWindow?.bounds.width ?? 0
+        // 隐藏时 frame 在屏幕外，midX 依然能判出栏在哪一侧
+        let isOnRightSide = (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
+        let swipingRight = velocity.x > 0
+        if isDockHidden {
+            // 向屏幕内侧甩 = 显示
+            if (isOnRightSide && !swipingRight) || (!isOnRightSide && swipingRight) {
+                showDockFromHidden()
+            }
+        } else {
+            // 向屏幕外侧甩 = 隐藏
+            if (isOnRightSide && swipingRight) || (!isOnRightSide && !swipingRight) {
+                hideDockToSide()
+            }
+        }
+    }
+
+    // 全局甩动手势只观察、不同步拦截：与 App 自己的手势同时识别
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return gestureRecognizer === globalSwipeRecognizer
+    }
+
     // Add edge gesture recognition areas when dock is hidden
     private func setupEdgeGestureRecognizers() {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
