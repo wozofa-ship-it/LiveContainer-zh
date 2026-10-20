@@ -434,11 +434,18 @@ class LCAppModel: ObservableObject, Hashable {
             }
         }
         
+        // 先签全局插件（原顺序在 guard 之后，没选模块文件夹的 App 会提前返回、全局插件签不上）
+        try await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: force) { p in
+            Task{ await MainActor.run {
+                self.isSigningInProgress = true
+            }}
+        }
+
         // sign its tweak
         guard let tweakFolder = appInfo.tweakFolder else {
             return
         }
-        
+
         let tweakFolderUrl : URL
         if(appInfo.isShared) {
             tweakFolderUrl = LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolder)
@@ -446,13 +453,6 @@ class LCAppModel: ObservableObject, Hashable {
             tweakFolderUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
         }
         try await LCUtils.signTweaks(tweakFolderUrl: tweakFolderUrl, force: force) { p in
-            Task{ await MainActor.run {
-                self.isSigningInProgress = true
-            }}
-        }
-        
-        // sign global tweak
-        try await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: force) { p in
             Task{ await MainActor.run {
                 self.isSigningInProgress = true
             }}

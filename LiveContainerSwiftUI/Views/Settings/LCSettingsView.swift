@@ -472,7 +472,7 @@ struct LCSettingsView: View {
         }
     }
     
-    // 保活开关同步：开 → 把内置保活 dylib 放入全局 Tweaks 根目录（所有 App 启动时自动加载，启动前 signTweaks 会自动签名）；
+    // 保活开关同步：开 → 把内置保活 dylib 放入全局 Tweaks 根目录并立即签名（没签名游客进程加载不了）；
     // 关 → 移出。onAppear 时也会调用一次，补齐/更新文件。
     func syncKeepAliveTweak(enabled: Bool) {
         let fm = FileManager.default
@@ -488,6 +488,13 @@ struct LCSettingsView: View {
                 }
             } else {
                 try? fm.removeItem(at: dest)
+            }
+        }
+        if enabled {
+            // 拷贝后（或文件已在但可能没签过）强制签一遍全局目录，签好才能被加载
+            Task {
+                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: true)
+                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
             }
         }
     }
