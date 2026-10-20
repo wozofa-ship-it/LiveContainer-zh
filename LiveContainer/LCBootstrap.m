@@ -512,10 +512,8 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     //     NSFMGuestHooksInit();
     //     initDead10ccFix();
     // }
-    // 防终止开关（用户手动开启）
-    if([lcUserDefaults boolForKey:@"LCDead10ccFix"]) {
-        initDead10ccFix();
-    }
+    // （原“防终止”开关已移除：实测无保活作用，保持不启用）
+
     if(isLiveProcess) {
         NSURLSCGuestHooksInit();
     }

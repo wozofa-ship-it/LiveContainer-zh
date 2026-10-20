@@ -59,6 +59,14 @@ jobs:
           filetype_parameter: ${{ steps.filetype_parameter.outputs.filetype_parameter }}
           file_to_build: ${{ steps.file_to_build.outputs.file_to_build }}
         run: xcodebuild archive -archivePath "$archive_path" -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -sdk iphoneos -arch arm64 -configuration Release | xcpretty && exit ${PIPESTATUS[0]}
+      - name: Build bundled keepalive tweak
+        run: |
+          clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -mios-version-min=14.0 -fobjc-arc -dynamiclib \
+            -framework UIKit -framework Foundation -framework AVFoundation \
+            -o CZFKeepAlive.dylib BundledTweaks/CZFKeepAlive.m
+          cp CZFKeepAlive.dylib "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFKeepAlive.dylib"
+          ls -la "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFKeepAlive.dylib"
       - name: Tar Build Artifact
         run: tar -cvf "$archive_path.xcarchive.tar" "$archive_path.xcarchive"
       - name: Upload a Build Artifact

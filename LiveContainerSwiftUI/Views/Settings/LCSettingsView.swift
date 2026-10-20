@@ -65,8 +65,7 @@ struct LCSettingsView: View {
     @AppStorage("LCSelected32BitEmulator", store: LCUtils.appGroupUserDefault) var selected32BitEmulator : String = ""
     @AppStorage("LCKeepSelectedWhenQuit") var keepSelectedWhenQuit = false
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
-    @AppStorage("LCBackgroundWork") var backgroundWork = false
-    @AppStorage("LCDead10ccFix") var dead10ccFix = false
+    @AppStorage("LCKeepAliveEnabled") var keepAliveEnabled = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
     
@@ -286,18 +285,14 @@ struct LCSettingsView: View {
                 }
                 
                 Section(header: Text("后台保活")) {
-                    Toggle(isOn: $backgroundWork) {
-                        Text("后台任务")
+                    Toggle(isOn: $keepAliveEnabled) {
+                        Text("保活（无声音频）")
                     }
-                    .onChange(of: backgroundWork) { newValue in
-                        if newValue {
-                            UIApplication.shared.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
-                        } else {
-                            UIApplication.shared.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalNever)
-                        }
+                    .onChange(of: keepAliveEnabled) { newValue in
+                        syncKeepAliveTweak(enabled: newValue)
                     }
-                    Toggle(isOn: $dead10ccFix) {
-                        Text("防终止（Dead10ccFix）")
+                    .onAppear {
+                        syncKeepAliveTweak(enabled: keepAliveEnabled)
                     }
                 }
                 
@@ -477,6 +472,26 @@ struct LCSettingsView: View {
         }
     }
     
+    // 保活开关同步：开 → 把内置保活 dylib 放入全局 Tweaks 根目录（所有 App 启动时自动加载，启动前 signTweaks 会自动签名）；
+    // 关 → 移出。onAppear 时也会调用一次，补齐/更新文件。
+    func syncKeepAliveTweak(enabled: Bool) {
+        let fm = FileManager.default
+        guard let src = Bundle.main.url(forResource: "CZFKeepAlive", withExtension: "dylib") else { return }
+        for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
+            let dest = folder.appendingPathComponent("CZFKeepAlive.dylib")
+            if enabled {
+                let srcSize = (try? fm.attributesOfItem(atPath: src.path))?[.size] as? NSNumber
+                let destSize = (try? fm.attributesOfItem(atPath: dest.path))?[.size] as? NSNumber
+                if destSize != srcSize {
+                    try? fm.removeItem(at: dest)
+                    try? fm.copyItem(at: src, to: dest)
+                }
+            } else {
+                try? fm.removeItem(at: dest)
+            }
+        }
+    }
+
     func openGitHub() {
         UIApplication.shared.open(URL(string: "https://github.com/LiveContainer/LiveContainer")!)
     }
