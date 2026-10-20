@@ -884,7 +884,7 @@ class AppInfoProvider {
             CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
                 guard let observerPtr = observerPtr, let cfName = cfName else { return }
                 let manager = Unmanaged<MultitaskDockManager>.fromOpaque(observerPtr).takeUnretainedValue()
-                let notificationName = cfName as String
+                let notificationName = cfName.rawValue as String
                 DispatchQueue.main.async {
                     switch notificationName {
                     case "czf.dock.rightInward": manager.czfEdgeRightInward()
