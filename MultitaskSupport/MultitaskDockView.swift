@@ -801,6 +801,8 @@ class AppInfoProvider {
     // 注意：游客 App 的内容是独立场景窗口，触摸不经过宿主窗口，
     // 所以必须给每个场景的每个窗口都挂上，宿主窗口一个不够。
     private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
+    // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
+    private var globalSwipeStartEdge: Int = 0
     private var globalSwipeObserversInstalled = false
 
     private func setupGlobalSwipeRecognizer() {
@@ -837,37 +839,40 @@ class AppInfoProvider {
     @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {
         guard gesture.state == .ended, isVisible else { return }
         let translation = gesture.translation(in: gesture.view)
-        // 边缘横拖：位移 >30 且横向至少是纵向 2 倍才算数
-        guard abs(translation.x) > 30, abs(translation.x) > 2 * abs(translation.y) else { return }
-        let screenWidth = keyWindow?.bounds.width ?? 0
-        // 隐藏时 frame 在屏幕外，midX 依然能判出栏在哪一侧
-        let isOnRightSide = (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
-        let swipingRight = translation.x > 0
-        if isDockHidden {
-            // 向屏幕内侧拖 = 显示
-            if (isOnRightSide && !swipingRight) || (!isOnRightSide && swipingRight) {
-                showDockFromHidden()
-            }
+        guard abs(translation.x) > 2 * abs(translation.y) else { return }
+        let endX = gesture.location(in: gesture.view).x
+        let width = gesture.view?.bounds.width ?? 0
+        let draggingRight = translation.x > 0
+        if globalSwipeStartEdge == 2 {
+            guard abs(translation.x) > 30 else { return }
+            if draggingRight { czfEdgeRightOutward() } else { czfEdgeRightInward() }
+        } else if globalSwipeStartEdge == 1 {
+            guard abs(translation.x) > 30 else { return }
+            if draggingRight { czfEdgeLeftInward() } else { czfOpenAppPanel() }
         } else {
-            // 向屏幕外侧拖 = 隐藏
-            if (isOnRightSide && swipingRight) || (!isOnRightSide && !swipingRight) {
-                hideDockToSide()
+            // 任意位置起手：拖到屏幕边缘、位移 >60 才算隐藏
+            guard abs(translation.x) > 60 else { return }
+            if draggingRight && endX >= width - 30 {
+                czfEdgeRightOutward()
+            } else if !draggingRight && endX <= 30 {
+                czfEdgeLeftOutward()
             }
         }
     }
 
-    // 只接收从快捷栏所在一侧边缘 44pt 内起手的触摸，其余一律不碰
+    // 全部接收、只记录起手位置；触发判定在 handler 里按起手+落点做
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
               let window = gestureRecognizer.view as? UIWindow else { return true }
         let x = touch.location(in: window).x
-        let screenWidth = keyWindow?.bounds.width ?? window.bounds.width
-        let isOnRightSide = (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
-        if isOnRightSide {
-            return x >= window.bounds.width - 44
+        if x >= window.bounds.width - 44 {
+            globalSwipeStartEdge = 2
+        } else if x <= 44 {
+            globalSwipeStartEdge = 1
         } else {
-            return x <= 44
+            globalSwipeStartEdge = 0
         }
+        return true
     }
 
     // 全局甩动手势只观察、不同步拦截：与 App 自己的手势同时识别
@@ -879,7 +884,7 @@ class AppInfoProvider {
     private func registerDockEdgeDarwinObservers() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
-        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftInward", "czf.dock.leftOutward"]
+        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftInward", "czf.dock.leftOutward", "czf.dock.openPanel"]
         for name in names {
             CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
                 guard let observerPtr = observerPtr, let cfName = cfName else { return }
@@ -891,6 +896,7 @@ class AppInfoProvider {
                     case "czf.dock.rightOutward": manager.czfEdgeRightOutward()
                     case "czf.dock.leftInward": manager.czfEdgeLeftInward()
                     case "czf.dock.leftOutward": manager.czfEdgeLeftOutward()
+                    case "czf.dock.openPanel": manager.czfOpenAppPanel()
                     default: break
                     }
                 }
@@ -933,6 +939,14 @@ class AppInfoProvider {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty, !isDockHidden, !dockIsOnRightSide else { return }
         hideDockToSide()
+    }
+
+    // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再通知栏视图弹面板）
+    @objc public func czfOpenAppPanel() {
+        edgeCallbackBuzz()
+        guard isVisible || !apps.isEmpty else { return }
+        if isDockHidden { showDockFromHidden() }
+        NotificationCenter.default.post(name: .czfOpenAllAppsPanel, object: nil)
     }
 
     // 把手势插件拷到两个全局 Tweaks 根目录（随所有游客 App 加载），并强制签名。
@@ -1001,6 +1015,11 @@ class AppInfoProvider {
     }
 }
 
+extension Notification.Name {
+    // 手势请求打开 App 面板（管理器发、栏视图收）
+    static let czfOpenAllAppsPanel = Notification.Name("czfOpenAllAppsPanel")
+}
+
 // MARK: - SwiftUI Dock View
 @available(iOS 16.0, *)
 public struct MultitaskDockSwiftView: View {
@@ -1059,6 +1078,9 @@ public struct MultitaskDockSwiftView: View {
                     // 只留一个半屏档位：两个档位时系统会先拉高抽屉、列表滚不动
                     .presentationDetents([.fraction(0.6)])
                     .presentationDragIndicator(.visible)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .czfOpenAllAppsPanel)) { _ in
+                showAllApps = true
             }
             .modifier { content in
                 if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {

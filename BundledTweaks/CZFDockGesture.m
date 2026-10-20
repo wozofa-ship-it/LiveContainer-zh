@@ -14,7 +14,8 @@
 #import <objc/runtime.h>
 
 static const void *kCZFDockGestureInstalledKey = &kCZFDockGestureInstalledKey;
-static BOOL gCZFEdgeIsRight = YES;
+// 起手位置：0=不在边缘 1=左边缘 2=右边缘（shouldReceive 时记录，handler 里判定）
+static NSInteger gCZFStartEdge = 0;
 
 @interface CZFDockGestureHandler : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)shared;
@@ -47,15 +48,15 @@ static BOOL gCZFEdgeIsRight = YES;
     if (![window isKindOfClass:[UIWindow class]]) return NO;
     CGFloat x = [touch locationInView:window].x;
     CGFloat width = window.bounds.size.width;
+    // 全部接收、只记录起手位置；是否触发在 handler 按起手+落点判定
     if (x >= width - 44) {
-        gCZFEdgeIsRight = YES;
-        return YES;
+        gCZFStartEdge = 2;
+    } else if (x <= 44) {
+        gCZFStartEdge = 1;
+    } else {
+        gCZFStartEdge = 0;
     }
-    if (x <= 44) {
-        gCZFEdgeIsRight = NO;
-        return YES;
-    }
-    return NO;
+    return YES;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
@@ -65,27 +66,42 @@ static BOOL gCZFEdgeIsRight = YES;
 - (void)czfHandlePan:(UIPanGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateEnded) return;
     CGPoint translation = [gesture translationInView:gesture.view];
-    if (fabs(translation.x) < 30 || fabs(translation.x) < 2 * fabs(translation.y)) return;
-    // 诊断标记：识别到合格边缘拖动先轻震一下（证明插件侧收到手势）
-    UIImpactFeedbackGenerator *buzz = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [buzz impactOccurred];
+    if (fabs(translation.x) < 2 * fabs(translation.y)) return;
+    CGFloat endX = [gesture locationInView:gesture.view].x;
+    CGFloat width = gesture.view.bounds.size.width;
     BOOL draggingRight = translation.x > 0;
     NSString *notificationName = nil;
-    if (gCZFEdgeIsRight) {
+    NSString *selectorName = nil;
+    if (gCZFStartEdge == 2) {
+        // 起手在右边缘：往左=唤出，往右=隐藏
+        if (fabs(translation.x) < 30) return;
         notificationName = draggingRight ? @"czf.dock.rightOutward" : @"czf.dock.rightInward";
+        selectorName = draggingRight ? @"czfEdgeRightOutward" : @"czfEdgeRightInward";
+    } else if (gCZFStartEdge == 1) {
+        // 起手在左边缘：往左=打开 App 面板，往右=唤出（栏在左侧时）
+        if (fabs(translation.x) < 30) return;
+        notificationName = draggingRight ? @"czf.dock.leftInward" : @"czf.dock.openPanel";
+        selectorName = draggingRight ? @"czfEdgeLeftInward" : @"czfOpenAppPanel";
     } else {
-        notificationName = draggingRight ? @"czf.dock.leftInward" : @"czf.dock.leftOutward";
+        // 任意位置起手：只有拖到屏幕边缘、位移够大才算隐藏（防误触）
+        if (fabs(translation.x) < 60) return;
+        if (draggingRight && endX >= width - 30) {
+            notificationName = @"czf.dock.rightOutward";
+            selectorName = @"czfEdgeRightOutward";
+        } else if (!draggingRight && endX <= 30) {
+            notificationName = @"czf.dock.leftOutward";
+            selectorName = @"czfEdgeLeftOutward";
+        } else {
+            return;
+        }
     }
+    // 诊断标记：识别到合格拖动先轻震一下（证明插件侧收到手势）
+    UIImpactFeedbackGenerator *buzz = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [buzz impactOccurred];
     // 游客 App 是独立进程（LiveProcess），按类名找宿主管理器必然落空；
     // 改发 Darwin 跨进程通知，宿主注册同名观察者接收。
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)notificationName, NULL, NULL, YES);
     // 同进程模式兜底（若某些场景游客与宿主同进程）：直调宿主入口
-    NSString *selectorName = nil;
-    if (gCZFEdgeIsRight) {
-        selectorName = draggingRight ? @"czfEdgeRightOutward" : @"czfEdgeRightInward";
-    } else {
-        selectorName = draggingRight ? @"czfEdgeLeftInward" : @"czfEdgeLeftOutward";
-    }
     Class managerClass = NSClassFromString(@"MultitaskDockManager");
     if (!managerClass) {
         managerClass = NSClassFromString(@"LiveContainer.MultitaskDockManager");
