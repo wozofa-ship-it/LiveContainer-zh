@@ -31,6 +31,9 @@ import Intents
             LCUtils.appGroupUserDefault.setValue(UIDevice.current.buildVersion, forKey: "LCLastIOSBuildVersion")
         }
         
+        // 部署快捷栏边缘手势插件到全局 Tweaks 并签名（赶在任何游客 App 启动前）
+        MultitaskDockManager.deployDockGestureTweak()
+
         return true
     }
     

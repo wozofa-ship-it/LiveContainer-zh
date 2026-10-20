@@ -287,7 +287,7 @@ class AppInfoProvider {
     
     override init() {
         super.init()
-        deployDockGestureTweak()
+        Self.deployDockGestureTweak()
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
         NotificationCenter.default.addObserver(
@@ -882,28 +882,39 @@ class AppInfoProvider {
         return (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
     }
 
+    // 诊断标记：游客回调到达宿主时震一下（在守卫之前，证明回调通了）
+    private func edgeCallbackBuzz() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
     @objc public func czfEdgeRightInward() {
-        guard isVisible, isDockHidden, dockIsOnRightSide else { return }
+        edgeCallbackBuzz()
+        guard isVisible || !apps.isEmpty, isDockHidden, dockIsOnRightSide else { return }
         showDockFromHidden()
     }
 
     @objc public func czfEdgeRightOutward() {
-        guard isVisible, !isDockHidden, dockIsOnRightSide else { return }
+        edgeCallbackBuzz()
+        guard isVisible || !apps.isEmpty, !isDockHidden, dockIsOnRightSide else { return }
         hideDockToSide()
     }
 
     @objc public func czfEdgeLeftInward() {
-        guard isVisible, isDockHidden, !dockIsOnRightSide else { return }
+        edgeCallbackBuzz()
+        guard isVisible || !apps.isEmpty, isDockHidden, !dockIsOnRightSide else { return }
         showDockFromHidden()
     }
 
     @objc public func czfEdgeLeftOutward() {
-        guard isVisible, !isDockHidden, !dockIsOnRightSide else { return }
+        edgeCallbackBuzz()
+        guard isVisible || !apps.isEmpty, !isDockHidden, !dockIsOnRightSide else { return }
         hideDockToSide()
     }
 
-    // 把手势插件拷到两个全局 Tweaks 根目录（随所有游客 App 加载），并强制签名
-    private func deployDockGestureTweak() {
+    // 把手势插件拷到两个全局 Tweaks 根目录（随所有游客 App 加载），并强制签名。
+    // 静态方法：宿主一启动（AppDelegate）就调，赶在任何游客 App 启动之前，
+    // 避开签名缓存与启动抢跑。管理器初始化时也会再调一次（幂等）。
+    static func deployDockGestureTweak() {
         let fm = FileManager.default
         guard let src = Bundle.main.url(forResource: "CZFDockGesture", withExtension: "dylib") else { return }
         var copied = false
@@ -919,7 +930,7 @@ class AppInfoProvider {
             }
         }
         if copied {
-            Task {
+            Task(priority: .userInitiated) {
                 try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: true)
                 try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
             }

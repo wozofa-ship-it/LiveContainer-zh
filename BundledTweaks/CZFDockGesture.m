@@ -66,6 +66,9 @@ static BOOL gCZFEdgeIsRight = YES;
     if (gesture.state != UIGestureRecognizerStateEnded) return;
     CGPoint translation = [gesture translationInView:gesture.view];
     if (fabs(translation.x) < 30 || fabs(translation.x) < 2 * fabs(translation.y)) return;
+    // 诊断标记：识别到合格边缘拖动先轻震一下（证明插件侧收到手势）
+    UIImpactFeedbackGenerator *buzz = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [buzz impactOccurred];
     BOOL draggingRight = translation.x > 0;
     NSString *selectorName = nil;
     if (gCZFEdgeIsRight) {
@@ -74,6 +77,9 @@ static BOOL gCZFEdgeIsRight = YES;
         selectorName = draggingRight ? @"czfEdgeLeftInward" : @"czfEdgeLeftOutward";
     }
     Class managerClass = NSClassFromString(@"MultitaskDockManager");
+    if (!managerClass) {
+        managerClass = NSClassFromString(@"LiveContainer.MultitaskDockManager");
+    }
     if (!managerClass) return;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -100,8 +106,11 @@ __attribute__((constructor)) static void CZFDockGestureInit(void) {
                 [[CZFDockGestureHandler shared] installOnWindow:(UIWindow *)note.object];
             }
         }];
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+            CZFDockGestureTryInstall();
+        }];
         // 窗口出现得晚：启动后数秒内重试几次，装上为止（装过的不重复装）
-        for (NSInteger i = 1; i <= 6; i++) {
+        for (NSInteger i = 1; i <= 10; i++) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 CZFDockGestureTryInstall();
             });
