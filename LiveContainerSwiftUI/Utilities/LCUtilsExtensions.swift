@@ -10,8 +10,27 @@ import LocalAuthentication
 extension LCUtils {
     public static let appGroupUserDefault = UserDefaults.init(suiteName: LCSharedUtils.appGroupID()) ?? UserDefaults.standard
     
+    // 本次运行内已验签通过的插件文件夹，避免每次打开 App 重复扫描全局插件（force=true 的安装/管理流程不受影响）
+    private static var verifiedTweakFolders: Set<String> = []
+    private static let verifiedTweakFoldersLock = NSLock()
+    
+    private static func isTweakFolderVerified(_ url: URL) -> Bool {
+        verifiedTweakFoldersLock.lock()
+        defer { verifiedTweakFoldersLock.unlock() }
+        return verifiedTweakFolders.contains(url.path)
+    }
+    
+    private static func markTweakFolderVerified(_ url: URL) {
+        verifiedTweakFoldersLock.lock()
+        verifiedTweakFolders.insert(url.path)
+        verifiedTweakFoldersLock.unlock()
+    }
+    
     public static func signTweaks(tweakFolderUrl: URL, force : Bool = false, progressHandler : ((Progress) -> Void)? = nil) async throws {
         guard LCSharedUtils.certificatePassword() != nil else {
+            return
+        }
+        if !force, isTweakFolderVerified(tweakFolderUrl) {
             return
         }
         let fm = FileManager.default
@@ -62,6 +81,7 @@ extension LCUtils {
         }
         
         if filesToSign.isEmpty {
+            markTweakFolderVerified(tweakFolderUrl)
             return
         }
         
@@ -86,6 +106,7 @@ extension LCUtils {
                 progressHandler?(progress)
             }
         })
+        markTweakFolderVerified(tweakFolderUrl)
     }
         
     private static func authenticateUser(completion: @escaping (Bool, Error?) -> Void) {
