@@ -840,7 +840,7 @@ final class CZFEdgeGestureWindow: UIWindow {
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
     private var edgeGestureWindow: CZFEdgeGestureWindow?
-    private var edgeStripStartEdge: Int = 0
+    private var edgeStripFired = false
     private var globalSwipeObserversInstalled = false
 
     private func setupGlobalSwipeRecognizer() {
@@ -884,35 +884,42 @@ final class CZFEdgeGestureWindow: UIWindow {
 
     // 手势判定核心：宿主窗口手势与悬浮边条窗共用。
     // startEdge：0=任意位置 1=左边缘 2=右边缘；往外滑门槛低（手指很快滑出屏幕）。
-    private func processGlobalSwipe(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) {
-        guard abs(translation.x) > 2 * abs(translation.y) else { return }
+    // 返回 true 表示本次判定触发了动作（边条 handler 据此做一次性触发）
+    @discardableResult
+    private func processGlobalSwipe(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
+        guard abs(translation.x) > 2 * abs(translation.y) else { return false }
         let draggingRight = translation.x > 0
         if startEdge == 2 {
             // 往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛30）
             if draggingRight {
-                guard translation.x > 10 else { return }
+                guard translation.x > 10 else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
             } else {
-                guard abs(translation.x) > 30 else { return }
+                guard abs(translation.x) > 30 else { return false }
                 fireDockAction { self.czfEdgeRightInward() }
             }
+            return true
         } else if startEdge == 1 {
             // 往右=唤出（门槛30），往左=打开 App 面板（往外滑，门槛10）
             if draggingRight {
-                guard translation.x > 30 else { return }
+                guard translation.x > 30 else { return false }
                 fireDockAction { self.czfEdgeLeftInward() }
             } else {
-                guard abs(translation.x) > 10 else { return }
+                guard abs(translation.x) > 10 else { return false }
                 fireDockAction { self.czfOpenAppPanel() }
             }
+            return true
         } else {
             // 任意位置起手：拖到屏幕边缘、位移 >60 才算隐藏
-            guard abs(translation.x) > 60 else { return }
+            guard abs(translation.x) > 60 else { return false }
             if draggingRight && endX >= width - 30 {
                 fireDockAction { self.czfEdgeRightOutward() }
+                return true
             } else if !draggingRight && endX <= 30 {
                 fireDockAction { self.czfEdgeLeftOutward() }
+                return true
             }
+            return false
         }
     }
 
@@ -960,13 +967,29 @@ final class CZFEdgeGestureWindow: UIWindow {
 
     @objc private func handleEdgeStripPan(_ gesture: UIPanGestureRecognizer) {
         guard let window = edgeGestureWindow else { return }
-        if gesture.state == .began {
-            edgeStripStartEdge = gesture.view === window.stripLeft ? 1 : 2
+        switch gesture.state {
+        case .began:
+            edgeStripFired = false
+            // 诊断标记（极轻一震）：边条能抓到滑动时先响一下，
+            // 用来区分「触摸没进悬浮窗」和「进了窗但判定没触发」
+            let marker = UIImpactFeedbackGenerator(style: .soft)
+            marker.impactOccurred(intensity: 0.4)
+        case .changed, .ended:
+            // 不等抬指才触发：往外滑时手指一出屏触摸就被系统取消、.ended 经常等不到，
+            // 滑动一过门槛立刻触发一次，这才是灵敏的关键
+            guard !edgeStripFired else { return }
+            // 起手边每次从手势本身读，不用共享变量，避免两个边条互相串
+            let startEdge = gesture.view === window.stripLeft ? 1 : 2
+            let translation = gesture.translation(in: window)
+            let endX = gesture.location(in: window).x
+            if processGlobalSwipe(startEdge: startEdge, translation: translation, endX: endX, width: window.bounds.width) {
+                edgeStripFired = true
+            }
+        case .cancelled, .failed:
+            edgeStripFired = false
+        default:
+            break
         }
-        guard gesture.state == .ended else { return }
-        let translation = gesture.translation(in: window)
-        let endX = gesture.location(in: window).x
-        processGlobalSwipe(startEdge: edgeStripStartEdge, translation: translation, endX: endX, width: window.bounds.width)
     }
 
     // 全部接收、只记录起手位置；触发判定在 handler 里按起手+落点做
