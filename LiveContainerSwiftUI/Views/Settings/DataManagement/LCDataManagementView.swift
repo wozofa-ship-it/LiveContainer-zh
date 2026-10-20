@@ -45,6 +45,8 @@ struct LCDataManagementView : View {
     @State private var cacheScheduleEnabled = false
     @State private var cacheScheduleHour = 3
     @State private var cacheScheduleMinute = 0
+    @State private var showFolderPicker = false
+    @State private var externalFolderName: String? = nil
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -133,6 +135,18 @@ struct LCDataManagementView : View {
                     showRestoreSelect = true
                 } label: {
                     Text("lc.settings.restoreBackup".loc)
+                }
+                Button {
+                    showFolderPicker = true
+                } label: {
+                    HStack {
+                        Text("iCloud 备份文件夹")
+                        Spacer()
+                        Text(externalFolderName ?? "未选择")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
                 }
             }
             
@@ -258,6 +272,11 @@ struct LCDataManagementView : View {
 
         .onAppear {
             onAppearFunc()
+        }
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPickerView { url in
+                saveExternalBackupFolder(url)
+            }
         }
         .sheet(isPresented: $showBackupSelect) {
             NavigationView {
@@ -499,10 +518,57 @@ struct LCDataManagementView : View {
             }
             appeared = true
         }
+        externalFolderName = externalBackupFolderURL()?.lastPathComponent
         // 检查定时备份
         Task { await checkAndRunScheduledBackup() }
         // 检查定时清理缓存
         Task { await checkAndRunScheduledCache() }
+    }
+
+    // MARK: - 外部备份文件夹（iCloud Drive 等，经文件选择器授权 + bookmark 持久化）
+
+    private static var cachedExternalFolderURL: URL? = nil
+
+    func saveExternalBackupFolder(_ url: URL) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            UserDefaults.standard.set(data, forKey: "LCExternalBackupFolderBookmark")
+            Self.cachedExternalFolderURL = nil
+            externalFolderName = url.lastPathComponent
+            successInfo = "备份文件夹已设置：\(url.lastPathComponent)\n之后的备份会同步到该文件夹，恢复时也会从该文件夹读取"
+            successShow = true
+        } else {
+            errorInfo = "保存文件夹授权失败，请重新选择"
+            errorShow = true
+        }
+    }
+
+    func externalBackupFolderURL() -> URL? {
+        if let cached = Self.cachedExternalFolderURL {
+            return cached
+        }
+        guard let data = UserDefaults.standard.data(forKey: "LCExternalBackupFolderBookmark") else { return nil }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+        // 本次运行内保持访问权限，供列表/恢复/删除直接使用
+        _ = url.startAccessingSecurityScopedResource()
+        Self.cachedExternalFolderURL = url
+        return url
+    }
+
+    // 把刚备份好的 App 文件夹同步到外部文件夹（同名覆盖）
+    func syncBackupsToExternalFolder(appNames: [String], backupRoot: URL) {
+        guard let extURL = externalBackupFolderURL() else { return }
+        let fm = FileManager.default
+        for name in appNames {
+            let src = backupRoot.appendingPathComponent(name)
+            let dest = extURL.appendingPathComponent(name)
+            if fm.fileExists(atPath: dest.path) {
+                try? fm.removeItem(at: dest)
+            }
+            try? fm.copyItem(at: src, to: dest)
+        }
     }
         func cleanUpUnusedFolders() async {
         
@@ -644,10 +710,19 @@ struct LCDataManagementView : View {
 
     func backupFolders() -> [URL] {
         let fm = FileManager.default
-        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return [] }
-        let backupsURL = docsURL.appendingPathComponent("Backups")
-        guard let folders = try? fm.contentsOfDirectory(at: backupsURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) else { return [] }
-        return folders.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        var allFolders: [URL] = []
+        if let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let backupsURL = docsURL.appendingPathComponent("Backups")
+            if let folders = try? fm.contentsOfDirectory(at: backupsURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) {
+                allFolders += folders
+            }
+        }
+        // 合并外部备份文件夹（iCloud）里的备份，恢复时直接从那边读
+        if let extURL = externalBackupFolderURL(),
+           let folders = try? fm.contentsOfDirectory(at: extURL, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) {
+            allFolders += folders
+        }
+        return allFolders.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             .sorted { (try? $0.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast > (try? $1.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast }
     }
 
@@ -680,6 +755,7 @@ struct LCDataManagementView : View {
         do {
             try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
             var count = 0
+            var backedUpNames: [String] = []
             for app in apps {
                 let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                 // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
@@ -711,7 +787,10 @@ struct LCDataManagementView : View {
                     }
                 }
                 count += 1
+                backedUpNames.append(appName)
             }
+            // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
+            syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
             successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n" + backupRoot.path
             successShow = true
         } catch {
@@ -1161,4 +1240,34 @@ struct LCDataManagementView : View {
         successShow = true
     }
 
+}
+
+// 文件夹选择器（选 iCloud Drive 里的文件夹，授权后用 bookmark 长期访问）
+struct FolderPickerView: UIViewControllerRepresentable {
+    var onPick: (URL) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        picker.delegate = context.coordinator
+        picker.allowsMultipleSelection = false
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPick: onPick)
+    }
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        init(onPick: @escaping (URL) -> Void) {
+            self.onPick = onPick
+        }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            if let url = urls.first {
+                onPick(url)
+            }
+        }
+    }
 }
