@@ -356,6 +356,27 @@ struct LCDataManagementView : View {
                             showRestoreSelect = false
                         }
                     }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Menu {
+                            Button {
+                                showRestoreSelect = false
+                                Task {
+                                    for folderURL in backupFolderList {
+                                        await restoreFromBackup(at: folderURL)
+                                    }
+                                }
+                            } label: {
+                                Label("一键恢复全部", systemImage: "arrow.clockwise.circle")
+                            }
+                            Button {
+                                presentExportPickerForAll()
+                            } label: {
+                                Label("一键导出全部", systemImage: "square.and.arrow.up")
+                            }
+                        } label: {
+                            Text("全部")
+                        }
+                    }
                 }
             }
         }
@@ -1114,6 +1135,21 @@ struct LCDataManagementView : View {
     func presentExportPicker(for url: URL) {
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
         // 找到最顶层的 VC
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = windowScene.windows.first,
+              var topVC = window.rootViewController else { return }
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+        topVC.present(picker, animated: true)
+        successInfo = "请选择导出位置（可存到 iCloud 云盘）"
+        successShow = true
+    }
+
+    func presentExportPickerForAll() {
+        let urls = backupFolderList
+        guard !urls.isEmpty else { return }
+        let picker = UIDocumentPickerViewController(forExporting: urls, asCopy: true)
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = windowScene.windows.first,
               var topVC = window.rootViewController else { return }
