@@ -369,9 +369,25 @@
     // check if iOS think this app's signature is valid, if so, we can skip any further signature check
     NSString* executablePath = [appPath stringByAppendingPathComponent:infoPlist[@"CFBundleExecutable"]];
     if(!forceSign) {
+        // 验签缓存：可执行文件大小+修改时间未变则跳过全量验签（大 App 逐页验签耗时）
+        NSDictionary *execAttrs = [fm attributesOfItemAtPath:executablePath error:nil];
+        NSNumber *execSize = execAttrs[NSFileSize];
+        NSDate *execMtime = execAttrs[NSFileModificationDate];
+        if (execSize && execMtime
+            && [info[@"LCLastVerifiedExecSize"] isEqual:execSize]
+            && [info[@"LCLastVerifiedExecMtime"] isEqual:execMtime]) {
+            [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
+            completetionHandler(YES, nil);
+            return;
+        }
         bool signatureValid = checkCodeSignature(executablePath.UTF8String);
         
         if(signatureValid) {
+            if (execSize && execMtime) {
+                info[@"LCLastVerifiedExecSize"] = execSize;
+                info[@"LCLastVerifiedExecMtime"] = execMtime;
+                [self save];
+            }
             [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
             completetionHandler(YES, nil);
             return;
