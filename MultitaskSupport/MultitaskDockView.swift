@@ -799,12 +799,27 @@ class AppInfoProvider {
     // 注意：游客 App 的内容是独立场景窗口，触摸不经过宿主窗口，
     // 所以必须给每个场景的每个窗口都挂上，宿主窗口一个不够。
     private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
+    private var globalSwipeObserversInstalled = false
 
     private func setupGlobalSwipeRecognizer() {
+        // 游客 App 的窗口出现得晚：监听新窗口/新场景，一出现就补装
+        if !globalSwipeObserversInstalled {
+            globalSwipeObserversInstalled = true
+            NotificationCenter.default.addObserver(forName: UIWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.setupGlobalSwipeRecognizer()
+            }
+            NotificationCenter.default.addObserver(forName: UIScene.didActivateNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.setupGlobalSwipeRecognizer()
+            }
+        }
         globalSwipeRecognizers.removeAll { $0.view == nil }
-        let windows = UIApplication.shared.connectedScenes
+        var windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
+        // 兜底：全进程窗口（含非 UIWindowScene 托管的游客窗口）
+        for window in UIApplication.shared.windows where !windows.contains(where: { $0 === window }) {
+            windows.append(window)
+        }
         for window in windows {
             if globalSwipeRecognizers.contains(where: { $0.view === window }) {
                 continue
