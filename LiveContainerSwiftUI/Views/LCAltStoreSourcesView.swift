@@ -1069,9 +1069,33 @@ private struct LCSourceAppBanner: View {
     @AppStorage("dynamicColors") private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
     @EnvironmentObject private var sharedModel: SharedModel
+    @State private var showDetail = false
     
     private var isInstalled: Bool {
         (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+    }
+    
+    private var installedAppModel: LCAppModel? {
+        (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })
+    }
+    
+    // 源里版本比已装版本新 → 有更新
+    private var hasUpdate: Bool {
+        guard let sourceVersion = app.latestVersion?.version,
+              let installed = installedAppModel else { return false }
+        return Self.isVersion(sourceVersion, newerThan: installed.appInfo.version())
+    }
+    
+    private static func isVersion(_ a: String, newerThan b: String) -> Bool {
+        let aParts = a.split(separator: ".").map { Int($0) ?? 0 }
+        let bParts = b.split(separator: ".").map { Int($0) ?? 0 }
+        let count = max(aParts.count, bParts.count)
+        for i in 0..<count {
+            let av = i < aParts.count ? aParts[i] : 0
+            let bv = i < bParts.count ? bParts[i] : 0
+            if av != bv { return av > bv }
+        }
+        return false
     }
     
     private var isPluginInstalled: Bool {
@@ -1193,6 +1217,26 @@ private struct LCSourceAppBanner: View {
                         .fixedSize()
                         .background(Capsule().fill(Color.green))
                         .clipShape(Capsule())
+                } else if !isDylib && isInstalled && hasUpdate {
+                    Button {
+                        installAction(app)
+                    } label: {
+                        Text("更新")
+                            .bold()
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .frame(height: 32)
+                            .minimumScaleFactor(0.1)
+                    }
+                    .buttonStyle(BasicButtonStyle())
+                    .padding()
+                    .frame(idealWidth: 70)
+                    .frame(height: 32)
+                    .fixedSize()
+                    .background(
+                        Capsule().fill(Color.orange)
+                    )
+                    .clipShape(Capsule())
                 } else if !isDylib && isInstalled {
                     Button {
                         if let installedApp = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) {
@@ -1243,6 +1287,132 @@ private struct LCSourceAppBanner: View {
         .background {
             RoundedRectangle(cornerSize: CGSize(width: 22, height: 22))
                 .fill(backgroundColor)
+        }
+        .onTapGesture {
+            if !isBatchMode {
+                showDetail = true
+            }
+        }
+        .sheet(isPresented: $showDetail) {
+            LCSourceAppDetailView(app: app, source: source)
+        }
+    }
+}
+
+private struct LCSourceAppDetailView: View {
+    let app: AltStoreSourceApp
+    let source: AltStoreSource
+    @Environment(\.dismiss) private var dismiss
+
+    // 从描述或下载链接里找 GitHub 地址
+    private var githubURL: URL? {
+        if let downloadURL = app.latestVersion?.downloadURL,
+           downloadURL.host?.contains("github") == true {
+            return downloadURL
+        }
+        if let desc = app.description,
+           let range = desc.range(of: "https://github.com/[^\\s)\"']+", options: .regularExpression) {
+            return URL(string: String(desc[range]))
+        }
+        return nil
+    }
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section {
+                    HStack(spacing: 12) {
+                        SourceIconView(url: app.iconURL)
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(app.name)
+                                .font(.headline)
+                            if let latest = app.latestVersion {
+                                Text("版本 \(latest.version)")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            Text(app.bundleIdentifier)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                if let developer = app.developerName, !developer.isEmpty {
+                    Section(header: Text("开发者")) {
+                        Text(developer)
+                    }
+                }
+                if let subtitle = app.subtitle, !subtitle.isEmpty {
+                    Section(header: Text("简介")) {
+                        Text(subtitle)
+                    }
+                }
+                if let desc = app.description, !desc.isEmpty {
+                    Section(header: Text("描述")) {
+                        Text(desc)
+                            .font(.callout)
+                    }
+                }
+                Section(header: Text("版本信息")) {
+                    ForEach(app.versions) { version in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(version.version)
+                                .font(.subheadline).bold()
+                            if let date = version.releaseDate {
+                                Text(date, style: .date)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            if let size = version.size {
+                                Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            if let vdesc = version.localizedDescription, !vdesc.isEmpty {
+                                Text(vdesc)
+                                    .font(.caption)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                if let downloadURL = app.latestVersion?.downloadURL {
+                    Section(header: Text("下载地址")) {
+                        Link(destination: downloadURL) {
+                            HStack {
+                                Image(systemName: "arrow.down.circle")
+                                Text(downloadURL.absoluteString)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                }
+                if let githubURL {
+                    Section {
+                        Link(destination: githubURL) {
+                            HStack {
+                                Image(systemName: "link")
+                                Text("在 GitHub 查看")
+                            }
+                        }
+                    }
+                }
+                Section(header: Text("来源")) {
+                    Text(source.name)
+                }
+            }
+            .navigationTitle("应用详情")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("lc.common.close".loc) {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }
