@@ -67,6 +67,12 @@ jobs:
             -o CZFKeepAlive.dylib BundledTweaks/CZFKeepAlive.m
           cp CZFKeepAlive.dylib "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFKeepAlive.dylib"
           ls -la "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFKeepAlive.dylib"
+          clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -mios-version-min=14.0 -fobjc-arc -dynamiclib \
+            -framework UIKit -framework Foundation \
+            -o CZFDockGesture.dylib BundledTweaks/CZFDockGesture.m
+          cp CZFDockGesture.dylib "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFDockGesture.dylib"
+          ls -la "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFDockGesture.dylib"
       - name: Tar Build Artifact
         run: tar -cvf "$archive_path.xcarchive.tar" "$archive_path.xcarchive"
       - name: Upload a Build Artifact

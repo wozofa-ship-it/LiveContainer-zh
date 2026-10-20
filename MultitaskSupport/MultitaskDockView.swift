@@ -287,6 +287,7 @@ class AppInfoProvider {
     
     override init() {
         super.init()
+        deployDockGestureTweak()
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
         NotificationCenter.default.addObserver(
@@ -873,6 +874,58 @@ class AppInfoProvider {
         return globalSwipeRecognizers.contains { $0 === gestureRecognizer }
     }
 
+    // MARK: - 游客侧边缘手势回调（CZFDockGesture 插件在 App 内部触发）
+    // 游客内容是远程托管视图，宿主窗口收不到其触摸；改由插件在游客窗口上
+    // 收边缘拖动，再回调这里。宿主按快捷栏实际所在侧决定是否响应。
+    private var dockIsOnRightSide: Bool {
+        let screenWidth = keyWindow?.bounds.width ?? 0
+        return (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
+    }
+
+    @objc public func czfEdgeRightInward() {
+        guard isVisible, isDockHidden, dockIsOnRightSide else { return }
+        showDockFromHidden()
+    }
+
+    @objc public func czfEdgeRightOutward() {
+        guard isVisible, !isDockHidden, dockIsOnRightSide else { return }
+        hideDockToSide()
+    }
+
+    @objc public func czfEdgeLeftInward() {
+        guard isVisible, isDockHidden, !dockIsOnRightSide else { return }
+        showDockFromHidden()
+    }
+
+    @objc public func czfEdgeLeftOutward() {
+        guard isVisible, !isDockHidden, !dockIsOnRightSide else { return }
+        hideDockToSide()
+    }
+
+    // 把手势插件拷到两个全局 Tweaks 根目录（随所有游客 App 加载），并强制签名
+    private func deployDockGestureTweak() {
+        let fm = FileManager.default
+        guard let src = Bundle.main.url(forResource: "CZFDockGesture", withExtension: "dylib") else { return }
+        var copied = false
+        for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
+            let dest = folder.appendingPathComponent("CZFDockGesture.dylib")
+            let srcSize = (try? fm.attributesOfItem(atPath: src.path))?[.size] as? NSNumber
+            let destSize = (try? fm.attributesOfItem(atPath: dest.path))?[.size] as? NSNumber
+            if destSize != srcSize {
+                try? fm.removeItem(at: dest)
+                if (try? fm.copyItem(at: src, to: dest)) != nil {
+                    copied = true
+                }
+            }
+        }
+        if copied {
+            Task {
+                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: true)
+                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
+            }
+        }
+    }
+
     // Add edge gesture recognition areas when dock is hidden
     private func setupEdgeGestureRecognizers() {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -968,7 +1021,8 @@ public struct MultitaskDockSwiftView: View {
             .padding(dynamicPadding)
             .sheet(isPresented: $showAllApps) {
                 AllAppsListView()
-                    .presentationDetents([.medium, .large])
+                    // 只留一个半屏档位：两个档位时系统会先拉高抽屉、列表滚不动
+                    .presentationDetents([.fraction(0.6)])
                     .presentationDragIndicator(.visible)
             }
             .modifier { content in
@@ -1381,6 +1435,7 @@ struct AppCardRow: View {
                 Text(app.appInfo.displayName() ?? "Unknown")
                     .font(.headline)
                     .foregroundColor(.primary)
+                    .lineLimit(1)
             }
             
             Spacer()
