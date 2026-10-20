@@ -126,6 +126,39 @@ class AppInfoProvider {
 }
 
 // MARK: - MultitaskDockView Manager
+// MARK: - 边缘手势悬浮窗
+/// 全屏游客 App 的内容是远程托管视图，宿主窗口收不到其触摸；
+/// 用一层透明悬浮窗压在最上层：hitTest 只认左右两条 44pt 边条，
+/// 其余区域全部穿透。边条上的拖动由 MultitaskDockManager 处理。
+final class CZFEdgeGestureWindow: UIWindow {
+    let stripLeft = UIView()
+    let stripRight = UIView()
+    /// 返回该点应命中的视图（边条），nil 表示穿透给下层窗口
+    var hitProvider: ((CGPoint) -> UIView?)?
+
+    override init(windowScene: UIWindowScene) {
+        super.init(windowScene: windowScene)
+        backgroundColor = .clear
+        isOpaque = false
+        addSubview(stripLeft)
+        addSubview(stripRight)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        stripLeft.frame = CGRect(x: 0, y: 0, width: 44, height: bounds.height)
+        stripRight.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: bounds.height)
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        return hitProvider?(point)
+    }
+}
+
 @available(iOS 16.0, *)
 @objc public class MultitaskDockManager: NSObject, ObservableObject, UIGestureRecognizerDelegate {
     @objc public static let shared = MultitaskDockManager()
@@ -287,10 +320,10 @@ class AppInfoProvider {
     
     override init() {
         super.init()
-        Self.deployDockGestureTweak()
-        registerDockEdgeDarwinObservers()
+        Self.removeDockGestureTweak()
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
+        setupEdgeGestureWindow()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(userDefaultsDidChange),
@@ -312,6 +345,9 @@ class AppInfoProvider {
 
     @objc private func deviceOrientationDidChange() {
         DispatchQueue.main.async {
+            if let scene = self.keyWindow?.windowScene {
+                self.edgeGestureWindow?.frame = scene.coordinateSpace.bounds
+            }
             if self.isVisible {
                 self.updateDockFrame()
             }
@@ -803,6 +839,8 @@ class AppInfoProvider {
     private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
+    private var edgeGestureWindow: CZFEdgeGestureWindow?
+    private var edgeStripStartEdge: Int = 0
     private var globalSwipeObserversInstalled = false
 
     private func setupGlobalSwipeRecognizer() {
@@ -839,25 +877,96 @@ class AppInfoProvider {
     @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {
         guard gesture.state == .ended, isVisible else { return }
         let translation = gesture.translation(in: gesture.view)
-        guard abs(translation.x) > 2 * abs(translation.y) else { return }
         let endX = gesture.location(in: gesture.view).x
         let width = gesture.view?.bounds.width ?? 0
+        processGlobalSwipe(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width)
+    }
+
+    // 手势判定核心：宿主窗口手势与悬浮边条窗共用。
+    // startEdge：0=任意位置 1=左边缘 2=右边缘；往外滑门槛低（手指很快滑出屏幕）。
+    private func processGlobalSwipe(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) {
+        guard abs(translation.x) > 2 * abs(translation.y) else { return }
         let draggingRight = translation.x > 0
-        if globalSwipeStartEdge == 2 {
-            guard abs(translation.x) > 30 else { return }
-            if draggingRight { czfEdgeRightOutward() } else { czfEdgeRightInward() }
-        } else if globalSwipeStartEdge == 1 {
-            guard abs(translation.x) > 30 else { return }
-            if draggingRight { czfEdgeLeftInward() } else { czfOpenAppPanel() }
+        if startEdge == 2 {
+            // 往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛30）
+            if draggingRight {
+                guard translation.x > 10 else { return }
+                fireDockAction { self.czfEdgeRightOutward() }
+            } else {
+                guard abs(translation.x) > 30 else { return }
+                fireDockAction { self.czfEdgeRightInward() }
+            }
+        } else if startEdge == 1 {
+            // 往右=唤出（门槛30），往左=打开 App 面板（往外滑，门槛10）
+            if draggingRight {
+                guard translation.x > 30 else { return }
+                fireDockAction { self.czfEdgeLeftInward() }
+            } else {
+                guard abs(translation.x) > 10 else { return }
+                fireDockAction { self.czfOpenAppPanel() }
+            }
         } else {
             // 任意位置起手：拖到屏幕边缘、位移 >60 才算隐藏
             guard abs(translation.x) > 60 else { return }
             if draggingRight && endX >= width - 30 {
-                czfEdgeRightOutward()
+                fireDockAction { self.czfEdgeRightOutward() }
             } else if !draggingRight && endX <= 30 {
-                czfEdgeLeftOutward()
+                fireDockAction { self.czfEdgeLeftOutward() }
             }
         }
+    }
+
+    // 诊断标记：识别到合格拖动先轻震一下（宿主入口里还会再重震一下）
+    private func fireDockAction(_ action: () -> Void) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        action()
+    }
+
+    // 悬浮边条窗：全屏 App 内容是远程托管视图、宿主窗口收不到其触摸，
+    // 靠这层窗在屏幕左右边缘截获拖动（其余区域全部穿透，不挡 App 操作）
+    private func setupEdgeGestureWindow() {
+        guard edgeGestureWindow == nil,
+              let scene = keyWindow?.windowScene else { return }
+        let window = CZFEdgeGestureWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = UIWindow.Level(rawValue: 900)
+        for strip in [window.stripLeft, window.stripRight] {
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handleEdgeStripPan(_:)))
+            strip.addGestureRecognizer(pan)
+        }
+        window.hitProvider = { [weak self] point in
+            self?.edgeHitTarget(at: point) ?? nil
+        }
+        window.isHidden = false
+        edgeGestureWindow = window
+    }
+
+    // 悬浮窗只在「有多任务在前台、无弹窗、且该点不在快捷栏上」时才认领边条触摸
+    private func edgeHitTarget(at point: CGPoint) -> UIView? {
+        guard isVisible, let window = edgeGestureWindow else { return nil }
+        guard hostingController?.presentedViewController == nil,
+              keyWindow?.rootViewController?.presentedViewController == nil else { return nil }
+        let hasFullscreenApp = apps.contains { app in
+            guard !app.view.isHidden,
+                  let decoratedVC = app.view._viewDelegate() as? DecoratedAppSceneViewController else { return false }
+            return decoratedVC.isMaximized
+        }
+        guard hasFullscreenApp else { return nil }
+        if let dockView = hostingController?.view, dockView.frame.contains(point) { return nil }
+        if point.x <= 44 { return window.stripLeft }
+        if point.x >= window.bounds.width - 44 { return window.stripRight }
+        return nil
+    }
+
+    @objc private func handleEdgeStripPan(_ gesture: UIPanGestureRecognizer) {
+        guard let window = edgeGestureWindow else { return }
+        if gesture.state == .began {
+            edgeStripStartEdge = gesture.view === window.stripLeft ? 1 : 2
+        }
+        guard gesture.state == .ended else { return }
+        let translation = gesture.translation(in: window)
+        let endX = gesture.location(in: window).x
+        processGlobalSwipe(startEdge: edgeStripStartEdge, translation: translation, endX: endX, width: window.bounds.width)
     }
 
     // 全部接收、只记录起手位置；触发判定在 handler 里按起手+落点做
@@ -880,33 +989,7 @@ class AppInfoProvider {
         return globalSwipeRecognizers.contains { $0 === gestureRecognizer }
     }
 
-    // 游客 App 是独立进程，插件的手势信号通过 Darwin 跨进程通知送达这里
-    private func registerDockEdgeDarwinObservers() {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        let observer = Unmanaged.passUnretained(self).toOpaque()
-        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftInward", "czf.dock.leftOutward", "czf.dock.openPanel"]
-        for name in names {
-            CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
-                guard let observerPtr = observerPtr, let cfName = cfName else { return }
-                let manager = Unmanaged<MultitaskDockManager>.fromOpaque(observerPtr).takeUnretainedValue()
-                let notificationName = cfName.rawValue as String
-                DispatchQueue.main.async {
-                    switch notificationName {
-                    case "czf.dock.rightInward": manager.czfEdgeRightInward()
-                    case "czf.dock.rightOutward": manager.czfEdgeRightOutward()
-                    case "czf.dock.leftInward": manager.czfEdgeLeftInward()
-                    case "czf.dock.leftOutward": manager.czfEdgeLeftOutward()
-                    case "czf.dock.openPanel": manager.czfOpenAppPanel()
-                    default: break
-                    }
-                }
-            }, name as CFString, nil, .deliverImmediately)
-        }
-    }
-
-    // MARK: - 游客侧边缘手势回调（CZFDockGesture 插件在 App 内部触发）
-    // 游客内容是远程托管视图，宿主窗口收不到其触摸；改由插件在游客窗口上
-    // 收边缘拖动，再回调这里。宿主按快捷栏实际所在侧决定是否响应。
+    // MARK: - 边缘手势入口（悬浮边条窗 / 宿主窗口手势共用）
     private var dockIsOnRightSide: Bool {
         let screenWidth = keyWindow?.bounds.width ?? 0
         return (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
@@ -949,29 +1032,14 @@ class AppInfoProvider {
         NotificationCenter.default.post(name: .czfOpenAllAppsPanel, object: nil)
     }
 
-    // 把手势插件拷到两个全局 Tweaks 根目录（随所有游客 App 加载），并强制签名。
-    // 静态方法：宿主一启动（AppDelegate）就调，赶在任何游客 App 启动之前，
-    // 避开签名缓存与启动抢跑。管理器初始化时也会再调一次（幂等）。
-    static func deployDockGestureTweak() {
+    // 手势已改走宿主悬浮边条窗，不再用插件：清掉旧版本部署到两个全局
+    // Tweaks 根目录的手势插件文件，避免它继续随游客 App 加载。
+    // 静态方法：宿主一启动（AppDelegate）就调，赶在任何游客 App 启动之前。
+    // 管理器初始化时也会再调一次（幂等）。
+    static func removeDockGestureTweak() {
         let fm = FileManager.default
-        guard let src = Bundle.main.url(forResource: "CZFDockGesture", withExtension: "dylib") else { return }
-        var copied = false
         for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
-            let dest = folder.appendingPathComponent("CZFDockGesture.dylib")
-            let srcSize = (try? fm.attributesOfItem(atPath: src.path))?[.size] as? NSNumber
-            let destSize = (try? fm.attributesOfItem(atPath: dest.path))?[.size] as? NSNumber
-            if destSize != srcSize {
-                try? fm.removeItem(at: dest)
-                if (try? fm.copyItem(at: src, to: dest)) != nil {
-                    copied = true
-                }
-            }
-        }
-        if copied {
-            Task(priority: .userInitiated) {
-                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: true)
-                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
-            }
+            try? fm.removeItem(at: folder.appendingPathComponent("CZFDockGesture.dylib"))
         }
     }
 
