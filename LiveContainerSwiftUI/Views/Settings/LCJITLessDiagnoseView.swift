@@ -398,15 +398,20 @@ struct LCJITLessDiagnoseView : View {
         }
 
         isJITLessTestInProgress = true
-        LCUtils.validateJITLessSetup { success, error in
-            if success {
-                successInfo = "lc.jitlessSetup.success".loc
-                successShow = true
-            } else {
-                errorInfo = "lc.jitlessSetup.error.testLibLoadFailed %@ %@ %@".localizeWithFormat(storeName, storeName, storeName) + "\n" + (error?.localizedDescription ?? "")
-                errorShow = true
+        // validateJITLessSetup 内部用信号量同步等签名结果，在主线程
+        // 调会把设置页冻到签完为止；挪到后台线程调，它的完成回调
+        // 自己会回主线程更新界面。
+        DispatchQueue.global(qos: .userInitiated).async {
+            LCUtils.validateJITLessSetup { success, error in
+                if success {
+                    successInfo = "lc.jitlessSetup.success".loc
+                    successShow = true
+                } else {
+                    errorInfo = "lc.jitlessSetup.error.testLibLoadFailed %@ %@ %@".localizeWithFormat(storeName, storeName, storeName) + "\n" + (error?.localizedDescription ?? "")
+                    errorShow = true
+                }
+                isJITLessTestInProgress = false
             }
-            isJITLessTestInProgress = false
         }
     
     }

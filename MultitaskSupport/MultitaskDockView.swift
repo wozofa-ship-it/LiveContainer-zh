@@ -885,7 +885,7 @@ class AppInfoProvider {
             return true
         } else if startEdge == 1 {
             // 往右=源面板（门槛30），往左=打开 App 面板（往外滑，门槛10）。
-            // 原往右是唤出左侧快捷栏（czfEdgeLeftInward）：用户定左边缘
+            // 原往右是唤出左侧快捷栏：用户定左边缘
             // 往右改派源面板，与插件侧判定保持一致；门槛 30 与插件 pan
             // 路径对齐，只认边缘起手的决断横拖，不抢 App 自己的滑动。
             if draggingRight {
@@ -959,12 +959,6 @@ class AppInfoProvider {
         hideDockToSide()
     }
 
-    @objc public func czfEdgeLeftInward() {
-        edgeCallbackBuzz()
-        guard isVisible || !apps.isEmpty, isDockHidden, !dockIsOnRightSide else { return }
-        showDockFromHidden()
-    }
-
     @objc public func czfEdgeLeftOutward() {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty, !isDockHidden, !dockIsOnRightSide else { return }
@@ -976,17 +970,38 @@ class AppInfoProvider {
     // 2026-10-21 定案：左滑就是调面板，全屏同理，不用小窗口绕路
     //（#91 的先还原小窗口已删）。触发收不到的根因在插件侧（系统左
     // 边缘手势截走触摸），已由插件的 sendEvent 触摸漏斗修复。
+    // 两个面板当前是否打开（以面板视图 isHidden 为准，与呈现层同源）
+    private var isAppPanelOpen: Bool {
+        guard let host = czfPanelOverlayHost else { return false }
+        return !host.view.isHidden
+    }
+    private var isSourcesPanelOpen: Bool {
+        guard let host = czfSourcesOverlayHost else { return false }
+        return !host.view.isHidden
+    }
+
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty else { return }
+        // 切换式（用户要求）：面板已打开再滑一次就关掉，
+        // 不再是只能滑开、关还得点按钮/点遮罩。
+        if isAppPanelOpen {
+            dismissPanelOverlay()
+            return
+        }
         presentAllAppsPanel()
     }
 
     // 左边缘往右滑：打开源面板（2026-10-21 用户定，与往左滑的 App
     // 面板对称）。故意不加 isVisible/!apps 守卫：没打开任何 App、在
     // 主界面时也要能调出（用户明确要求）；呈现走 keyWindow 兜底。
+    // 同样是切换式：已打开再滑一次关掉。
     @objc public func czfOpenSourcesPanel() {
         edgeCallbackBuzz()
+        if isSourcesPanelOpen {
+            dismissSourcesOverlay()
+            return
+        }
         presentSourcesPanel()
     }
 
@@ -1031,6 +1046,11 @@ class AppInfoProvider {
         host.view.clipsToBounds = true
         host.view.isHidden = true
         window.addSubview(host.view)
+        // 下滑关闭：面板宿主挂拖动手势（只认顶部标题区起手，不抢
+        // 列表滚动，起手判定在 gestureRecognizerShouldBegin）
+        let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
+        drag.delegate = self
+        host.view.addGestureRecognizer(drag)
         czfPanelOverlayBackdrop = backdrop
         czfPanelOverlayHost = host
     }
@@ -1066,6 +1086,49 @@ class AppInfoProvider {
 
     @objc private func czfPanelBackdropTapped() {
         dismissPanelOverlay()
+    }
+
+    // 面板下滑关闭的起手限制：只认面板顶部 52pt 标题区，
+    // 面板内的列表滚动一点不受影响；其余手势一律放行。
+    public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if let hostView = gestureRecognizer.view,
+           hostView === czfPanelOverlayHost?.view || hostView === czfSourcesOverlayHost?.view {
+            return gestureRecognizer.location(in: hostView).y < 52
+        }
+        return true
+    }
+
+    // 面板下滑关闭（两个面板共用，按手势挂的宿主区分）：拖动跟随
+    // 手指，松手时位移过 90 或下滑速度过 500 就关，否则弹回。
+    @objc private func czfPanelDragged(_ gesture: UIPanGestureRecognizer) {
+        guard let hostView = gesture.view, let container = hostView.superview else { return }
+        let isSources = hostView === czfSourcesOverlayHost?.view
+        let backdrop = isSources ? czfSourcesOverlayBackdrop : czfPanelOverlayBackdrop
+        let panelHeight = hostView.frame.height
+        let openY = container.bounds.height - panelHeight
+        switch gesture.state {
+        case .changed:
+            let dy = max(0, gesture.translation(in: container).y)
+            hostView.frame.origin.y = openY + dy
+            backdrop?.alpha = max(0, 1 - dy / panelHeight)
+        case .ended, .cancelled:
+            let dy = max(0, gesture.translation(in: container).y)
+            let velocityY = gesture.velocity(in: container).y
+            if dy > 90 || velocityY > 500 {
+                if isSources {
+                    dismissSourcesOverlay()
+                } else {
+                    dismissPanelOverlay()
+                }
+            } else {
+                UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseOut]) {
+                    hostView.frame.origin.y = openY
+                    backdrop?.alpha = 1
+                }
+            }
+        default:
+            break
+        }
     }
 
     // 关闭手势面板覆盖层：滑出后切回隐藏待命（不摘除、不销毁）。
@@ -1116,6 +1179,10 @@ class AppInfoProvider {
         host.view.clipsToBounds = true
         host.view.isHidden = true
         window.addSubview(host.view)
+        // 下滑关闭：与 App 面板共用同一个拖动处理器
+        let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
+        drag.delegate = self
+        host.view.addGestureRecognizer(drag)
         czfSourcesOverlayBackdrop = backdrop
         czfSourcesOverlayHost = host
     }
@@ -1170,7 +1237,7 @@ class AppInfoProvider {
     private func registerDockEdgeDarwinObservers() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
-        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftInward", "czf.dock.leftOutward", "czf.dock.openPanel", "czf.dock.openSources"]
+        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftOutward", "czf.dock.openPanel", "czf.dock.openSources"]
         for name in names {
             CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
                 guard let observerPtr = observerPtr, let cfName = cfName else { return }
@@ -1180,7 +1247,6 @@ class AppInfoProvider {
                     switch notificationName {
                     case "czf.dock.rightInward": manager.czfEdgeRightInward()
                     case "czf.dock.rightOutward": manager.czfEdgeRightOutward()
-                    case "czf.dock.leftInward": manager.czfEdgeLeftInward()
                     case "czf.dock.leftOutward": manager.czfEdgeLeftOutward()
                     case "czf.dock.openPanel": manager.czfOpenAppPanel()
                     case "czf.dock.openSources": manager.czfOpenSourcesPanel()
@@ -1200,21 +1266,24 @@ class AppInfoProvider {
         // 必须比内容：旧版只比大小，同体积的不同构建被误判为已最新，
         // 插件改了却部署不出去（#91/#93 两次真机测试因此作废）。
         let srcData = try? Data(contentsOf: src)
-        var copied = false
+        var copiedDests: [URL] = []
         for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
             let dest = folder.appendingPathComponent("CZFDockGesture.dylib")
             let destData = try? Data(contentsOf: dest)
             if destData != srcData {
                 try? fm.removeItem(at: dest)
                 if (try? fm.copyItem(at: src, to: dest)) != nil {
-                    copied = true
+                    copiedDests.append(dest)
                 }
             }
         }
-        if copied {
+        // 只签刚替换的那一个文件：原来整夹 force 重签两个全局目录，
+        // 插件越多越慢，其余文件签名没动过，不陪着重签。
+        if !copiedDests.isEmpty {
             Task(priority: .userInitiated) {
-                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: true)
-                try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
+                for dest in copiedDests {
+                    try? await LCUtils.signSingleTweakFile(dest)
+                }
             }
         }
     }
@@ -1634,11 +1703,16 @@ struct AllAppsListView: View {
         }
     }
     @ObservedObject var sortManager = LCAppSortManager.shared
-    
+
     var body: some View {
         NavigationView {
             ScrollView {
                 LazyVStack(spacing: 10) {
+                    // 顶部状态栏（用户要求）：已打开的 App 横排，
+                    // 点一下直接切换过去，不用在列表里翻找
+                    if !dockManager.apps.isEmpty {
+                        RunningAppsStripView { closePanel() }
+                    }
                     ForEach(sortManager.sortedApps, id: \.self) { app in
                         AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
@@ -1655,7 +1729,11 @@ struct AllAppsListView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { closePanel() }
+                    Button { closePanel() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             .searchable(text: .constant(""), prompt: "搜索")
@@ -1768,6 +1846,12 @@ struct SourcesPanelView: View {
         NavigationView {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
+                    // 顶部状态栏（与 App 面板一致）：已打开的 App
+                    // 横排，点一下切换过去
+                    if !dockManager.apps.isEmpty {
+                        RunningAppsStripView { closePanel() }
+                            .padding(.horizontal)
+                    }
                     if viewModel.sources.isEmpty {
                         Text("还没有添加源")
                             .foregroundColor(.secondary)
@@ -1805,7 +1889,11 @@ struct SourcesPanelView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { closePanel() }
+                    Button { closePanel() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -2065,6 +2153,70 @@ private struct SourcePanelRow: View {
         .background {
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color(.secondarySystemBackground))
+        }
+    }
+}
+
+// 已打开 App 状态栏（App 面板与源面板共用）：横排图标+名字，
+// 点一下把那个 App 切到前台（与卡片"打开"按钮对已运行 App 的
+// 处理一致）；切换后的关面板动作由宿主视图通过 onSwitch 传入。
+@available(iOS 16.0, *)
+private struct RunningAppsStripView: View {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    let onSwitch: () -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                ForEach(dockManager.apps) { runningApp in
+                    Button {
+                        let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                        onSwitch()
+                    } label: {
+                        VStack(spacing: 4) {
+                            RunningAppIcon(appInfo: runningApp.appInfo)
+                                .frame(width: 52, height: 52)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                            Text(runningApp.appName)
+                                .font(.caption2)
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .frame(width: 60)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+        }
+    }
+}
+
+// 状态栏里的单个已打开 App 图标（异步加载方式与 AppCardRow 一致）
+@available(iOS 16.0, *)
+private struct RunningAppIcon: View {
+    let appInfo: LCAppInfo?
+    @State private var icon: UIImage?
+
+    var body: some View {
+        Group {
+            if let icon = icon {
+                Image(uiImage: icon)
+                    .resizable()
+            } else {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.gray.opacity(0.3))
+            }
+        }
+        .onAppear {
+            guard let appInfo = appInfo else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let loaded = appInfo.iconIsDarkIcon(false)
+                DispatchQueue.main.async {
+                    self.icon = loaded
+                }
+            }
         }
     }
 }

@@ -25,6 +25,13 @@ extension LCUtils {
         verifiedTweakFolders.insert(url.path)
         verifiedTweakFoldersLock.unlock()
     }
+
+    // 验签指纹：文件大小+修改时间。文件被换掉/重签都会变，变了就重验。
+    private static func tweakFingerprint(of attributes: [FileAttributeKey: Any]) -> String {
+        let size = attributes[.size] as? NSNumber ?? 0
+        let mtime = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(size)|\(mtime)"
+    }
     
     public static func signTweaks(tweakFolderUrl: URL, force : Bool = false, progressHandler : ((Progress) -> Void)? = nil) async throws {
         guard LCSharedUtils.certificatePassword() != nil else {
@@ -32,6 +39,21 @@ extension LCUtils {
         }
         if !force, isTweakFolderVerified(tweakFolderUrl) {
             return
+        }
+        // 落盘验签指纹（按证书 Team 分键）：冷启动第一次验签时，
+        // 指纹没变的文件跳过 checkCodeSignature 的逐个内核校验——
+        // 插件文件夹文件一多，这是冷启后第一次打开 App 的主要
+        // 耗时之一。换证书（Team 变）后读的是另一张表，旧指纹
+        // 不复用；Team 取不到时整套不用，退回逐个内核校验。
+        var fingerprintKey: String? = nil
+        var fingerprints: [String: String] = [:]
+        var fingerprintsChanged = false
+        if let certData = certificateData(),
+           let certPassword = LCSharedUtils.certificatePassword(),
+           let teamId = getCertTeamId(withKeyData: certData, password: certPassword) {
+            let key = "LCVerifiedTweakFingerprints_\(teamId)"
+            fingerprintKey = key
+            fingerprints = appGroupUserDefault.dictionary(forKey: key) as? [String: String] ?? [:]
         }
         let fm = FileManager.default
         // a disabled folder is renamed to .disabled; skip it, it gets signed again once re-enabled
@@ -73,14 +95,30 @@ extension LCUtils {
                 continue
             }
 
-            if !force, checkCodeSignature((fileURL.path as NSString).utf8String) {
-                continue;
+            if !force {
+                // 指纹按最终要验的文件现取属性：框架类插件上文把
+                // fileURL 换成了包内的可执行文件，不能用文件夹的属性
+                let fpAttributes = (try? fm.attributesOfItem(atPath: fileURL.path)) ?? attributes
+                let fingerprint = tweakFingerprint(of: fpAttributes)
+                if fingerprints[fileURL.path] == fingerprint {
+                    continue;
+                }
+                if checkCodeSignature((fileURL.path as NSString).utf8String) {
+                    if fingerprintKey != nil {
+                        fingerprints[fileURL.path] = fingerprint
+                        fingerprintsChanged = true
+                    }
+                    continue;
+                }
             }
-            
+
             filesToSign.append(fileURL)
         }
         
         if filesToSign.isEmpty {
+            if fingerprintsChanged, let fingerprintKey {
+                appGroupUserDefault.set(fingerprints, forKey: fingerprintKey)
+            }
             markTweakFolderVerified(tweakFolderUrl)
             return
         }
@@ -106,9 +144,45 @@ extension LCUtils {
                 progressHandler?(progress)
             }
         })
+        // 刚签完的文件把指纹刷新成签后状态，下次冷启动直接跳过校验
+        if let fingerprintKey {
+            for fileURL in filesToSign {
+                if let attributes = try? fm.attributesOfItem(atPath: fileURL.path) {
+                    fingerprints[fileURL.path] = tweakFingerprint(of: attributes)
+                    fingerprintsChanged = true
+                }
+            }
+            if fingerprintsChanged {
+                appGroupUserDefault.set(fingerprints, forKey: fingerprintKey)
+            }
+        }
         markTweakFolderVerified(tweakFolderUrl)
     }
-        
+
+    // 只签单个插件文件（部署手势插件时用）：原来部署替换一个文件要把
+    // 两个全局插件目录整夹 force 重签，插件越多越慢；其余文件签名没动
+    // 过，没必要陪着重签。处理与 signTweaks 对单文件一致（先做 arm64e
+    // 切片修补再签）。
+    public static func signSingleTweakFile(_ fileURL: URL) async throws {
+        guard LCSharedUtils.certificatePassword() != nil else {
+            return
+        }
+        LCPatchAppBundleFixupARM64eSlice(fileURL)
+        try await withUnsafeThrowingContinuation { c in
+            let _ = signFilesWithZSign(with: [fileURL]) { success, error in
+                if success {
+                    c.resume()
+                    return
+                }
+                guard let error else {
+                    c.resume()
+                    return
+                }
+                c.resume(throwing: error)
+            }
+        }
+    }
+
     private static func authenticateUser(completion: @escaping (Bool, Error?) -> Void) {
         // Create a context for authentication
         let context = LAContext()
