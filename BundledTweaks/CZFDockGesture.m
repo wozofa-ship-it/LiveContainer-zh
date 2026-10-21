@@ -147,12 +147,11 @@ static BOOL gCZFFired = NO;
     [self czfPostNotification:notificationName selectorName:selectorName];
 }
 
-// 发信号：轻震标记 + Darwin 跨进程通知 + 同进程兜底直调。
+// 发信号：Darwin 跨进程通知 + 同进程兜底直调。震动不在本侧给——
+// 原来插件轻震+宿主入口再中震，一滑震两三下，用户反馈像滑了
+// 两次；现在统一由宿主在动作真正生效时只震一下。
 // 识别器路径与触摸漏斗路径共用此方法，保证两条路信号完全一致。
 - (void)czfPostNotification:(NSString *)notificationName selectorName:(NSString *)selectorName {
-    // 诊断标记：识别到合格拖动先轻震一下（证明插件侧收到手势）
-    UIImpactFeedbackGenerator *buzz = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [buzz impactOccurred];
     // 游客 App 是独立进程（LiveProcess），按类名找宿主管理器必然落空；
     // 改发 Darwin 跨进程通知，宿主注册同名观察者接收。
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)notificationName, NULL, NULL, YES);

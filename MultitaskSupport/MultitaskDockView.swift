@@ -757,6 +757,19 @@ class AppInfoProvider {
             }
         }
     }
+
+    // 最大化指定 App（状态栏点按用）：vc 的 maximizeWindow() 是
+    // 切换式的（已最大化时调它反而还原小窗口），只在没最大化
+    // 时调一次。
+    @objc public func maximizeWindow(uuid: String) {
+        DispatchQueue.main.async {
+            if let app = self.apps.first(where: { $0.appUUID == uuid }),
+               let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+               !vc.isMaximized {
+                vc.maximizeWindow()
+            }
+        }
+    }
     
     @objc public func closeAllWindows() {
         DispatchQueue.main.async {
@@ -910,9 +923,10 @@ class AppInfoProvider {
         }
     }
 
-    // 诊断标记：识别到合格拖动先轻震一下（宿主入口里还会再重震一下）
+    // 手势动作统一入口：只执行，不在这里震——震动由各动作在真正
+    // 生效的点自己给一次（原来这里一下+入口一下+插件一下，一滑
+    // 震两三下，用户反馈像滑了两次）。
     private func fireDockAction(_ action: () -> Void) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         action()
     }
 
@@ -942,26 +956,27 @@ class AppInfoProvider {
         return (hostingController?.view.frame.midX ?? 0) > screenWidth / 2
     }
 
-    // 诊断标记：游客回调到达宿主时震一下（在守卫之前，证明回调通了）
+    // 动作确认震动：只在动作真正生效的点调用（守卫之后），
+    // 一次手势最多一下，没生效不震。
     private func edgeCallbackBuzz() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
     @objc public func czfEdgeRightInward() {
-        edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty, isDockHidden, dockIsOnRightSide else { return }
+        edgeCallbackBuzz()
         showDockFromHidden()
     }
 
     @objc public func czfEdgeRightOutward() {
-        edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty, !isDockHidden, dockIsOnRightSide else { return }
+        edgeCallbackBuzz()
         hideDockToSide()
     }
 
     @objc public func czfEdgeLeftOutward() {
-        edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty, !isDockHidden, !dockIsOnRightSide else { return }
+        edgeCallbackBuzz()
         hideDockToSide()
     }
 
@@ -980,9 +995,19 @@ class AppInfoProvider {
         return !host.view.isHidden
     }
 
+    // 面板动作防重复：同一次滑动可能被插件（Darwin）和宿主窗口
+    // 识别器两条路各报一次（小窗口模式两边都收得到触摸），切换式
+    // 开关下第二下会把刚打开的面板又关掉，还多震一下。0.4 秒内
+    // 的重复调用直接吞掉，一次滑动只算一次。两个面板共用一个
+    // 时间戳（互斥呈现，连着误报两边也只认第一下）。
+    private var czfLastPanelActionAt = Date.distantPast
+
     @objc public func czfOpenAppPanel() {
-        edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty else { return }
+        let now = Date()
+        guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
+        czfLastPanelActionAt = now
+        edgeCallbackBuzz()
         // 切换式（用户要求）：面板已打开再滑一次就关掉，
         // 不再是只能滑开、关还得点按钮/点遮罩。
         if isAppPanelOpen {
@@ -997,6 +1022,9 @@ class AppInfoProvider {
     // 主界面时也要能调出（用户明确要求）；呈现走 keyWindow 兜底。
     // 同样是切换式：已打开再滑一次关掉。
     @objc public func czfOpenSourcesPanel() {
+        let now = Date()
+        guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
+        czfLastPanelActionAt = now
         edgeCallbackBuzz()
         if isSourcesPanelOpen {
             dismissSourcesOverlay()
@@ -1708,11 +1736,10 @@ struct AllAppsListView: View {
         NavigationView {
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    // 顶部状态栏（用户要求）：已打开的 App 横排，
-                    // 点一下直接切换过去，不用在列表里翻找
-                    if !dockManager.apps.isEmpty {
-                        RunningAppsStripView { closePanel() }
-                    }
+                    // 顶部状态栏（用户要求）：固定按钮 + 已打开
+                    // 的 App 横排，没打开 App 时也显示（固定按钮
+                    // 仍然可用）
+                    RunningAppsStripView { closePanel() }
                     ForEach(sortManager.sortedApps, id: \.self) { app in
                         AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
@@ -1846,12 +1873,10 @@ struct SourcesPanelView: View {
         NavigationView {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    // 顶部状态栏（与 App 面板一致）：已打开的 App
-                    // 横排，点一下切换过去
-                    if !dockManager.apps.isEmpty {
-                        RunningAppsStripView { closePanel() }
-                            .padding(.horizontal)
-                    }
+                    // 顶部状态栏（与 App 面板一致）：固定按钮 +
+                    // 已打开的 App 横排
+                    RunningAppsStripView { closePanel() }
+                        .padding(.horizontal)
                     if viewModel.sources.isEmpty {
                         Text("还没有添加源")
                             .foregroundColor(.secondary)
@@ -2157,9 +2182,10 @@ private struct SourcePanelRow: View {
     }
 }
 
-// 已打开 App 状态栏（App 面板与源面板共用）：横排图标+名字，
-// 点一下把那个 App 切到前台（与卡片"打开"按钮对已运行 App 的
-// 处理一致）；切换后的关面板动作由宿主视图通过 onSwitch 传入。
+// 顶部状态栏（App 面板与源面板共用）：最前面是与快捷栏同款
+// 的三个固定按钮（收起/最小化/关闭全部，用户要求加的），后面
+// 横排已打开的 App：点按最大化打开，长按最小化（用户定）。
+// 整条放在浅色圆角底板上，与下面的列表卡片区分开（UI 美化）。
 @available(iOS 16.0, *)
 private struct RunningAppsStripView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
@@ -2168,27 +2194,77 @@ private struct RunningAppsStripView: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
+                fixedButton(systemImage: "chevron.down", tile: Color.gray.opacity(0.8), label: "收起") {
+                    dockManager.toggleDockCollapse()
+                    onSwitch()
+                }
+                fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color.gray.opacity(0.8), label: "最小化") {
+                    dockManager.minimizeAllWindows()
+                    onSwitch()
+                }
+                fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.85), label: "关闭全部") {
+                    dockManager.closeAllWindows()
+                    onSwitch()
+                }
+                if !dockManager.apps.isEmpty {
+                    Divider().frame(height: 56)
+                }
                 ForEach(dockManager.apps) { runningApp in
-                    Button {
-                        let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                        onSwitch()
-                    } label: {
-                        VStack(spacing: 4) {
-                            RunningAppIcon(appInfo: runningApp.appInfo)
-                                .frame(width: 52, height: 52)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                            Text(runningApp.appName)
-                                .font(.caption2)
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .frame(width: 60)
-                        }
-                    }
-                    .buttonStyle(.plain)
+                    runningAppItem(runningApp)
                 }
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .background(Color(UIColor.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    // 固定按钮：与快捷栏同款的灰/红圆角底 + 白图标，下方小字标签
+    private func fixedButton(systemImage: String, tile: Color, label: String, action: @escaping () -> Void) -> some View {
+        VStack(spacing: 4) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(tile)
+                    .frame(width: 52, height: 52)
+                Image(systemName: systemImage)
+                    .foregroundColor(.white)
+                    .font(.system(size: 21, weight: .semibold))
+            }
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.25), lineWidth: 1))
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .frame(width: 60)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { action() }
+    }
+
+    // 已打开的 App：点按切前台并最大化，长按最小化。不用 Button
+    // 是免得长按时把点按也误触发（SwiftUI 的老毛病）。
+    private func runningAppItem(_ runningApp: DockAppModel) -> some View {
+        VStack(spacing: 4) {
+            RunningAppIcon(appInfo: runningApp.appInfo)
+                .frame(width: 52, height: 52)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .shadow(color: .black.opacity(0.12), radius: 3, x: 0, y: 2)
+            Text(runningApp.appName)
+                .font(.caption2)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .frame(width: 60)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+            dockManager.maximizeWindow(uuid: runningApp.appUUID)
+            onSwitch()
+        }
+        .onLongPressGesture(minimumDuration: 0.45) {
+            dockManager.minimizeWindow(uuid: runningApp.appUUID)
+            onSwitch()
         }
     }
 }
