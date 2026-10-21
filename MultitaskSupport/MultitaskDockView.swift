@@ -1018,17 +1018,21 @@ class AppInfoProvider {
             guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
             self.ensurePanelOverlay(in: window)
             guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else { return }
-            // 已开着就不重复开（以视图真实状态为准）
-            if !host.view.isHidden { return }
-            // 保险：盖到最上层，并按当前窗口尺寸摆好起始位（屏幕下方）
+            // 每次调用都强制对齐到打开状态，不看旧状态早退：旧状态可能
+            // 与真实显示脱节（isHidden 为 false 但 frame 停在屏外/被盖住，
+            // 表现为"滑一次没出来、再滑一次才出来"）。搬顶层、摆正、
+            // 切可见、动画到目标位，一次调用即恢复；已打开时动画终点
+            // 与当前位相同，无可见副作用。
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
             let panelHeight = b.height * 0.6
             backdrop.frame = b
-            host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: panelHeight)
             backdrop.isHidden = false
             host.view.isHidden = false
+            if host.view.frame.height != panelHeight {
+                host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: panelHeight)
+            }
             UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
                 backdrop.alpha = 1
                 host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)

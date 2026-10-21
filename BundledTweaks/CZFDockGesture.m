@@ -21,8 +21,8 @@
 // 漏斗 hook 窗口 sendEvent，在识别器仲裁之前直读原始触摸判定，
 // 与识别器路径共用同一发信号方法，信号完全一致。
 // 漏斗判定要点：贴边往外滑时手指滑出屏幕，上报坐标被钳在边缘，
-// 可测位移只有几 pt 且抬手时才报全——必须在 Ended 也判定，门槛用
-// 「净位移往左 ≥8 且当前位置已贴边 28pt 内」，不能只看移动中位移。
+// 可测位移只有几 pt 且抬手时才报全——必须在 Ended 也判定；条件只
+// 认起手在左带内 + 净位移往左 ≥8 + 方向占优，不附加位置条件。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -191,7 +191,10 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                 if (state && ![state[2] boolValue]) {
                     CGFloat dx = loc.x - [state[0] doubleValue];
                     CGFloat dy = loc.y - [state[1] doubleValue];
-                    if (dx <= -8 && loc.x <= 28 && fabs(dx) > 1.2 * fabs(dy)) {
+                    // 只认「起手在左带 + 往左位移 + 方向占优」：起手位置
+                    // 本身已限定在边缘带，附加"当前位置贴边"会让第一滑
+                    // 擦边不达标、要第二滑才触发，故去掉。
+                    if (dx <= -8 && fabs(dx) > 1.2 * fabs(dy)) {
                         gCZFTouchStates[key] = @[ state[0], state[1], @YES ];
                         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
                         if (now - gCZFLastFunnelFire >= 0.6) {
