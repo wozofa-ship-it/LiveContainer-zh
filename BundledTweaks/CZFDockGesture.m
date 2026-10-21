@@ -179,22 +179,38 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
         CGPoint loc = [touch locationInView:window];
         switch (touch.phase) {
             case UITouchPhaseBegan: {
-                if (loc.x <= 64) {
+                // 记录带放宽到 96：抬手兜底规则需要它；移动中的提前
+                // 触发仍只认 64 带内起手（见 Moved 分支）。
+                if (loc.x <= 96) {
                     gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO ];
                 }
                 break;
             }
             case UITouchPhaseMoved:
-            case UITouchPhaseEnded: {
-                // 移动中和抬手时都判定：贴边 flick 的完整位移只在抬手时报全
+            case UITouchPhaseEnded:
+            case UITouchPhaseCancelled: {
+                // 三个阶段都判定：贴边 flick 的完整位移只在触摸终结时
+                // 报全；而快速滑出边缘会被系统仲裁"没收"，游客收到
+                // 的是 Cancelled 而非 Ended——终结事件（含取消）必须
+                // 一视同仁地判，判完再清状态。
                 NSArray *state = gCZFTouchStates[key];
                 if (state && ![state[2] boolValue]) {
                     CGFloat dx = loc.x - [state[0] doubleValue];
                     CGFloat dy = loc.y - [state[1] doubleValue];
-                    // 只认「起手在左带 + 往左位移 + 方向占优」：起手位置
-                    // 本身已限定在边缘带，附加"当前位置贴边"会让第一滑
-                    // 擦边不达标、要第二滑才触发，故去掉。
-                    if (dx <= -8 && fabs(dx) > 1.2 * fabs(dy)) {
+                    BOOL fire = NO;
+                    if (touch.phase == UITouchPhaseMoved) {
+                        // 提前触发（严判定防误触）：64 带内起手、往左 8、
+                        // 横向占优 1.2 倍
+                        fire = ([state[0] doubleValue] <= 64 && dx <= -8 && fabs(dx) > 1.2 * fabs(dy));
+                    } else {
+                        // 终结兜底（看物理结果，不看轨迹）：拇指弧线在下
+                        // 半屏轨迹偏斜，方向比会把整段滑动判掉；只要最
+                        // 终落点贴到边缘 12 内、净位移往左 ≥15，就是
+                        // 一次滑出左边缘。方向比只留 0.4 的底线挡纯竖滑
+                        //（竖滑被取消时落点不在边缘，也进不来）。
+                        fire = (dx <= -15 && loc.x <= 12 && fabs(dx) > 0.4 * fabs(dy));
+                    }
+                    if (fire) {
                         gCZFTouchStates[key] = @[ state[0], state[1], @YES ];
                         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
                         if (now - gCZFLastFunnelFire >= 0.6) {
@@ -203,13 +219,9 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         }
                     }
                 }
-                if (touch.phase == UITouchPhaseEnded) {
+                if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
                     [gCZFTouchStates removeObjectForKey:key];
                 }
-                break;
-            }
-            case UITouchPhaseCancelled: {
-                [gCZFTouchStates removeObjectForKey:key];
                 break;
             }
             default:

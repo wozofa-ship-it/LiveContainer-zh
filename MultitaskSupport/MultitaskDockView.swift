@@ -957,14 +957,14 @@ class AppInfoProvider {
         hideDockToSide()
     }
 
-    // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再弹面板）。
+    // 左边缘往左滑：打开 App 面板。面板独立呈现，不联动快捷栏——
+    // 栏藏着就保持藏着（用户定：调面板时不许把栏也带出来）。
     // 2026-10-21 定案：左滑就是调面板，全屏同理，不用小窗口绕路
     //（#91 的先还原小窗口已删）。触发收不到的根因在插件侧（系统左
     // 边缘手势截走触摸），已由插件的 sendEvent 触摸漏斗修复。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty else { return }
-        if isDockHidden { showDockFromHidden() }
         presentAllAppsPanel()
     }
 
