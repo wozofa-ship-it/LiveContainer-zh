@@ -66,6 +66,9 @@ struct LCSettingsView: View {
     @AppStorage("LCKeepSelectedWhenQuit") var keepSelectedWhenQuit = false
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
     @AppStorage("LCKeepAliveEnabled") var keepAliveEnabled = false
+    @AppStorage("CZFVPNNodeLink") var vpnNodeLink = ""
+    @State var vpnCoreRunning = false
+    @State var vpnStatusMessage: String?
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
     
@@ -294,6 +297,34 @@ struct LCSettingsView: View {
                     .onAppear {
                         syncKeepAliveTweak(enabled: keepAliveEnabled)
                     }
+                }
+
+                Section {
+                    TextField("粘贴节点链接（vless://…）", text: $vpnNodeLink)
+                        .textInputAutocapitalization(.never)
+                    HStack {
+                        Button(vpnCoreRunning ? "停止核心" : "启动核心") {
+                            if vpnCoreRunning {
+                                CZFVPNManager.shared.stop()
+                            } else {
+                                _ = CZFVPNManager.shared.start()
+                            }
+                            vpnCoreRunning = CZFVPNManager.shared.isRunning
+                            vpnStatusMessage = CZFVPNManager.shared.lastError
+                        }
+                        Spacer()
+                        Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
+                            .font(.footnote)
+                            .foregroundStyle(.gray)
+                    }
+                    .onAppear {
+                        vpnCoreRunning = CZFVPNManager.shared.isRunning
+                        vpnStatusMessage = CZFVPNManager.shared.lastError
+                    }
+                } header: {
+                    Text("单App VPN（验证版）")
+                } footer: {
+                    Text("给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」。被标记的 App 打开时核心会自动启动，这里也能手动启停测试。")
                 }
                 
                 Section {

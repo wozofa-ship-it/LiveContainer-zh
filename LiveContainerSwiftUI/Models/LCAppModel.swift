@@ -321,7 +321,14 @@ class LCAppModel: ObservableObject, Hashable {
             }}
         }
         try await signApp(force: false)
-        
+
+        // 单 App VPN（验证版）：被标记的 App 启动前确保内置核心
+        // 在跑（同步等它起来，免得游客先跑、头几秒走了直连）。
+        // 失败不拦启动——游客侧插件有 fail-open，核心不在时直连。
+        if CZFVPNManager.isEnabled(for: appInfo) {
+            CZFVPNManager.shared.ensureRunning()
+        }
+
         if let bundleIdOverride {
             UserDefaults.standard.set(bundleIdOverride, forKey: "selected")
         } else {
@@ -441,6 +448,12 @@ class LCAppModel: ObservableObject, Hashable {
             }}
         }
 
+        // 单 App VPN（验证版）：开着 VPN 又没专属插件目录的，先给
+        // 它建一个名为 CZFVPN 的目录名，重定向插件才有地方部署
+        if CZFVPNManager.isEnabled(for: appInfo), appInfo.tweakFolder == nil {
+            appInfo.tweakFolder = "CZFVPN"
+        }
+
         // sign its tweak
         guard let tweakFolder = appInfo.tweakFolder else {
             return
@@ -452,6 +465,8 @@ class LCAppModel: ObservableObject, Hashable {
         } else {
             tweakFolderUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
         }
+        // 单 App VPN（验证版）：签名之前按标记同步重定向插件
+        CZFVPNManager.syncProxyTweak(for: appInfo, tweakFolderUrl: tweakFolderUrl)
         try await LCUtils.signTweaks(tweakFolderUrl: tweakFolderUrl, force: force) { p in
             Task{ await MainActor.run {
                 self.isSigningInProgress = true

@@ -300,6 +300,19 @@ struct LCAppSettingsView: View {
             }
             
             Section {
+                Toggle(isOn: Binding(
+                    get: { CZFVPNManager.isEnabled(for: model.appInfo) },
+                    set: { CZFVPNManager.setEnabled($0, for: model.appInfo) }
+                )) {
+                    Text("VPN 打开（内置节点）")
+                }
+            } header: {
+                Text("单App VPN（验证版）")
+            } footer: {
+                Text("开启后这个 App 的流量走内置节点出网（节点链接在「设置 → 单App VPN」里填）。没有专属插件目录时会自动建一个名为 CZFVPN 的目录。改完需重开该 App 生效。")
+            }
+
+            Section {
                 Toggle(isOn: $model.uiFixFilePickerNew) {
                     Text("lc.appSettings.fixFilePickerNew".loc)
                 }

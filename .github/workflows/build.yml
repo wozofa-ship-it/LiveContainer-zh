@@ -53,6 +53,13 @@ jobs:
           file_to_build=`ls -A | grep -i \\.xcworkspace\$ || ls -A | grep -i \\.xcodeproj\$`
           file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
           echo "file_to_build=$file_to_build" >> $GITHUB_OUTPUT
+      - name: Fetch LibXray (for per-app VPN core)
+        run: |
+          curl -L -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.17/libxray-apple-cgo.zip
+          unzip -o -q /tmp/libxray.zip -d /tmp/libxray
+          mkdir -p Vendor
+          cp -R /tmp/libxray/libxray-apple-cgo/LibXray.xcframework Vendor/
+          ls Vendor/LibXray.xcframework
       - name: Archive
         env:
           scheme: ${{ steps.scheme.outputs.scheme }}
@@ -73,6 +80,13 @@ jobs:
             -o CZFDockGesture.dylib BundledTweaks/CZFDockGesture.m
           cp CZFDockGesture.dylib "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFDockGesture.dylib"
           ls -la "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFDockGesture.dylib"
+          clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -mios-version-min=14.0 -fobjc-arc -dynamiclib \
+            -framework Foundation \
+            -I BundledTweaks \
+            -o CZFProxy.dylib BundledTweaks/CZFProxy.m BundledTweaks/fishhook.c
+          cp CZFProxy.dylib "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFProxy.dylib"
+          ls -la "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFProxy.dylib"
       - name: Tar Build Artifact
         run: tar -cvf "$archive_path.xcarchive.tar" "$archive_path.xcarchive"
       - name: Upload a Build Artifact
