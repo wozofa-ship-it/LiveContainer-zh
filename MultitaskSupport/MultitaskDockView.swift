@@ -770,6 +770,19 @@ class AppInfoProvider {
             }
         }
     }
+
+    // 小窗口打开指定 App（状态栏长按用，用户定：长按是小窗口
+    // 不是最小化）：同样借切换式的 maximizeWindow()——已最大化
+    // 时调一次正好还原成小窗口；本来就是小窗口的不动。
+    @objc public func restoreSmallWindow(uuid: String) {
+        DispatchQueue.main.async {
+            if let app = self.apps.first(where: { $0.appUUID == uuid }),
+               let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+               vc.isMaximized {
+                vc.maximizeWindow()
+            }
+        }
+    }
     
     @objc public func closeAllWindows() {
         DispatchQueue.main.async {
@@ -2184,7 +2197,7 @@ private struct SourcePanelRow: View {
 
 // 顶部状态栏（App 面板与源面板共用）：最前面是与快捷栏同款
 // 的三个固定按钮（收起/最小化/关闭全部，用户要求加的），后面
-// 横排已打开的 App：点按最大化打开，长按最小化（用户定）。
+// 横排已打开的 App：点按最大化打开，长按小窗口打开（用户定）。
 // 整条放在浅色圆角底板上，与下面的列表卡片区分开（UI 美化）。
 @available(iOS 16.0, *)
 private struct RunningAppsStripView: View {
@@ -2242,8 +2255,8 @@ private struct RunningAppsStripView: View {
         .onTapGesture { action() }
     }
 
-    // 已打开的 App：点按切前台并最大化，长按最小化。不用 Button
-    // 是免得长按时把点按也误触发（SwiftUI 的老毛病）。
+    // 已打开的 App：点按切前台并最大化，长按切前台并小窗口
+    // 打开。不用 Button 是免得长按时把点按也误触发（老毛病）。
     private func runningAppItem(_ runningApp: DockAppModel) -> some View {
         VStack(spacing: 4) {
             RunningAppIcon(appInfo: runningApp.appInfo)
@@ -2263,7 +2276,8 @@ private struct RunningAppsStripView: View {
             onSwitch()
         }
         .onLongPressGesture(minimumDuration: 0.45) {
-            dockManager.minimizeWindow(uuid: runningApp.appUUID)
+            let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+            dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
             onSwitch()
         }
     }
