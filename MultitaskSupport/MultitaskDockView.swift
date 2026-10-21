@@ -125,18 +125,6 @@ class AppInfoProvider {
     }
 }
 
-// 手势面板的宿主控制器：面板被关闭（下滑关闭或点按钮 dismiss）时回调，
-// 让管理器回收面板的专用窗口。被其他界面盖住时 isBeingDismissed 为假，不误回收。
-private final class CZFPanelHostingController: UIHostingController<AnyView> {
-    var onDismissed: (() -> Void)?
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil {
-            onDismissed?()
-        }
-    }
-}
-
 // MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
 @objc public class MultitaskDockManager: NSObject, ObservableObject, UIGestureRecognizerDelegate {
@@ -150,8 +138,9 @@ private final class CZFPanelHostingController: UIHostingController<AnyView> {
     // （旧直连通道，已弃用：面板改走 presentAllAppsPanel 的 UIKit 呈现。
     //  属性保留是因为栏视图还挂着 onChange 引用，删它要动视图修饰链。）
     @Published var czfPanelOpenCounter: Int = 0
-    // 手势弹出的面板专用窗口（独立置顶窗口）：强引用，面板关闭时回收
-    private var czfPanelWindow: UIWindow?
+    // 手势面板覆盖层的引用（背景遮罩 + 面板宿主）：面板开着时非空，防重复弹
+    private var czfPanelOverlayBackdrop: UIView?
+    private var czfPanelOverlayHost: UIHostingController<AnyView>?
 
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
@@ -964,8 +953,7 @@ private final class CZFPanelHostingController: UIHostingController<AnyView> {
     }
 
     // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再弹面板）
-    // 面板走独立置顶窗口呈现（见 presentAllAppsPanel）：主窗口内的呈现
-    // 方式在全屏游客下都会被游客画面压住。
+    // 面板走窗口覆盖层（见 presentAllAppsPanel）：与快捷栏同一个机制。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty else { return }
@@ -976,43 +964,59 @@ private final class CZFPanelHostingController: UIHostingController<AnyView> {
     private func presentAllAppsPanel() {
         DispatchQueue.main.async {
             // 面板已在显示中：不重复弹（连续左滑两次的情形）
-            if self.czfPanelWindow != nil { return }
-            // 面板窗口建在与快捷栏同一个场景里
-            let scene = self.hostingController?.view.window?.windowScene ?? self.keyWindow?.windowScene
-            guard let scene = scene else { return }
-            // 独立置顶窗口装面板：全屏游客时，主窗口内借道栏视图 .sheet
-            // （#85）、根控制器（#86）、栏宿主（#87）三种呈现都被游客
-            // 画面压住不出；单独的高等级窗口与主窗口层级脱钩，不受影响。
-            let panelWindow = UIWindow(windowScene: scene)
-            panelWindow.windowLevel = .alert + 10
-            panelWindow.backgroundColor = .clear
-            let root = UIViewController()
-            root.view.backgroundColor = .clear
-            panelWindow.rootViewController = root
-            let panel = CZFPanelHostingController(rootView: AnyView(AllAppsListView().environmentObject(self)))
-            panel.modalPresentationStyle = .pageSheet
-            if let sheet = panel.sheetPresentationController {
-                sheet.detents = [.custom(identifier: .init("czf.panel60")) { context in
-                    context.maximumDetentValue * 0.6
-                }]
-                sheet.prefersGrabberVisible = true
-            }
-            panel.onDismissed = { [weak self] in
-                self?.teardownPanelWindow()
-            }
-            self.czfPanelWindow = panelWindow
-            panelWindow.makeKeyAndVisible()
-            // 根控制器的视图进窗口后才能呈现，推到下一拍
-            DispatchQueue.main.async {
-                root.present(panel, animated: true)
+            if self.czfPanelOverlayHost != nil { return }
+            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            // 覆盖层方式：面板视图像快捷栏一样直接加到窗口最上层。
+            // 走 present 的四种弹法（栏视图 .sheet #85、根控制器 #86、
+            // 栏宿主 #87、独立窗口 #88）在全屏游客下全部不出；而快捷栏
+            // 本身就是窗口的直接子视图，全屏下能滑出、能点，从没失败过。
+            let bounds = window.bounds
+            // 背景遮罩：点任意空白处关闭
+            let backdrop = UIView(frame: bounds)
+            backdrop.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+            backdrop.alpha = 0
+            backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(czfPanelBackdropTapped)))
+            window.addSubview(backdrop)
+            // 面板本体：底部 60% 高，上圆角，从底部滑入
+            let rootView = AnyView(
+                AllAppsListView()
+                    .environmentObject(self)
+                    .environment(\.czfPanelClose) { [weak self] in self?.dismissPanelOverlay() }
+            )
+            let host = UIHostingController(rootView: rootView)
+            let panelHeight = bounds.height * 0.6
+            host.view.frame = CGRect(x: 0, y: bounds.height, width: bounds.width, height: panelHeight)
+            host.view.layer.cornerRadius = 16
+            host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+            host.view.clipsToBounds = true
+            window.addSubview(host.view)
+            self.czfPanelOverlayBackdrop = backdrop
+            self.czfPanelOverlayHost = host
+            UIView.animate(withDuration: 0.3) {
+                backdrop.alpha = 1
+                host.view.frame = CGRect(x: 0, y: bounds.height - panelHeight, width: bounds.width, height: panelHeight)
             }
         }
     }
 
-    // 面板关闭后回收专用窗口（不回收的话窗口会一直占着，面板再也弹不出）
-    private func teardownPanelWindow() {
-        czfPanelWindow?.isHidden = true
-        czfPanelWindow = nil
+    @objc private func czfPanelBackdropTapped() {
+        dismissPanelOverlay()
+    }
+
+    // 关闭手势面板覆盖层：滑出动画结束后摘除视图（背景点击、面板内
+    // 关闭/启动/最小化/小窗口按钮经 czfPanelClose 环境注入都会走到这里）
+    private func dismissPanelOverlay() {
+        guard let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop else { return }
+        czfPanelOverlayHost = nil
+        czfPanelOverlayBackdrop = nil
+        let height = host.view.frame.height
+        UIView.animate(withDuration: 0.25, animations: {
+            backdrop.alpha = 0
+            host.view.frame = host.view.frame.offsetBy(dx: 0, dy: height)
+        }, completion: { _ in
+            backdrop.removeFromSuperview()
+            host.view.removeFromSuperview()
+        })
     }
 
     // 手势已改走宿主悬浮边条窗，不再用插件：清掉旧版本部署到两个全局
@@ -1444,11 +1448,35 @@ struct CloseAllButtonView: View {
     }
 }
 
+// 手势面板（窗口覆盖层方式）专用的关闭通道：覆盖层不是模态呈现，
+// SwiftUI 的 dismiss 在那里无效。覆盖层注入关闭动作，面板内按钮统一走
+// closePanel()：有注入走注入（覆盖层），没注入走 dismiss（点蓝图标的 sheet）。
+private struct CZFPanelCloseKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var czfPanelClose: (() -> Void)? {
+        get { self[CZFPanelCloseKey.self] }
+        set { self[CZFPanelCloseKey.self] = newValue }
+    }
+}
+
 // MARK: - All Apps List View
 @available(iOS 16.0, *)
 struct AllAppsListView: View {
     @Environment(\.dismiss) var dismiss
+    @Environment(\.czfPanelClose) private var czfPanelClose
     @EnvironmentObject var dockManager: MultitaskDockManager
+
+    // 关闭面板：覆盖层（手势弹出）走注入的关闭动作；sheet（点蓝图标）走 dismiss
+    private func closePanel() {
+        if let czfPanelClose = czfPanelClose {
+            czfPanelClose()
+        } else {
+            dismiss()
+        }
+    }
     @ObservedObject var sortManager = LCAppSortManager.shared
     
     var body: some View {
@@ -1471,7 +1499,7 @@ struct AllAppsListView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                    Button("关闭") { closePanel() }
                 }
             }
             .searchable(text: .constant(""), prompt: "搜索")
@@ -1482,7 +1510,7 @@ struct AllAppsListView: View {
         let bundleId = app.appInfo.relativeBundlePath ?? ""
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == app.appInfo.dataUUID }) {
             let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-            dismiss()
+            closePanel()
             return
         }
         if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
@@ -1490,7 +1518,7 @@ struct AllAppsListView: View {
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
             #endif
         }
-        dismiss()
+        closePanel()
     }
     
     private func minimizeOpenApp(_ app: LCAppModel) {
@@ -1498,10 +1526,10 @@ struct AllAppsListView: View {
         // 如果已在运行，直接最小化它的窗口
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
             dockManager.minimizeWindow(uuid: runningApp.appUUID)
-            dismiss()
+            closePanel()
             return
         }        // 未运行：先启动，延迟后最小化窗口
-        dismiss()
+        closePanel()
         let bundleId = app.appInfo.relativeBundlePath ?? ""
         if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
             #if !os(visionOS)
@@ -1528,10 +1556,10 @@ struct AllAppsListView: View {
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
             let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
             unmaximizeWindow(uuid: dataUUID)
-            dismiss()
+            closePanel()
             return
         }
-        dismiss()
+        closePanel()
         Task {
             try? await app.runApp(multitask: true, containerFolderName: dataUUID)
         }
