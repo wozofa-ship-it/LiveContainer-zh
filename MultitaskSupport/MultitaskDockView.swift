@@ -135,9 +135,11 @@ class AppInfoProvider {
     @Published @objc var isCollapsed: Bool = false
     @Published var isDockHidden: Bool = false
     @Published var settingsChanged: Bool = false
-    // 打开 App 面板的直连通道：czfOpenAppPanel 每调一次 +1，栏视图 onChange 后弹面板
-    // （与 NotificationCenter 通知并行，哪条先到都行，重复置位无副作用）
+    // （旧直连通道，已弃用：面板改走 presentAllAppsPanel 的 UIKit 呈现。
+    //  属性保留是因为栏视图还挂着 onChange 引用，删它要动视图修饰链。）
     @Published var czfPanelOpenCounter: Int = 0
+    // 手势弹出的面板宿主（UIKit 呈现）：弱引用，仅用于防重复呈现
+    private weak var czfPanelHost: UIViewController?
 
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
@@ -949,13 +951,39 @@ class AppInfoProvider {
         hideDockToSide()
     }
 
-    // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再通知栏视图弹面板）
+    // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再弹面板）
+    // 面板改走 UIKit 直接呈现，不再借道栏视图的 .sheet：栏藏着时栏视图
+    // 透明且移出屏幕，.sheet 的呈现请求会被系统吞掉（#85 实测全屏左滑
+    // 有震动、无面板）；UIKit 从主窗口顶层控制器呈现，与栏显隐无关。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty else { return }
         if isDockHidden { showDockFromHidden() }
-        NotificationCenter.default.post(name: .czfOpenAllAppsPanel, object: nil)
-        czfPanelOpenCounter += 1
+        presentAllAppsPanel()
+    }
+
+    private func presentAllAppsPanel() {
+        DispatchQueue.main.async {
+            // 面板已在显示中：不重复呈现（连续左滑两次的情形）
+            if let host = self.czfPanelHost, host.presentingViewController != nil { return }
+            guard let window = self.keyWindow else { return }
+            var presenter: UIViewController? = window.rootViewController
+            if presenter == nil { presenter = self.hostingController }
+            while let presented = presenter?.presentedViewController {
+                presenter = presented
+            }
+            guard let presenter = presenter else { return }
+            let panel = UIHostingController(rootView: AllAppsListView().environmentObject(self))
+            panel.modalPresentationStyle = .pageSheet
+            if let sheet = panel.sheetPresentationController {
+                sheet.detents = [.custom(identifier: .init("czf.panel60")) { context in
+                    context.maximumDetentValue * 0.6
+                }]
+                sheet.prefersGrabberVisible = true
+            }
+            self.czfPanelHost = panel
+            presenter.present(panel, animated: true)
+        }
     }
 
     // 手势已改走宿主悬浮边条窗，不再用插件：清掉旧版本部署到两个全局
