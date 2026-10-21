@@ -111,14 +111,25 @@ public final class CZFVPNManager {
 
         let config: [String: Any] = [
             "log": ["loglevel": "warning"],
-            "inbounds": [[
-                "tag": "socks-in",
-                "listen": "127.0.0.1",
-                "port": Self.socksPort,
-                "protocol": "socks",
-                "settings": ["auth": "noauth", "udp": false],
-                "sniffing": ["enabled": true, "destOverride": ["http", "tls"]],
-            ]],
+            "inbounds": [
+                [
+                    "tag": "socks-in",
+                    "listen": "127.0.0.1",
+                    "port": Self.socksPort,
+                    "protocol": "socks",
+                    "settings": ["auth": "noauth", "udp": false],
+                    "sniffing": ["enabled": true, "destOverride": ["http", "tls"]],
+                ] as [String: Any],
+                // HTTP 入口给 NSURLSession 配置改写用（插件把会话
+                // 的代理字典指向这里，框架自己把请求送进来）
+                [
+                    "tag": "http-in",
+                    "listen": "127.0.0.1",
+                    "port": 10828,
+                    "protocol": "http",
+                    "settings": [String: Any](),
+                ] as [String: Any],
+            ],
             "outbounds": [
                 node,
                 ["tag": "direct", "protocol": "freedom"] as [String: Any],
@@ -126,7 +137,7 @@ public final class CZFVPNManager {
             ],
             "routing": [
                 "domainStrategy": "IPIfNonMatch",
-                "rules": [["type": "field", "inboundTag": ["socks-in"], "outboundTag": "node"]],
+                "rules": [["type": "field", "inboundTag": ["socks-in", "http-in"], "outboundTag": "node"]],
             ],
         ]
         guard let cfgData = try? JSONSerialization.data(withJSONObject: config),
@@ -255,7 +266,7 @@ public final class CZFVPNManager {
             if kv.count == 2 { dict[String(kv[0])] = String(kv[1]) }
         }
         guard let load = dict["load"] else { return nil }
-        return "插件统计（加载 \(load)）：解析共 \(dict["gaiPass"] ?? "0") 次（假IP \(dict["gaiFake"] ?? "0")）· 代理连接 \(dict["proxied"] ?? "0") · 失败 \(dict["failed"] ?? "0") · 直连 \(dict["direct"] ?? "0") · 放行 \(dict["pass"] ?? "0") · connectx \(dict["connectx"] ?? "0")"
+        return "插件统计（加载 \(load) · 自检 \(dict["selftest"] ?? "?")）：解析共 \(dict["gaiPass"] ?? "0") 次（假IP \(dict["gaiFake"] ?? "0")）· 代理连接 \(dict["proxied"] ?? "0") · 失败 \(dict["failed"] ?? "0") · 直连 \(dict["direct"] ?? "0") · 放行 \(dict["pass"] ?? "0") · connectx \(dict["connectx"] ?? "0") · 会话改写 \(dict["swizzled"] ?? "0") · 拦QUIC \(dict["quic"] ?? "0")"
     }
 
     // MARK: - libXray 调用

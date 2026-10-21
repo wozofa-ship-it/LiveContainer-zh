@@ -36,15 +36,19 @@
 #import <stdlib.h>
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
+#import <objc/runtime.h>
 #import "litehook.h"
 
 #define CZF_SOCKS_PORT 10827
+#define CZF_HTTP_PORT 10828
 // fake-IP 段 198.18.0.0/15 是 RFC 2544 基准测试保留段，
 // 现实网络里不会有真主机，各家 tun 实现都拿它当假 IP 池。
 #define CZF_FAKE_NET 0xC6120000u // 198.18.0.0
 
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int (*orig_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
+static ssize_t (*orig_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+static ssize_t (*orig_sendmsg)(int, const struct msghdr *, int);
 // connectx 的参数全是指针/32 位整数，用 ABI 等价的不透明
 // 签名声明，避免依赖系统头里冷门的 sa_endpoints_t 等 typedef
 static int (*orig_connectx)(int, const void *, uint32_t, unsigned int, const void *, unsigned int, size_t *, uint32_t *);
@@ -63,6 +67,9 @@ static volatile int64_t gStatConnDirect = 0;
 static volatile int64_t gStatConnFailed = 0;
 static volatile int64_t gStatConnPass = 0;
 static volatile int64_t gStatConnx = 0;
+static volatile int64_t gStatSelfTest = 0;
+static volatile int64_t gStatSwizzled = 0;
+static volatile int64_t gStatQuicBlocked = 0;
 static double gLastStatWrite = 0;
 static pthread_mutex_t gStatLock = PTHREAD_MUTEX_INITIALIZER;
 // 统计按 App 分文件（CZFProxyStats-<包名>.txt）：所有开了
@@ -80,8 +87,8 @@ static void CZFWriteStats(BOOL force) {
     }
     gLastStatWrite = now;
     pthread_mutex_unlock(&gStatLock);
-    NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld",
-        gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx];
+    NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld selftest=%lld swizzled=%lld quic=%lld",
+        gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx, gStatSelfTest, gStatSwizzled, gStatQuicBlocked];
     [text writeToFile:gStatsPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
 }
 
@@ -272,10 +279,18 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         return orig_connect(sockfd, addr, addrlen);
     }
     // 只代理 TCP 流套接字：UDP 的 connect 只是给数据包定个默认
-    // 去向（QUIC 全靠它），拿去做 SOCKS 握手只会把它卡死——原样放行。
+    // 去向，拿去做 SOCKS 握手只会把它卡死。例外：发往公网
+    // 443 的 UDP 就是 QUIC（YouTube 等），直连必死还会拖住它
+    // 回退 TCP——当场拒掉，让它立刻改走 TCP 被代理接住。
     int sockType = 0;
     socklen_t sockTypeLen = sizeof(sockType);
     if (getsockopt(sockfd, SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen) != 0 || sockType != SOCK_STREAM) {
+        if (sockType == SOCK_DGRAM && ntohs(sin->sin_port) == 443) {
+            __sync_add_and_fetch(&gStatQuicBlocked, 1);
+            CZFWriteStats(NO);
+            errno = ECONNREFUSED;
+            return -1;
+        }
         __sync_add_and_fetch(&gStatConnPass, 1);
         return orig_connect(sockfd, addr, addrlen);
     }
@@ -346,6 +361,79 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
     __sync_add_and_fetch(&gStatConnx, 1);
     CZFWriteStats(NO);
     return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+}
+
+// MARK: - QUIC 快速失败（sendto/sendmsg）
+// QUIC 也常用"不 connect、直接带地址发包"的 UDP 套接字，上
+// 面的 connect 拦不住。凡是发往公网 443 的 UDP 包当场拒掉
+// （只认 443：DNS 的 53 等其它 UDP 一概不碰）。
+static BOOL CZFIsQUICAddr(const struct sockaddr *addr) {
+    if (!addr || addr->sa_family != AF_INET) return NO;
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+    if (ntohs(sin->sin_port) != 443) return NO;
+    return !CZFIsPrivateOrLoopback(ntohl(sin->sin_addr.s_addr));
+}
+
+static BOOL CZFIsUDPSocket(int fd) {
+    int t = 0;
+    socklen_t tl = sizeof(t);
+    return getsockopt(fd, SOL_SOCKET, SO_TYPE, &t, &tl) == 0 && t == SOCK_DGRAM;
+}
+
+static ssize_t CZFSendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen) {
+    if (addr && CZFIsQUICAddr(addr) && CZFIsUDPSocket(fd)) {
+        __sync_add_and_fetch(&gStatQuicBlocked, 1);
+        CZFWriteStats(NO);
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    return orig_sendto(fd, buf, len, flags, addr, addrlen);
+}
+
+static ssize_t CZFSendmsg(int fd, const struct msghdr *msg, int flags) {
+    if (msg && msg->msg_name && CZFIsQUICAddr((const struct sockaddr *)msg->msg_name) && CZFIsUDPSocket(fd)) {
+        __sync_add_and_fetch(&gStatQuicBlocked, 1);
+        CZFWriteStats(NO);
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    return orig_sendmsg(fd, msg, flags);
+}
+
+// MARK: - NSURLSession 配置改写（第二层拦截）
+// 有一类 App（如 X）的网络完全不经过 getaddrinfo/connect——它
+// 们走 NSURLSession 框架。就改写框架这一层：App 创建会话时
+// 给它的配置塞一份代理字典，指向核心的 HTTP 入口，框架会自
+// 己把请求（含 HTTPS 的 CONNECT 隧道）送进代理。核心不在时
+// 不动配置（fail-open，别把 App 的网弄断）。
+static NSURLSession *(*orig_sessionWithConfig)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
+
+static NSURLSession *CZFSessionWithConfig(id self, SEL _cmd, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
+    if (config && CZFCoreAlive()) {
+        NSMutableDictionary *merged = [config.connectionProxyDictionary mutableCopy] ?: [NSMutableDictionary dictionary];
+        merged[@"HTTPEnable"] = @YES;
+        merged[@"HTTPProxy"] = @"127.0.0.1";
+        merged[@"HTTPPort"] = @(CZF_HTTP_PORT);
+        merged[@"HTTPSEnable"] = @YES;
+        merged[@"HTTPSProxy"] = @"127.0.0.1";
+        merged[@"HTTPSPort"] = @(CZF_HTTP_PORT);
+        merged[@"SOCKSEnable"] = @YES;
+        merged[@"SOCKSProxy"] = @"127.0.0.1";
+        merged[@"SOCKSPort"] = @(CZF_SOCKS_PORT);
+        config.connectionProxyDictionary = merged;
+        __sync_add_and_fetch(&gStatSwizzled, 1);
+        CZFWriteStats(NO);
+    }
+    return orig_sessionWithConfig(self, _cmd, config, delegate, queue);
+}
+
+static void CZFInstallSessionSwizzle(void) {
+    Class cls = NSClassFromString(@"NSURLSession");
+    if (!cls) return;
+    Method m = class_getClassMethod(cls, @selector(sessionWithConfiguration:delegate:delegateQueue:));
+    if (!m) return;
+    orig_sessionWithConfig = (NSURLSession *(*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))method_getImplementation(m);
+    method_setImplementation(m, (IMP)CZFSessionWithConfig);
 }
 
 // MARK: - getaddrinfo 钩子
@@ -455,7 +543,24 @@ static void CZFProxyInit(void) {
     if (orig_connectx) {
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_connectx, (void *)CZFConnectx, NULL);
     }
+    orig_sendto = (ssize_t (*)(int, const void *, size_t, int, const struct sockaddr *, socklen_t))dlsym(RTLD_DEFAULT, "sendto");
+    orig_sendmsg = (ssize_t (*)(int, const struct msghdr *, int))dlsym(RTLD_DEFAULT, "sendmsg");
+    if (orig_sendto) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_sendto, (void *)CZFSendto, NULL);
+    }
+    if (orig_sendmsg) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_sendmsg, (void *)CZFSendmsg, NULL);
+    }
+    CZFInstallSessionSwizzle();
     __sync_add_and_fetch(&gStatLoads, 1);
+    // 自检：钩子装完立刻自调一次解析——计数涨了说明本进程的
+    // 符号重绑真的活着（区分"钩子失效"与"App 不走这些接口"）。
+    // 查的是不存在的域名，我的钩子会同步发假 IP，不碰真网络。
+    int64_t gaiBefore = gStatGaiFake;
+    struct addrinfo *selfRes = NULL;
+    getaddrinfo("czf-selftest.invalid", "443", NULL, &selfRes);
+    if (selfRes) freeaddrinfo(selfRes);
+    gStatSelfTest = (gStatGaiFake > gaiBefore) ? 1 : 0;
     CZFWriteStats(YES);
     NSLog(@"[CZFProxy] 已加载：本 App 流量将经 127.0.0.1:%d 的 SOCKS 核心出网（核心不在时直连）", CZF_SOCKS_PORT);
 }
