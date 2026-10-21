@@ -1296,6 +1296,14 @@ private struct LCSourceAppBanner: View {
         .sheet(isPresented: $showDetail) {
             LCSourceAppDetailView(app: app, source: source)
         }
+        // 长按卡片直接复制该 App 的下载地址（不用点进详情页）
+        .contextMenu {
+            if let downloadURL = app.latestVersion?.downloadURL {
+                Button("复制下载地址", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = downloadURL.absoluteString
+                }
+            }
+        }
     }
 }
 
