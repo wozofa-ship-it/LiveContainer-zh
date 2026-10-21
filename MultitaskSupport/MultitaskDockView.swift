@@ -138,7 +138,8 @@ class AppInfoProvider {
     // （旧直连通道，已弃用：面板改走 presentAllAppsPanel 的 UIKit 呈现。
     //  属性保留是因为栏视图还挂着 onChange 引用，删它要动视图修饰链。）
     @Published var czfPanelOpenCounter: Int = 0
-    // 手势面板覆盖层的引用（背景遮罩 + 面板宿主）：面板开着时非空，防重复弹
+    // 手势面板覆盖层（背景遮罩 + 面板宿主）：只建一次常驻窗口待命，
+    // 开/关只切可见性和位置；开没开以面板视图的 isHidden 为准，不以引用为准
     private var czfPanelOverlayBackdrop: UIView?
     private var czfPanelOverlayHost: UIHostingController<AnyView>?
 
@@ -341,6 +342,10 @@ class AppInfoProvider {
             self.hostingController = UIHostingController(rootView: dockView)
             self.hostingController?.view.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin, .flexibleRightMargin, .flexibleBottomMargin]
             self.hostingController?.view.backgroundColor = .clear
+            // 预建手势面板覆盖层：常驻窗口待命，左滑时不再现建视图树
+            if let window = self.keyWindow {
+                self.ensurePanelOverlay(in: window)
+            }
         }
     }
 
@@ -961,40 +966,69 @@ class AppInfoProvider {
         presentAllAppsPanel()
     }
 
+    // 建好手势面板覆盖层（只建一次，常驻窗口待命，和快捷栏同一个生命周期）。
+    // #89 是每次左滑现建 SwiftUI 视图树：首帧渲染慢，滑完要等一下才动，
+    // 体感像失灵；且开/关状态只认存着的引用，视图一旦被外部摘掉引用还
+    // 非空，之后永远弹不出（小窗口"有时行有时不行"）。常驻后开/关只改
+    // 可见性和位置，状态以视图 isHidden 为准，不再被旧引用毒化。
+    private func ensurePanelOverlay(in window: UIWindow) {
+        if let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop {
+            // 已建过：若被挪出当前窗口（窗口/场景切换），搬回当前窗口
+            if host.view.superview !== window {
+                window.addSubview(backdrop)
+                window.addSubview(host.view)
+            }
+            return
+        }
+        // 状态不完整（只剩一半）：清掉重建，避免留孤儿视图
+        czfPanelOverlayHost?.view.removeFromSuperview()
+        czfPanelOverlayBackdrop?.removeFromSuperview()
+        czfPanelOverlayHost = nil
+        czfPanelOverlayBackdrop = nil
+        // 背景遮罩：点任意空白处关闭
+        let backdrop = UIView(frame: window.bounds)
+        backdrop.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        backdrop.alpha = 0
+        backdrop.isHidden = true
+        backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
+        window.addSubview(backdrop)
+        // 面板本体：底部 60% 高，上圆角
+        let rootView = AnyView(
+            AllAppsListView()
+                .environmentObject(self)
+                .environment(\.czfPanelClose) { [weak self] in self?.dismissPanelOverlay() }
+        )
+        let host = UIHostingController(rootView: rootView)
+        let b = window.bounds
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
+        host.view.layer.cornerRadius = 16
+        host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        host.view.clipsToBounds = true
+        host.view.isHidden = true
+        window.addSubview(host.view)
+        czfPanelOverlayBackdrop = backdrop
+        czfPanelOverlayHost = host
+    }
+
     private func presentAllAppsPanel() {
         DispatchQueue.main.async {
-            // 面板已在显示中：不重复弹（连续左滑两次的情形）
-            if self.czfPanelOverlayHost != nil { return }
             guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
-            // 覆盖层方式：面板视图像快捷栏一样直接加到窗口最上层。
-            // 走 present 的四种弹法（栏视图 .sheet #85、根控制器 #86、
-            // 栏宿主 #87、独立窗口 #88）在全屏游客下全部不出；而快捷栏
-            // 本身就是窗口的直接子视图，全屏下能滑出、能点，从没失败过。
-            let bounds = window.bounds
-            // 背景遮罩：点任意空白处关闭
-            let backdrop = UIView(frame: bounds)
-            backdrop.backgroundColor = UIColor.black.withAlphaComponent(0.35)
-            backdrop.alpha = 0
-            backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
-            window.addSubview(backdrop)
-            // 面板本体：底部 60% 高，上圆角，从底部滑入
-            let rootView = AnyView(
-                AllAppsListView()
-                    .environmentObject(self)
-                    .environment(\.czfPanelClose) { [weak self] in self?.dismissPanelOverlay() }
-            )
-            let host = UIHostingController(rootView: rootView)
-            let panelHeight = bounds.height * 0.6
-            host.view.frame = CGRect(x: 0, y: bounds.height, width: bounds.width, height: panelHeight)
-            host.view.layer.cornerRadius = 16
-            host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
-            host.view.clipsToBounds = true
-            window.addSubview(host.view)
-            self.czfPanelOverlayBackdrop = backdrop
-            self.czfPanelOverlayHost = host
-            UIView.animate(withDuration: 0.3) {
+            self.ensurePanelOverlay(in: window)
+            guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else { return }
+            // 已开着就不重复开（以视图真实状态为准）
+            if !host.view.isHidden { return }
+            // 保险：盖到最上层，并按当前窗口尺寸摆好起始位（屏幕下方）
+            window.bringSubviewToFront(backdrop)
+            window.bringSubviewToFront(host.view)
+            let b = window.bounds
+            let panelHeight = b.height * 0.6
+            backdrop.frame = b
+            host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: panelHeight)
+            backdrop.isHidden = false
+            host.view.isHidden = false
+            UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
                 backdrop.alpha = 1
-                host.view.frame = CGRect(x: 0, y: bounds.height - panelHeight, width: bounds.width, height: panelHeight)
+                host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
             }
         }
     }
@@ -1003,19 +1037,18 @@ class AppInfoProvider {
         dismissPanelOverlay()
     }
 
-    // 关闭手势面板覆盖层：滑出动画结束后摘除视图（背景点击、面板内
-    // 关闭/启动/最小化/小窗口按钮经 czfPanelClose 环境注入都会走到这里）
+    // 关闭手势面板覆盖层：滑出后切回隐藏待命（不摘除、不销毁）。
+    // 背景点击、面板内关闭/启动/最小化/小窗口按钮（经 czfPanelClose 注入）
+    // 都会走到这里。
     private func dismissPanelOverlay() {
-        guard let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop else { return }
-        czfPanelOverlayHost = nil
-        czfPanelOverlayBackdrop = nil
+        guard let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop, !host.view.isHidden else { return }
         let height = host.view.frame.height
-        UIView.animate(withDuration: 0.25, animations: {
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn], animations: {
             backdrop.alpha = 0
             host.view.frame = host.view.frame.offsetBy(dx: 0, dy: height)
         }, completion: { _ in
-            backdrop.removeFromSuperview()
-            host.view.removeFromSuperview()
+            backdrop.isHidden = true
+            host.view.isHidden = true
         })
     }
 
