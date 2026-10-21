@@ -553,8 +553,15 @@ struct LCDataManagementView : View {
         }
         externalFolderName = Self.externalBackupFolderURL()?.lastPathComponent
         // 兜底：把本地备份补齐同步到外部文件夹（后台线程，避免大备份拷贝卡界面）
-        Task.detached {
-            Self.syncAllLocalBackupsToExternalFolder()
+        // 节流：6 小时内已同步过就跳过。原来每次打开本页都全量比对+补拷，
+        // 和到期的定时备份叠在一起抢 I/O；备份动作本身已即时同步到外部
+        // 文件夹，这里只兜底捡漏，不需要每次打开都跑一遍。
+        let lastSync = UserDefaults.standard.double(forKey: "LCExternalSyncLastRun")
+        if Date().timeIntervalSince1970 - lastSync > 6 * 3600 {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "LCExternalSyncLastRun")
+            Task.detached {
+                Self.syncAllLocalBackupsToExternalFolder()
+            }
         }
         // 检查定时备份
         Task { await checkAndRunScheduledBackup() }
@@ -599,7 +606,9 @@ struct LCDataManagementView : View {
     }
 
     // 把刚备份好的 App 文件夹同步到外部文件夹（同名覆盖）
-    func syncBackupsToExternalFolder(appNames: [String], backupRoot: URL) {
+    // 静态化：函数体只用 externalBackupFolderURL 和 FileManager，不碰
+    // 视图状态，静态后可从后台线程直接调（备份重活整体挪后台用）。
+    static func syncBackupsToExternalFolder(appNames: [String], backupRoot: URL) {
         guard let extURL = Self.externalBackupFolderURL() else { return }
         let fm = FileManager.default
         for name in appNames {
@@ -852,53 +861,67 @@ struct LCDataManagementView : View {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
-        do {
-            try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
-            var count = 0
-            var backedUpNames: [String] = []
-            for app in apps {
-                let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-                // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
-                let appBackupURL = backupRoot.appendingPathComponent(appName)
-                if fm.fileExists(atPath: appBackupURL.path) {
-                    try fm.removeItem(at: appBackupURL)
-                }
-                try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
-                // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
-                let dateFmt = DateFormatter()
-                dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
-                let manifest: [String: String] = [
-                    "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
-                    "displayName": app.appInfo.displayName() ?? "",
-                    "version": app.appInfo.version() ?? "",
-                    "backupDate": dateFmt.string(from: Date())
-                ]
-                if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
-                    try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
-                }
-                // 保存 .app bundle 供恢复时参考（iOS 沙盒不允许调用 zip，暂不打包 IPA）
-                if let bundlePath = app.appInfo.bundlePath() {
-                    let bundleURL = URL(fileURLWithPath: bundlePath)
-                    let destAppURL = appBackupURL.appendingPathComponent(bundleURL.lastPathComponent)
-                    try? fm.copyItem(at: bundleURL, to: destAppURL)
-                }
-                for container in app.uiContainers {
-                    let srcURL = container.containerURL
-                    let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
-                    if fm.fileExists(atPath: srcURL.path) {
-                        try? fm.copyItem(at: srcURL, to: destURL)
+        // 拷贝重活整体挪到后台队列：原来这段在打开页面触发定时备份时
+        // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
+        // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
+        // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
+        let (count, failure): (Int, Error?) = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let fm = FileManager.default
+                do {
+                    try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+                    var count = 0
+                    var backedUpNames: [String] = []
+                    for app in apps {
+                        let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                        // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
+                        let appBackupURL = backupRoot.appendingPathComponent(appName)
+                        if fm.fileExists(atPath: appBackupURL.path) {
+                            try fm.removeItem(at: appBackupURL)
+                        }
+                        try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
+                        // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
+                        let dateFmt = DateFormatter()
+                        dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
+                        let manifest: [String: String] = [
+                            "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
+                            "displayName": app.appInfo.displayName() ?? "",
+                            "version": app.appInfo.version() ?? "",
+                            "backupDate": dateFmt.string(from: Date())
+                        ]
+                        if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
+                            try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
+                        }
+                        // 保存 .app bundle 供恢复时参考（iOS 沙盒不允许调用 zip，暂不打包 IPA）
+                        if let bundlePath = app.appInfo.bundlePath() {
+                            let bundleURL = URL(fileURLWithPath: bundlePath)
+                            let destAppURL = appBackupURL.appendingPathComponent(bundleURL.lastPathComponent)
+                            try? fm.copyItem(at: bundleURL, to: destAppURL)
+                        }
+                        for container in app.uiContainers {
+                            let srcURL = container.containerURL
+                            let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
+                            if fm.fileExists(atPath: srcURL.path) {
+                                try? fm.copyItem(at: srcURL, to: destURL)
+                            }
+                        }
+                        count += 1
+                        backedUpNames.append(appName)
                     }
+                    // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
+                    Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
+                    continuation.resume(returning: (count, nil))
+                } catch {
+                    continuation.resume(returning: (0, error))
                 }
-                count += 1
-                backedUpNames.append(appName)
             }
-            // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
-            syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
+        }
+        if let failure {
+            errorInfo = failure.localizedDescription
+            errorShow = true
+        } else {
             successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n" + backupRoot.path
             successShow = true
-        } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
         }
     }
 

@@ -23,6 +23,14 @@
 // 漏斗判定要点：贴边往外滑时手指滑出屏幕，上报坐标被钳在边缘，
 // 可测位移只有几 pt 且抬手时才报全——必须在 Ended 也判定；条件只
 // 认起手在左带内 + 净位移往左 ≥8 + 方向占优，不附加位置条件。
+//
+// 左边缘往右滑 = 源面板（2026-10-21 用户定）：与往左滑的 App 面板
+// 对称，同挂左边缘。原左边缘往右是 leftInward（唤出左侧快捷栏），
+// 用户快捷栏在右侧、该动作一直空转，就此改派给源面板；pan 路径与
+// 漏斗路径都改。防抢 App 自己的滑动：漏斗往右判定门槛比往左严
+// （Moved 提前触发要 36 带内起手 + 位移 ≥36 + 方向比 1.5；
+// 终结兜底 64 带内起手 + 位移 ≥44），普通横滑（多为中部起手）
+// 进不了左带记录，进了带的慢拖也过不了方向比，互不干扰。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -111,11 +119,12 @@ static BOOL gCZFFired = NO;
             selectorName = @"czfEdgeRightInward";
         }
     } else if (gCZFStartEdge == 1) {
-        // 起手在左边缘：往左=打开 App 面板（往外滑，门槛10），往右=唤出（门槛24）
+        // 起手在左边缘：往左=打开 App 面板（往外滑，门槛10），往右=源面板（门槛30，
+        // 比原唤栏的 24 略严：往右是 App 内常用方向，宁可多滑一点点也不抢 App 的指令）
         if (draggingRight) {
-            if (absX <= 24) return;
-            notificationName = @"czf.dock.leftInward";
-            selectorName = @"czfEdgeLeftInward";
+            if (absX <= 30) return;
+            notificationName = @"czf.dock.openSources";
+            selectorName = @"czfOpenSourcesPanel";
         } else {
             if (absX <= 10) return;
             notificationName = @"czf.dock.openPanel";
@@ -197,25 +206,47 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                 if (state && ![state[2] boolValue]) {
                     CGFloat dx = loc.x - [state[0] doubleValue];
                     CGFloat dy = loc.y - [state[1] doubleValue];
-                    BOOL fire = NO;
+                    NSString *fireName = nil;
+                    NSString *fireSelector = nil;
                     if (touch.phase == UITouchPhaseMoved) {
                         // 提前触发（严判定防误触）：64 带内起手、往左 8、
                         // 横向占优 1.2 倍
-                        fire = ([state[0] doubleValue] <= 64 && dx <= -8 && fabs(dx) > 1.2 * fabs(dy));
+                        if ([state[0] doubleValue] <= 64 && dx <= -8 && fabs(dx) > 1.2 * fabs(dy)) {
+                            fireName = @"czf.dock.openPanel";
+                            fireSelector = @"czfOpenAppPanel";
+                        } else if ([state[0] doubleValue] <= 36 && dx >= 36 && fabs(dx) > 1.5 * fabs(dy)) {
+                            // 往右=源面板：全屏下与 App 的边缘返回/横滑
+                            // 共用这条轨迹，防冲突全靠收紧——起手只认
+                            // 贴边 36 带、位移 ≥36、方向比 1.5（与 pan
+                            // 路径一致）；App 中部起手的横滑根本不进
+                            // 记录，进了带的慢拖也过不了方向比。
+                            fireName = @"czf.dock.openSources";
+                            fireSelector = @"czfOpenSourcesPanel";
+                        }
                     } else {
                         // 终结兜底（看物理结果，不看轨迹）：拇指弧线在下
                         // 半屏轨迹偏斜，方向比会把整段滑动判掉；只要最
                         // 终落点贴到边缘 12 内、净位移往左 ≥15，就是
                         // 一次滑出左边缘。方向比只留 0.4 的底线挡纯竖滑
                         //（竖滑被取消时落点不在边缘，也进不来）。
-                        fire = (dx <= -15 && loc.x <= 12 && fabs(dx) > 0.4 * fabs(dy));
+                        if (dx <= -15 && loc.x <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
+                            fireName = @"czf.dock.openPanel";
+                            fireSelector = @"czfOpenAppPanel";
+                        } else if ([state[0] doubleValue] <= 64 && dx >= 44 && fabs(dx) > 0.8 * fabs(dy)) {
+                            // 往右终结兜底：起手 ≤64 带内、净位移 ≥44、
+                            // 方向比 ≥0.8。比 Moved 提前触发宽在起手带、
+                            // 严在位移：慢拖到终点也算数，但必须是明确
+                            // 的横向大位移，不捡 App 的普通滑动。
+                            fireName = @"czf.dock.openSources";
+                            fireSelector = @"czfOpenSourcesPanel";
+                        }
                     }
-                    if (fire) {
+                    if (fireName) {
                         gCZFTouchStates[key] = @[ state[0], state[1], @YES ];
                         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
                         if (now - gCZFLastFunnelFire >= 0.6) {
                             gCZFLastFunnelFire = now;
-                            [[CZFDockGestureHandler shared] czfPostNotification:@"czf.dock.openPanel" selectorName:@"czfOpenAppPanel"];
+                            [[CZFDockGestureHandler shared] czfPostNotification:fireName selectorName:fireSelector];
                         }
                     }
                 }

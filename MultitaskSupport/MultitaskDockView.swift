@@ -138,10 +138,15 @@ class AppInfoProvider {
     // （旧直连通道，已弃用：面板改走 presentAllAppsPanel 的 UIKit 呈现。
     //  属性保留是因为栏视图还挂着 onChange 引用，删它要动视图修饰链。）
     @Published var czfPanelOpenCounter: Int = 0
+    // 源面板每次调出时 +1，面板视图据此刷新源数据（覆盖层常驻，onAppear 只来一次）
+    @Published var czfSourcesPanelOpenCounter: Int = 0
     // 手势面板覆盖层（背景遮罩 + 面板宿主）：只建一次常驻窗口待命，
     // 开/关只切可见性和位置；开没开以面板视图的 isHidden 为准，不以引用为准
     private var czfPanelOverlayBackdrop: UIView?
     private var czfPanelOverlayHost: UIHostingController<AnyView>?
+    // 源面板覆盖层：与 App 面板同构，各自一套遮罩+宿主，互开时先关对方
+    private var czfSourcesOverlayBackdrop: UIView?
+    private var czfSourcesOverlayHost: UIHostingController<AnyView>?
 
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
@@ -815,6 +820,9 @@ class AppInfoProvider {
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
     private var globalSwipeObserversInstalled = false
+    // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
+    // 不闩住会在 .changed 里连震好几下）
+    private var czfEdgeSwipeLatched = false
 
     private func setupGlobalSwipeRecognizer() {
         // 游客 App 的窗口出现得晚：监听新窗口/新场景，一出现就补装
@@ -848,7 +856,10 @@ class AppInfoProvider {
     }
 
     @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {
-        guard gesture.state == .ended, isVisible else { return }
+        // 不再要求 isVisible：源面板要在"没打开任何 App"时也能从主界面
+        // 调出。其余每个动作入口都自带 isVisible/!apps.isEmpty 守卫，
+        // 在主界面裸跑时各自落空，不会误触发显隐快捷栏或 App 面板。
+        guard gesture.state == .ended else { return }
         let translation = gesture.translation(in: gesture.view)
         let endX = gesture.location(in: gesture.view).x
         let width = gesture.view?.bounds.width ?? 0
@@ -873,10 +884,13 @@ class AppInfoProvider {
             }
             return true
         } else if startEdge == 1 {
-            // 往右=唤出（门槛24），往左=打开 App 面板（往外滑，门槛10）
+            // 往右=源面板（门槛30），往左=打开 App 面板（往外滑，门槛10）。
+            // 原往右是唤出左侧快捷栏（czfEdgeLeftInward）：用户定左边缘
+            // 往右改派源面板，与插件侧判定保持一致；门槛 30 与插件 pan
+            // 路径对齐，只认边缘起手的决断横拖，不抢 App 自己的滑动。
             if draggingRight {
-                guard translation.x > 24 else { return false }
-                fireDockAction { self.czfEdgeLeftInward() }
+                guard translation.x > 30 else { return false }
+                fireDockAction { self.czfOpenSourcesPanel() }
             } else {
                 guard abs(translation.x) > 10 else { return false }
                 fireDockAction { self.czfOpenAppPanel() }
@@ -968,6 +982,14 @@ class AppInfoProvider {
         presentAllAppsPanel()
     }
 
+    // 左边缘往右滑：打开源面板（2026-10-21 用户定，与往左滑的 App
+    // 面板对称）。故意不加 isVisible/!apps 守卫：没打开任何 App、在
+    // 主界面时也要能调出（用户明确要求）；呈现走 keyWindow 兜底。
+    @objc public func czfOpenSourcesPanel() {
+        edgeCallbackBuzz()
+        presentSourcesPanel()
+    }
+
 
     // 建好手势面板覆盖层（只建一次，常驻窗口待命，和快捷栏同一个生命周期）。
     // #89 是每次左滑现建 SwiftUI 视图树：首帧渲染慢，滑完要等一下才动，
@@ -1016,6 +1038,8 @@ class AppInfoProvider {
     private func presentAllAppsPanel() {
         DispatchQueue.main.async {
             guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            // 两个面板互斥：开这个先关那个
+            self.dismissSourcesOverlay()
             self.ensurePanelOverlay(in: window)
             guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else { return }
             // 每次调用都强制对齐到打开状态，不看旧状态早退：旧状态可能
@@ -1059,6 +1083,85 @@ class AppInfoProvider {
         })
     }
 
+    // MARK: - 源面板覆盖层（与 App 面板同构：常驻待命、强制对齐呈现）
+
+    private func ensureSourcesOverlay(in window: UIWindow) {
+        if let host = czfSourcesOverlayHost, let backdrop = czfSourcesOverlayBackdrop {
+            if host.view.superview !== window {
+                window.addSubview(backdrop)
+                window.addSubview(host.view)
+            }
+            return
+        }
+        czfSourcesOverlayHost?.view.removeFromSuperview()
+        czfSourcesOverlayBackdrop?.removeFromSuperview()
+        czfSourcesOverlayHost = nil
+        czfSourcesOverlayBackdrop = nil
+        let backdrop = UIView(frame: window.bounds)
+        backdrop.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        backdrop.alpha = 0
+        backdrop.isHidden = true
+        backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfSourcesBackdropTapped)))
+        window.addSubview(backdrop)
+        let rootView = AnyView(
+            SourcesPanelView()
+                .environmentObject(self)
+                .environment(\.czfPanelClose) { [weak self] in self?.dismissSourcesOverlay() }
+        )
+        let host = UIHostingController(rootView: rootView)
+        let b = window.bounds
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
+        host.view.layer.cornerRadius = 16
+        host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        host.view.clipsToBounds = true
+        host.view.isHidden = true
+        window.addSubview(host.view)
+        czfSourcesOverlayBackdrop = backdrop
+        czfSourcesOverlayHost = host
+    }
+
+    private func presentSourcesPanel() {
+        DispatchQueue.main.async {
+            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            // 两个面板互斥：开这个先关那个
+            self.dismissPanelOverlay()
+            self.ensureSourcesOverlay(in: window)
+            guard let host = self.czfSourcesOverlayHost, let backdrop = self.czfSourcesOverlayBackdrop else { return }
+            // 计数 +1：面板视图据此刷新源数据（覆盖层常驻，onAppear 不重来）
+            self.czfSourcesPanelOpenCounter += 1
+            window.bringSubviewToFront(backdrop)
+            window.bringSubviewToFront(host.view)
+            let b = window.bounds
+            let panelHeight = b.height * 0.6
+            backdrop.frame = b
+            backdrop.isHidden = false
+            host.view.isHidden = false
+            if host.view.frame.height != panelHeight {
+                host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: panelHeight)
+            }
+            UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
+                backdrop.alpha = 1
+                host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
+            }
+        }
+    }
+
+    @objc private func czfSourcesBackdropTapped() {
+        dismissSourcesOverlay()
+    }
+
+    private func dismissSourcesOverlay() {
+        guard let host = czfSourcesOverlayHost, let backdrop = czfSourcesOverlayBackdrop, !host.view.isHidden else { return }
+        let height = host.view.frame.height
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn], animations: {
+            backdrop.alpha = 0
+            host.view.frame = host.view.frame.offsetBy(dx: 0, dy: height)
+        }, completion: { _ in
+            backdrop.isHidden = true
+            host.view.isHidden = true
+        })
+    }
+
     // 手势已改走宿主悬浮边条窗，不再用插件：清掉旧版本部署到两个全局
     // Tweaks 根目录的手势插件文件，避免它继续随游客 App 加载。
     // 静态方法：宿主一启动（AppDelegate）就调，赶在任何游客 App 启动之前。
@@ -1067,7 +1170,7 @@ class AppInfoProvider {
     private func registerDockEdgeDarwinObservers() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
-        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftInward", "czf.dock.leftOutward", "czf.dock.openPanel"]
+        let names = ["czf.dock.rightInward", "czf.dock.rightOutward", "czf.dock.leftInward", "czf.dock.leftOutward", "czf.dock.openPanel", "czf.dock.openSources"]
         for name in names {
             CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
                 guard let observerPtr = observerPtr, let cfName = cfName else { return }
@@ -1080,6 +1183,7 @@ class AppInfoProvider {
                     case "czf.dock.leftInward": manager.czfEdgeLeftInward()
                     case "czf.dock.leftOutward": manager.czfEdgeLeftOutward()
                     case "czf.dock.openPanel": manager.czfOpenAppPanel()
+                    case "czf.dock.openSources": manager.czfOpenSourcesPanel()
                     default: break
                     }
                 }
@@ -1139,12 +1243,22 @@ class AppInfoProvider {
         guard isDockHidden, gesture.state == .began || gesture.state == .changed else {
             return
         }
-        
+        if gesture.state == .began {
+            czfEdgeSwipeLatched = false
+        }
+
         let translation = gesture.translation(in: gesture.view)
         let swipeDistance = abs(translation.x)
-        
-        if swipeDistance > Constants.edgeSwipeThreshold {
-            showDockFromHidden()
+
+        if swipeDistance > Constants.edgeSwipeThreshold, !czfEdgeSwipeLatched {
+            czfEdgeSwipeLatched = true
+            // 左边缘往右滑改派源面板（用户定，与全局甩手判定一致）；
+            // 右边缘照旧唤出快捷栏
+            if gesture.edges == .left {
+                czfOpenSourcesPanel()
+            } else {
+                showDockFromHidden()
+            }
         }
     }
     
@@ -1625,6 +1739,333 @@ struct AllAppsListView: View {
               let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
               vc.isMaximized else { return }
         vc.maximizeWindow()
+    }
+}
+
+// MARK: - Sources Panel View（左边缘往右滑调出，与 App 面板对称）
+// 数据复用源页面的 AltStoreSourcesViewModel（进面板自动加载+刷新，
+// 每次调出计数变化再刷一次）；行卡片按源页 LCSourceAppBanner 的状态
+// 逻辑简化（复制/下载/安装/打开/更新/已安装），安装走与源页完全相同
+// 的通道：IPA 发 InstallAppNotification 给 App 列表执行，dylib 直装
+// 插件目录并签名。
+@available(iOS 16.0, *)
+struct SourcesPanelView: View {
+    @Environment(\.dismiss) var dismiss
+    @Environment(\.czfPanelClose) private var czfPanelClose
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    @StateObject private var viewModel = AltStoreSourcesViewModel()
+    @State private var errorMessage: String?
+
+    private func closePanel() {
+        if let czfPanelClose = czfPanelClose {
+            czfPanelClose()
+        } else {
+            dismiss()
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if viewModel.sources.isEmpty {
+                        Text("还没有添加源")
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal)
+                    }
+                    ForEach(viewModel.sources) { item in
+                        if let source = item.source {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(source.name)
+                                    .font(.headline)
+                                    .padding(.horizontal)
+                                ForEach(source.apps) { app in
+                                    SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) })
+                                        .padding(.horizontal)
+                                }
+                            }
+                        } else if item.isLoading {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text(item.displayName)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal)
+                        } else if let err = item.error {
+                            Text("\(item.displayName) 加载失败：\(err)")
+                                .font(.footnote)
+                                .foregroundColor(.red)
+                                .padding(.horizontal)
+                        }
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+            .navigationTitle("源")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { closePanel() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await viewModel.refreshAllSources() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+            }
+            .onChange(of: dockManager.czfSourcesPanelOpenCounter) { _ in
+                Task { await viewModel.refreshAllSources() }
+            }
+            .alert("提示", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+                Button("好") { errorMessage = nil }
+            } message: {
+                Text(errorMessage ?? "")
+            }
+        }
+    }
+
+    // 与源页 LCSourcesView.install 一致，额外关掉面板让用户看安装进度
+    @MainActor
+    private func installFromPanel(app: AltStoreSourceApp) {
+        guard let downloadURL = app.latestVersion?.downloadURL else {
+            errorMessage = "lc.sources.error.missingDownload".loc
+            return
+        }
+        if downloadURL.pathExtension.lowercased() == "dylib" {
+            Task { await installTweakFromPanel(from: downloadURL, name: app.name) }
+            return
+        }
+        DataManager.shared.model.selectedTab = .apps
+        closePanel()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL])
+        }
+    }
+
+    // 与源页 LCSourcesView.installTweak 一致
+    @MainActor
+    private func installTweakFromPanel(from url: URL, name: String) async {
+        do {
+            let (tempURL, _) = try await URLSession.shared.download(from: url)
+            let fm = FileManager.default
+            let folderURL = LCPath.tweakPath.appendingPathComponent(name)
+            if !fm.fileExists(atPath: folderURL.path) {
+                try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
+            }
+            let destURL = folderURL.appendingPathComponent(url.lastPathComponent)
+            if fm.fileExists(atPath: destURL.path) {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.moveItem(at: tempURL, to: destURL)
+            try await LCUtils.signTweaks(tweakFolderUrl: folderURL, force: true)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    // 与源页 LCSourcesView.download 一致：下载到文档目录后弹分享框
+    @MainActor
+    private func downloadFromPanel(app: AltStoreSourceApp) {
+        guard let downloadURL = app.latestVersion?.downloadURL else {
+            errorMessage = "lc.sources.error.missingDownload".loc
+            return
+        }
+        Task {
+            do {
+                let (tempURL, _) = try await URLSession.shared.download(from: downloadURL)
+                let fileName = downloadURL.lastPathComponent
+                let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let destURL = docsURL.appendingPathComponent(fileName)
+                if FileManager.default.fileExists(atPath: destURL.path) {
+                    try FileManager.default.removeItem(at: destURL)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: destURL)
+                await MainActor.run {
+                    shareFileFromPanel(at: destURL)
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func shareFileFromPanel(at url: URL) {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootVC = windowScene.windows.first?.rootViewController else { return }
+        let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = rootVC.view
+            popover.sourceRect = CGRect(x: rootVC.view.bounds.midX, y: rootVC.view.bounds.midY, width: 0, height: 0)
+            popover.permittedArrowDirections = []
+        }
+        rootVC.present(activityVC, animated: true)
+    }
+}
+
+// 源面板的行卡片：状态判定与源页横幅一致（已装/更新/插件已装）
+@available(iOS 16.0, *)
+private struct SourcePanelRow: View {
+    let app: AltStoreSourceApp
+    let onInstall: () -> Void
+    let onDownload: () -> Void
+    @ObservedObject private var sharedModel = DataManager.shared.model
+    @State private var copied = false
+
+    private var isInstalled: Bool {
+        (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+    }
+
+    private var installedAppModel: LCAppModel? {
+        (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })
+    }
+
+    private var hasUpdate: Bool {
+        guard let sourceVersion = app.latestVersion?.version,
+              let installed = installedAppModel else { return false }
+        return Self.isVersion(sourceVersion, newerThan: installed.appInfo.version())
+    }
+
+    private static func isVersion(_ a: String, newerThan b: String) -> Bool {
+        let aParts = a.split(separator: ".").map { Int($0) ?? 0 }
+        let bParts = b.split(separator: ".").map { Int($0) ?? 0 }
+        let count = max(aParts.count, bParts.count)
+        for i in 0..<count {
+            let av = i < aParts.count ? aParts[i] : 0
+            let bv = i < bParts.count ? bParts[i] : 0
+            if av != bv { return av > bv }
+        }
+        return false
+    }
+
+    private var isPlugin: Bool {
+        app.latestVersion?.downloadURL.pathExtension.lowercased() == "dylib"
+    }
+
+    private var isPluginInstalled: Bool {
+        guard let downloadURL = app.latestVersion?.downloadURL,
+              downloadURL.pathExtension.lowercased() == "dylib" else { return false }
+        let pluginURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
+        return FileManager.default.fileExists(atPath: pluginURL.path)
+    }
+
+    private var metadataText: String {
+        guard let latest = app.latestVersion else {
+            return app.bundleIdentifier
+        }
+        return "\(latest.version) • \(app.bundleIdentifier)"
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            AsyncImage(url: app.iconURL) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    Color.gray.opacity(0.25)
+                }
+            }
+            .frame(width: 48, height: 48)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(app.name)
+                    .font(.system(size: 15)).bold()
+                    .lineLimit(1)
+                Text(metadataText)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                if let subtitle = app.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+            if let downloadURL = app.latestVersion?.downloadURL {
+                Button {
+                    UIPasteboard.general.string = downloadURL.absoluteString
+                    copied = true
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(BasicButtonStyle())
+            }
+            Button {
+                onDownload()
+            } label: {
+                Text("下载")
+                    .font(.system(size: 13)).bold()
+                    .foregroundColor(.white)
+                    .frame(height: 30)
+                    .padding(.horizontal, 10)
+            }
+            .buttonStyle(BasicButtonStyle())
+            .background(Capsule().fill(Color.gray))
+            .clipShape(Capsule())
+            if isPlugin && isPluginInstalled {
+                Text("已安装")
+                    .font(.system(size: 13)).bold()
+                    .foregroundColor(.white)
+                    .frame(height: 30)
+                    .padding(.horizontal, 10)
+                    .background(Capsule().fill(Color.green))
+                    .clipShape(Capsule())
+            } else if !isPlugin && isInstalled && hasUpdate {
+                Button {
+                    onInstall()
+                } label: {
+                    Text("更新")
+                        .font(.system(size: 13)).bold()
+                        .foregroundColor(.white)
+                        .frame(height: 30)
+                        .padding(.horizontal, 10)
+                }
+                .buttonStyle(BasicButtonStyle())
+                .background(Capsule().fill(Color.orange))
+                .clipShape(Capsule())
+            } else if !isPlugin && isInstalled {
+                Button {
+                    if let installedApp = installedAppModel {
+                        Task { try? await installedApp.runApp() }
+                    }
+                } label: {
+                    Text("打开")
+                        .font(.system(size: 13)).bold()
+                        .foregroundColor(.white)
+                        .frame(height: 30)
+                        .padding(.horizontal, 10)
+                }
+                .buttonStyle(BasicButtonStyle())
+                .background(Capsule().fill(Color.green))
+                .clipShape(Capsule())
+            } else {
+                Button {
+                    onInstall()
+                } label: {
+                    Text("安装")
+                        .font(.system(size: 13)).bold()
+                        .foregroundColor(.white)
+                        .frame(height: 30)
+                        .padding(.horizontal, 10)
+                }
+                .buttonStyle(BasicButtonStyle())
+                .background(Capsule().fill(Color.blue))
+                .clipShape(Capsule())
+            }
+        }
+        .padding(10)
+        .background {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.secondarySystemBackground))
+        }
     }
 }
 
