@@ -860,22 +860,22 @@ class AppInfoProvider {
     // 返回 true 表示本次判定触发了动作（边条 handler 据此做一次性触发）
     @discardableResult
     private func processGlobalSwipe(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
-        guard abs(translation.x) > 2 * abs(translation.y) else { return false }
+        guard abs(translation.x) > 1.5 * abs(translation.y) else { return false }
         let draggingRight = translation.x > 0
         if startEdge == 2 {
-            // 往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛30）
+            // 往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛24）
             if draggingRight {
                 guard translation.x > 10 else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
             } else {
-                guard abs(translation.x) > 30 else { return false }
+                guard abs(translation.x) > 24 else { return false }
                 fireDockAction { self.czfEdgeRightInward() }
             }
             return true
         } else if startEdge == 1 {
-            // 往右=唤出（门槛30），往左=打开 App 面板（往外滑，门槛10）
+            // 往右=唤出（门槛24），往左=打开 App 面板（往外滑，门槛10）
             if draggingRight {
-                guard translation.x > 30 else { return false }
+                guard translation.x > 24 else { return false }
                 fireDockAction { self.czfEdgeLeftInward() }
             } else {
                 guard abs(translation.x) > 10 else { return false }
@@ -883,8 +883,8 @@ class AppInfoProvider {
             }
             return true
         } else {
-            // 任意位置起手：拖到屏幕边缘、位移 >60 才算隐藏
-            guard abs(translation.x) > 60 else { return false }
+            // 任意位置起手：拖到屏幕边缘、位移 >50 才算隐藏
+            guard abs(translation.x) > 50 else { return false }
             if draggingRight && endX >= width - 30 {
                 fireDockAction { self.czfEdgeRightOutward() }
                 return true
@@ -957,13 +957,35 @@ class AppInfoProvider {
         hideDockToSide()
     }
 
-    // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再弹面板）
-    // 面板走窗口覆盖层（见 presentAllAppsPanel）：与快捷栏同一个机制。
+    // 左边缘往左滑（2026-10-21 用户改定）：有全屏窗口时先把最前的
+    // 全屏窗口还原成小窗口（面板在全屏下多版实测调不出来）；没有全屏
+    // 窗口时才开 App 面板（窗口覆盖层，见 presentAllAppsPanel）。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty else { return }
         if isDockHidden { showDockFromHidden() }
+        if czfUnmaximizeFrontmostWindow() { return }
         presentAllAppsPanel()
+    }
+
+    // 把最前面的全屏窗口还原成小窗口（等同点标题栏的绿色还原按钮，
+    // maximizeWindow 是切换开关，对已最大化的窗口调它即还原）。
+    // 前后次序按窗口在宿主视图里的层级定；返回 true 表示已还原。
+    private func czfUnmaximizeFrontmostWindow() -> Bool {
+        let subviews = windowHostingView.subviews
+        var best: (vc: DecoratedAppSceneViewController, z: Int)? = nil
+        for app in apps {
+            guard let view = app.view,
+                  let vc = view._viewDelegate() as? DecoratedAppSceneViewController,
+                  vc.isMaximized else { continue }
+            let z = subviews.firstIndex(where: { $0 === view }) ?? -1
+            if best == nil || z > best!.z {
+                best = (vc, z)
+            }
+        }
+        guard let target = best else { return false }
+        target.vc.maximizeWindow()
+        return true
     }
 
     // 建好手势面板覆盖层（只建一次，常驻窗口待命，和快捷栏同一个生命周期）。

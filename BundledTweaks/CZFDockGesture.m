@@ -10,8 +10,9 @@
 // 行为：只观察不拦截（cancelsTouchesInView=NO + 同时识别）。
 // 判定用「起手位置 + 当前位移」：滑动过程中持续判定，一过门槛立刻
 // 触发一次（不等抬指——往外滑手指很快出屏，抬指信号经常等不到）。
-// 门槛：往外滑（隐藏/面板）10pt，往里滑（唤出）30pt，
-// 任意位置起手拖到边缘需位移 >60pt（防误触）。
+// 门槛：往外滑（隐藏/面板）10pt，往里滑（唤出）24pt，
+// 任意位置起手拖到边缘需位移 >50pt（防误触）。
+// 方向判定：横向位移须大于纵向的 1.5 倍（原为 2 倍，斜向滑太容易被判掉）。
 // 不费电：无定时器（仅启动阶段几次延迟重试）、无轮询。
 
 #import <UIKit/UIKit.h>
@@ -81,7 +82,7 @@ static BOOL gCZFFired = NO;
     if (gCZFFired) return;
     if (gesture.state != UIGestureRecognizerStateChanged && gesture.state != UIGestureRecognizerStateEnded) return;
     CGPoint translation = [gesture translationInView:gesture.view];
-    if (fabs(translation.x) < 2 * fabs(translation.y)) return;
+    if (fabs(translation.x) < 1.5 * fabs(translation.y)) return;
     CGFloat endX = [gesture locationInView:gesture.view].x;
     CGFloat width = gesture.view.bounds.size.width;
     BOOL draggingRight = translation.x > 0;
@@ -89,20 +90,20 @@ static BOOL gCZFFired = NO;
     NSString *notificationName = nil;
     NSString *selectorName = nil;
     if (gCZFStartEdge == 2) {
-        // 起手在右边缘：往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛30）
+        // 起手在右边缘：往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛24）
         if (draggingRight) {
             if (absX <= 10) return;
             notificationName = @"czf.dock.rightOutward";
             selectorName = @"czfEdgeRightOutward";
         } else {
-            if (absX <= 30) return;
+            if (absX <= 24) return;
             notificationName = @"czf.dock.rightInward";
             selectorName = @"czfEdgeRightInward";
         }
     } else if (gCZFStartEdge == 1) {
-        // 起手在左边缘：往左=打开 App 面板（往外滑，门槛10），往右=唤出（门槛30）
+        // 起手在左边缘：往左=打开 App 面板（往外滑，门槛10），往右=唤出（门槛24）
         if (draggingRight) {
-            if (absX <= 30) return;
+            if (absX <= 24) return;
             notificationName = @"czf.dock.leftInward";
             selectorName = @"czfEdgeLeftInward";
         } else {
@@ -112,7 +113,7 @@ static BOOL gCZFFired = NO;
         }
     } else {
         // 任意位置起手：只有拖到屏幕边缘、位移够大才算隐藏（防误触）
-        if (absX <= 60) return;
+        if (absX <= 50) return;
         if (draggingRight && endX >= width - 30) {
             notificationName = @"czf.dock.rightOutward";
             selectorName = @"czfEdgeRightOutward";
