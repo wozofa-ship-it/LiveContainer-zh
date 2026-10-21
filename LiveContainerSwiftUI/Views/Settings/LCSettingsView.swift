@@ -480,9 +480,10 @@ struct LCSettingsView: View {
         for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
             let dest = folder.appendingPathComponent("CZFKeepAlive.dylib")
             if enabled {
-                let srcSize = (try? fm.attributesOfItem(atPath: src.path))?[.size] as? NSNumber
-                let destSize = (try? fm.attributesOfItem(atPath: dest.path))?[.size] as? NSNumber
-                if destSize != srcSize {
+                // 同手势插件部署：比内容不比大小，防同体积新构建部署不出去
+                let srcData = try? Data(contentsOf: src)
+                let destData = try? Data(contentsOf: dest)
+                if destData != srcData {
                     try? fm.removeItem(at: dest)
                     try? fm.copyItem(at: src, to: dest)
                 }

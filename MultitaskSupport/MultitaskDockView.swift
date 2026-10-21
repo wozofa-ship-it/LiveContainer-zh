@@ -961,44 +961,11 @@ class AppInfoProvider {
     // 2026-10-21 定案：左滑就是调面板，全屏同理，不用小窗口绕路
     //（#91 的先还原小窗口已删）。触发收不到的根因在插件侧（系统左
     // 边缘手势截走触摸），已由插件的 sendEvent 触摸漏斗修复。
-    // CZFDIAG：诊断埋点（验证本版修复后删除）。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
-        let maxNow = apps.filter { ($0.view?._viewDelegate() as? DecoratedAppSceneViewController)?.isMaximized == true }.count
-        czfDiagShow("STEP=entry\nvis=\(isVisible) apps=\(apps.count) maxNow=\(maxNow)\ndockHidden=\(isDockHidden) onRight=\(dockIsOnRightSide)")
-        guard isVisible || !apps.isEmpty else {
-            czfDiagShow("STEP=guardFail vis=\(isVisible) apps=\(apps.count)")
-            return
-        }
+        guard isVisible || !apps.isEmpty else { return }
         if isDockHidden { showDockFromHidden() }
         presentAllAppsPanel()
-    }
-
-    // CZFDIAG：诊断条（临时）：把触发瞬间的运行时状态贴在窗口顶部，
-    // 供截图回传定位。修复版连同所有 czfDiag 调用一并删除。
-    private var czfDiagLabel: UILabel?
-    private func czfDiagShow(_ text: String) {
-        DispatchQueue.main.async {
-            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
-            let label = self.czfDiagLabel ?? UILabel()
-            label.numberOfLines = 0
-            label.font = .monospacedSystemFont(ofSize: 12, weight: .bold)
-            label.textColor = .white
-            label.backgroundColor = UIColor.red.withAlphaComponent(0.88)
-            label.frame = CGRect(x: 8, y: 54, width: window.bounds.width - 16, height: 150)
-            label.text = text
-            if label.superview !== window {
-                window.addSubview(label)
-            }
-            window.bringSubviewToFront(label)
-            self.czfDiagLabel = label
-        }
-    }
-
-    // CZFDIAG：present 出口的覆盖层状态快照
-    private func czfPresentTrace(window: UIWindow, host: UIHostingController<AnyView>, opened: Bool, note: String) -> String {
-        let f = host.view.frame
-        return "STEP=present \(note) opened=\(opened)\nhid=\(host.view.isHidden) sup=\(host.view.superview != nil) sameWin=\(host.view.window === window)\nanchorDock=\(hostingController?.view.window != nil) scenes=\(UIApplication.shared.connectedScenes.count) wins=\(window.windowScene?.windows.count ?? -1)\nframe=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.width)),\(Int(f.height))) alpha=\(host.view.alpha)\nwinBounds=\(Int(window.bounds.width))x\(Int(window.bounds.height))"
     }
 
 
@@ -1048,20 +1015,11 @@ class AppInfoProvider {
 
     private func presentAllAppsPanel() {
         DispatchQueue.main.async {
-            guard let window = self.hostingController?.view.window ?? self.keyWindow else {
-                self.czfDiagShow("STEP=present FAIL=noWindow")
-                return
-            }
+            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
             self.ensurePanelOverlay(in: window)
-            guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else {
-                self.czfDiagShow("STEP=present FAIL=noOverlay")
-                return
-            }
+            guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else { return }
             // 已开着就不重复开（以视图真实状态为准）
-            if !host.view.isHidden {
-                self.czfDiagShow(self.czfPresentTrace(window: window, host: host, opened: false, note: "alreadyOpen"))
-                return
-            }
+            if !host.view.isHidden { return }
             // 保险：盖到最上层，并按当前窗口尺寸摆好起始位（屏幕下方）
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
@@ -1075,7 +1033,6 @@ class AppInfoProvider {
                 backdrop.alpha = 1
                 host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
             }
-            self.czfDiagShow(self.czfPresentTrace(window: window, host: host, opened: true, note: "opened"))
         }
     }
 
@@ -1132,12 +1089,14 @@ class AppInfoProvider {
     static func deployDockGestureTweak() {
         let fm = FileManager.default
         guard let src = Bundle.main.url(forResource: "CZFDockGesture", withExtension: "dylib") else { return }
+        // 必须比内容：旧版只比大小，同体积的不同构建被误判为已最新，
+        // 插件改了却部署不出去（#91/#93 两次真机测试因此作废）。
+        let srcData = try? Data(contentsOf: src)
         var copied = false
         for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
             let dest = folder.appendingPathComponent("CZFDockGesture.dylib")
-            let srcSize = (try? fm.attributesOfItem(atPath: src.path))?[.size] as? NSNumber
-            let destSize = (try? fm.attributesOfItem(atPath: dest.path))?[.size] as? NSNumber
-            if destSize != srcSize {
+            let destData = try? Data(contentsOf: dest)
+            if destData != srcData {
                 try? fm.removeItem(at: dest)
                 if (try? fm.copyItem(at: src, to: dest)) != nil {
                     copied = true
