@@ -975,7 +975,7 @@ class AppInfoProvider {
             let backdrop = UIView(frame: bounds)
             backdrop.backgroundColor = UIColor.black.withAlphaComponent(0.35)
             backdrop.alpha = 0
-            backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(czfPanelBackdropTapped)))
+            backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
             window.addSubview(backdrop)
             // 面板本体：底部 60% 高，上圆角，从底部滑入
             let rootView = AnyView(
