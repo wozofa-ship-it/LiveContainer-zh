@@ -966,9 +966,16 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             // 面板已在显示中：不重复呈现（连续左滑两次的情形）
             if let host = self.czfPanelHost, host.presentingViewController != nil { return }
-            guard let window = self.keyWindow else { return }
-            var presenter: UIViewController? = window.rootViewController
-            if presenter == nil { presenter = self.hostingController }
+            // 呈现者优先用快捷栏自己的宿主控制器：它所在的窗口就是全屏时
+            // 点蓝图标能弹出面板的那个窗口。#86 从主窗口根控制器呈现，
+            // 全屏时面板弹到了不顶层的窗口、被游客画面盖住（小窗口与主
+            // 窗口同窗，所以看起来正常）。
+            var presenter: UIViewController? = nil
+            if let hc = self.hostingController, hc.view.window != nil {
+                presenter = hc
+            } else {
+                presenter = self.keyWindow?.rootViewController
+            }
             while let presented = presenter?.presentedViewController {
                 presenter = presented
             }
