@@ -465,8 +465,18 @@ class LCAppModel: ObservableObject, Hashable {
         } else {
             tweakFolderUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
         }
-        // 单 App VPN（验证版）：签名之前按标记同步重定向插件
-        CZFVPNManager.syncProxyTweak(for: appInfo, tweakFolderUrl: tweakFolderUrl)
+        // 单 App VPN（验证版）：签名之前按标记同步重定向插件。
+        // 刚换上的新插件单独补一签（照手势插件的部署法）：批量
+        // 签名带指纹缓存，新文件有被误判"已验过"跳过的先例
+        // （真机出过签名无效被拒载），单独签没有缓存判断、必签。
+        if CZFVPNManager.syncProxyTweak(for: appInfo, tweakFolderUrl: tweakFolderUrl) {
+            let proxyUrl = tweakFolderUrl.appendingPathComponent("CZFProxy.dylib")
+            try? await LCUtils.signSingleTweakFile(proxyUrl)
+            if !checkCodeSignature((proxyUrl.path as NSString).utf8String) {
+                // 第一签验不过就再签一次（下面的批量签名还会再兜底）
+                try? await LCUtils.signSingleTweakFile(proxyUrl)
+            }
+        }
         try await LCUtils.signTweaks(tweakFolderUrl: tweakFolderUrl, force: force) { p in
             Task{ await MainActor.run {
                 self.isSigningInProgress = true

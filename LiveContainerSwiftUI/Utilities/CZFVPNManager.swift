@@ -50,7 +50,10 @@ public final class CZFVPNManager {
     // 按标记把 CZFProxy.dylib 同步进该 App 的专属插件目录：
     // 开着 → 内容不一致就拷入（随后 signTweaks 会签它）；
     // 关着 → 残留删掉。
-    public static func syncProxyTweak(for appInfo: LCAppInfo, tweakFolderUrl: URL) {
+    // 返回 true 表示这次换上了新插件文件——调用方要立刻给它
+    // 单独补一签（见 signApp 里的说明）
+    @discardableResult
+    public static func syncProxyTweak(for appInfo: LCAppInfo, tweakFolderUrl: URL) -> Bool {
         let dest = tweakFolderUrl.appendingPathComponent("CZFProxy.dylib")
         let fm = FileManager.default
         // 目录可能还不存在（自动建的 CZFVPN 目录名只有名字、没落盘），
@@ -58,16 +61,18 @@ public final class CZFVPNManager {
         // 整个 App 都打不开（真机实测）
         try? fm.createDirectory(at: tweakFolderUrl, withIntermediateDirectories: true)
         if isEnabled(for: appInfo) {
-            guard let src = Bundle.main.url(forResource: "CZFProxy", withExtension: "dylib") else { return }
+            guard let src = Bundle.main.url(forResource: "CZFProxy", withExtension: "dylib") else { return false }
             let srcData = try? Data(contentsOf: src)
             let destData = try? Data(contentsOf: dest)
             if destData != srcData {
                 try? fm.removeItem(at: dest)
                 try? fm.copyItem(at: src, to: dest)
+                return true
             }
         } else {
             try? fm.removeItem(at: dest)
         }
+        return false
     }
 
     // MARK: - 核心启停
