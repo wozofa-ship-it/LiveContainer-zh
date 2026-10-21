@@ -176,7 +176,11 @@ static BOOL CZFCoreAlive(void) {
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     double now = [NSDate timeIntervalSinceReferenceDate];
     pthread_mutex_lock(&lock);
-    double ttl = lastResult ? 5.0 : 2.0;
+    // "活着"的结论缓存 60 秒：核心跟着宿主进程走，活着时极少
+    // 中途死掉；缓存太短时偶发探活失败会让一批连接/会话漏掉
+    // 代理、直连卡死，表现为"抽风"。死了的结论只缓存 3 秒，
+    // 核心被重新拉起后能很快恢复。
+    double ttl = lastResult ? 60.0 : 3.0;
     if (now - lastCheck < ttl && lastCheck > 0) {
         BOOL r = lastResult;
         pthread_mutex_unlock(&lock);
@@ -187,7 +191,9 @@ static BOOL CZFCoreAlive(void) {
     BOOL alive = NO;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd >= 0) {
-        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        // 探活必须快：它卡在连接/建会话的必经之路上，超时压到
+        // 0.3 秒（回环握手正常是毫秒级，慢了就是核心不在状态）
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 300 * 1000 };
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         struct sockaddr_in addr;

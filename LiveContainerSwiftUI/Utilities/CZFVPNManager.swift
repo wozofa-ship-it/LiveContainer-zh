@@ -255,6 +255,12 @@ public final class CZFVPNManager {
                 "domainStrategy": "IPIfNonMatch",
                 "rules": [["type": "field", "inboundTag": ["socks-in", "http-in"], "outboundTag": "node"]],
             ],
+            // 隧道闲置保活拉长到 600 秒（默认 300）：X 这类间歇
+            // 小请求的 App 隔几分钟用一次，隧道被回收就要重付
+            // 一次跨欧握手，表现为时快时慢
+            "policy": [
+                "levels": ["0": ["connIdle": 600, "handshake": 4] as [String: Any]],
+            ],
         ]
         guard let cfgData = try? JSONSerialization.data(withJSONObject: config),
               let cfgStr = String(data: cfgData, encoding: .utf8) else {
