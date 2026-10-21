@@ -65,8 +65,13 @@ static volatile int64_t gStatConnPass = 0;
 static volatile int64_t gStatConnx = 0;
 static double gLastStatWrite = 0;
 static pthread_mutex_t gStatLock = PTHREAD_MUTEX_INITIALIZER;
+// 统计按 App 分文件（CZFProxyStats-<包名>.txt）：所有开了
+// VPN 又没专属目录的 App 共用同一个插件目录，写同一个文件
+// 会互相覆盖，根本分不清是谁的数字（真机实测踩到）。
+static NSString *gStatsPath = nil;
 
 static void CZFWriteStats(BOOL force) {
+    if (!gStatsPath) return;
     double now = [NSDate timeIntervalSinceReferenceDate];
     pthread_mutex_lock(&gStatLock);
     if (!force && now - gLastStatWrite < 1.5) {
@@ -77,12 +82,7 @@ static void CZFWriteStats(BOOL force) {
     pthread_mutex_unlock(&gStatLock);
     NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld",
         gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx];
-    Dl_info info;
-    if (dladdr((const void *)CZFConnect, &info) && info.dli_fname) {
-        NSString *dir = [[NSString stringWithUTF8String:info.dli_fname] stringByDeletingLastPathComponent];
-        [text writeToFile:[dir stringByAppendingPathComponent:@"CZFProxyStats.txt"]
-               atomically:NO encoding:NSUTF8StringEncoding error:nil];
-    }
+    [text writeToFile:gStatsPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
 }
 
 // MARK: - 域名 ↔ fake-IP 映射表
@@ -436,6 +436,13 @@ __attribute__((constructor))
 static void CZFProxyInit(void) {
     gIPByHost = [NSMutableDictionary dictionary];
     gHostByIP = [NSMutableDictionary dictionary];
+    // 先定好本 App 的统计文件路径（构造器最开始，后面钩子随时能写）
+    Dl_info selfInfo;
+    if (dladdr((const void *)CZFProxyInit, &selfInfo) && selfInfo.dli_fname) {
+        NSString *dir = [[NSString stringWithUTF8String:selfInfo.dli_fname] stringByDeletingLastPathComponent];
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown";
+        gStatsPath = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"CZFProxyStats-%@.txt", bid]];
+    }
     orig_connect = (int (*)(int, const struct sockaddr *, socklen_t))dlsym(RTLD_DEFAULT, "connect");
     orig_getaddrinfo = (int (*)(const char *, const char *, const struct addrinfo *, struct addrinfo **))dlsym(RTLD_DEFAULT, "getaddrinfo");
     orig_connectx = (int (*)(int, const void *, uint32_t, unsigned int, const void *, unsigned int, size_t *, uint32_t *))dlsym(RTLD_DEFAULT, "connectx");
