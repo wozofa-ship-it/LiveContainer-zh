@@ -66,9 +66,11 @@ struct LCSettingsView: View {
     @AppStorage("LCKeepSelectedWhenQuit") var keepSelectedWhenQuit = false
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
     @AppStorage("LCKeepAliveEnabled") var keepAliveEnabled = false
-    @AppStorage("CZFVPNNodeLink") var vpnNodeLink = ""
     @State var vpnCoreRunning = false
     @State var vpnStatusMessage: String?
+    @State var vpnNewNodeText = ""
+    @State var vpnNodes: [String] = []
+    @State var vpnActiveIndex = 0
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
     
@@ -300,8 +302,45 @@ struct LCSettingsView: View {
                 }
 
                 Section {
-                    TextField("粘贴节点链接（vless://…）", text: $vpnNodeLink)
-                        .textInputAutocapitalization(.never)
+                    HStack {
+                        TextField("粘贴节点链接（vless://…）", text: $vpnNewNodeText)
+                            .textInputAutocapitalization(.never)
+                        Button("添加") {
+                            CZFVPNManager.shared.addNode(vpnNewNodeText)
+                            vpnNewNodeText = ""
+                            refreshVPNState()
+                        }
+                        .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    ForEach(Array(vpnNodes.enumerated()), id: \.offset) { index, link in
+                        Button {
+                            CZFVPNManager.shared.setActiveNode(at: index)
+                            refreshVPNState()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(CZFVPNManager.nodeDisplay(for: link).name)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(CZFVPNManager.nodeDisplay(for: link).detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.gray)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                if index == vpnActiveIndex {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+                        }
+                    }
+                    .onDelete { offsets in
+                        for i in offsets.sorted(by: >) {
+                            CZFVPNManager.shared.removeNode(at: i)
+                        }
+                        refreshVPNState()
+                    }
                     HStack {
                         Button(vpnCoreRunning ? "停止核心" : "启动核心") {
                             if vpnCoreRunning {
@@ -309,8 +348,7 @@ struct LCSettingsView: View {
                             } else {
                                 _ = CZFVPNManager.shared.start()
                             }
-                            vpnCoreRunning = CZFVPNManager.shared.isRunning
-                            vpnStatusMessage = CZFVPNManager.shared.lastError
+                            refreshVPNState()
                         }
                         Spacer()
                         Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
@@ -318,13 +356,12 @@ struct LCSettingsView: View {
                             .foregroundStyle(.gray)
                     }
                     .onAppear {
-                        vpnCoreRunning = CZFVPNManager.shared.isRunning
-                        vpnStatusMessage = CZFVPNManager.shared.lastError
+                        refreshVPNState()
                     }
                 } header: {
-                    Text("单App VPN（验证版）")
+                    Text("单App VPN")
                 } footer: {
-                    Text("给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」。被标记的 App 打开时核心会自动启动，这里也能手动启停测试。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑可删。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。")
                 }
                 
                 Section {
@@ -529,6 +566,13 @@ struct LCSettingsView: View {
                 try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
             }
         }
+    }
+
+    func refreshVPNState() {
+        vpnNodes = CZFVPNManager.shared.nodeLinks
+        vpnActiveIndex = CZFVPNManager.shared.activeNodeIndex
+        vpnCoreRunning = CZFVPNManager.shared.isRunning
+        vpnStatusMessage = CZFVPNManager.shared.lastError
     }
 
     func openGitHub() {

@@ -21,18 +21,110 @@ public final class CZFVPNManager {
 
     public static let socksPort = 10827
     private static let nodeLinkKey = "CZFVPNNodeLink"
+    private static let nodeListKey = "CZFVPNNodeLinks"
+    private static let activeNodeKey = "CZFVPNActiveNodeIndex"
     private static let enabledKeyPrefix = "CZFVPNEnabled-"
 
     public private(set) var isRunning = false
     private var runningLink: String?
     public private(set) var lastError: String?
+    // 核心自动停：被标记 App 全部关掉后延迟停核心（见
+    // noteRunningAppsChanged）；防抖靠"最近一次被标记 App
+    // 启动时间"+ 60 秒延迟双保险，避免 App 重启时反复启停
+    private var pendingStopWork: DispatchWorkItem?
+    private var lastFlaggedLaunchAt = Date.distantPast
 
     private init() {}
 
     // MARK: - 节点与标记（UserDefaults 存储）
 
+    // 节点列表：老版本只存过单个链接，首次读时自动迁移成列表，
+    // 用户原来填的节点不丢
+    public var nodeLinks: [String] {
+        if let saved = UserDefaults.standard.array(forKey: Self.nodeListKey) as? [String] {
+            return saved
+        }
+        let legacy = UserDefaults.standard.string(forKey: Self.nodeLinkKey) ?? ""
+        let migrated = legacy.isEmpty ? [] : [legacy]
+        UserDefaults.standard.set(migrated, forKey: Self.nodeListKey)
+        return migrated
+    }
+
+    public var activeNodeIndex: Int {
+        let links = nodeLinks
+        guard !links.isEmpty else { return 0 }
+        let idx = UserDefaults.standard.integer(forKey: Self.activeNodeKey)
+        return min(max(idx, 0), links.count - 1)
+    }
+
+    // 当前生效的节点链接（start/ensureRunning 都读它）
     public var nodeLink: String {
-        UserDefaults.standard.string(forKey: Self.nodeLinkKey) ?? ""
+        let links = nodeLinks
+        guard !links.isEmpty else { return "" }
+        return links[activeNodeIndex]
+    }
+
+    public func addNode(_ link: String) {
+        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var links = nodeLinks
+        if links.contains(trimmed) { return }
+        links.append(trimmed)
+        UserDefaults.standard.set(links, forKey: Self.nodeListKey)
+    }
+
+    public func removeNode(at index: Int) {
+        var links = nodeLinks
+        guard links.indices.contains(index) else { return }
+        // 先记住当前活动节点是哪条：删掉它前面的节点会让后面的
+        // 往前挪，按下标存的选中项会悄悄换人，删完要按内容找回
+        let previousActive = nodeLink
+        links.remove(at: index)
+        UserDefaults.standard.set(links, forKey: Self.nodeListKey)
+        if let newIdx = links.firstIndex(of: previousActive) {
+            UserDefaults.standard.set(newIdx, forKey: Self.activeNodeKey)
+        } else {
+            UserDefaults.standard.set(max(links.count - 1, 0), forKey: Self.activeNodeKey)
+        }
+        applyActiveNodeChange()
+    }
+
+    public func setActiveNode(at index: Int) {
+        guard nodeLinks.indices.contains(index) else { return }
+        UserDefaults.standard.set(index, forKey: Self.activeNodeKey)
+        applyActiveNodeChange()
+    }
+
+    // 活动节点变了而核心在跑：立刻按新节点重启（改完即生效）；
+    // 没有可用节点了就停掉
+    private func applyActiveNodeChange() {
+        guard isRunning else { return }
+        if nodeLink.isEmpty {
+            stop()
+        } else if runningLink != nodeLink {
+            _ = start()
+        }
+    }
+
+    // 节点显示名：优先链接里的备注（标准格式的 # 片段；老格式
+    // 经 normalizedShareLink 后 remarks 也会落到片段里），其次
+    // 是 地址:端口——列表里一眼能认出是哪个节点
+    public static func nodeDisplay(for link: String) -> (name: String, detail: String) {
+        let std = normalizedShareLink(link)
+        var name = ""
+        var detail = ""
+        if let comps = URLComponents(string: std) {
+            if let frag = comps.fragment, !frag.isEmpty {
+                name = frag
+            }
+            if let host = comps.host, !host.isEmpty {
+                detail = comps.port.map { "\(host):\($0)" } ?? host
+            }
+        }
+        if name.isEmpty {
+            name = detail.isEmpty ? "节点" : detail
+        }
+        return (name, detail)
     }
 
     public static func isEnabled(for appInfo: LCAppInfo) -> Bool {
@@ -81,10 +173,34 @@ public final class CZFVPNManager {
     // 失败只记 lastError 不抛——游客侧插件有 fail-open，核心不
     // 在时 App 直连不断网。
     public func ensureRunning() {
+        // 有被标记 App 在启动：取消待执行的自动停，并记下时间
+        pendingStopWork?.cancel()
+        pendingStopWork = nil
+        lastFlaggedLaunchAt = Date()
         let link = nodeLink.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !link.isEmpty else { return }
         if isRunning && runningLink == link { return }
         _ = start()
+    }
+
+    // 多任务列表变化后由 MultitaskDockManager 调用：还在跑的
+    // App 里已经没有被标记的了，就排一个 60 秒后的停核心；
+    // 期间有被标记 App 起来（ensureRunning 会取消）就不停
+    public func noteRunningAppsChanged(stillHasFlagged: Bool) {
+        if stillHasFlagged {
+            pendingStopWork?.cancel()
+            pendingStopWork = nil
+            return
+        }
+        guard isRunning else { return }
+        pendingStopWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isRunning else { return }
+            if Date().timeIntervalSince(self.lastFlaggedLaunchAt) < 60 { return }
+            self.stop()
+        }
+        pendingStopWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
     }
 
     @discardableResult

@@ -457,12 +457,20 @@ class AppInfoProvider {
         
         DispatchQueue.main.async {
             self.apps.removeAll { $0.appUUID == appUUID }
-            
+
             if self.apps.isEmpty {
                 self.hideDock()
             } else if self.isVisible {
                 self.updateDockFrame()
             }
+
+            // 单 App VPN 核心自动停：还在跑的 App 里没有被标记
+            // 的了，通知管理器排队停核心（它内部有防抖）
+            let stillHasFlagged = self.apps.contains { app in
+                guard let info = app.appInfo else { return false }
+                return CZFVPNManager.isEnabled(for: info)
+            }
+            CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: stillHasFlagged)
         }
     }
     
