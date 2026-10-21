@@ -45,6 +45,45 @@
 
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int (*orig_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
+// connectx 的参数全是指针/32 位整数，用 ABI 等价的不透明
+// 签名声明，避免依赖系统头里冷门的 sa_endpoints_t 等 typedef
+static int (*orig_connectx)(int, const void *, uint32_t, unsigned int, const void *, unsigned int, size_t *, uint32_t *);
+
+static int CZFConnect(int, const struct sockaddr *, socklen_t);
+
+// MARK: - 运行统计
+// 计数写到插件同目录的 CZFProxyStats.txt，宿主在该 App 的
+// 设置页读出来显示——用来一眼分清"插件没干活/某类连接没
+// 被拦到/拦到了但没连通"，不再靠猜。
+static volatile int64_t gStatLoads = 0;
+static volatile int64_t gStatGaiFake = 0;
+static volatile int64_t gStatGaiPass = 0;
+static volatile int64_t gStatConnProxied = 0;
+static volatile int64_t gStatConnDirect = 0;
+static volatile int64_t gStatConnFailed = 0;
+static volatile int64_t gStatConnPass = 0;
+static volatile int64_t gStatConnx = 0;
+static double gLastStatWrite = 0;
+static pthread_mutex_t gStatLock = PTHREAD_MUTEX_INITIALIZER;
+
+static void CZFWriteStats(BOOL force) {
+    double now = [NSDate timeIntervalSinceReferenceDate];
+    pthread_mutex_lock(&gStatLock);
+    if (!force && now - gLastStatWrite < 1.5) {
+        pthread_mutex_unlock(&gStatLock);
+        return;
+    }
+    gLastStatWrite = now;
+    pthread_mutex_unlock(&gStatLock);
+    NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld",
+        gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx];
+    Dl_info info;
+    if (dladdr((const void *)CZFConnect, &info) && info.dli_fname) {
+        NSString *dir = [[NSString stringWithUTF8String:info.dli_fname] stringByDeletingLastPathComponent];
+        [text writeToFile:[dir stringByAppendingPathComponent:@"CZFProxyStats.txt"]
+               atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    }
+}
 
 // MARK: - 域名 ↔ fake-IP 映射表
 
@@ -222,12 +261,14 @@ static BOOL CZFSocksRequest(int fd, NSString *hostOrNil, uint32_t ipHostOrder, u
 
 static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (!addr || addr->sa_family != AF_INET) {
+        __sync_add_and_fetch(&gStatConnPass, 1);
         return orig_connect(sockfd, addr, addrlen);
     }
     const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
     uint32_t ip = ntohl(sin->sin_addr.s_addr);
 
     if (CZFIsPrivateOrLoopback(ip)) {
+        __sync_add_and_fetch(&gStatConnPass, 1);
         return orig_connect(sockfd, addr, addrlen);
     }
     // 只代理 TCP 流套接字：UDP 的 connect 只是给数据包定个默认
@@ -235,10 +276,13 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
     int sockType = 0;
     socklen_t sockTypeLen = sizeof(sockType);
     if (getsockopt(sockfd, SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen) != 0 || sockType != SOCK_STREAM) {
+        __sync_add_and_fetch(&gStatConnPass, 1);
         return orig_connect(sockfd, addr, addrlen);
     }
     if (!CZFCoreAlive()) {
         // 核心不在：fail-open 直连，App 不断网
+        __sync_add_and_fetch(&gStatConnDirect, 1);
+        CZFWriteStats(NO);
         return orig_connect(sockfd, addr, addrlen);
     }
 
@@ -287,8 +331,21 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         // fd 已连到 SOCKS 口但请求失败时，这个 fd 没法再改作直连，
         // 如实返回失败（语义=经 VPN 不可达，与普通连接失败无异）。
         errno = savedErrno;
+        __sync_add_and_fetch(&gStatConnFailed, 1);
+    } else {
+        __sync_add_and_fetch(&gStatConnProxied, 1);
     }
+    CZFWriteStats(NO);
     return result;
+}
+
+// connectx 只观察不拦截：新式网络栈（Network.framework）发
+// 起连接走的是这个接口而不是 connect，先数它到底来不来、
+// 来多少，确认后再决定要不要代理它。
+static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, const void *iov, unsigned int iovcnt, size_t *len, uint32_t *cid) {
+    __sync_add_and_fetch(&gStatConnx, 1);
+    CZFWriteStats(NO);
+    return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
 }
 
 // MARK: - getaddrinfo 钩子
@@ -304,6 +361,8 @@ static uint16_t CZFPortFromService(const char *service) {
 }
 
 static int CZFGetAddrInfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
+    // gaiPass 记总调用数，gaiFake 记其中被换成假 IP 的次数
+    __sync_add_and_fetch(&gStatGaiPass, 1);
     if (!node || !*node) {
         return orig_getaddrinfo(node, service, hints, res);
     }
@@ -360,6 +419,8 @@ static int CZFGetAddrInfo(const char *node, const char *service, const struct ad
     // 链是手工 calloc 的，系统 freeaddrinfo 按 ai_addr/ai_canonname/
     // 节点逐个 free，正好对得上（POSIX 布局）。
     *res = ai;
+    __sync_add_and_fetch(&gStatGaiFake, 1);
+    CZFWriteStats(NO);
     return 0;
 }
 
@@ -377,11 +438,17 @@ static void CZFProxyInit(void) {
     gHostByIP = [NSMutableDictionary dictionary];
     orig_connect = (int (*)(int, const struct sockaddr *, socklen_t))dlsym(RTLD_DEFAULT, "connect");
     orig_getaddrinfo = (int (*)(const char *, const char *, const struct addrinfo *, struct addrinfo **))dlsym(RTLD_DEFAULT, "getaddrinfo");
+    orig_connectx = (int (*)(int, const void *, uint32_t, unsigned int, const void *, unsigned int, size_t *, uint32_t *))dlsym(RTLD_DEFAULT, "connectx");
     if (orig_connect) {
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_connect, (void *)CZFConnect, NULL);
     }
     if (orig_getaddrinfo) {
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_getaddrinfo, (void *)CZFGetAddrInfo, NULL);
     }
+    if (orig_connectx) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_connectx, (void *)CZFConnectx, NULL);
+    }
+    __sync_add_and_fetch(&gStatLoads, 1);
+    CZFWriteStats(YES);
     NSLog(@"[CZFProxy] 已加载：本 App 流量将经 127.0.0.1:%d 的 SOCKS 核心出网（核心不在时直连）", CZF_SOCKS_PORT);
 }

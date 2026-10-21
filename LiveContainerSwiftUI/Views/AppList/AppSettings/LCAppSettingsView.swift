@@ -306,6 +306,11 @@ struct LCAppSettingsView: View {
                 )) {
                     Text("VPN 打开（内置节点）")
                 }
+                if let stats = CZFVPNManager.proxyStatsText(for: model.appInfo) {
+                    Text(stats)
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                }
             } header: {
                 Text("单App VPN（验证版）")
             } footer: {

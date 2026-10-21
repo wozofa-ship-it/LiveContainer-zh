@@ -236,6 +236,22 @@ public final class CZFVPNManager {
         return result
     }
 
+    // 读游客插件写的运行统计（插件同目录的 CZFProxyStats.txt），
+    // 供 App 设置页显示：插件到底干了多少活、哪类连接没被拦到
+    public static func proxyStatsText(for appInfo: LCAppInfo) -> String? {
+        guard let folderName = appInfo.tweakFolder ?? (isEnabled(for: appInfo) ? "CZFVPN" : nil) else { return nil }
+        let base = appInfo.isShared ? LCPath.lcGroupTweakPath : LCPath.tweakPath
+        let url = base.appendingPathComponent(folderName).appendingPathComponent("CZFProxyStats.txt")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        var dict: [String: String] = [:]
+        for part in raw.split(separator: " ") {
+            let kv = part.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 { dict[String(kv[0])] = String(kv[1]) }
+        }
+        guard dict["load"] != nil else { return nil }
+        return "插件统计：解析共 \(dict["gaiPass"] ?? "0") 次（假IP \(dict["gaiFake"] ?? "0")）· 代理连接 \(dict["proxied"] ?? "0") · 失败 \(dict["failed"] ?? "0") · 直连 \(dict["direct"] ?? "0") · 放行 \(dict["pass"] ?? "0") · connectx \(dict["connectx"] ?? "0")"
+    }
+
     // MARK: - libXray 调用
 
     private func invokeError(from resp: [String: Any]?) -> String? {
