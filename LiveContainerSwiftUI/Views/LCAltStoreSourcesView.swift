@@ -1070,6 +1070,7 @@ private struct LCSourceAppBanner: View {
     @Environment(\.colorScheme) var colorScheme
     @EnvironmentObject private var sharedModel: SharedModel
     @State private var showDetail = false
+    @State private var copiedCardURL = false
     
     private var isInstalled: Bool {
         (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
@@ -1173,6 +1174,19 @@ private struct LCSourceAppBanner: View {
             }
             .allowsHitTesting(false)
             Spacer()
+            // 卡片上可见的复制按钮：点一下复制该 App 的下载地址
+            if let downloadURL = app.latestVersion?.downloadURL {
+                Button {
+                    UIPasteboard.general.string = downloadURL.absoluteString
+                    copiedCardURL = true
+                } label: {
+                    Image(systemName: copiedCardURL ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(textColor)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(BasicButtonStyle())
+            }
             if isBatchMode {
                 Button {
                     onToggleSelect()
@@ -1295,14 +1309,6 @@ private struct LCSourceAppBanner: View {
         }
         .sheet(isPresented: $showDetail) {
             LCSourceAppDetailView(app: app, source: source)
-        }
-        // 长按卡片直接复制该 App 的下载地址（不用点进详情页）
-        .contextMenu {
-            if let downloadURL = app.latestVersion?.downloadURL {
-                Button("复制下载地址", systemImage: "doc.on.doc") {
-                    UIPasteboard.general.string = downloadURL.absoluteString
-                }
-            }
         }
     }
 }

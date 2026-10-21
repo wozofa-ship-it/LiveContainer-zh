@@ -296,6 +296,12 @@
             [self.view layoutIfNeeded];
         } completion:^(BOOL finished) {
             self.isMaximized = NO;
+            // 还原成小窗口后必须重算标题栏显隐：最大化时若快捷栏是
+            // 收起的，栏被自动藏了（沉浸全屏）；不重算的话还原后栏
+            // 永久卡在隐藏——拖动和最大/最小化按钮都在栏上，窗口
+            // 就成了拖不动、关不掉的死窗。最大化分支有重算，还原
+            // 分支漏了，这里补上。
+            [self updateVerticalConstraints];
             UIImage *maximizeImage = [UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right.circle"];
             UIImageConfiguration *maximizeConfig = [UIImageSymbolConfiguration configurationWithPointSize:16.0 weight:UIImageSymbolWeightMedium];
             self.maximizeButton.image = [maximizeImage imageWithConfiguration:maximizeConfig];
