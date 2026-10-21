@@ -83,8 +83,8 @@ jobs:
           clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -mios-version-min=14.0 -fobjc-arc -dynamiclib \
             -framework Foundation \
-            -I BundledTweaks \
-            -o CZFProxy.dylib BundledTweaks/CZFProxy.m BundledTweaks/fishhook.c
+            -I litehook/src -I litehook/external/include \
+            -o CZFProxy.dylib BundledTweaks/CZFProxy.m litehook/src/litehook.c
           cp CZFProxy.dylib "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFProxy.dylib"
           ls -la "$archive_path.xcarchive/Products/Applications/LiveContainer.app/CZFProxy.dylib"
       - name: Tar Build Artifact

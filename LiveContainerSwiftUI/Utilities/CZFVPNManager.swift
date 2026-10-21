@@ -53,6 +53,10 @@ public final class CZFVPNManager {
     public static func syncProxyTweak(for appInfo: LCAppInfo, tweakFolderUrl: URL) {
         let dest = tweakFolderUrl.appendingPathComponent("CZFProxy.dylib")
         let fm = FileManager.default
+        // 目录可能还不存在（自动建的 CZFVPN 目录名只有名字、没落盘），
+        // 先建出来——不建的话随后 signTweaks 枚举目录会直接报错，
+        // 整个 App 都打不开（真机实测）
+        try? fm.createDirectory(at: tweakFolderUrl, withIntermediateDirectories: true)
         if isEnabled(for: appInfo) {
             guard let src = Bundle.main.url(forResource: "CZFProxy", withExtension: "dylib") else { return }
             let srcData = try? Data(contentsOf: src)
@@ -172,10 +176,19 @@ public final class CZFVPNManager {
         }
         let encryption = group(1), uuid = group(2), host = group(3), port = group(4)
 
+        // 查询参数手动切分（不走 URLComponents：它对这种 base64
+        // 当主机名的怪链接有整串拒绝的先例，参数会丢）
         var query: [String: String] = [:]
-        if let comps = URLComponents(string: link) {
-            for item in comps.queryItems ?? [] {
-                query[item.name] = item.value ?? ""
+        if let qStart = link.firstIndex(of: "?") {
+            var qStr = link[link.index(after: qStart)...]
+            if let hashIdx = qStr.firstIndex(of: "#") {
+                qStr = qStr[..<hashIdx]
+            }
+            for pair in qStr.split(separator: "&") {
+                let parts = pair.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 {
+                    query[String(parts[0])] = String(parts[1]).removingPercentEncoding ?? String(parts[1])
+                }
             }
         }
 

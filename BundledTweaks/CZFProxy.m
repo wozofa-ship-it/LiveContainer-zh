@@ -35,7 +35,8 @@
 #import <string.h>
 #import <stdlib.h>
 #import <mach-o/dyld.h>
-#import "fishhook.h"
+#import <dlfcn.h>
+#import "litehook.h"
 
 #define CZF_SOCKS_PORT 10827
 // fake-IP 段 198.18.0.0/15 是 RFC 2544 基准测试保留段，
@@ -229,6 +230,13 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
     if (CZFIsPrivateOrLoopback(ip)) {
         return orig_connect(sockfd, addr, addrlen);
     }
+    // 只代理 TCP 流套接字：UDP 的 connect 只是给数据包定个默认
+    // 去向（QUIC 全靠它），拿去做 SOCKS 握手只会把它卡死——原样放行。
+    int sockType = 0;
+    socklen_t sockTypeLen = sizeof(sockType);
+    if (getsockopt(sockfd, SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen) != 0 || sockType != SOCK_STREAM) {
+        return orig_connect(sockfd, addr, addrlen);
+    }
     if (!CZFCoreAlive()) {
         // 核心不在：fail-open 直连，App 不断网
         return orig_connect(sockfd, addr, addrlen);
@@ -357,29 +365,23 @@ static int CZFGetAddrInfo(const char *node, const char *service, const struct ad
 
 // MARK: - 安装
 
-// fishhook 的全局 rebind 只覆盖已加载镜像；App 运行中还会懒加载
-// 框架。用 dyld 新镜像回调逐个补挂，并用已处理集合防重复挂
-// （重复挂会把保存的原函数指针覆盖成替换函数自己，无限递归）。
-static NSMutableSet<NSValue *> *gProcessedImages;
-
-static void CZFRebindForImage(const struct mach_header *header, intptr_t slide) {
-    NSValue *key = [NSValue valueWithPointer:header];
-    @synchronized (gProcessedImages) {
-        if ([gProcessedImages containsObject:key]) return;
-        [gProcessedImages addObject:key];
-    }
-    struct rebinding r[2] = {
-        {"connect", (void *)CZFConnect, (void **)&orig_connect},
-        {"getaddrinfo", (void *)CZFGetAddrInfo, (void **)&orig_getaddrinfo},
-    };
-    rebind_symbols_image((void *)header, slide, r, 2);
-}
-
+// litehook 全局重绑：覆盖全部镜像（含运行中懒加载的框架，它
+// 内部注册了 dyld 新镜像回调补挂），且能处理现代 App 的链式
+// 绑定格式——fishhook 在那种格式下找不到符号槽、钩子根本不
+// 生效（真机表现为开了 VPN 和没开一样）。原函数在重绑之前
+// 用 dlsym 拿函数直址存好：直址调用不经任何符号槽，既不
+// 会递归、也不受重绑影响。
 __attribute__((constructor))
 static void CZFProxyInit(void) {
     gIPByHost = [NSMutableDictionary dictionary];
     gHostByIP = [NSMutableDictionary dictionary];
-    gProcessedImages = [NSMutableSet set];
-    _dyld_register_func_for_add_image(CZFRebindForImage);
+    orig_connect = (int (*)(int, const struct sockaddr *, socklen_t))dlsym(RTLD_DEFAULT, "connect");
+    orig_getaddrinfo = (int (*)(const char *, const char *, const struct addrinfo *, struct addrinfo **))dlsym(RTLD_DEFAULT, "getaddrinfo");
+    if (orig_connect) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_connect, (void *)CZFConnect, NULL);
+    }
+    if (orig_getaddrinfo) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_getaddrinfo, (void *)CZFGetAddrInfo, NULL);
+    }
     NSLog(@"[CZFProxy] 已加载：本 App 流量将经 127.0.0.1:%d 的 SOCKS 核心出网（核心不在时直连）", CZF_SOCKS_PORT);
 }
