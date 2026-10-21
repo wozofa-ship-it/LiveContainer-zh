@@ -14,6 +14,12 @@
 // 任意位置起手拖到边缘需位移 >50pt（防误触）。
 // 方向判定：横向位移须大于纵向的 1.5 倍（原为 2 倍，斜向滑太容易被判掉）。
 // 不费电：无定时器（仅启动阶段几次延迟重试）、无轮询。
+//
+// 左边缘另有「触摸漏斗」（见文件后半）：最大化时左边缘往左滑，pan
+// 识别器收不到触摸——每个 App 都有系统左边缘返回手势，短促滑动时
+// 触摸先被它判走（多个 App 实测一致；右边缘无此手势故一直正常）。
+// 漏斗 hook 窗口 sendEvent，在识别器仲裁之前直读原始触摸判定，
+// 与识别器路径共用同一发信号方法，信号完全一致。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -27,6 +33,7 @@ static BOOL gCZFFired = NO;
 @interface CZFDockGestureHandler : NSObject <UIGestureRecognizerDelegate>
 + (instancetype)shared;
 - (void)installOnWindow:(UIWindow *)window;
+- (void)czfPostNotification:(NSString *)notificationName selectorName:(NSString *)selectorName;
 @end
 
 @implementation CZFDockGestureHandler
@@ -125,6 +132,12 @@ static BOOL gCZFFired = NO;
         }
     }
     gCZFFired = YES;
+    [self czfPostNotification:notificationName selectorName:selectorName];
+}
+
+// 发信号：轻震标记 + Darwin 跨进程通知 + 同进程兜底直调。
+// 识别器路径与触摸漏斗路径共用此方法，保证两条路信号完全一致。
+- (void)czfPostNotification:(NSString *)notificationName selectorName:(NSString *)selectorName {
     // 诊断标记：识别到合格拖动先轻震一下（证明插件侧收到手势）
     UIImpactFeedbackGenerator *buzz = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [buzz impactOccurred];
@@ -149,6 +162,76 @@ static BOOL gCZFFired = NO;
 
 @end
 
+// ===== 左边缘触摸漏斗（根因修复，见文件头注释）=====
+static NSMutableDictionary *gCZFTouchStates = nil;
+static NSTimeInterval gCZFLastFunnelFire = 0;
+
+static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
+    if (event.type != UIEventTypeTouches) return;
+    if (!gCZFTouchStates) {
+        gCZFTouchStates = [[NSMutableDictionary alloc] init];
+    }
+    for (UITouch *touch in [event touchesForWindow:window]) {
+        NSValue *key = [NSValue valueWithPointer:(const void *)touch];
+        CGPoint loc = [touch locationInView:window];
+        switch (touch.phase) {
+            case UITouchPhaseBegan: {
+                if (loc.x <= 64) {
+                    gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO ];
+                }
+                break;
+            }
+            case UITouchPhaseMoved: {
+                NSArray *state = gCZFTouchStates[key];
+                if (!state || [state[2] boolValue]) break;
+                CGFloat dx = loc.x - [state[0] doubleValue];
+                CGFloat dy = loc.y - [state[1] doubleValue];
+                if (dx <= -12 && fabs(dx) > 1.2 * fabs(dy)) {
+                    gCZFTouchStates[key] = @[ state[0], state[1], @YES ];
+                    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+                    if (now - gCZFLastFunnelFire < 0.6) break;
+                    gCZFLastFunnelFire = now;
+                    [[CZFDockGestureHandler shared] czfPostNotification:@"czf.dock.openPanel" selectorName:@"czfOpenAppPanel"];
+                }
+                break;
+            }
+            case UITouchPhaseEnded:
+            case UITouchPhaseCancelled: {
+                [gCZFTouchStates removeObjectForKey:key];
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+@interface UIWindow (CZFDockGestureFunnel)
+- (void)czf_sendEvent:(UIEvent *)event;
+@end
+
+@implementation UIWindow (CZFDockGestureFunnel)
+- (void)czf_sendEvent:(UIEvent *)event {
+    // 交换后本方法即原实现：先原样转发，再纯观察（绝不拦截/改事件）
+    [self czf_sendEvent:event];
+    @try {
+        CZFFunnelObserve(self, event);
+    } @catch (NSException *exception) {
+    }
+}
+@end
+
+static void CZFInstallSendEventHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Method orig = class_getInstanceMethod([UIWindow class], @selector(sendEvent:));
+        Method hook = class_getInstanceMethod([UIWindow class], @selector(czf_sendEvent:));
+        if (orig && hook) {
+            method_exchangeImplementations(orig, hook);
+        }
+    });
+}
+
 static void CZFDockGestureTryInstall(void) {
     for (UIWindow *window in [UIApplication sharedApplication].windows) {
         [[CZFDockGestureHandler shared] installOnWindow:window];
@@ -157,6 +240,7 @@ static void CZFDockGestureTryInstall(void) {
 
 __attribute__((constructor)) static void CZFDockGestureInit(void) {
     @autoreleasepool {
+        CZFInstallSendEventHook();
         [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeKeyNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             if ([note.object isKindOfClass:[UIWindow class]]) {
                 [[CZFDockGestureHandler shared] installOnWindow:(UIWindow *)note.object];

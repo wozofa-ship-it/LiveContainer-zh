@@ -957,10 +957,11 @@ class AppInfoProvider {
         hideDockToSide()
     }
 
-    // 左边缘往左滑（2026-10-21 用户改定）：有全屏窗口时先把最前的
-    // 全屏窗口还原成小窗口（面板在全屏下多版实测调不出来）；没有全屏
-    // 窗口时才开 App 面板（窗口覆盖层，见 presentAllAppsPanel）。
-    // CZFDIAG：诊断版临时埋点（定位全屏面板不出，修复版删除）。
+    // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再弹面板）。
+    // 2026-10-21 定案：左滑就是调面板，全屏同理，不用小窗口绕路
+    //（#91 的先还原小窗口已删）。触发收不到的根因在插件侧（系统左
+    // 边缘手势截走触摸），已由插件的 sendEvent 触摸漏斗修复。
+    // CZFDIAG：诊断埋点（验证本版修复后删除）。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
         let maxNow = apps.filter { ($0.view?._viewDelegate() as? DecoratedAppSceneViewController)?.isMaximized == true }.count
@@ -970,10 +971,6 @@ class AppInfoProvider {
             return
         }
         if isDockHidden { showDockFromHidden() }
-        if czfUnmaximizeFrontmostWindow() {
-            czfDiagShow("STEP=unmax hit=1 maxNow=\(maxNow)")
-            return
-        }
         presentAllAppsPanel()
     }
 
@@ -1004,25 +1001,6 @@ class AppInfoProvider {
         return "STEP=present \(note) opened=\(opened)\nhid=\(host.view.isHidden) sup=\(host.view.superview != nil) sameWin=\(host.view.window === window)\nanchorDock=\(hostingController?.view.window != nil) scenes=\(UIApplication.shared.connectedScenes.count) wins=\(window.windowScene?.windows.count ?? -1)\nframe=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.width)),\(Int(f.height))) alpha=\(host.view.alpha)\nwinBounds=\(Int(window.bounds.width))x\(Int(window.bounds.height))"
     }
 
-    // 把最前面的全屏窗口还原成小窗口（等同点标题栏的绿色还原按钮，
-    // maximizeWindow 是切换开关，对已最大化的窗口调它即还原）。
-    // 前后次序按窗口在宿主视图里的层级定；返回 true 表示已还原。
-    private func czfUnmaximizeFrontmostWindow() -> Bool {
-        let subviews = windowHostingView.subviews
-        var best: (vc: DecoratedAppSceneViewController, z: Int)? = nil
-        for app in apps {
-            guard let view = app.view,
-                  let vc = view._viewDelegate() as? DecoratedAppSceneViewController,
-                  vc.isMaximized else { continue }
-            let z = subviews.firstIndex(where: { $0 === view }) ?? -1
-            if best == nil || z > best!.z {
-                best = (vc, z)
-            }
-        }
-        guard let target = best else { return false }
-        target.vc.maximizeWindow()
-        return true
-    }
 
     // 建好手势面板覆盖层（只建一次，常驻窗口待命，和快捷栏同一个生命周期）。
     // #89 是每次左滑现建 SwiftUI 视图树：首帧渲染慢，滑完要等一下才动，
