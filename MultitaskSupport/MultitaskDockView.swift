@@ -960,12 +960,48 @@ class AppInfoProvider {
     // 左边缘往左滑（2026-10-21 用户改定）：有全屏窗口时先把最前的
     // 全屏窗口还原成小窗口（面板在全屏下多版实测调不出来）；没有全屏
     // 窗口时才开 App 面板（窗口覆盖层，见 presentAllAppsPanel）。
+    // CZFDIAG：诊断版临时埋点（定位全屏面板不出，修复版删除）。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
-        guard isVisible || !apps.isEmpty else { return }
+        let maxNow = apps.filter { ($0.view?._viewDelegate() as? DecoratedAppSceneViewController)?.isMaximized == true }.count
+        czfDiagShow("STEP=entry\nvis=\(isVisible) apps=\(apps.count) maxNow=\(maxNow)\ndockHidden=\(isDockHidden) onRight=\(dockIsOnRightSide)")
+        guard isVisible || !apps.isEmpty else {
+            czfDiagShow("STEP=guardFail vis=\(isVisible) apps=\(apps.count)")
+            return
+        }
         if isDockHidden { showDockFromHidden() }
-        if czfUnmaximizeFrontmostWindow() { return }
+        if czfUnmaximizeFrontmostWindow() {
+            czfDiagShow("STEP=unmax hit=1 maxNow=\(maxNow)")
+            return
+        }
         presentAllAppsPanel()
+    }
+
+    // CZFDIAG：诊断条（临时）：把触发瞬间的运行时状态贴在窗口顶部，
+    // 供截图回传定位。修复版连同所有 czfDiag 调用一并删除。
+    private var czfDiagLabel: UILabel?
+    private func czfDiagShow(_ text: String) {
+        DispatchQueue.main.async {
+            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            let label = self.czfDiagLabel ?? UILabel()
+            label.numberOfLines = 0
+            label.font = .monospacedSystemFont(ofSize: 12, weight: .bold)
+            label.textColor = .white
+            label.backgroundColor = UIColor.red.withAlphaComponent(0.88)
+            label.frame = CGRect(x: 8, y: 54, width: window.bounds.width - 16, height: 150)
+            label.text = text
+            if label.superview !== window {
+                window.addSubview(label)
+            }
+            window.bringSubviewToFront(label)
+            self.czfDiagLabel = label
+        }
+    }
+
+    // CZFDIAG：present 出口的覆盖层状态快照
+    private func czfPresentTrace(window: UIWindow, host: UIHostingController<AnyView>, opened: Bool, note: String) -> String {
+        let f = host.view.frame
+        return "STEP=present \(note) opened=\(opened)\nhid=\(host.view.isHidden) sup=\(host.view.superview != nil) sameWin=\(host.view.window === window)\nanchorDock=\(hostingController?.view.window != nil) scenes=\(UIApplication.shared.connectedScenes.count) wins=\(window.windowScene?.windows.count ?? -1)\nframe=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.width)),\(Int(f.height))) alpha=\(host.view.alpha)\nwinBounds=\(Int(window.bounds.width))x\(Int(window.bounds.height))"
     }
 
     // 把最前面的全屏窗口还原成小窗口（等同点标题栏的绿色还原按钮，
@@ -1034,11 +1070,20 @@ class AppInfoProvider {
 
     private func presentAllAppsPanel() {
         DispatchQueue.main.async {
-            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            guard let window = self.hostingController?.view.window ?? self.keyWindow else {
+                self.czfDiagShow("STEP=present FAIL=noWindow")
+                return
+            }
             self.ensurePanelOverlay(in: window)
-            guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else { return }
+            guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else {
+                self.czfDiagShow("STEP=present FAIL=noOverlay")
+                return
+            }
             // 已开着就不重复开（以视图真实状态为准）
-            if !host.view.isHidden { return }
+            if !host.view.isHidden {
+                self.czfDiagShow(self.czfPresentTrace(window: window, host: host, opened: false, note: "alreadyOpen"))
+                return
+            }
             // 保险：盖到最上层，并按当前窗口尺寸摆好起始位（屏幕下方）
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
@@ -1052,6 +1097,7 @@ class AppInfoProvider {
                 backdrop.alpha = 1
                 host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
             }
+            self.czfDiagShow(self.czfPresentTrace(window: window, host: host, opened: true, note: "opened"))
         }
     }
 
