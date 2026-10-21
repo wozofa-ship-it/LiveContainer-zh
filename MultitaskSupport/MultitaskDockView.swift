@@ -125,6 +125,18 @@ class AppInfoProvider {
     }
 }
 
+// 手势面板的宿主控制器：面板被关闭（下滑关闭或点按钮 dismiss）时回调，
+// 让管理器回收面板的专用窗口。被其他界面盖住时 isBeingDismissed 为假，不误回收。
+private final class CZFPanelHostingController: UIHostingController<AnyView> {
+    var onDismissed: (() -> Void)?
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isBeingDismissed || presentingViewController == nil {
+            onDismissed?()
+        }
+    }
+}
+
 // MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
 @objc public class MultitaskDockManager: NSObject, ObservableObject, UIGestureRecognizerDelegate {
@@ -138,8 +150,8 @@ class AppInfoProvider {
     // （旧直连通道，已弃用：面板改走 presentAllAppsPanel 的 UIKit 呈现。
     //  属性保留是因为栏视图还挂着 onChange 引用，删它要动视图修饰链。）
     @Published var czfPanelOpenCounter: Int = 0
-    // 手势弹出的面板宿主（UIKit 呈现）：弱引用，仅用于防重复呈现
-    private weak var czfPanelHost: UIViewController?
+    // 手势弹出的面板专用窗口（独立置顶窗口）：强引用，面板关闭时回收
+    private var czfPanelWindow: UIWindow?
 
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
@@ -952,9 +964,8 @@ class AppInfoProvider {
     }
 
     // 左边缘往左滑：打开 App 面板（栏藏着先把栏唤出，再弹面板）
-    // 面板改走 UIKit 直接呈现，不再借道栏视图的 .sheet：栏藏着时栏视图
-    // 透明且移出屏幕，.sheet 的呈现请求会被系统吞掉（#85 实测全屏左滑
-    // 有震动、无面板）；UIKit 从主窗口顶层控制器呈现，与栏显隐无关。
+    // 面板走独立置顶窗口呈现（见 presentAllAppsPanel）：主窗口内的呈现
+    // 方式在全屏游客下都会被游客画面压住。
     @objc public func czfOpenAppPanel() {
         edgeCallbackBuzz()
         guard isVisible || !apps.isEmpty else { return }
@@ -964,23 +975,21 @@ class AppInfoProvider {
 
     private func presentAllAppsPanel() {
         DispatchQueue.main.async {
-            // 面板已在显示中：不重复呈现（连续左滑两次的情形）
-            if let host = self.czfPanelHost, host.presentingViewController != nil { return }
-            // 呈现者优先用快捷栏自己的宿主控制器：它所在的窗口就是全屏时
-            // 点蓝图标能弹出面板的那个窗口。#86 从主窗口根控制器呈现，
-            // 全屏时面板弹到了不顶层的窗口、被游客画面盖住（小窗口与主
-            // 窗口同窗，所以看起来正常）。
-            var presenter: UIViewController? = nil
-            if let hc = self.hostingController, hc.view.window != nil {
-                presenter = hc
-            } else {
-                presenter = self.keyWindow?.rootViewController
-            }
-            while let presented = presenter?.presentedViewController {
-                presenter = presented
-            }
-            guard let presenter = presenter else { return }
-            let panel = UIHostingController(rootView: AllAppsListView().environmentObject(self))
+            // 面板已在显示中：不重复弹（连续左滑两次的情形）
+            if self.czfPanelWindow != nil { return }
+            // 面板窗口建在与快捷栏同一个场景里
+            let scene = self.hostingController?.view.window?.windowScene ?? self.keyWindow?.windowScene
+            guard let scene = scene else { return }
+            // 独立置顶窗口装面板：全屏游客时，主窗口内借道栏视图 .sheet
+            // （#85）、根控制器（#86）、栏宿主（#87）三种呈现都被游客
+            // 画面压住不出；单独的高等级窗口与主窗口层级脱钩，不受影响。
+            let panelWindow = UIWindow(windowScene: scene)
+            panelWindow.windowLevel = .alert + 10
+            panelWindow.backgroundColor = .clear
+            let root = UIViewController()
+            root.view.backgroundColor = .clear
+            panelWindow.rootViewController = root
+            let panel = CZFPanelHostingController(rootView: AnyView(AllAppsListView().environmentObject(self)))
             panel.modalPresentationStyle = .pageSheet
             if let sheet = panel.sheetPresentationController {
                 sheet.detents = [.custom(identifier: .init("czf.panel60")) { context in
@@ -988,9 +997,22 @@ class AppInfoProvider {
                 }]
                 sheet.prefersGrabberVisible = true
             }
-            self.czfPanelHost = panel
-            presenter.present(panel, animated: true)
+            panel.onDismissed = { [weak self] in
+                self?.teardownPanelWindow()
+            }
+            self.czfPanelWindow = panelWindow
+            panelWindow.makeKeyAndVisible()
+            // 根控制器的视图进窗口后才能呈现，推到下一拍
+            DispatchQueue.main.async {
+                root.present(panel, animated: true)
+            }
         }
+    }
+
+    // 面板关闭后回收专用窗口（不回收的话窗口会一直占着，面板再也弹不出）
+    private func teardownPanelWindow() {
+        czfPanelWindow?.isHidden = true
+        czfPanelWindow = nil
     }
 
     // 手势已改走宿主悬浮边条窗，不再用插件：清掉旧版本部署到两个全局
