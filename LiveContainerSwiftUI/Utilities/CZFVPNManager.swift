@@ -88,12 +88,13 @@ public final class CZFVPNManager {
         if isRunning && runningLink == link { return true }
         if isRunning { stop() }
 
-        guard let conv = invoke(method: "convertShareLinksToXrayJson", payload: ["text": link]),
+        let conv = invoke(method: "convertShareLinksToXrayJson", payload: ["text": Self.normalizedShareLink(link)])
+        guard let conv,
               conv["success"] as? Bool == true,
               let data = conv["data"] as? [String: Any],
               var outbounds = data["outbounds"] as? [[String: Any]],
               !outbounds.isEmpty else {
-            lastError = "节点链接解析失败（链接不对或核心没应答）"
+            lastError = "节点链接解析失败：\(invokeError(from: conv) ?? "核心无应答")"
             return false
         }
         var node = outbounds[0]
@@ -139,6 +140,82 @@ public final class CZFVPNManager {
         _ = invoke(method: "stopXray", payload: [:])
         isRunning = false
         runningLink = nil
+    }
+
+    // MARK: - 老格式链接翻译
+
+    // 有些面板发的 vless 链接是老格式：vless://<base64>?参数，
+    // base64 解开是「加密:uuid@地址:端口」。官方解析器只认标准
+    // 格式（uuid@地址:端口 写在明处），先把老格式翻译成标准
+    // 格式再交给它；认不出的一律原样返回。
+    private static func normalizedShareLink(_ link: String) -> String {
+        guard link.hasPrefix("vless://") else { return link }
+        let rest = String(link.dropFirst("vless://".count))
+        let authEnd = rest.firstIndex(where: { $0 == "?" || $0 == "#" }) ?? rest.endIndex
+        let authority = String(rest[..<authEnd])
+        if authority.contains("@") { return link } // 已是标准格式
+
+        var b64 = authority
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while b64.count % 4 != 0 { b64 += "=" }
+        guard let decodedData = Data(base64Encoded: b64),
+              let decoded = String(data: decodedData, encoding: .utf8) else { return link }
+
+        let pattern = #"^([^:]+):([^@]+)@([^:]+):([0-9]+)$"#
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let m = re.firstMatch(in: decoded, range: NSRange(decoded.startIndex..., in: decoded)),
+              m.numberOfRanges == 5 else { return link }
+        func group(_ i: Int) -> String {
+            let r = Range(m.range(at: i), in: decoded)!
+            return String(decoded[r])
+        }
+        let encryption = group(1), uuid = group(2), host = group(3), port = group(4)
+
+        var query: [String: String] = [:]
+        if let comps = URLComponents(string: link) {
+            for item in comps.queryItems ?? [] {
+                query[item.name] = item.value ?? ""
+            }
+        }
+
+        var out: [(String, String)] = [("encryption", encryption)]
+        if let pbk = query["pbk"], !pbk.isEmpty {
+            out.append(("security", "reality"))
+            out.append(("pbk", pbk))
+            if let sid = query["sid"], !sid.isEmpty { out.append(("sid", sid)) }
+        } else if query["tls"] == "1" {
+            out.append(("security", "tls"))
+        } else {
+            out.append(("security", "none"))
+        }
+        if let sni = query["peer"] ?? query["sni"], !sni.isEmpty {
+            out.append(("sni", sni))
+        }
+        if let flow = query["flow"], !flow.isEmpty {
+            out.append(("flow", flow))
+        } else if query["xtls"] == "2" {
+            out.append(("flow", "xtls-rprx-vision"))
+        } else if query["xtls"] == "1" {
+            out.append(("flow", "xtls-rprx-origin"))
+        }
+        if let fp = query["fingerprint"] ?? query["fp"], !fp.isEmpty {
+            out.append(("fp", fp))
+        }
+        let type = query["type"] ?? query["net"] ?? "tcp"
+        out.append(("type", type))
+        if type == "ws" {
+            if let h = query["host"], !h.isEmpty { out.append(("host", h)) }
+            if let p = query["path"], !p.isEmpty { out.append(("path", p)) }
+        }
+
+        var result = "vless://\(uuid)@\(host):\(port)?"
+        result += out.map { "\($0.0)=\($0.1.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.1)" }
+            .joined(separator: "&")
+        if let name = query["remarks"], !name.isEmpty {
+            result += "#" + (name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name)
+        }
+        return result
     }
 
     // MARK: - libXray 调用
