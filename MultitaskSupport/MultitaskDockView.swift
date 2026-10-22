@@ -142,6 +142,8 @@ class AppInfoProvider {
     @Published var czfSourcesPanelOpenCounter: Int = 0
     // 手势面板覆盖层（背景遮罩 + 面板宿主）：只建一次常驻窗口待命，
     // 开/关只切可见性和位置；开没开以面板视图的 isHidden 为准，不以引用为准
+    // 定时最小化打开的轮询定时器（30 秒一轮，只在宿主活着时跑）
+    private var czfSchedMinTimer: Timer?
     private var czfPanelOverlayBackdrop: UIView?
     private var czfPanelOverlayHost: UIHostingController<AnyView>?
     // 源面板覆盖层：与 App 面板同构，各自一套遮罩+宿主，互开时先关对方
@@ -301,6 +303,7 @@ class AppInfoProvider {
         super.init()
         Self.deployDockGestureTweak()
         registerDockEdgeDarwinObservers()
+        startScheduledMinimizeOpenTimer()
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
         NotificationCenter.default.addObserver(
@@ -762,6 +765,75 @@ class AppInfoProvider {
                let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController {
                 app.view?.layer.removeAllAnimations()
                 vc.minimizeWindow()
+            }
+        }
+    }
+
+    // MARK: - 定时最小化打开（CZF）
+    // 每个 App 在其设置页单独开关+定时间（UserDefaults 键 CZFSchedMin*，
+    // 按 bundleIdentifier 存）。宿主活着时每 30 秒查一轮：到点且今天
+    // 还没开过 → 拉起并最小化，一轮最多开一个（避免同时拉起多个）。
+    // 宿主被彻底关掉时 iOS 不会唤醒它，到点没开成的会在下次打开
+    // LiveContainer 时由同一轮检查补开。
+    private func startScheduledMinimizeOpenTimer() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.czfSchedMinTimer?.invalidate()
+            self.czfSchedMinTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                self?.checkScheduledMinimizeOpen()
+            }
+            self.checkScheduledMinimizeOpen()
+        }
+    }
+
+    private func checkScheduledMinimizeOpen() {
+        let defaults = UserDefaults.standard
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd"
+        let today = formatter.string(from: Date())
+        let cal = Calendar.current
+        let now = Date()
+        let nowTotal = cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now)
+        let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        for app in allApps {
+            guard let bundleId = app.appInfo.bundleIdentifier() else { continue }
+            guard defaults.bool(forKey: "CZFSchedMinEnabled-\(bundleId)") else { continue }
+            if defaults.string(forKey: "CZFSchedMinLastDate-\(bundleId)") == today { continue }
+            let target = defaults.integer(forKey: "CZFSchedMinMinutes-\(bundleId)")
+            if nowTotal < target { continue }
+            guard let dataUUID = app.appInfo.dataUUID,
+                  let bundlePath = app.appInfo.relativeBundlePath else { continue }
+            // 先记账再打开，防同一天重复触发
+            defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
+            czfMinimizeOpenApp(dataUUID: dataUUID, bundlePath: bundlePath)
+            break
+        }
+    }
+
+    // 与快捷栏面板的「最小化打开」同一套路：已在运行直接最小化窗口；
+    // 未运行先走 launch URL 拉起，再轮询等窗口出现后最小化。
+    private func czfMinimizeOpenApp(dataUUID: String, bundlePath: String) {
+        if apps.contains(where: { $0.appUUID == dataUUID }) {
+            minimizeWindow(uuid: dataUUID)
+            return
+        }
+        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundlePath)") {
+            #if !os(visionOS)
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            #endif
+        }
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+            attempts += 1
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            if self.apps.contains(where: { $0.appUUID == dataUUID }) {
+                self.minimizeWindow(uuid: dataUUID)
+                timer.invalidate()
+            } else if attempts >= 40 {
+                timer.invalidate()
             }
         }
     }

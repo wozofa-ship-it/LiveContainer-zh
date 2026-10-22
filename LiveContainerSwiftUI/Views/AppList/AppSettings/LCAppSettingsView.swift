@@ -37,12 +37,48 @@ struct LCAppSettingsView: View {
     @State private var errorShow = false
     @State private var errorInfo = ""
     @State private var selectUnusedContainerSheetShow = false
+    @State private var schedMinEnabled = false
+    @State private var schedMinTime = Date()
     
     @EnvironmentObject private var sharedModel : SharedModel
     
     init(model: LCAppModel) {
         self.appInfo = model.appInfo
         self._model = ObservedObject(wrappedValue: model)
+    }
+
+    // 定时最小化打开：开关与时间按 bundleIdentifier 存 UserDefaults，
+    // 由 MultitaskDockManager 的轮询到点执行（键名前缀 CZFSchedMin）。
+    private var schedMinBundleId: String {
+        appInfo.bundleIdentifier() ?? ""
+    }
+
+    private func loadSchedMinSettings() {
+        let defaults = UserDefaults.standard
+        let bid = schedMinBundleId
+        schedMinEnabled = defaults.bool(forKey: "CZFSchedMinEnabled-\(bid)")
+        let minutes: Int
+        if defaults.object(forKey: "CZFSchedMinMinutes-\(bid)") == nil {
+            minutes = 8 * 60
+        } else {
+            minutes = defaults.integer(forKey: "CZFSchedMinMinutes-\(bid)")
+        }
+        var comps = DateComponents()
+        comps.hour = minutes / 60
+        comps.minute = minutes % 60
+        schedMinTime = Calendar.current.date(from: comps) ?? Date()
+    }
+
+    private func saveSchedMinSettings() {
+        let bid = schedMinBundleId
+        guard !bid.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(schedMinEnabled, forKey: "CZFSchedMinEnabled-\(bid)")
+        let cal = Calendar.current
+        let minutes = cal.component(.hour, from: schedMinTime) * 60 + cal.component(.minute, from: schedMinTime)
+        defaults.set(minutes, forKey: "CZFSchedMinMinutes-\(bid)")
+        // 改设置后清掉今日已开标记，让新时间今天就能生效
+        defaults.removeObject(forKey: "CZFSchedMinLastDate-\(bid)")
     }
     
     var body: some View {
@@ -318,6 +354,25 @@ struct LCAppSettingsView: View {
             }
 
             Section {
+                Toggle(isOn: $schedMinEnabled) {
+                    Text("定时最小化打开")
+                }
+                .onChange(of: schedMinEnabled) { _ in
+                    saveSchedMinSettings()
+                }
+                if schedMinEnabled {
+                    DatePicker("打开时间", selection: $schedMinTime, displayedComponents: .hourAndMinute)
+                        .onChange(of: schedMinTime) { _ in
+                            saveSchedMinSettings()
+                        }
+                }
+            } header: {
+                Text("定时打开")
+            } footer: {
+                Text("每天到设定时间，自动把这个 App 以最小化方式打开。需要 LiveContainer 保持运行（在前台，或开着保活挂在后台）；如果到点时 LiveContainer 被彻底关掉了，下次打开它时会补开。这个 App 需要先手动打开过一次。")
+            }
+
+            Section {
                 Toggle(isOn: $model.uiFixFilePickerNew) {
                     Text("lc.appSettings.fixFilePickerNew".loc)
                 }
@@ -420,6 +475,7 @@ struct LCAppSettingsView: View {
         }
         .navigationTitle(appInfo.displayName())
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { loadSchedMinSettings() }
         .alert("lc.common.error".loc, isPresented: $errorShow) {
             Button("lc.common.ok".loc, action: {
             })
