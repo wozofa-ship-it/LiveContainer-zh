@@ -286,6 +286,83 @@ public final class CZFVPNManager {
         runningLink = nil
     }
 
+    // MARK: - 节点延迟测试
+
+    /// 一个节点的延迟测试结果：success 时 delay 是真实毫秒；
+    /// 失败时 delay 是核心给的码（10000 出错 / 11000 超时），
+    /// 界面别当毫秒显示
+    public struct CZFNodePingResult {
+        public let success: Bool
+        public let delay: Int
+    }
+
+    /// 测全部节点的延迟（libXray 的 pingBatch：临时实例并发
+    /// 测、每批最多 5 个，经节点真实发一次 HEAD 量往返）。
+    /// 注意 pingBatch 与在跑的核心抢同一把生命周期锁、核心
+    /// 在跑时整批会被拒——所以核心在跑时先停、测完按原样起
+    /// 回来（用户点测速触发，几秒的事）。completion 回主
+    /// 线程，结果与 nodeLinks 同序
+    public func pingAllNodes(completion: @escaping ([CZFNodePingResult]) -> Void) {
+        let links = nodeLinks
+        guard !links.isEmpty else { completion([]); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let wasRunning = self.isRunning
+            var outcome = self.runPingBatches(links: links)
+            if wasRunning && outcome.batchRejected {
+                self.stop()
+                outcome = self.runPingBatches(links: links)
+                _ = self.start()
+            }
+            let items = outcome.items
+            DispatchQueue.main.async { completion(items) }
+        }
+    }
+
+    /// 逐批调 pingBatch（同步阻塞，必须在后台线程调）
+    private func runPingBatches(links: [String]) -> (items: [CZFNodePingResult], batchRejected: Bool) {
+        var items = [CZFNodePingResult?](repeating: nil, count: links.count)
+        var batchRejected = false
+        // 先把每个链接转成出站 JSON，转不动的直接记失败
+        var pending: [(index: Int, xrayJson: String)] = []
+        for (i, link) in links.enumerated() {
+            let conv = invoke(method: "convertShareLinksToXrayJson", payload: ["text": Self.normalizedShareLink(link)])
+            if let conv, conv["success"] as? Bool == true,
+               let data = conv["data"] as? [String: Any],
+               let outbounds = data["outbounds"] as? [[String: Any]], !outbounds.isEmpty,
+               let jsonData = try? JSONSerialization.data(withJSONObject: ["outbounds": outbounds]),
+               let jsonStr = String(data: jsonData, encoding: .utf8) {
+                pending.append((i, jsonStr))
+            } else {
+                items[i] = CZFNodePingResult(success: false, delay: 10000)
+            }
+        }
+        var start = 0
+        while start < pending.count {
+            let batch = Array(pending[start..<min(start + 5, pending.count)])
+            let resp = invoke(method: "pingBatch", payload: [
+                "configs": batch.map { ["xrayJson": $0.xrayJson] },
+                "timeout": 5,
+                "url": "https://cp.cloudflare.com/",
+            ])
+            if let resp, resp["success"] as? Bool == true,
+               let data = resp["data"] as? [String: Any],
+               let results = data["results"] as? [[String: Any]] {
+                for (j, item) in results.enumerated() where j < batch.count {
+                    let ok = item["success"] as? Bool ?? false
+                    let delay = (item["delay"] as? NSNumber)?.intValue ?? 10000
+                    items[batch[j].index] = CZFNodePingResult(success: ok, delay: delay)
+                }
+            } else {
+                batchRejected = true
+            }
+            for entry in batch where items[entry.index] == nil {
+                items[entry.index] = CZFNodePingResult(success: false, delay: 10000)
+            }
+            start += 5
+        }
+        return (items.map { $0 ?? CZFNodePingResult(success: false, delay: 10000) }, batchRejected)
+    }
+
     // MARK: - 老格式链接翻译
 
     // 有些面板发的 vless 链接是老格式：vless://<base64>?参数，

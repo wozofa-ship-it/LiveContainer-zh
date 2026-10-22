@@ -1925,7 +1925,6 @@ extension EnvironmentValues {
 }
 
 // MARK: - All Apps List View
-@available(iOS 16.0, *)
 // 面板顶部固定 App 的存储（用户定）：长按列表行固定/取消固定，
 // 按 bundleIdentifier 记（重装不丢），存 App Group 默认设置。
 final class CZFPinnedAppsStore: ObservableObject {
@@ -1948,6 +1947,7 @@ final class CZFPinnedAppsStore: ObservableObject {
 
 // 面板顶部固定区：固定的 App 小图标（40pt）横排，点按打开；
 // 没固定过时给一行小字提示怎么固定
+@available(iOS 16.0, *)
 struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
     @ObservedObject var pinnedStore = CZFPinnedAppsStore.shared
@@ -1990,6 +1990,7 @@ struct PinnedAppsStripView: View {
     }
 }
 
+@available(iOS 16.0, *)
 struct AllAppsListView: View {
     @Environment(\.dismiss) var dismiss
     @Environment(\.czfPanelClose) private var czfPanelClose

@@ -72,6 +72,8 @@ struct LCSettingsView: View {
     @State var vpnNodes: [String] = []
     @State var vpnHostProxy = false
     @State var vpnActiveIndex = 0
+    @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    @State var vpnPinging = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
     
@@ -309,6 +311,7 @@ struct LCSettingsView: View {
                         Button("添加") {
                             CZFVPNManager.shared.addNode(vpnNewNodeText)
                             vpnNewNodeText = ""
+                            vpnPingResults = [:]
                             refreshVPNState()
                         }
                         .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -329,6 +332,24 @@ struct LCSettingsView: View {
                                         .lineLimit(1)
                                 }
                                 Spacer()
+                                // 延迟测试结果（点下面的「测延迟」
+                                // 后显示）：绿 <300ms、橙 <800ms、
+                                // 红 ≥800ms；失败显示 超时/不通
+                                if vpnPinging && vpnPingResults[index] == nil {
+                                    Text("测速中")
+                                        .font(.caption)
+                                        .foregroundStyle(.gray)
+                                } else if let ping = vpnPingResults[index] {
+                                    if ping.success {
+                                        Text("\(ping.delay)ms")
+                                            .font(.caption)
+                                            .foregroundStyle(ping.delay < 300 ? .green : (ping.delay < 800 ? .orange : .red))
+                                    } else {
+                                        Text(ping.delay == 11000 ? "超时" : "不通")
+                                            .font(.caption)
+                                            .foregroundStyle(.red)
+                                    }
+                                }
                                 if index == vpnActiveIndex {
                                     Image(systemName: "checkmark")
                                         .foregroundStyle(.blue)
@@ -340,6 +361,7 @@ struct LCSettingsView: View {
                         for i in offsets.sorted(by: >) {
                             CZFVPNManager.shared.removeNode(at: i)
                         }
+                        vpnPingResults = [:]
                         refreshVPNState()
                     }
                     HStack {
@@ -351,6 +373,18 @@ struct LCSettingsView: View {
                             }
                             refreshVPNState()
                         }
+                        Button(vpnPinging ? "测速中…" : "测延迟") {
+                            vpnPingResults = [:]
+                            vpnPinging = true
+                            CZFVPNManager.shared.pingAllNodes { results in
+                                var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+                                for (i, r) in results.enumerated() { map[i] = r }
+                                vpnPingResults = map
+                                vpnPinging = false
+                                refreshVPNState()
+                            }
+                        }
+                        .disabled(vpnPinging || vpnNodes.isEmpty)
                         Spacer()
                         Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
                             .font(.footnote)
@@ -370,7 +404,7 @@ struct LCSettingsView: View {
                 } header: {
                     Text("单App VPN")
                 } footer: {
-                    Text("点节点行切换（核心在跑时立即生效），左滑可删。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑可删。点「测延迟」经每个节点真实发一次请求量往返毫秒数（核心在跑时测速会短暂停核心、测完自动起回来，几秒的事）。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
                 }
                 
                 Section {
