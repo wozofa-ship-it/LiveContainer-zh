@@ -187,7 +187,8 @@ public final class CZFVPNManager {
     // App 里已经没有被标记的了，就排一个 60 秒后的停核心；
     // 期间有被标记 App 起来（ensureRunning 会取消）就不停
     public func noteRunningAppsChanged(stillHasFlagged: Bool) {
-        if stillHasFlagged {
+        // 宿主自身走节点的开关开着时，核心同样算"还在被用"
+        if stillHasFlagged || Self.isHostProxyEnabled {
             pendingStopWork?.cancel()
             pendingStopWork = nil
             return
@@ -196,6 +197,7 @@ public final class CZFVPNManager {
         pendingStopWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isRunning else { return }
+            if Self.isHostProxyEnabled { return }
             if Date().timeIntervalSince(self.lastFlaggedLaunchAt) < 60 { return }
             self.stop()
         }
@@ -371,6 +373,57 @@ public final class CZFVPNManager {
 
     // 读游客插件写的运行统计（插件同目录的 CZFProxyStats.txt），
     // 供 App 设置页显示：插件到底干了多少活、哪类连接没被拦到
+    // MARK: 宿主自身走节点（源刷新 / 从源下载 IPA）
+
+    /// 开关：LiveContainer 自己的源请求与下载也经内置节点出网
+    /// （境外源才需要；JIT 的局域网服务器调用不走这里、不受影响）
+    public static var isHostProxyEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "CZFVPNHostProxyEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "CZFVPNHostProxyEnabled") }
+    }
+
+    public static func proxyDictionary() -> [String: Any] {
+        [
+            "HTTPEnable": true, "HTTPProxy": "127.0.0.1", "HTTPPort": 10828,
+            "HTTPSEnable": true, "HTTPSProxy": "127.0.0.1", "HTTPSPort": 10828,
+            "SOCKSEnable": true, "SOCKSProxy": "127.0.0.1", "SOCKSPort": socksPort,
+        ]
+    }
+
+    private static let proxiedHostSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.connectionProxyDictionary = proxyDictionary()
+        return URLSession(configuration: config)
+    }()
+
+    /// 宿主自己的网络会话：开关开且核心在跑时经核心出网，
+    /// 否则系统共享会话（fail-open，不断网）
+    public static func hostSession() -> URLSession {
+        guard isHostProxyEnabled, shared.isRunning else { return .shared }
+        return proxiedHostSession
+    }
+
+    /// 下载用配置：走节点时改用前台配置——后台配置的下载任务由
+    /// 系统进程执行、代理字典不生效；不开节点时维持后台配置原样
+    public static func hostDownloadConfiguration(identifier: String) -> URLSessionConfiguration {
+        if isHostProxyEnabled && shared.isRunning {
+            let config = URLSessionConfiguration.default
+            config.connectionProxyDictionary = proxyDictionary()
+            return config
+        }
+        return URLSessionConfiguration.background(withIdentifier: identifier)
+    }
+
+    /// 宿主开关打开时把核心拉起来（源/下载要用），顺带取消待执行的自动停
+    public func ensureRunningForHost() {
+        guard Self.isHostProxyEnabled else { return }
+        pendingStopWork?.cancel()
+        pendingStopWork = nil
+        if !isRunning {
+            _ = start()
+        }
+    }
+
     public static func proxyStatsText(for appInfo: LCAppInfo) -> String? {
         guard let folderName = appInfo.tweakFolder ?? (isEnabled(for: appInfo) ? "CZFVPN" : nil) else { return nil }
         let base = appInfo.isShared ? LCPath.lcGroupTweakPath : LCPath.tweakPath
@@ -388,7 +441,7 @@ public final class CZFVPNManager {
             if kv.count == 2 { dict[String(kv[0])] = String(kv[1]) }
         }
         guard let load = dict["load"] else { return nil }
-        return "插件统计（加载 \(load) · 自检 \(dict["selftest"] ?? "?")）：解析共 \(dict["gaiPass"] ?? "0") 次（假IP \(dict["gaiFake"] ?? "0")）· 代理连接 \(dict["proxied"] ?? "0") · 失败 \(dict["failed"] ?? "0") · 直连 \(dict["direct"] ?? "0") · 放行 \(dict["pass"] ?? "0") · connectx \(dict["connectx"] ?? "0") · 会话改写 \(dict["swizzled"] ?? "0") · 拦QUIC \(dict["quic"] ?? "0")"
+        return "插件统计（加载 \(load) · 自检 \(dict["selftest"] ?? "?")）：解析共 \(dict["gaiPass"] ?? "0") 次（假IP \(dict["gaiFake"] ?? "0")）· 代理连接 \(dict["proxied"] ?? "0") · 失败 \(dict["failed"] ?? "0") · 直连 \(dict["direct"] ?? "0") · 放行 \(dict["pass"] ?? "0") · connectx \(dict["connectx"] ?? "0") · 会话改写 \(dict["swizzled"] ?? "0") · 配置改写 \(dict["cfg"] ?? "0") · 拦QUIC \(dict["quic"] ?? "0")"
     }
 
     // MARK: - libXray 调用

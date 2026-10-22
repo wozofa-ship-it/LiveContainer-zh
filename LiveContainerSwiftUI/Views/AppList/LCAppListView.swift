@@ -827,7 +827,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         do {
-            let (data, _) = try await URLSession.shared.data(from: plistUrl)
+            let (data, _) = try await CZFVPNManager.hostSession().data(from: plistUrl)
             
             guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
                   let items = plist["items"] as? [[String: Any]],

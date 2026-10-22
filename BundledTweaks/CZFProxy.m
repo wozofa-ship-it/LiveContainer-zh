@@ -70,6 +70,7 @@ static volatile int64_t gStatConnx = 0;
 static volatile int64_t gStatSelfTest = 0;
 static volatile int64_t gStatSwizzled = 0;
 static volatile int64_t gStatQuicBlocked = 0;
+static volatile int64_t gStatCfg = 0;
 static double gLastStatWrite = 0;
 static pthread_mutex_t gStatLock = PTHREAD_MUTEX_INITIALIZER;
 // 统计按 App 分文件（CZFProxyStats-<包名>.txt）：所有开了
@@ -87,8 +88,8 @@ static void CZFWriteStats(BOOL force) {
     }
     gLastStatWrite = now;
     pthread_mutex_unlock(&gStatLock);
-    NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld selftest=%lld swizzled=%lld quic=%lld",
-        gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx, gStatSelfTest, gStatSwizzled, gStatQuicBlocked];
+    NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld selftest=%lld swizzled=%lld quic=%lld cfg=%lld",
+        gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx, gStatSelfTest, gStatSwizzled, gStatQuicBlocked, gStatCfg];
     [text writeToFile:gStatsPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
 }
 
@@ -414,32 +415,81 @@ static ssize_t CZFSendmsg(int fd, const struct msghdr *msg, int flags) {
 // 不动配置（fail-open，别把 App 的网弄断）。
 static NSURLSession *(*orig_sessionWithConfig)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
 
+static NSDictionary *CZFProxyDict(void) {
+    return @{
+        @"HTTPEnable": @YES,
+        @"HTTPProxy": @"127.0.0.1",
+        @"HTTPPort": @(CZF_HTTP_PORT),
+        @"HTTPSEnable": @YES,
+        @"HTTPSProxy": @"127.0.0.1",
+        @"HTTPSPort": @(CZF_HTTP_PORT),
+        @"SOCKSEnable": @YES,
+        @"SOCKSProxy": @"127.0.0.1",
+        @"SOCKSPort": @(CZF_SOCKS_PORT),
+    };
+}
+
+// 给一份会话配置盖上代理字典（核心不在时不动）。isFactory 区分
+// 统计口径：YES=配置出厂时盖的，NO=建会话时盖的。
+static NSURLSessionConfiguration *CZFStampConfig(NSURLSessionConfiguration *config, BOOL isFactory) {
+    if (!config || !CZFCoreAlive()) return config;
+    NSMutableDictionary *merged = [config.connectionProxyDictionary mutableCopy] ?: [NSMutableDictionary dictionary];
+    [merged addEntriesFromDictionary:CZFProxyDict()];
+    config.connectionProxyDictionary = merged;
+    __sync_add_and_fetch(isFactory ? &gStatCfg : &gStatSwizzled, 1);
+    CZFWriteStats(NO);
+    return config;
+}
+
 static NSURLSession *CZFSessionWithConfig(id self, SEL _cmd, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
-    if (config && CZFCoreAlive()) {
-        NSMutableDictionary *merged = [config.connectionProxyDictionary mutableCopy] ?: [NSMutableDictionary dictionary];
-        merged[@"HTTPEnable"] = @YES;
-        merged[@"HTTPProxy"] = @"127.0.0.1";
-        merged[@"HTTPPort"] = @(CZF_HTTP_PORT);
-        merged[@"HTTPSEnable"] = @YES;
-        merged[@"HTTPSProxy"] = @"127.0.0.1";
-        merged[@"HTTPSPort"] = @(CZF_HTTP_PORT);
-        merged[@"SOCKSEnable"] = @YES;
-        merged[@"SOCKSProxy"] = @"127.0.0.1";
-        merged[@"SOCKSPort"] = @(CZF_SOCKS_PORT);
-        config.connectionProxyDictionary = merged;
-        __sync_add_and_fetch(&gStatSwizzled, 1);
-        CZFWriteStats(NO);
-    }
+    CZFStampConfig(config, NO);
     return orig_sessionWithConfig(self, _cmd, config, delegate, queue);
+}
+
+// 配置工厂方法的替换实现：播放器（AVPlayer）等系统媒体管线不走
+// App 自己建会话的入口，它们在内部用这些工厂方法取配置建会话。
+// 代理字典盖在出厂配置上，才能把这类流量也罩住（X 的视频就是
+// 栽在这里：文字会话被盖、播放器管线没被盖，视频一直直连转圈）。
+static NSURLSessionConfiguration *(*orig_defaultConfig)(id, SEL);
+static NSURLSessionConfiguration *CZFDefaultConfig(id self, SEL _cmd) {
+    return CZFStampConfig(orig_defaultConfig(self, _cmd), YES);
+}
+static NSURLSessionConfiguration *(*orig_ephemeralConfig)(id, SEL);
+static NSURLSessionConfiguration *CZFEphemeralConfig(id self, SEL _cmd) {
+    return CZFStampConfig(orig_ephemeralConfig(self, _cmd), YES);
+}
+static NSURLSessionConfiguration *(*orig_backgroundConfig)(id, SEL, NSString *);
+static NSURLSessionConfiguration *CZFBackgroundConfig(id self, SEL _cmd, NSString *identifier) {
+    return CZFStampConfig(orig_backgroundConfig(self, _cmd, identifier), YES);
 }
 
 static void CZFInstallSessionSwizzle(void) {
     Class cls = NSClassFromString(@"NSURLSession");
-    if (!cls) return;
-    Method m = class_getClassMethod(cls, @selector(sessionWithConfiguration:delegate:delegateQueue:));
-    if (!m) return;
-    orig_sessionWithConfig = (NSURLSession *(*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))method_getImplementation(m);
-    method_setImplementation(m, (IMP)CZFSessionWithConfig);
+    if (cls) {
+        Method m = class_getClassMethod(cls, @selector(sessionWithConfiguration:delegate:delegateQueue:));
+        if (m) {
+            orig_sessionWithConfig = (NSURLSession *(*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))method_getImplementation(m);
+            method_setImplementation(m, (IMP)CZFSessionWithConfig);
+        }
+    }
+    Class cfgCls = NSClassFromString(@"NSURLSessionConfiguration");
+    if (cfgCls) {
+        Method dm = class_getClassMethod(cfgCls, @selector(defaultSessionConfiguration));
+        if (dm) {
+            orig_defaultConfig = (NSURLSessionConfiguration *(*)(id, SEL))method_getImplementation(dm);
+            method_setImplementation(dm, (IMP)CZFDefaultConfig);
+        }
+        Method em = class_getClassMethod(cfgCls, @selector(ephemeralSessionConfiguration));
+        if (em) {
+            orig_ephemeralConfig = (NSURLSessionConfiguration *(*)(id, SEL))method_getImplementation(em);
+            method_setImplementation(em, (IMP)CZFEphemeralConfig);
+        }
+        Method bm = class_getClassMethod(cfgCls, @selector(backgroundSessionConfigurationWithIdentifier:));
+        if (bm) {
+            orig_backgroundConfig = (NSURLSessionConfiguration *(*)(id, SEL, NSString *))method_getImplementation(bm);
+            method_setImplementation(bm, (IMP)CZFBackgroundConfig);
+        }
+    }
 }
 
 // MARK: - getaddrinfo 钩子

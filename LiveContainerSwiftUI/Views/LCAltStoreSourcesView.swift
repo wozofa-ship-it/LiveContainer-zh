@@ -316,7 +316,7 @@ private extension AltStoreSourcesViewModel {
 
 enum AltStoreSourceLoader {
     static func load(from url: URL) async throws -> (AltStoreSource, Data) {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await CZFVPNManager.hostSession().data(from: url)
         if let httpResponse = response as? HTTPURLResponse,
            !(200...299).contains(httpResponse.statusCode) {
             throw NSError(domain: "AltStoreSource", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"])
@@ -740,7 +740,7 @@ struct LCSourcesView: View {
     @MainActor
     private func installTweak(from url: URL, name: String) async {
         do {
-            let (tempURL, _) = try await URLSession.shared.download(from: url)
+            let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: url)
             let fm = FileManager.default
             // 按插件名字建文件夹，不全塞一个
             let folderURL = LCPath.tweakPath.appendingPathComponent(name)
@@ -766,7 +766,7 @@ struct LCSourcesView: View {
         }
         Task {
             do {
-                let (tempURL, _) = try await URLSession.shared.download(from: downloadURL)
+                let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: downloadURL)
                 let fileName = downloadURL.lastPathComponent
                 let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let destURL = docsURL.appendingPathComponent(fileName)

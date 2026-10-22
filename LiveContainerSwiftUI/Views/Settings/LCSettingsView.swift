@@ -70,6 +70,7 @@ struct LCSettingsView: View {
     @State var vpnStatusMessage: String?
     @State var vpnNewNodeText = ""
     @State var vpnNodes: [String] = []
+    @State var vpnHostProxy = false
     @State var vpnActiveIndex = 0
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
@@ -358,10 +359,18 @@ struct LCSettingsView: View {
                     .onAppear {
                         refreshVPNState()
                     }
+                    Toggle("源和下载也走内置节点", isOn: $vpnHostProxy)
+                        .onChange(of: vpnHostProxy) { newValue in
+                            CZFVPNManager.isHostProxyEnabled = newValue
+                            if newValue {
+                                CZFVPNManager.shared.ensureRunningForHost()
+                            }
+                            refreshVPNState()
+                        }
                 } header: {
                     Text("单App VPN")
                 } footer: {
-                    Text("点节点行切换（核心在跑时立即生效），左滑可删。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑可删。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
                 }
                 
                 Section {
@@ -573,6 +582,7 @@ struct LCSettingsView: View {
         vpnActiveIndex = CZFVPNManager.shared.activeNodeIndex
         vpnCoreRunning = CZFVPNManager.shared.isRunning
         vpnStatusMessage = CZFVPNManager.shared.lastError
+        vpnHostProxy = CZFVPNManager.isHostProxyEnabled
     }
 
     func openGitHub() {

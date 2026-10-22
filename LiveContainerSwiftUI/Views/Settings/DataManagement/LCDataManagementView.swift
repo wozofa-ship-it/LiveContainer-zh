@@ -1078,7 +1078,7 @@ struct LCDataManagementView : View {
         for urlString in stored {
             guard let sourceURL = URL(string: urlString) else { continue }
             do {
-                let (data, _) = try await URLSession.shared.data(from: sourceURL)
+                let (data, _) = try await CZFVPNManager.hostSession().data(from: sourceURL)
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let apps = json["apps"] as? [[String: Any]] else { continue }
                 for app in apps {
