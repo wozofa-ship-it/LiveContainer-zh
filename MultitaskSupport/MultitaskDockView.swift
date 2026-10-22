@@ -925,6 +925,12 @@ class AppInfoProvider {
     private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
+    // 边缘手势启用带（用户画定）：边缘起手的触摸只有落在屏幕
+    // 高度约 28%–68% 的中段才算数，上下两段不调（防误触）。
+    // 插件侧 CZFDockGesture 用同一组比例，保持两边一致。
+    private static let czfEdgeBandTop: CGFloat = 0.28
+    private static let czfEdgeBandBottom: CGFloat = 0.68
+    private var globalSwipeStartInBand: Bool = true
     private var globalSwipeObserversInstalled = false
     // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
     // 不闩住会在 .changed 里连震好几下）
@@ -980,13 +986,13 @@ class AppInfoProvider {
         case .began:
             czfEdgeSwipeLatched = false
         case .changed:
-            guard !czfEdgeSwipeLatched else { return }
+            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand, !czfEdgeSwipeLatched else { return }
             if processGlobalSwipe(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width) {
                 czfEdgeSwipeLatched = true
             }
         case .ended, .cancelled:
             defer { czfEdgeSwipeLatched = false }
-            guard !czfEdgeSwipeLatched else { return }
+            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand, !czfEdgeSwipeLatched else { return }
             processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width)
         default:
             break
@@ -1024,8 +1030,9 @@ class AppInfoProvider {
         guard abs(translation.x) > 1.5 * abs(translation.y) else { return false }
         let draggingRight = translation.x > 0
         if startEdge == 2 {
-            // 右边缘改派：往左=当前 App 全屏（门槛24），往右=当前
-            // App 小窗口（往外滑手指很快出屏，门槛10）
+            // 右边缘改派：往左（门槛24）/往右（门槛10，往外滑手指
+            // 很快出屏）；动作分场景在入口判定（App 内全屏/小窗口，
+            // 主界面状态栏调度）
             if draggingRight {
                 guard translation.x > 10 else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
@@ -1070,12 +1077,22 @@ class AppInfoProvider {
 
     // 全部接收、只记录起手位置；触发判定在 handler 里按起手+落点做
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // 屏幕边缘识别器（栏隐藏时的 UIScreenEdgePan）：按启用带
+        // 放行，带外的触摸直接不让它识别。
+        if gestureRecognizer is UIScreenEdgePanGestureRecognizer,
+           let window = gestureRecognizer.view as? UIWindow {
+            let y = touch.location(in: window).y
+            let height = window.bounds.height
+            return y >= height * Self.czfEdgeBandTop && y <= height * Self.czfEdgeBandBottom
+        }
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
               let window = gestureRecognizer.view as? UIWindow else { return true }
-        let x = touch.location(in: window).x
-        if x >= window.bounds.width - 44 {
+        let loc = touch.location(in: window)
+        let height = window.bounds.height
+        globalSwipeStartInBand = loc.y >= height * Self.czfEdgeBandTop && loc.y <= height * Self.czfEdgeBandBottom
+        if loc.x >= window.bounds.width - 44 {
             globalSwipeStartEdge = 2
-        } else if x <= 44 {
+        } else if loc.x <= 44 {
             globalSwipeStartEdge = 1
         } else {
             globalSwipeStartEdge = 0
@@ -1100,21 +1117,32 @@ class AppInfoProvider {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
-    // 右边缘手势改派（用户定）：往左滑=当前 App 全屏（最大化，
-    // 状态栏随全屏隐藏），往右滑=当前 App 还原小窗口。原先右边缘
-    // 的显/隐快捷栏去掉；左边缘手势（App 面板/源面板开关）不动。
-    // 宿主窗口手势与游客插件的 Darwin 通知都汇到这两个入口。
+    // 右边缘手势改派（用户定）：分场景——在 App 界面内（有 App
+    // 在台前）：往左滑=当前 App 全屏（最大化，状态栏随全屏隐藏），
+    // 往右滑=还原小窗口；不在 App 界面内（主界面）：走状态栏调度，
+    // 往左滑开关 App 面板、往右滑关掉面板。原先右边缘的显/隐快捷
+    // 栏去掉；左边缘手势（App 面板/源面板开关）不动。宿主窗口手势
+    // 与游客插件的 Darwin 通知都汇到这两个入口，场景在此判定。
     @objc public func czfEdgeRightInward() {
-        guard let app = czfFrontmostApp(),
-              let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+        guard let app = czfFrontmostApp() else {
+            czfOpenAppPanel()
+            return
+        }
+        guard let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
               !vc.isMaximized else { return }
         edgeCallbackBuzz()
         maximizeWindow(uuid: app.appUUID)
     }
 
     @objc public func czfEdgeRightOutward() {
-        guard let app = czfFrontmostApp(),
-              let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+        guard let app = czfFrontmostApp() else {
+            if isAppPanelOpen {
+                edgeCallbackBuzz()
+                dismissPanelOverlay()
+            }
+            return
+        }
+        guard let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
               vc.isMaximized else { return }
         edgeCallbackBuzz()
         restoreSmallWindow(uuid: app.appUUID)
@@ -1493,10 +1521,12 @@ class AppInfoProvider {
         if isDockHidden {
             let leftEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
             leftEdgeGesture.edges = .left
+            leftEdgeGesture.delegate = self
             keyWindow.addGestureRecognizer(leftEdgeGesture)
             
             let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
             rightEdgeGesture.edges = .right
+            rightEdgeGesture.delegate = self
             keyWindow.addGestureRecognizer(rightEdgeGesture)
         }
     }

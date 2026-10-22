@@ -38,6 +38,9 @@
 static const void *kCZFDockGestureInstalledKey = &kCZFDockGestureInstalledKey;
 // 起手位置：0=不在边缘 1=左边缘 2=右边缘（shouldReceive 时记录，handler 里判定）
 static NSInteger gCZFStartEdge = 0;
+// 起手高度是否在启用带内：边缘手势只认屏幕高度 28%–68% 中段
+//（用户画定，上下两段不调防误触；与宿主侧同一组比例）
+static BOOL gCZFStartInBand = YES;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;
 
@@ -46,6 +49,39 @@ static BOOL gCZFFired = NO;
 - (void)installOnWindow:(UIWindow *)window;
 - (void)czfPostNotification:(NSString *)notificationName selectorName:(NSString *)selectorName;
 @end
+
+// 终结兜底判定（与宿主 processGlobalSwipeFallback 同参）：贴边
+// flick 被 App 仲裁取消、或全程方向比过不了严判时，只看物理
+// 结果——净位移方向 + 落点贴边。右边缘此前没有兜底（触摸漏斗
+// 只管左边缘），轻扫经常被取消导致不跟手，本次补齐。
+static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat endX, CGFloat width, NSString **outName, NSString **outSelector) {
+    CGFloat dx = translation.x;
+    CGFloat dy = translation.y;
+    if (startEdge == 1) {
+        if (dx <= -15 && endX <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
+            *outName = @"czf.dock.openPanel";
+            *outSelector = @"czfOpenAppPanel";
+            return YES;
+        }
+        if (dx >= 44 && fabs(dx) > 0.8 * fabs(dy)) {
+            *outName = @"czf.dock.openSources";
+            *outSelector = @"czfOpenSourcesPanel";
+            return YES;
+        }
+    } else if (startEdge == 2) {
+        if (dx >= 15 && endX >= width - 12 && fabs(dx) > 0.4 * fabs(dy)) {
+            *outName = @"czf.dock.rightOutward";
+            *outSelector = @"czfEdgeRightOutward";
+            return YES;
+        }
+        if (dx <= -44 && fabs(dx) > 0.8 * fabs(dy)) {
+            *outName = @"czf.dock.rightInward";
+            *outSelector = @"czfEdgeRightInward";
+            return YES;
+        }
+    }
+    return NO;
+}
 
 @implementation CZFDockGestureHandler
 
@@ -71,12 +107,14 @@ static BOOL gCZFFired = NO;
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     UIWindow *window = (UIWindow *)gestureRecognizer.view;
     if (![window isKindOfClass:[UIWindow class]]) return NO;
-    CGFloat x = [touch locationInView:window].x;
+    CGPoint loc = [touch locationInView:window];
     CGFloat width = window.bounds.size.width;
+    CGFloat height = window.bounds.size.height;
+    gCZFStartInBand = (loc.y >= height * 0.28 && loc.y <= height * 0.68);
     // 全部接收、只记录起手位置；是否触发在 handler 按起手+位移判定
-    if (x >= width - 44) {
+    if (loc.x >= width - 44) {
         gCZFStartEdge = 2;
-    } else if (x <= 44) {
+    } else if (loc.x <= 44) {
         gCZFStartEdge = 1;
     } else {
         gCZFStartEdge = 0;
@@ -93,16 +131,42 @@ static BOOL gCZFFired = NO;
         gCZFFired = NO;
         return;
     }
-    if (gesture.state == UIGestureRecognizerStateCancelled || gesture.state == UIGestureRecognizerStateFailed) {
+    if (gesture.state == UIGestureRecognizerStateFailed) {
+        gCZFFired = NO;
+        return;
+    }
+    if (gesture.state == UIGestureRecognizerStateCancelled) {
+        // 被 App 仲裁"没收"不等于没滑：走终结兜底判定（见
+        // CZFPanFallback），判完清状态
+        if (!gCZFFired && gCZFStartEdge != 0 && gCZFStartInBand) {
+            NSString *name = nil;
+            NSString *selector = nil;
+            if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, &name, &selector)) {
+                [self czfPostNotification:name selectorName:selector];
+            }
+        }
         gCZFFired = NO;
         return;
     }
     if (gCZFFired) return;
     if (gesture.state != UIGestureRecognizerStateChanged && gesture.state != UIGestureRecognizerStateEnded) return;
+    // 启用带外起手的边缘滑动不调（任意位置起手不受此限）
+    if (gCZFStartEdge != 0 && !gCZFStartInBand) return;
     CGPoint translation = [gesture translationInView:gesture.view];
-    if (fabs(translation.x) < 1.5 * fabs(translation.y)) return;
     CGFloat endX = [gesture locationInView:gesture.view].x;
     CGFloat width = gesture.view.bounds.size.width;
+    if (gesture.state == UIGestureRecognizerStateEnded) {
+        // 终结兜底先于严判：落点贴边+净位移够就认；严判的方向比
+        // 留给滑动中的提前触发
+        NSString *name = nil;
+        NSString *selector = nil;
+        if (CZFPanFallback(gCZFStartEdge, translation, endX, width, &name, &selector)) {
+            gCZFFired = YES;
+            [self czfPostNotification:name selectorName:selector];
+            return;
+        }
+    }
+    if (fabs(translation.x) < 1.5 * fabs(translation.y)) return;
     BOOL draggingRight = translation.x > 0;
     CGFloat absX = fabs(translation.x);
     NSString *notificationName = nil;
@@ -189,8 +253,11 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
         switch (touch.phase) {
             case UITouchPhaseBegan: {
                 // 记录带放宽到 96：抬手兜底规则需要它；移动中的提前
-                // 触发仍只认 64 带内起手（见 Moved 分支）。
-                if (loc.x <= 96) {
+                // 触发仍只认 64 带内起手（见 Moved 分支）。另加启用
+                // 带（与宿主同比例）：带外起手不记录，手势只认
+                // 屏幕高度中段。
+                CGFloat winHeight = window.bounds.size.height;
+                if (loc.x <= 96 && loc.y >= winHeight * 0.28 && loc.y <= winHeight * 0.68) {
                     gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO ];
                 }
                 break;
