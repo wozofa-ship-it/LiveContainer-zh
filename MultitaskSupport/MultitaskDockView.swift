@@ -965,11 +965,55 @@ class AppInfoProvider {
         // 不再要求 isVisible：源面板要在"没打开任何 App"时也能从主界面
         // 调出。其余每个动作入口都自带 isVisible/!apps.isEmpty 守卫，
         // 在主界面裸跑时各自落空，不会误触发显隐快捷栏或 App 面板。
-        guard gesture.state == .ended else { return }
+        //
+        // 判定模型与游客插件（CZFDockGesture）对齐：滑动中过门槛即
+        // 触发（不等抬指），终结/被取消时再走一遍宽松兜底（只看物理
+        // 结果：净位移方向 + 落点贴边，方向比只留底线）。原来只在
+        // .ended 拿全程位移卡 1.5 倍方向比——手指在屏幕上/下部天然
+        // 走弧线、纵向位移大，整段被判掉，真机表现就是"只有中间
+        // 一段灵、上下无效"，且被列表滚动取消（.cancelled）时直接
+        // 不判；插件侧有 sendEvent 漏斗直读原始触摸才显得灵敏。
         let translation = gesture.translation(in: gesture.view)
         let endX = gesture.location(in: gesture.view).x
         let width = gesture.view?.bounds.width ?? 0
-        processGlobalSwipe(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width)
+        switch gesture.state {
+        case .began:
+            czfEdgeSwipeLatched = false
+        case .changed:
+            guard !czfEdgeSwipeLatched else { return }
+            if processGlobalSwipe(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width) {
+                czfEdgeSwipeLatched = true
+            }
+        case .ended, .cancelled:
+            defer { czfEdgeSwipeLatched = false }
+            guard !czfEdgeSwipeLatched else { return }
+            processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width)
+        default:
+            break
+        }
+    }
+
+    // 终结兜底判定：与 CZFDockGesture 触摸漏斗的终结规则同参。
+    // 只认边缘起手；任意位置起手不兜底（防误触设计不变）。
+    private func processGlobalSwipeFallback(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) {
+        let dx = translation.x
+        let dy = translation.y
+        if startEdge == 1 {
+            // 往左滑出：净位移往左 ≥15、落点贴边 12 内、方向比底线 0.4
+            if dx <= -15, endX <= 12, abs(dx) > 0.4 * abs(dy) {
+                fireDockAction { self.czfOpenAppPanel() }
+            } else if dx >= 44, abs(dx) > 0.8 * abs(dy) {
+                // 往右源面板：起手已在 44 带内（比插件漏斗的 64 带更
+                // 严），净位移 ≥44、方向比底线 0.8
+                fireDockAction { self.czfOpenSourcesPanel() }
+            }
+        } else if startEdge == 2 {
+            if dx >= 15, endX >= width - 12, abs(dx) > 0.4 * abs(dy) {
+                fireDockAction { self.czfEdgeRightOutward() }
+            } else if dx <= -44, abs(dx) > 0.8 * abs(dy) {
+                fireDockAction { self.czfEdgeRightInward() }
+            }
+        }
     }
 
     // 手势判定核心：宿主窗口手势与悬浮边条窗共用。
@@ -980,7 +1024,8 @@ class AppInfoProvider {
         guard abs(translation.x) > 1.5 * abs(translation.y) else { return false }
         let draggingRight = translation.x > 0
         if startEdge == 2 {
-            // 往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛24）
+            // 右边缘改派：往左=当前 App 全屏（门槛24），往右=当前
+            // App 小窗口（往外滑手指很快出屏，门槛10）
             if draggingRight {
                 guard translation.x > 10 else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
@@ -1055,16 +1100,43 @@ class AppInfoProvider {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
+    // 右边缘手势改派（用户定）：往左滑=当前 App 全屏（最大化，
+    // 状态栏随全屏隐藏），往右滑=当前 App 还原小窗口。原先右边缘
+    // 的显/隐快捷栏去掉；左边缘手势（App 面板/源面板开关）不动。
+    // 宿主窗口手势与游客插件的 Darwin 通知都汇到这两个入口。
     @objc public func czfEdgeRightInward() {
-        guard isVisible || !apps.isEmpty, isDockHidden, dockIsOnRightSide else { return }
+        guard let app = czfFrontmostApp(),
+              let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+              !vc.isMaximized else { return }
         edgeCallbackBuzz()
-        showDockFromHidden()
+        maximizeWindow(uuid: app.appUUID)
     }
 
     @objc public func czfEdgeRightOutward() {
-        guard isVisible || !apps.isEmpty, !isDockHidden, dockIsOnRightSide else { return }
+        guard let app = czfFrontmostApp(),
+              let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+              vc.isMaximized else { return }
         edgeCallbackBuzz()
-        hideDockToSide()
+        restoreSmallWindow(uuid: app.appUUID)
+    }
+
+    // 当前 App：已最大化的那个优先（全屏时台前只有一个）；否则取
+    // 宿主视图里层级最靠前、可见的运行中 App。最小化中的（视图
+    // 已隐藏）不算。
+    private func czfFrontmostApp() -> DockAppModel? {
+        var frontmost: DockAppModel?
+        var frontmostZ = -1
+        for app in apps {
+            guard let view = app.view, !view.isHidden, view.alpha >= 0.1,
+                  let vc = view._viewDelegate() as? DecoratedAppSceneViewController else { continue }
+            if vc.isMaximized { return app }
+            let z = view.superview?.subviews.firstIndex(where: { $0 === view }) ?? 0
+            if z > frontmostZ {
+                frontmostZ = z
+                frontmost = app
+            }
+        }
+        return frontmost
     }
 
     @objc public func czfEdgeLeftOutward() {

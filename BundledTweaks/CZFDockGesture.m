@@ -108,7 +108,8 @@ static BOOL gCZFFired = NO;
     NSString *notificationName = nil;
     NSString *selectorName = nil;
     if (gCZFStartEdge == 2) {
-        // 起手在右边缘：往右=隐藏（往外滑手指很快出屏，门槛10），往左=唤出（门槛24）
+        // 起手在右边缘：往左=当前 App 全屏（门槛24），往右=当前 App
+        // 小窗口（往外滑手指很快出屏，门槛10）；宿主侧改派，原显/隐栏已去掉
         if (draggingRight) {
             if (absX <= 10) return;
             notificationName = @"czf.dock.rightOutward";
