@@ -1945,8 +1945,9 @@ final class CZFPinnedAppsStore: ObservableObject {
     }
 }
 
-// 面板顶部固定区：固定的 App 小图标（40pt）横排，点按打开；
-// 没固定过时给一行小字提示怎么固定
+// 面板顶部固定区（美化版）：浅灰圆角卡片 + 「固定」小标题，
+// 固定的 App 小图标（40pt）横排，点按打开；没固定过时卡片
+// 里给一行提示怎么固定
 @available(iOS 16.0, *)
 struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
@@ -1958,35 +1959,47 @@ struct PinnedAppsStripView: View {
     }
 
     var body: some View {
-        if pinnedApps.isEmpty {
-            Text("长按下面的 App 可以固定到这里")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-        } else {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 14) {
-                    ForEach(pinnedApps, id: \.self) { app in
-                        VStack(spacing: 3) {
-                            RunningAppIcon(appInfo: app.appInfo)
-                                .frame(width: 40, height: 40)
-                                .clipShape(RoundedRectangle(cornerRadius: 9))
-                            Text(app.appInfo.displayName() ?? "")
-                                .font(.caption2)
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .frame(width: 52)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                Text("固定")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+            }
+            .foregroundColor(.secondary)
+            if pinnedApps.isEmpty {
+                Text("长按下面的 App 可以固定到这里")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        ForEach(pinnedApps, id: \.self) { app in
+                            VStack(spacing: 3) {
+                                RunningAppIcon(appInfo: app.appInfo)
+                                    .frame(width: 40, height: 40)
+                                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                                    .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
+                                Text(app.appInfo.displayName() ?? "")
+                                    .font(.caption2)
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                    .frame(width: 52)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { onLaunch(app) }
                         }
-                        .contentShape(Rectangle())
-                        .onTapGesture { onLaunch(app) }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
             }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
     }
 }
 
@@ -2014,7 +2027,6 @@ struct AllAppsListView: View {
                 // 的 App 小图标横排（长按下面列表行固定/取消），
                 // 固定区不随列表滚动
                 PinnedAppsStripView { app in launchApp(app) }
-                Divider()
             ScrollView {
                 LazyVStack(spacing: 10) {
                     // 顶部状态栏（用户要求）：固定按钮 + 已打开

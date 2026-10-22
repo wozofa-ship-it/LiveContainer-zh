@@ -202,6 +202,25 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             self?.openSettings()
         })
 
+        // 单 App VPN（用户定）：长按直接调用，不用进设置页翻。
+        // 没开过 → 打标记并立刻打开这个 App（插件在启动签名时
+        // 自动部署、核心自动起）；已开 → 摘标记（残留插件下次
+        // 启动时自动清掉，与设置页开关同一套逻辑）
+        let vpnEnabled = CZFVPNManager.isEnabled(for: appInfo)
+        sectionChildren.append(UIAction(
+            title: vpnEnabled ? "关闭 VPN 打开" : "用 VPN 打开",
+            image: UIImage(systemName: "globe")
+        ) { [weak self] _ in
+            if vpnEnabled {
+                CZFVPNManager.setEnabled(false, for: appInfo)
+            } else {
+                CZFVPNManager.setEnabled(true, for: appInfo)
+                Task { [weak self] in
+                    await self?.runApp()
+                }
+            }
+        })
+
         // Tweak/Module Picker (direct in context menu)
         let tweakActions = [nil as String?] + DataManager.shared.model.tweakFolderNames.map { $0 as String? }
         let tweakMenuActions = tweakActions.map { [weak self] folderName in
