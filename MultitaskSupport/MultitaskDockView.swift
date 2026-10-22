@@ -140,6 +140,8 @@ class AppInfoProvider {
     @Published var czfPanelOpenCounter: Int = 0
     // 源面板每次调出时 +1，面板视图据此刷新源数据（覆盖层常驻，onAppear 只来一次）
     @Published var czfSourcesPanelOpenCounter: Int = 0
+    // App 面板每次调出时 +1，面板视图据此滚回顶部（每次调出都是初始状态，用户定）
+    @Published var czfAppPanelOpenCounter: Int = 0
     // 手势面板覆盖层（背景遮罩 + 面板宿主）：只建一次常驻窗口待命，
     // 开/关只切可见性和位置；开没开以面板视图的 isHidden 为准，不以引用为准
     // 定时最小化打开的轮询定时器（30 秒一轮，只在宿主活着时跑）
@@ -769,6 +771,16 @@ class AppInfoProvider {
         }
     }
 
+    // 关闭单个运行中 App（面板顶部状态栏的图标右上角 ✕ 用）
+    @objc public func closeAppWindow(uuid: String) {
+        DispatchQueue.main.async {
+            if let app = self.apps.first(where: { $0.appUUID == uuid }),
+               let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController {
+                vc.closeWindow()
+            }
+        }
+    }
+
     // MARK: - 定时最小化打开（CZF）
     // 每个 App 在其设置页单独开关+定时间（UserDefaults 键 CZFSchedMin*，
     // 按 bundleIdentifier 存）。宿主活着时每 30 秒查一轮：到点且今天
@@ -1288,6 +1300,8 @@ class AppInfoProvider {
             // 表现为"滑一次没出来、再滑一次才出来"）。搬顶层、摆正、
             // 切可见、动画到目标位，一次调用即恢复；已打开时动画终点
             // 与当前位相同，无可见副作用。
+            // 计数 +1：面板视图据此滚回顶部（每次调出都是初始状态）
+            self.czfAppPanelOpenCounter += 1
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
@@ -1912,6 +1926,70 @@ extension EnvironmentValues {
 
 // MARK: - All Apps List View
 @available(iOS 16.0, *)
+// 面板顶部固定 App 的存储（用户定）：长按列表行固定/取消固定，
+// 按 bundleIdentifier 记（重装不丢），存 App Group 默认设置。
+final class CZFPinnedAppsStore: ObservableObject {
+    static let shared = CZFPinnedAppsStore()
+    @Published private(set) var pinnedIds: [String] = []
+    private let defaultsKey = "CZFPinnedPanelApps"
+    init() {
+        pinnedIds = LCUtils.appGroupUserDefault.stringArray(forKey: defaultsKey) ?? []
+    }
+    func isPinned(_ id: String) -> Bool { pinnedIds.contains(id) }
+    func toggle(_ id: String) {
+        if let idx = pinnedIds.firstIndex(of: id) {
+            pinnedIds.remove(at: idx)
+        } else {
+            pinnedIds.append(id)
+        }
+        LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+    }
+}
+
+// 面板顶部固定区：固定的 App 小图标（40pt）横排，点按打开；
+// 没固定过时给一行小字提示怎么固定
+struct PinnedAppsStripView: View {
+    @ObservedObject var sortManager = LCAppSortManager.shared
+    @ObservedObject var pinnedStore = CZFPinnedAppsStore.shared
+    let onLaunch: (LCAppModel) -> Void
+
+    private var pinnedApps: [LCAppModel] {
+        sortManager.sortedApps.filter { pinnedStore.isPinned($0.appInfo.bundleIdentifier() ?? "") }
+    }
+
+    var body: some View {
+        if pinnedApps.isEmpty {
+            Text("长按下面的 App 可以固定到这里")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    ForEach(pinnedApps, id: \.self) { app in
+                        VStack(spacing: 3) {
+                            RunningAppIcon(appInfo: app.appInfo)
+                                .frame(width: 40, height: 40)
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                            Text(app.appInfo.displayName() ?? "")
+                                .font(.caption2)
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .frame(width: 52)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { onLaunch(app) }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            }
+        }
+    }
+}
+
 struct AllAppsListView: View {
     @Environment(\.dismiss) var dismiss
     @Environment(\.czfPanelClose) private var czfPanelClose
@@ -1929,12 +2007,20 @@ struct AllAppsListView: View {
 
     var body: some View {
         NavigationView {
+            ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                // 顶部固定区（用户定）：不要"App"标题，换成可固定
+                // 的 App 小图标横排（长按下面列表行固定/取消），
+                // 固定区不随列表滚动
+                PinnedAppsStripView { app in launchApp(app) }
+                Divider()
             ScrollView {
                 LazyVStack(spacing: 10) {
                     // 顶部状态栏（用户要求）：固定按钮 + 已打开
                     // 的 App 横排，没打开 App 时也显示（固定按钮
                     // 仍然可用）
                     RunningAppsStripView { closePanel() }
+                        .id("czfAppPanelTop")
                     ForEach(sortManager.sortedApps, id: \.self) { app in
                         AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
@@ -1947,7 +2033,13 @@ struct AllAppsListView: View {
                 }
                 .padding()
             }
-            .navigationTitle("App")
+            .onChange(of: dockManager.czfAppPanelOpenCounter) { _ in
+                // 每次调出回到初始状态：滚回最顶部（用户定，
+                // 不留上次滑动的位置）
+                proxy.scrollTo("czfAppPanelTop", anchor: .top)
+            }
+            }
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1959,6 +2051,7 @@ struct AllAppsListView: View {
                 }
             }
             .searchable(text: .constant(""), prompt: "搜索")
+            }
         }
     }
     
@@ -2066,12 +2159,14 @@ struct SourcesPanelView: View {
 
     var body: some View {
         NavigationView {
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     // 顶部状态栏（与 App 面板一致）：固定按钮 +
                     // 已打开的 App 横排
                     RunningAppsStripView { closePanel() }
                         .padding(.horizontal)
+                        .id("czfSourcesPanelTop")
                     if viewModel.sources.isEmpty {
                         Text("还没有添加源")
                             .foregroundColor(.secondary)
@@ -2124,12 +2219,16 @@ struct SourcesPanelView: View {
                 }
             }
             .onChange(of: dockManager.czfSourcesPanelOpenCounter) { _ in
+                // 每次调出回到初始状态：滚回最顶部（用户定，
+                // 不留上次滑动的位置）+ 刷新源数据
+                proxy.scrollTo("czfSourcesPanelTop", anchor: .top)
                 Task { await viewModel.refreshAllSources() }
             }
             .alert("提示", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                 Button("好") { errorMessage = nil }
             } message: {
                 Text(errorMessage ?? "")
+            }
             }
         }
     }
@@ -2441,10 +2540,28 @@ private struct RunningAppsStripView: View {
     // 打开。不用 Button 是免得长按时把点按也误触发（老毛病）。
     private func runningAppItem(_ runningApp: DockAppModel) -> some View {
         VStack(spacing: 4) {
-            RunningAppIcon(appInfo: runningApp.appInfo)
-                .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(color: .black.opacity(0.12), radius: 3, x: 0, y: 2)
+            ZStack(alignment: .topTrailing) {
+                RunningAppIcon(appInfo: runningApp.appInfo)
+                    .frame(width: 52, height: 52)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shadow(color: .black.opacity(0.12), radius: 3, x: 0, y: 2)
+                // 右上角小红 ✕：单独关掉这个 App（用户定）。
+                // 高优先级手势独占这下点按，不触发图标本体的
+                // 点按切换/长按小窗口；关掉后图标自动消失，
+                // 面板不关（方便接着关下一个）
+                ZStack {
+                    Circle().fill(Color.red).frame(width: 18, height: 18)
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                }
+                .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
+                .contentShape(Circle())
+                .highPriorityGesture(TapGesture().onEnded {
+                    dockManager.closeAppWindow(uuid: runningApp.appUUID)
+                })
+                .offset(x: 5, y: -4)
+            }
             Text(runningApp.appName)
                 .font(.caption2)
                 .foregroundColor(.primary)
@@ -2501,6 +2618,7 @@ struct AppCardRow: View {
     let onLaunch: () -> Void
     let onMinimizeOpen: () -> Void
     let onSmallWindowOpen: () -> Void
+    @ObservedObject private var pinnedStore = CZFPinnedAppsStore.shared
     @State private var appIcon: UIImage?
     
     var body: some View {
@@ -2571,6 +2689,15 @@ struct AppCardRow: View {
         .padding(10)
         .background(Color(.systemGray6))
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        // 长按行：固定到面板顶部 / 取消固定（用户定）
+        .contextMenu {
+            Button {
+                pinnedStore.toggle(app.appInfo.bundleIdentifier() ?? "")
+            } label: {
+                Label(pinnedStore.isPinned(app.appInfo.bundleIdentifier() ?? "") ? "取消固定" : "固定到顶部",
+                      systemImage: pinnedStore.isPinned(app.appInfo.bundleIdentifier() ?? "") ? "pin.slash" : "pin")
+            }
+        }
     }
     
     private func loadIcon() {
