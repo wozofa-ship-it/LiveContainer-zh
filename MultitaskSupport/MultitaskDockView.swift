@@ -1348,8 +1348,8 @@ class AppInfoProvider {
         backdrop.isHidden = true
         backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
         window.addSubview(backdrop)
-        // 面板本体：底部 75% 高，上圆角（60% 时顶栏+固定区+运行区
-        // 就吃掉一半，列表只剩两行，用户真机点名太挤、遮挡）
+        // 面板本体：底部 60% 高，上圆角（75% 版 2026-10-23 当晚被
+        // 用户真机否决：又高又肿，且整条盖死源面板手势起手带）
         let rootView = AnyView(
             AllAppsListView()
                 .environmentObject(self)
@@ -1357,7 +1357,7 @@ class AppInfoProvider {
         )
         let host = UIHostingController(rootView: rootView)
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.75)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
         host.view.layer.cornerRadius = 16
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -1389,7 +1389,7 @@ class AppInfoProvider {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.75
+            let panelHeight = b.height * 0.6
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -1720,9 +1720,8 @@ public struct MultitaskDockSwiftView: View {
             .padding(dynamicPadding)
             .sheet(isPresented: $showAllApps) {
                 AllAppsListView()
-                    // 只留一个档位：两个档位时系统会先拉高抽屉、列表滚不动；
-                    // 高度与手势覆盖层一致 75%（60% 太挤、遮行）
-                    .presentationDetents([.fraction(0.75)])
+                    // 只留一个半屏档位：两个档位时系统会先拉高抽屉、列表滚不动
+                    .presentationDetents([.fraction(0.6)])
                     .presentationDragIndicator(.visible)
             }
             .onReceive(NotificationCenter.default.publisher(for: .czfOpenAllAppsPanel)) { _ in
@@ -2030,10 +2029,9 @@ struct PinnedAppsStripView: View {
     }
 
     var body: some View {
-        // 与下面控制卡、列表行同款卡片（secondarySystemBackground
-        // / 圆角 16 / 左右对齐）：上一版去掉灰卡后整条裸贴在面板
-        // 白底上飘着，和下方成套的卡片脱节，用户真机截图仍点名
-        // 丑。卡中卡的问题在嵌套两层，这里只留一层、与下方同款
+        // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
+        // 点名"太丑"的主因）；图标尺寸/圆角与下面运行区、列表
+        // 行统一（46pt / 圆角 12）
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
                 Image(systemName: "pin.fill")
@@ -2053,14 +2051,14 @@ struct PinnedAppsStripView: View {
                         ForEach(pinnedApps, id: \.self) { app in
                             VStack(spacing: 4) {
                                 RunningAppIcon(appInfo: app.appInfo)
-                                    .frame(width: 48, height: 48)
+                                    .frame(width: 46, height: 46)
                                     .clipShape(RoundedRectangle(cornerRadius: 12))
                                     .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 Text(app.appInfo.displayName() ?? "")
                                     .font(.caption2)
-                                    .foregroundColor(.primary)
+                                    .foregroundColor(.secondary)
                                     .lineLimit(1)
-                                    .frame(width: 58)
+                                    .frame(width: 56)
                             }
                             .contentShape(Rectangle())
                             .onTapGesture { onLaunch(app) }
@@ -2069,13 +2067,9 @@ struct PinnedAppsStripView: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Color(.secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 2)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
     }
 }
 
