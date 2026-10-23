@@ -10,7 +10,7 @@
 // 行为：只观察不拦截（cancelsTouchesInView=NO + 同时识别）。
 // 判定用「起手位置 + 当前位移」：滑动过程中持续判定，一过门槛立刻
 // 触发一次（不等抬指——往外滑手指很快出屏，抬指信号经常等不到）。
-// 门槛：往外滑（隐藏/面板）10pt，往里滑（唤出）24pt，
+// 门槛：往外滑（隐藏/面板）6pt，往里滑（唤出）24pt，
 // 任意位置起手拖到边缘需位移 >50pt（防误触）。
 // 方向判定：横向位移须大于纵向的 1.5 倍（原为 2 倍，斜向滑太容易被判掉）。
 // 不费电：无定时器（仅启动阶段几次延迟重试）、无轮询。
@@ -63,7 +63,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     if (startEdge == 1) {
         // 2026-10-23 真机纠正后对调：往外弹（左移）= 源面板，
         // 往里拖（右移）= App 面板；门槛跟着物理方向走
-        if (dx <= -15 && endX <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
+        if (dx <= -8 && endX <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
             *outName = @"czf.dock.openSources";
             *outSelector = @"czfOpenSourcesPanel";
             return YES;
@@ -74,7 +74,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
             return YES;
         }
     } else if (startEdge == 2) {
-        if (dx >= 15 && endX >= width - 12 && fabs(dx) > 0.4 * fabs(dy)) {
+        if (dx >= 8 && endX >= width - 12 && fabs(dx) > 0.4 * fabs(dy)) {
             *outName = @"czf.dock.rightOutward";
             *outSelector = @"czfEdgeRightOutward";
             return YES;
@@ -171,16 +171,20 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
             return;
         }
     }
-    if (fabs(translation.x) < 1.5 * fabs(translation.y)) return;
+    // 方向比：往外弹（左缘左移/右缘右移）物理行程短、拇指走
+    // 弧线纵向分量大，1.5 倍会把大半次弹滑判掉（用户真机反馈
+    // 左缘往左弹很不灵敏），往外方向放宽到 0.9；其余维持 1.5
+    BOOL czfOutward = (gCZFStartEdge == 1 && translation.x < 0) || (gCZFStartEdge == 2 && translation.x > 0);
+    if (fabs(translation.x) < (czfOutward ? 0.9 : 1.5) * fabs(translation.y)) return;
     BOOL draggingRight = translation.x > 0;
     CGFloat absX = fabs(translation.x);
     NSString *notificationName = nil;
     NSString *selectorName = nil;
     if (gCZFStartEdge == 2) {
         // 起手在右边缘：往左=当前 App 全屏（门槛24），往右=当前 App
-        // 小窗口（往外滑手指很快出屏，门槛10）；宿主侧改派，原显/隐栏已去掉
+        // 小窗口（往外滑手指很快出屏，门槛6）；宿主侧改派，原显/隐栏已去掉
         if (draggingRight) {
-            if (absX <= 10) return;
+            if (absX <= 6) return;
             notificationName = @"czf.dock.rightOutward";
             selectorName = @"czfEdgeRightOutward";
         } else {
@@ -192,13 +196,13 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // 起手在左边缘（2026-10-23 真机纠正后对调）：往里拖
         // （手指右移，门槛30）= App 面板——往里是 App 内常用
         // 方向，门槛保持严，宁可多滑一点也不抢 App 的指令；
-        // 往外弹（手指左移，门槛10）= 源面板
+        // 往外弹（手指左移，门槛6）= 源面板
         if (draggingRight) {
             if (absX <= 30) return;
             notificationName = @"czf.dock.openPanel";
             selectorName = @"czfOpenAppPanel";
         } else {
-            if (absX <= 10) return;
+            if (absX <= 6) return;
             notificationName = @"czf.dock.openSources";
             selectorName = @"czfOpenSourcesPanel";
         }
@@ -286,7 +290,7 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         // 提前触发（严判定防误触）：64 带内起手、往外
                         // 弹（左移）8、横向占优 1.2 倍 = 源面板
                         // （2026-10-23 对调后）
-                        if ([state[0] doubleValue] <= 64 && dx <= -8 && fabs(dx) > 1.2 * fabs(dy)) {
+                        if ([state[0] doubleValue] <= 64 && dx <= -8 && fabs(dx) > 0.9 * fabs(dy)) {
                             fireName = @"czf.dock.openSources";
                             fireSelector = @"czfOpenSourcesPanel";
                         } else if ([state[0] doubleValue] <= 36 && dx >= 36 && fabs(dx) > 1.5 * fabs(dy)) {
@@ -302,11 +306,13 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                     } else {
                         // 终结兜底（看物理结果，不看轨迹）：拇指弧线在下
                         // 半屏轨迹偏斜，方向比会把整段滑动判掉；只要最
-                        // 终落点贴到边缘 12 内、净位移往左 ≥15，就是
+                        // 终落点贴到边缘 12 内、净位移往左 ≥8，就是
                         // 一次滑出左边缘 = 源面板（2026-10-23 对调
-                        // 后）。方向比只留 0.4 的底线挡纯竖滑（竖滑
+                        // 后；门槛原为 15，起手贴边时物理行程总共就
+                        // 十几 pt、大半次滑够不着，真机反馈不灵敏）。
+                        // 方向比只留 0.4 的底线挡纯竖滑（竖滑
                         // 被取消时落点不在边缘，也进不来）。
-                        if (dx <= -15 && loc.x <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
+                        if (dx <= -8 && loc.x <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
                             fireName = @"czf.dock.openSources";
                             fireSelector = @"czfOpenSourcesPanel";
                         } else if ([state[0] doubleValue] <= 64 && dx >= 44 && fabs(dx) > 0.8 * fabs(dy)) {

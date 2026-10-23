@@ -1091,13 +1091,13 @@ class AppInfoProvider {
             // = App 面板，往外弹（手指左移）= 源面板。门槛跟着动作
             // 的物理方向走，不跟面板走（往里拖与 App 内横滑同轨，
             // 门槛保持严；往外弹空间小，门槛保持松）
-            if dx <= -15 * s, endX <= 12, abs(dx) > 0.4 * abs(dy) {
+            if dx <= -8 * s, endX <= 12, abs(dx) > 0.4 * abs(dy) {
                 fireDockAction { self.czfOpenSourcesPanel() }
             } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy) {
                 fireDockAction { self.czfOpenAppPanel() }
             }
         } else if startEdge == 2 {
-            if dx >= 15 * s, endX >= width - 12, abs(dx) > 0.4 * abs(dy) {
+            if dx >= 8 * s, endX >= width - 12, abs(dx) > 0.4 * abs(dy) {
                 fireDockAction { self.czfEdgeRightOutward() }
             } else if dx <= -44 * s, abs(dx) > 0.8 * abs(dy) {
                 fireDockAction { self.czfEdgeRightInward() }
@@ -1110,15 +1110,22 @@ class AppInfoProvider {
     // 返回 true 表示本次判定触发了动作（边条 handler 据此做一次性触发）
     @discardableResult
     private func processGlobalSwipe(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
-        guard abs(translation.x) > 1.5 * abs(translation.y) else { return false }
         let draggingRight = translation.x > 0
+        // 往外弹（左缘左移/右缘右移）物理行程就只有起手那几十
+        // 点：手指几毫米就出屏，拇指走的还是弧线、纵向分量大，
+        // 方向比按 1.5 卡会把大半次弹滑判掉（用户真机反馈左缘
+        // 往左弹很不灵敏）。往外方向方向比放宽到 0.9、距离门槛
+        // 降到 6：贴边往外滑没有任何 App 手势同轨，放宽不抢
+        // 东西；往里拖和任意位置维持原判定不变
+        let isOutward = (startEdge == 1 && !draggingRight) || (startEdge == 2 && draggingRight)
+        guard abs(translation.x) > (isOutward ? 0.9 : 1.5) * abs(translation.y) else { return false }
         let s = Self.czfThresholdScale
         if startEdge == 2 {
             // 右边缘改派：往左（门槛24）/往右（门槛10，往外滑手指
             // 很快出屏）；动作分场景在入口判定（App 内全屏/小窗口，
             // 主界面状态栏调度）。门槛乘灵敏度系数（设置页三档）
             if draggingRight {
-                guard translation.x > 10 * s else { return false }
+                guard translation.x > 6 * s else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
             } else {
                 guard abs(translation.x) > 24 * s else { return false }
@@ -1135,7 +1142,7 @@ class AppInfoProvider {
                 guard translation.x > 30 * s else { return false }
                 fireDockAction { self.czfOpenAppPanel() }
             } else {
-                guard abs(translation.x) > 10 * s else { return false }
+                guard abs(translation.x) > 6 * s else { return false }
                 fireDockAction { self.czfOpenSourcesPanel() }
             }
             return true
@@ -2023,6 +2030,7 @@ struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
     @ObservedObject var pinnedStore = CZFPinnedAppsStore.shared
     let onLaunch: (LCAppModel) -> Void
+    let onClose: () -> Void
 
     private var pinnedApps: [LCAppModel] {
         sortManager.sortedApps.filter { pinnedStore.isPinned($0.appInfo.bundleIdentifier() ?? "") }
@@ -2039,6 +2047,13 @@ struct PinnedAppsStripView: View {
                 Text("固定")
                     .font(.caption)
                     .fontWeight(.semibold)
+                Spacer()
+                // 关闭钮并进这一行（原来单独占一整行顶栏，顶部
+                // 一层叠一层，用户点名挤）；动作与原 ✕ 相同
+                Button { onClose() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                }
             }
             .foregroundColor(.secondary)
             if pinnedApps.isEmpty {
@@ -2094,25 +2109,15 @@ struct AllAppsListView: View {
         // 本来就只有半屏多；原来挂的 .searchable 绑的是常量空串
         // （根本不筛选），iOS 26 还把它渲染成悬浮条压在面板底部，
         // 遮住最后一行（用户真机点名"一拉出来都遮挡住了"）。改成
-        // 自带一行紧凑顶栏：左边关闭钮，下面直接接固定区，
-        // 省下的高度全留给列表
+        // 关闭钮并进固定区标题行：独立顶栏又是一层，顶部
+        // 顶栏+固定+运行三层叠着（用户点名），省下的高度
+        // 全留给列表
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
-                HStack {
-                    Button { closePanel() } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-                .padding(.bottom, 2)
                 // 顶部固定区（用户定）：不要"App"标题，换成可固定
                 // 的 App 小图标横排（长按下面列表行固定/取消），
                 // 固定区不随列表滚动
-                PinnedAppsStripView { app in launchApp(app) }
+                PinnedAppsStripView(onLaunch: { app in launchApp(app) }, onClose: { closePanel() })
             ScrollView {
                 LazyVStack(spacing: 10) {
                     // 顶部状态栏（用户要求）：固定按钮 + 已打开
@@ -2573,7 +2578,7 @@ private struct RunningAppsStripView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
                     dockManager.toggleDockCollapse()
                     onSwitch()
@@ -2587,14 +2592,14 @@ private struct RunningAppsStripView: View {
                     onSwitch()
                 }
                 if !dockManager.apps.isEmpty {
-                    Divider().frame(height: 56)
+                    Divider().frame(height: 50)
                 }
                 ForEach(dockManager.apps) { runningApp in
                     runningAppItem(runningApp)
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
         }
         .background(Color(UIColor.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -2607,10 +2612,10 @@ private struct RunningAppsStripView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(tile)
-                    .frame(width: 52, height: 52)
+                    .frame(width: 46, height: 46)
                 Image(systemName: systemImage)
                     .foregroundColor(glyph)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: 18, weight: .semibold))
             }
             Text(label)
                 .font(.caption2)
@@ -2628,7 +2633,7 @@ private struct RunningAppsStripView: View {
         VStack(spacing: 4) {
             ZStack(alignment: .topTrailing) {
                 RunningAppIcon(appInfo: runningApp.appInfo)
-                    .frame(width: 52, height: 52)
+                    .frame(width: 46, height: 46)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.12), radius: 3, x: 0, y: 2)
                 // 右上角小红 ✕：单独关掉这个 App（用户定）。
