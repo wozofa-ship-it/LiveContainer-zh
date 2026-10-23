@@ -60,6 +60,15 @@ struct LCTabView: View {
         .onAppear {
             // 每次打开 App 通知源页自动刷新一次（节流在源页那边）
             NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
+            // 预热节点核心：有标了 VPN 的 App 时提前起核心，
+            // 第一个 VPN App 点开不用等冷启动
+            CZFVPNManager.shared.prewarmIfNeeded()
+        }
+        .onChange(of: scenePhase) { newPhase in
+            // 从后台切回前台时也预热一次（核心可能已被自动停）
+            if newPhase == .active {
+                CZFVPNManager.shared.prewarmIfNeeded()
+            }
         }
         .downloadAlert(helper: downloadHelper)
         .environmentObject(downloadHelper)

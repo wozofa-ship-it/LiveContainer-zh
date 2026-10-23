@@ -781,6 +781,22 @@ class AppInfoProvider {
         }
     }
 
+    // 一键重启运行中的 App（卡死时用）：关掉窗口，等它退
+    // 干净再按平时的启动路线重新拉起
+    @objc public func restartApp(uuid: String) {
+        guard let app = self.apps.first(where: { $0.appUUID == uuid }) else { return }
+        let bundlePath = app.appInfo.relativeBundlePath ?? ""
+        closeAppWindow(uuid: uuid)
+        guard !bundlePath.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundlePath)") {
+                #if !os(visionOS)
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                #endif
+            }
+        }
+    }
+
     // MARK: - 定时最小化打开（CZF）
     // 每个 App 在其设置页单独开关+定时间（UserDefaults 键 CZFSchedMin*，
     // 按 bundleIdentifier 存）。宿主活着时每 30 秒查一轮：到点且今天
@@ -2742,13 +2758,27 @@ struct AppCardRow: View {
         .padding(10)
         .background(Color(.systemGray6))
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        // 长按行：固定到面板顶部 / 取消固定（用户定）
+        // 长按行：固定到面板顶部 / 取消固定（用户定）；
+        // 正在运行的还多两个：重启（卡死时一步恢复）、关闭
         .contextMenu {
             Button {
                 pinnedStore.toggle(app.appInfo.bundleIdentifier() ?? "")
             } label: {
                 Label(pinnedStore.isPinned(app.appInfo.bundleIdentifier() ?? "") ? "取消固定" : "固定到顶部",
                       systemImage: pinnedStore.isPinned(app.appInfo.bundleIdentifier() ?? "") ? "pin.slash" : "pin")
+            }
+            if let uuid = app.appInfo.dataUUID,
+               dockManager.apps.contains(where: { $0.appUUID == uuid }) {
+                Button {
+                    dockManager.restartApp(uuid: uuid)
+                } label: {
+                    Label("重启 App", systemImage: "arrow.clockwise")
+                }
+                Button(role: .destructive) {
+                    dockManager.closeAppWindow(uuid: uuid)
+                } label: {
+                    Label("关闭 App", systemImage: "xmark.circle")
+                }
             }
         }
     }

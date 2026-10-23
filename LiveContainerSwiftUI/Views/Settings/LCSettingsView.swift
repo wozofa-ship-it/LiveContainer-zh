@@ -73,6 +73,7 @@ struct LCSettingsView: View {
     @State var vpnSubBusy = false
     @State var vpnNodes: [String] = []
     @State var vpnHostProxy = false
+    @AppStorage("CZFVPNPrewarm") var vpnPrewarm = true
     @State var vpnActiveIndex = 0
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
     @State var vpnPinging = false
@@ -445,6 +446,22 @@ struct LCSettingsView: View {
                                 refreshVPNState()
                             }
                         }
+                        // 测完后按延迟从低到高重排节点列表（不通
+                        // 的沉底、没测到的最后），活动节点按内容
+                        // 跟随、不重启核心
+                        if vpnPingResults.count > 1 {
+                            Button("按延迟排序") {
+                                let links = CZFVPNManager.shared.nodeLinks
+                                let sorted = links.enumerated().sorted { a, b in
+                                    let ka = vpnPingResults[a.offset].map { $0.success ? $0.delay : Int.max - 1 } ?? Int.max
+                                    let kb = vpnPingResults[b.offset].map { $0.success ? $0.delay : Int.max - 1 } ?? Int.max
+                                    return ka < kb
+                                }.map { $0.element }
+                                CZFVPNManager.shared.replaceNodeOrder(sorted)
+                                vpnPingResults = [:]
+                                refreshVPNState()
+                            }
+                        }
                         Spacer()
                         Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
                             .font(.footnote)
@@ -453,6 +470,7 @@ struct LCSettingsView: View {
                     .onAppear {
                         refreshVPNState()
                     }
+                    Toggle("打开时预热节点核心", isOn: $vpnPrewarm)
                     Toggle("源和下载也走内置节点", isOn: $vpnHostProxy)
                         .onChange(of: vpnHostProxy) { newValue in
                             CZFVPNManager.isHostProxyEnabled = newValue
@@ -464,7 +482,7 @@ struct LCSettingsView: View {
                 } header: {
                     Text("单App VPN")
                 } footer: {
-                    Text("点节点行切换（核心在跑时立即生效），左滑可删。订阅导入会用订阅内容整体替换节点列表（当前选中的节点还在订阅里就继续用它），节点更新了再点一次「导入订阅」即可。点「测延迟」经每个节点真实发一次请求量往返毫秒数（核心在跑时测速会短暂停核心、测完自动起回来，几秒的事）。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑可删。订阅导入会用订阅内容整体替换节点列表（当前选中的节点还在订阅里就继续用它），节点更新了再点一次「导入订阅」即可。点「测延迟」经每个节点真实发一次请求量往返毫秒数（核心在跑时测速会短暂停核心、测完自动起回来，几秒的事）。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。「打开时预热节点核心」开着时，进 LiveContainer 就先把核心热好，第一个 VPN App 点开不用等冷启动（不用的话核心随宿主挂起，不额外耗电）。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
                 }
                 
                 Section {

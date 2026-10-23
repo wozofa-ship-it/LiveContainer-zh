@@ -37,12 +37,12 @@ struct LCDataManagementView : View {
     @State private var backupFolderList: [URL] = []
     // 每个备份的体积（打开恢复列表时后台算，行里显示 + 底部总占用）
     @State private var backupSizes: [URL: Int64] = [:]
-    // 储存总览（进页面时后台算）：备份总占用、已下载 IPA、
-    // 数据占用最大的几个 App
+    // 储存总览（进页面时后台算）：备份总占用、已下载 IPA。
+    // 各 App 的数据占用不重复统计——设置里的「存储管理」页
+    // （上游自带）已经有完整的分 App 明细
     @State private var storageBackupBytes: Int64 = -1
     @State private var storageIPAFiles: [(url: URL, size: Int64)] = []
     @State private var storageIPATotal: Int64 = 0
-    @State private var storageAppSizes: [(name: String, size: Int64)] = []
     @State private var showClearIPAsConfirm = false
     // 设置导出/导入
     @State private var showSettingsImporter = false
@@ -94,15 +94,6 @@ struct LCDataManagementView : View {
                         Text(backupSizeText(storageIPATotal))
                             .foregroundColor(.secondary)
                     }
-                    ForEach(Array(storageAppSizes.enumerated()), id: \.offset) { _, item in
-                        HStack {
-                            Text(item.name)
-                                .lineLimit(1)
-                            Spacer()
-                            Text(backupSizeText(item.size))
-                                .foregroundColor(.secondary)
-                        }
-                    }
                     if !storageIPAFiles.isEmpty {
                         Button(role: .destructive) {
                             showClearIPAsConfirm = true
@@ -114,7 +105,7 @@ struct LCDataManagementView : View {
             } header: {
                 Text("储存总览")
             } footer: {
-                Text("「已下载的 IPA」是在源里点「下载」存进来的安装包，装完就没用了、可以放心清。App 列表是数据占用最大的几个（只列前 5）。")
+                Text("「已下载的 IPA」是在源里点「下载」存进来的安装包，装完就没用了、可以放心清。每个 App 的数据占用明细在设置里的「存储管理」页看。")
             }
             .task {
                 computeStorageStats()
@@ -910,10 +901,9 @@ struct LCDataManagementView : View {
     }
 
     /// 储存总览统计：备份总占用 + Documents 根目录的 .ipa
-    /// （源里「下载」存的位置）+ 各 App 容器数据占用前 5。
-    /// 全在后台线程算，算完回主线程刷界面
+    /// （源里「下载」存的位置）。各 App 数据占用不在这里重
+    /// 复统计（「存储管理」页已有）。后台线程算完回主线程
     func computeStorageStats() {
-        let apps = sharedModel.apps + sharedModel.hiddenApps
         DispatchQueue.global(qos: .utility).async {
             let fm = FileManager.default
             let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -925,24 +915,11 @@ struct LCDataManagementView : View {
                     ipaFiles.append((entry, size))
                 }
             }
-            var appSizes: [(name: String, size: Int64)] = []
-            for app in apps {
-                var total: Int64 = 0
-                for container in app.uiContainers {
-                    total += Self.folderSize(container.containerURL)
-                }
-                if total > 0 {
-                    appSizes.append((app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown", total))
-                }
-            }
-            appSizes.sort { $0.size > $1.size }
-            let top = Array(appSizes.prefix(5))
             let ipaTotal = ipaFiles.reduce(0) { $0 + $1.size }
             DispatchQueue.main.async {
                 storageBackupBytes = backupsBytes
                 storageIPAFiles = ipaFiles
                 storageIPATotal = ipaTotal
-                storageAppSizes = top
             }
         }
     }

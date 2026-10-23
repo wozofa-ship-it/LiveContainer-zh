@@ -138,6 +138,36 @@ public final class CZFVPNManager {
         }.resume()
     }
 
+    // 只换节点顺序（测速排序用）：活动节点按内容找回，不
+    // 重启核心（顺序不影响在跑的核心用哪条节点）
+    public func replaceNodeOrder(_ newLinks: [String]) {
+        guard !newLinks.isEmpty else { return }
+        let previousActive = nodeLink
+        UserDefaults.standard.set(newLinks, forKey: Self.nodeListKey)
+        if let idx = newLinks.firstIndex(of: previousActive) {
+            UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+        }
+    }
+
+    /// 预热：有 App 标了 VPN 且预热开关没关时，提前把核心
+    /// 拉起来（用全局当前节点），第一个 VPN App 点开就不
+    /// 用等冷启动。核心已经在跑就直接返回，不打扰正在用
+    /// 的连接；起了没人用时原有的 60 秒自动停不覆盖这种
+    /// 情况（没 App 启动过），核心随宿主进程被系统挂起，
+    /// 不额外耗电
+    public func prewarmIfNeeded() {
+        if UserDefaults.standard.object(forKey: "CZFVPNPrewarm") != nil, !UserDefaults.standard.bool(forKey: "CZFVPNPrewarm") {
+            return
+        }
+        guard !isRunning, !nodeLinks.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        let hasMarked = defaults.dictionaryRepresentation().keys.contains { key in
+            key.hasPrefix("CZFVPNEnabled-") && defaults.bool(forKey: key)
+        }
+        guard hasMarked else { return }
+        _ = start()
+    }
+
     public func removeNode(at index: Int) {
         var links = nodeLinks
         guard links.indices.contains(index) else { return }
