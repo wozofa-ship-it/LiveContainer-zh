@@ -66,6 +66,8 @@ struct LCDataManagementView : View {
     @State private var showRestoreSourceDialog = false
     @State private var restoreFromExternal = false
     @State private var showDeleteAllBackupsConfirm = false
+    @State private var showDeleteBackupConfirm = false
+    @State private var pendingDeleteBackupURL: URL? = nil
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -472,7 +474,11 @@ struct LCDataManagementView : View {
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
-                            deleteBackup(at: folderURL)
+                            // 删单个备份原来左滑直接删（删全部反而有
+                            // 确认框）：备份含整套数据/登录态，误滑
+                            // 不可恢复，先确认再删
+                            pendingDeleteBackupURL = folderURL
+                            showDeleteBackupConfirm = true
                         } label: {
                             Label("删除", systemImage: "trash")
                         }
@@ -503,9 +509,15 @@ struct LCDataManagementView : View {
                             Button {
                                 showRestoreSelect = false
                                 Task {
+                                    // 逐个静默恢复、只在最后弹一个
+                                    // 总报告：原来每个备份弹一次自己
+                                    // 的结果窗，十几个备份要点掉十几层
+                                    var lines: [String] = []
                                     for folderURL in backupFolderList {
-                                        await restoreFromBackup(at: folderURL)
+                                        lines.append(await restoreFromBackup(at: folderURL, presentResult: false))
                                     }
+                                    successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
+                                    successShow = true
                                 }
                             } label: {
                                 Label("一键恢复全部", systemImage: "arrow.clockwise.circle")
@@ -532,6 +544,19 @@ struct LCDataManagementView : View {
                     Button("lc.common.cancel".loc, role: .cancel) {}
                 } message: {
                     Text("将删除当前列表里的全部 \(backupFolderList.count) 个备份，此操作不可恢复")
+                }
+                .confirmationDialog("确定删除这个备份？", isPresented: $showDeleteBackupConfirm, titleVisibility: .visible) {
+                    Button("删除", role: .destructive) {
+                        if let url = pendingDeleteBackupURL {
+                            deleteBackup(at: url)
+                        }
+                        pendingDeleteBackupURL = nil
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        pendingDeleteBackupURL = nil
+                    }
+                } message: {
+                    Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」，此操作不可恢复")
                 }
             }
         }
@@ -1247,7 +1272,11 @@ struct LCDataManagementView : View {
     }
 
 
-    func restoreFromBackup(at backupURL: URL) async {
+    /// 恢复一个备份文件夹。presentResult=true（恢复单个时）照旧
+    /// 弹完整报告；false（一键恢复全部逐个调）时不弹窗，返回一行
+    /// 摘要给调用方汇总成一个总报告。返回值单个恢复时不用
+    @discardableResult
+    func restoreFromBackup(at backupURL: URL, presentResult: Bool = true) async -> String {
         let fm = FileManager.default
         do {
             // 新结构：backupURL 直接是单个 App 的备份文件夹（如 Backups/GitHub/）
@@ -1355,11 +1384,27 @@ struct LCDataManagementView : View {
             if !versionMismatchApps.isEmpty {
                 msg += "\n\n备份版本与当前 App 版本不同的（数据已整套按备份时刻恢复；打开后若仍有个别信息异常，是新版读旧数据的兼容问题）：\n" + versionMismatchApps.joined(separator: "\n")
             }
-            successInfo = msg
-            successShow = true
+            if presentResult {
+                successInfo = msg
+                successShow = true
+            }
+            // 汇总用的一行摘要：恢复数 + 各类问题计数
+            var line = "\(folderName)：已恢复 \(restoredCount + installRestoredCount) 个"
+            var issues: [String] = []
+            if !installNotFound.isEmpty { issues.append("未在源中找到 \(installNotFound.count) 个") }
+            if !installFailed.isEmpty { issues.append("安装失败 \(installFailed.count) 个") }
+            if !noDataApps.isEmpty { issues.append("无可恢复数据 \(noDataApps.count) 个") }
+            if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
+            if !issues.isEmpty {
+                line += "（" + issues.joined(separator: "、") + "）"
+            }
+            return line
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            if presentResult {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
+            return "\(backupURL.lastPathComponent)：恢复失败（\(error.localizedDescription)）"
         }
     }
 

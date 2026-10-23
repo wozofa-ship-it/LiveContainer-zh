@@ -71,6 +71,8 @@ struct LCSettingsView: View {
     @State var vpnNewNodeText = ""
     @State var vpnSubURL: String = UserDefaults.standard.string(forKey: "CZFVPNSubscriptionURL") ?? ""
     @State var vpnSubBusy = false
+    @State var showSubReplaceConfirm = false
+    @State var pendingSubLinks: [String] = []
     @State var vpnNodes: [String] = []
     @State var vpnHostProxy = false
     @AppStorage("CZFVPNPrewarm") var vpnPrewarm = true
@@ -354,12 +356,16 @@ struct LCSettingsView: View {
                                     vpnSubBusy = false
                                     switch result {
                                     case .success(let links):
-                                        CZFVPNManager.shared.replaceAllNodes(links)
-                                        UserDefaults.standard.set(vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "CZFVPNSubscriptionURL")
-                                        vpnPingResults = [:]
-                                        refreshVPNState()
-                                        successInfo = "订阅导入完成：共 \(links.count) 个节点（节点列表已替换为订阅内容）"
-                                        successShow = true
+                                        // 整体替换是破坏性操作：列表里有
+                                        // 手填节点时先确认再替换（原来点
+                                        // 一下直接全换，手填的瞬间没了）；
+                                        // 列表为空没东西可丢，直接导入
+                                        if vpnNodes.isEmpty {
+                                            applySubscriptionLinks(links)
+                                        } else {
+                                            pendingSubLinks = links
+                                            showSubReplaceConfirm = true
+                                        }
                                     case .failure(let error):
                                         errorInfo = error.localizedDescription
                                         errorShow = true
@@ -588,6 +594,17 @@ struct LCSettingsView: View {
             } message: {
                 Text(successInfo)
             }
+            .confirmationDialog("替换全部节点？", isPresented: $showSubReplaceConfirm, titleVisibility: .visible) {
+                Button("替换为订阅的 \(pendingSubLinks.count) 个节点", role: .destructive) {
+                    applySubscriptionLinks(pendingSubLinks)
+                    pendingSubLinks = []
+                }
+                Button("lc.common.cancel".loc, role: .cancel) {
+                    pendingSubLinks = []
+                }
+            } message: {
+                Text("当前 \(vpnNodes.count) 个节点（包括手动添加的）会被订阅内容整体替换，此操作不可恢复")
+            }
             .alert("lc.settings.importCertificate".loc, isPresented: $certificateImportAlert.show) {
                 Button {
                     certificateImportAlert.close(result: true)
@@ -687,6 +704,17 @@ struct LCSettingsView: View {
                 try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
             }
         }
+    }
+
+    /// 订阅导入的实际替换动作：导入按钮（列表为空时直达）和
+    /// 替换确认框共用，避免两处逻辑漂移
+    func applySubscriptionLinks(_ links: [String]) {
+        CZFVPNManager.shared.replaceAllNodes(links)
+        UserDefaults.standard.set(vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "CZFVPNSubscriptionURL")
+        vpnPingResults = [:]
+        refreshVPNState()
+        successInfo = "订阅导入完成：共 \(links.count) 个节点（节点列表已替换为订阅内容）"
+        successShow = true
     }
 
     func refreshVPNState() {

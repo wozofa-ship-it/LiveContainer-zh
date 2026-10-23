@@ -1059,6 +1059,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         installQueueRunning = true
         Task {
             var processed = 0
+            var succeeded = 0
+            var failedNames: [String] = []
             var batch = false
             // 预下载好的下一个安装包：装当前这个的同时，后台
             // 先把下一个下好，轮到它时直接装，省一半等待
@@ -1104,7 +1106,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                     }
                 }
-                await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview)
+                let installOK = await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview)
+                if installOK {
+                    succeeded += 1
+                } else {
+                    failedNames.append(item.url.lastPathComponent)
+                }
                 if let prefetchFile {
                     try? FileManager.default.removeItem(at: prefetchFile)
                 }
@@ -1115,9 +1122,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             downloadHelper.batchMode = false
             installQueueRunning = false
             if processed > 1 {
-                installInfo = "批量安装完成：共处理 \(processed) 个应用"
+                // 汇总分开报成功/失败并点名失败的：原来只报总数，
+                // 装 10 个挂 3 个也显示"完成"，得逐个去核对
+                if failedNames.isEmpty {
+                    installInfo = "批量安装完成：共 \(processed) 个，全部成功"
+                } else {
+                    installInfo = "批量安装完成：成功 \(succeeded) 个，失败 \(failedNames.count) 个\n\n失败的：\n" + failedNames.joined(separator: "\n")
+                }
                 installInfoShow = true
-                notifyBatchDone(processed)
+                notifyBatchDone(processed, succeeded: succeeded, failedNames: failedNames)
             }
         }
     }
@@ -1125,7 +1138,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 批量安装全部完成时发一条本地通知：批量装十几个要
     /// 很久，用户切去干别的也能知道装完了（在 App 里时只
     /// 进通知中心，不弹横幅，靠顶部小条和汇总弹窗就够了）
-    func notifyBatchDone(_ count: Int) {
+    func notifyBatchDone(_ count: Int, succeeded: Int, failedNames: [String]) {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else {
@@ -1133,7 +1146,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             let content = UNMutableNotificationContent()
             content.title = "批量安装完成"
-            content.body = "共处理 \(count) 个应用"
+            content.body = failedNames.isEmpty ? "共 \(count) 个应用，全部成功" : "成功 \(succeeded) 个，失败 \(failedNames.count) 个：\(failedNames.joined(separator: "、"))"
             content.sound = .default
             center.add(UNNotificationRequest(identifier: "CZFBatchInstall-\(UUID().uuidString)", content: content, trigger: nil))
         }
@@ -1184,22 +1197,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         return lines.joined(separator: "\n")
     }
 
-    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false) async {
+    /// 返回是否装成功：批量队列靠它分开统计成功/失败（原来
+    /// 无返回值，汇总只能报"共处理 N 个"，挂了几个看不出来）。
+    /// 单个安装的调用方不关心返回值，照旧靠 errorShow 弹窗
+    @discardableResult
+    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false) async -> Bool {
         // ignore any install request if we are installing another app
         if self.installprogressVisible {
-            return
+            return false
         }
-        
+
         if sharedModel.multiLCStatus == 2 {
             errorInfo = "lc.appList.manageInPrimaryTip".loc
             errorShow = true
-            return
+            return false
         }
-        
+
         guard var installUrl = URL(string: urlStr) else {
             errorInfo = "lc.appList.urlInvalidError".loc
             errorShow = true
-            return
+            return false
         }
         
         self.installprogressVisible = true
@@ -1213,7 +1230,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if fileExtension != "ipa" && fileExtension != "tipa" {
                 errorInfo = "lc.appList.urlFileIsNotIpaError".loc
                 errorShow = true
-                return
+                return false
             }
             
             let fm = FileManager.default
@@ -1233,7 +1250,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 } catch {
                     errorInfo =  "Failed to resolve shared IPA bookmark: \(error.localizedDescription)"
                     errorShow = true
-                    return
+                    return false
                 }
             }
 
@@ -1244,7 +1261,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if !fm.isReadableFile(atPath: installUrl.path) && !didStartAccessing {
                 errorInfo = "lc.appList.ipaAccessError".loc
                 errorShow = true
-                return
+                return false
             }
             
             defer {
@@ -1253,13 +1270,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
             }
             
+            var installOK = true
             do {
                 try await installIpaFile(installUrl, autoReplace: autoReplace)
             } catch {
+                installOK = false
                 errorInfo = error.localizedDescription
                 errorShow = true
             }
-            
+
             do {
                 // delete ipa if it's in inbox
                 var shouldDelete = false
@@ -1274,7 +1293,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 errorInfo = error.localizedDescription
                 errorShow = true
             }
-            return
+            return installOK
         }
         
         do {
@@ -1286,7 +1305,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             
             try await downloadHelper.download(url: installUrl, to: destinationURL)
             if downloadHelper.cancelled {
-                return
+                return false
             }
             if preview, let text = await makeInstallPreviewText(forIpa: destinationURL) {
                 // 下完了先弹信息卡：用户点「安装」才继续，
@@ -1298,7 +1317,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 if !proceed {
                     try? fileManager.removeItem(at: destinationURL)
-                    return
+                    return false
                 }
             }
             try await installIpaFile(destinationURL, autoReplace: autoReplace)
@@ -1306,8 +1325,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } catch {
             errorInfo = error.localizedDescription
             errorShow = true
+            return false
         }
-        
+        return true
     }
     
     func removeApp(app: LCAppModel) {
