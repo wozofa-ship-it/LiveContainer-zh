@@ -58,11 +58,23 @@ struct LCTabView: View {
             }
         )
         .onAppear {
+            // 提前把多任务管理器建起来：全局手势识别器和 Darwin
+            // 监听都在它的 init 里装配，懒到第一个 App 打开才建，
+            // 刚进 LiveContainer 在主界面就滑不出面板（用户实测）
+            _ = MultitaskDockManager.shared
             // 每次打开 App 通知源页自动刷新一次（节流在源页那边）
             NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
             // 预热节点核心：有标了 VPN 的 App 时提前起核心，
             // 第一个 VPN App 点开不用等冷启动
             CZFVPNManager.shared.prewarmIfNeeded()
+            // 定时备份/定时清理的到点检查：原来只挂在数据管理页
+            // 的 onAppear 上，不去那页就永远不触发（审计发现）。
+            // 改成打开 LiveContainer 就查，到没到点由各自的
+            // 日期+时间守卫决定，静默执行不弹窗
+            Task {
+                await LCDataManagementView.runScheduledBackupIfDue()
+                await LCDataManagementView.runScheduledCacheIfDue()
+            }
         }
         .onChange(of: scenePhase) { newPhase in
             // 从后台切回前台时也预热一次（核心可能已被自动停）

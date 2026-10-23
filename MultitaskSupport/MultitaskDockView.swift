@@ -1023,9 +1023,10 @@ class AppInfoProvider {
     }
 
     @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {
-        // 不再要求 isVisible：源面板要在"没打开任何 App"时也能从主界面
-        // 调出。其余每个动作入口都自带 isVisible/!apps.isEmpty 守卫，
-        // 在主界面裸跑时各自落空，不会误触发显隐快捷栏或 App 面板。
+        // 不再要求 isVisible：源面板和 App 面板都要在"没打开任何
+        // App"时也能从主界面调出（用户定：任意位置可调出面板）。
+        // 其余动作入口（显隐快捷栏/全屏切换）自带场景守卫，在主
+        // 界面裸跑时各自落空，不会误触发。
         //
         // 判定模型与游客插件（CZFDockGesture）对齐：滑动中过门槛即
         // 触发（不等抬指），终结/被取消时再走一遍宽松兜底（只看物理
@@ -1261,7 +1262,9 @@ class AppInfoProvider {
 
     @objc public func czfOpenAppPanel() {
         guard Self.czfEdgeGesturesEnabled else { return }
-        guard isVisible || !apps.isEmpty else { return }
+        // 不再要求已打开 App/快捷栏可见：用户定任意位置（包括刚
+        // 进 LiveContainer 的主界面）都要能调出面板，与源面板同
+        // 待遇。呈现走 keyWindow 兜底（presentAllAppsPanel 内）。
         let now = Date()
         guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
         czfLastPanelActionAt = now
@@ -2015,7 +2018,10 @@ struct PinnedAppsStripView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
+        // 点名"太丑"的主因）；图标尺寸/圆角与下面运行区、列表
+        // 行统一（46pt / 圆角 12）
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
                 Image(systemName: "pin.fill")
                     .font(.caption2)
@@ -2032,16 +2038,16 @@ struct PinnedAppsStripView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 14) {
                         ForEach(pinnedApps, id: \.self) { app in
-                            VStack(spacing: 3) {
+                            VStack(spacing: 4) {
                                 RunningAppIcon(appInfo: app.appInfo)
-                                    .frame(width: 40, height: 40)
-                                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                                    .frame(width: 46, height: 46)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
                                     .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 Text(app.appInfo.displayName() ?? "")
                                     .font(.caption2)
-                                    .foregroundColor(.primary)
+                                    .foregroundColor(.secondary)
                                     .lineLimit(1)
-                                    .frame(width: 52)
+                                    .frame(width: 56)
                             }
                             .contentShape(Rectangle())
                             .onTapGesture { onLaunch(app) }
@@ -2050,12 +2056,9 @@ struct PinnedAppsStripView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
     }
 }
 
@@ -2557,15 +2560,15 @@ private struct RunningAppsStripView: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
-                fixedButton(systemImage: "chevron.down", tile: Color.gray.opacity(0.8), label: "收起") {
+                fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
                     dockManager.toggleDockCollapse()
                     onSwitch()
                 }
-                fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color.gray.opacity(0.8), label: "最小化") {
+                fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
                     dockManager.minimizeAllWindows()
                     onSwitch()
                 }
-                fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.85), label: "关闭全部") {
+                fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
                     dockManager.closeAllWindows()
                     onSwitch()
                 }
@@ -2583,18 +2586,18 @@ private struct RunningAppsStripView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
-    // 固定按钮：与快捷栏同款的灰/红圆角底 + 白图标，下方小字标签
-    private func fixedButton(systemImage: String, tile: Color, label: String, action: @escaping () -> Void) -> some View {
+    // 固定按钮：浅底 + 深色图标（原来整块实心灰/红加白描边太
+    // 重，用户点名丑）；关闭全部保留红色语义，但改浅红底红图标
+    private func fixedButton(systemImage: String, tile: Color, glyph: Color, label: String, action: @escaping () -> Void) -> some View {
         VStack(spacing: 4) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(tile)
                     .frame(width: 52, height: 52)
                 Image(systemName: systemImage)
-                    .foregroundColor(.white)
-                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundColor(glyph)
+                    .font(.system(size: 20, weight: .semibold))
             }
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.25), lineWidth: 1))
             Text(label)
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -2716,47 +2719,47 @@ struct AppCardRow: View {
             
             Spacer()
             
-            // Minimize-open button
+            // 次级动作统一中性灰胶囊（原来蓝/紫糖果色三件套太花，
+            // 用户点名丑）；只有主动作「打开/启动」保留实心蓝
             Button(action: onMinimizeOpen) {
                 Text("最小化")
                     .font(.subheadline)
-                    .foregroundColor(.blue)
+                    .foregroundColor(.primary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.blue.opacity(0.15))
+                    .padding(.vertical, 7)
+                    .background(Color(.systemGray5))
                     .clipShape(Capsule())
             }
 
-            // Small-window-open button
             Button(action: onSmallWindowOpen) {
                 Text("小窗口")
                     .font(.subheadline)
-                    .foregroundColor(.purple)
+                    .foregroundColor(.primary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.purple.opacity(0.15))
+                    .padding(.vertical, 7)
+                    .background(Color(.systemGray5))
                     .clipShape(Capsule())
             }
 
             // Launch button
             Button(action: onLaunch) {
                 Text(dockManager.apps.contains(where: { $0.appUUID == app.appInfo.dataUUID }) ? "打开" : "启动")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 7)
                     .background(Color.blue)
                     .clipShape(Capsule())
             }
         }
         .padding(10)
-        .background(Color(.systemGray6))
+        .background(Color(.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         // 长按行：固定到面板顶部 / 取消固定（用户定）；
         // 正在运行的还多两个：重启（卡死时一步恢复）、关闭
