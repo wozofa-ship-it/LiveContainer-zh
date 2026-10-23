@@ -887,7 +887,10 @@ struct LCDataManagementView : View {
                             "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
                             "displayName": app.appInfo.displayName() ?? "",
                             "version": app.appInfo.version() ?? "",
-                            "backupDate": dateFmt.string(from: Date())
+                            "backupDate": dateFmt.string(from: Date()),
+                            // 恢复时靠它认出哪个是默认容器：容器文件夹名
+                            // 是随机 UUID，删后重装会换号，不能靠名字猜
+                            "dataUUID": app.appInfo.dataUUID ?? ""
                         ]
                         if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
                             try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
@@ -942,7 +945,8 @@ struct LCDataManagementView : View {
                 appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
             }
             var restoredCount = 0
-            var missingApps: [String] = []
+            var missing: [(folder: URL, name: String, bundleID: String)] = []
+            var noDataApps: [String] = []
             var missingFolders: [URL] = []
             let allApps = sharedModel.apps + sharedModel.hiddenApps
             for appFolder in appFolders {
@@ -952,46 +956,141 @@ struct LCDataManagementView : View {
                     ($0.appInfo.displayName() ?? "") == folderName ||
                     ($0.appInfo.bundleIdentifier() ?? "") == folderName
                 }) else {
-                    // App 未安装：读 manifest.json 获取应用名，提示用户先安装
+                    // App 未安装：记下它的备份文件夹和身份，后面先装再恢复
                     let manifestURL = appFolder.appendingPathComponent("manifest.json")
                     var appName = folderName
+                    var appBundleID = ""
                     if let data = try? Data(contentsOf: manifestURL),
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                       let displayName = json["displayName"], !displayName.isEmpty {
-                        appName = displayName
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                        if let displayName = json["displayName"], !displayName.isEmpty {
+                            appName = displayName
+                        }
+                        appBundleID = json["bundleIdentifier"] ?? ""
                     }
-                    missingApps.append(appName)
+                    missing.append((folder: appFolder, name: appName, bundleID: appBundleID))
                     continue
                 }
-                let containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
-                for containerFolder in containerFolders {
-                    for container in app.uiContainers {
-                        if container.containerURL.lastPathComponent == containerFolder.lastPathComponent {
-                            let destURL = container.containerURL
-                            if fm.fileExists(atPath: destURL.path) {
-                                try fm.removeItem(at: destURL)
-                            }
-                            try fm.copyItem(at: containerFolder, to: destURL)
-                            break
-                        }
-                    }
+                if try await restoreOneApp(appFolder: appFolder, app: app) {
+                    restoredCount += 1
+                } else {
+                    noDataApps.append(app.appInfo.displayName() ?? folderName)
                 }
-                restoredCount += 1
             }
-            var msg = String(format: "lc.settings.restoreComplete".loc, restoredCount)
-            if !missingApps.isEmpty {
-                msg += "\n\n未安装的 App（请先安装 IPA）：\n" + missingApps.joined(separator: "\n")
+            // 未安装的 App：先从源里下载安装，等装好再恢复它的数据。
+            // 老逻辑是恢复和安装同时发：恢复当场报 0，安装请求又因为
+            // 安装通道同时只接一个、其余被静默丢弃，最后谁也没成。
+            // 现在一个个串行：装一个 → 等它出现在列表里 → 恢复 → 下一个
+            var installRestoredCount = 0
+            var installNotFound: [String] = []
+            var installFailed: [String] = []
+            for item in missing {
+                guard let downloadURL = await searchSourceForApp(bundleID: item.bundleID, name: item.name) else {
+                    installNotFound.append(item.name)
+                    continue
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL])
+                }
+                // 装好后 App 会进 sharedModel 的列表；2 秒一查，最多等 10 分钟
+                var installedApp: LCAppModel?
+                for _ in 0..<300 {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    let currentApps = sharedModel.apps + sharedModel.hiddenApps
+                    installedApp = currentApps.first(where: {
+                        (!item.bundleID.isEmpty && ($0.appInfo.bundleIdentifier() ?? "") == item.bundleID) ||
+                        ($0.appInfo.displayName() ?? "") == item.name
+                    })
+                    if installedApp != nil { break }
+                }
+                guard let installedApp else {
+                    installFailed.append(item.name)
+                    continue
+                }
+                // 再缓 2 秒等安装收尾落稳，然后恢复这个 App 的数据
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if try await restoreOneApp(appFolder: item.folder, app: installedApp) {
+                    installRestoredCount += 1
+                } else {
+                    noDataApps.append(item.name)
+                }
+            }
+            var msg = String(format: "lc.settings.restoreComplete".loc, restoredCount + installRestoredCount)
+            if installRestoredCount > 0 {
+                msg += "\n\n其中 \(installRestoredCount) 个是先安装再恢复的"
+            }
+            if !installNotFound.isEmpty {
+                msg += "\n\n未在源中找到（请手动到 App 页导入 IPA）：\n" + installNotFound.joined(separator: "\n")
+            }
+            if !installFailed.isEmpty {
+                msg += "\n\n安装失败或超时（可到 App 页看报错后重试）：\n" + installFailed.joined(separator: "\n")
+            }
+            if !noDataApps.isEmpty {
+                msg += "\n\n未能恢复数据的 App（备份里没有可对应的数据容器）：\n" + noDataApps.joined(separator: "\n")
             }
             successInfo = msg
             successShow = true
-            // 恢复为0时自动触发安装流程
-            if restoredCount == 0 && !missingApps.isEmpty {
-                await installMissingApps(from: backupURL)
-            }
         } catch {
             errorInfo = error.localizedDescription
             errorShow = true
         }
+    }
+
+    /// 把一个 App 备份文件夹里的数据容器恢复到这个 App 名下。
+    /// 返回 true = 至少拷回一个容器。删后重装时容器名对不上号，
+    /// 按原文件夹名放回原位并登记，登录态才能跟着回来（见内注）。
+    func restoreOneApp(appFolder: URL, app: LCAppModel) async throws -> Bool {
+        let fm = FileManager.default
+        // 备份里的容器文件夹（跳过 manifest 和 .app 本体）
+        let containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") }
+        // manifest 记着备份时的默认容器名，多个容器时靠它定默认
+        var manifestDataUUID = ""
+        if let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+            manifestDataUUID = json["dataUUID"] ?? ""
+        }
+        var restoredContainers = 0
+        var newDefaultContainer: LCContainer?
+        for containerFolder in containerFolders {
+            let folderName = containerFolder.lastPathComponent
+            if let live = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == folderName }) {
+                // 同名容器还在（没删过 App）：原地覆盖
+                let destURL = live.containerURL
+                if fm.fileExists(atPath: destURL.path) {
+                    try fm.removeItem(at: destURL)
+                }
+                try fm.copyItem(at: containerFolder, to: destURL)
+                restoredContainers += 1
+                continue
+            }
+            // 删后重装：新容器的文件夹名是新随机 UUID，和备份里的
+            // 旧名对不上——按原文件夹名把整个容器放回原位并登记：
+            // 容器里的 LCContainerInfo.plist 记着钥匙串组号，文件
+            // 和钥匙串指向一起回来，登录态才能跟着恢复
+            let root = app.appInfo.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
+            let destURL = root.appendingPathComponent(folderName)
+            if fm.fileExists(atPath: destURL.path) {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.copyItem(at: containerFolder, to: destURL)
+            let restoredName = (NSDictionary(contentsOf: destURL.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["name"] as? String ?? folderName
+            let restored = LCContainer(infoDict: ["folderName": folderName, "name": restoredName], isShared: app.appInfo.isShared)
+            var containers = app.uiContainers
+            containers.append(restored)
+            app.uiContainers = containers
+            app.appInfo.containers = containers
+            restoredContainers += 1
+            if newDefaultContainer == nil || folderName == manifestDataUUID {
+                newDefaultContainer = restored
+            }
+        }
+        if let newDefaultContainer {
+            // 恢复出来的容器设为默认选中，App 下次打开就用它
+            app.uiSelectedContainer = newDefaultContainer
+            app.uiDefaultDataFolder = newDefaultContainer.folderName
+            app.appInfo.dataUUID = newDefaultContainer.folderName
+        }
+        return restoredContainers > 0
     }
 
     func installMissingApps(from backupURL: URL) async {

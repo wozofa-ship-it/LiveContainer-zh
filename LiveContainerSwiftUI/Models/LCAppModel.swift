@@ -326,7 +326,7 @@ class LCAppModel: ObservableObject, Hashable {
         // 在跑（同步等它起来，免得游客先跑、头几秒走了直连）。
         // 失败不拦启动——游客侧插件有 fail-open，核心不在时直连。
         if CZFVPNManager.isEnabled(for: appInfo) {
-            CZFVPNManager.shared.ensureRunning()
+            CZFVPNManager.shared.ensureRunning(for: appInfo)
         }
 
         if let bundleIdOverride {

@@ -39,6 +39,8 @@ struct LCAppSettingsView: View {
     @State private var selectUnusedContainerSheetShow = false
     @State private var schedMinEnabled = false
     @State private var schedMinTime = Date()
+    /// 单 App VPN 指定节点改动后自增，逼设置页重读一遍节点行。
+    @State private var vpnNodeTick = 0
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -67,6 +69,50 @@ struct LCAppSettingsView: View {
         comps.hour = minutes / 60
         comps.minute = minutes % 60
         schedMinTime = Calendar.current.date(from: comps) ?? Date()
+    }
+
+    /// 单 App VPN 的节点行：跟随全局或给这个 App 单独指定一个
+    /// 节点（延迟敏感的 App 指到最快的那个）。核心只有一个，
+    /// 打开这个 App 时若核心正跑在别的节点上会按它的节点重启。
+    private var vpnNodeRow: some View {
+        let links = CZFVPNManager.shared.nodeLinks
+        let current = CZFVPNManager.nodeOverride(for: model.appInfo)
+        let _ = vpnNodeTick
+        return Menu {
+            Button {
+                CZFVPNManager.setNodeOverride(nil, for: model.appInfo)
+                vpnNodeTick += 1
+            } label: {
+                if current == nil {
+                    Label("跟随全局", systemImage: "checkmark")
+                } else {
+                    Text("跟随全局")
+                }
+            }
+            ForEach(links, id: \.self) { link in
+                Button {
+                    CZFVPNManager.setNodeOverride(link, for: model.appInfo)
+                    vpnNodeTick += 1
+                } label: {
+                    let d = CZFVPNManager.nodeDisplay(for: link)
+                    if current == link {
+                        Label(d.detail.isEmpty ? d.name : "\(d.name)（\(d.detail)）", systemImage: "checkmark")
+                    } else {
+                        Text(d.detail.isEmpty ? d.name : "\(d.name)（\(d.detail)）")
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Text("使用节点")
+                Spacer()
+                Text(current.map { CZFVPNManager.nodeDisplay(for: $0).name } ?? "跟随全局")
+                    .foregroundStyle(.gray)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.gray)
+            }
+        }
     }
 
     private func saveSchedMinSettings() {
@@ -341,6 +387,9 @@ struct LCAppSettingsView: View {
                     set: { CZFVPNManager.setEnabled($0, for: model.appInfo) }
                 )) {
                     Text("VPN 打开（内置节点）")
+                }
+                if CZFVPNManager.isEnabled(for: model.appInfo) {
+                    vpnNodeRow
                 }
                 if let stats = CZFVPNManager.proxyStatsText(for: model.appInfo) {
                     Text(stats)

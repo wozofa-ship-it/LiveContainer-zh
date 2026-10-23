@@ -24,6 +24,7 @@ public final class CZFVPNManager {
     private static let nodeListKey = "CZFVPNNodeLinks"
     private static let activeNodeKey = "CZFVPNActiveNodeIndex"
     private static let enabledKeyPrefix = "CZFVPNEnabled-"
+    private static let nodeOverrideKeyPrefix = "CZFVPNNodeOverride-"
 
     public private(set) var isRunning = false
     private var runningLink: String?
@@ -137,6 +138,35 @@ public final class CZFVPNManager {
         UserDefaults.standard.set(enabled, forKey: enabledKeyPrefix + bundleId)
     }
 
+    // 按 App 指定节点：存链接本身而不是下标，节点列表增删、
+    // 排序变化都不会让指定关系错位。没指定、或指定的节点已
+    // 被从列表删除时，effectiveLink 回落全局活动节点
+    public static func nodeOverride(for appInfo: LCAppInfo) -> String? {
+        guard let bundleId = appInfo.bundleIdentifier() else { return nil }
+        let saved = UserDefaults.standard.string(forKey: nodeOverrideKeyPrefix + bundleId)
+        return (saved?.isEmpty == false) ? saved : nil
+    }
+
+    public static func setNodeOverride(_ link: String?, for appInfo: LCAppInfo) {
+        guard let bundleId = appInfo.bundleIdentifier() else { return }
+        if let link, !link.isEmpty {
+            UserDefaults.standard.set(link, forKey: nodeOverrideKeyPrefix + bundleId)
+        } else {
+            UserDefaults.standard.removeObject(forKey: nodeOverrideKeyPrefix + bundleId)
+        }
+    }
+
+    // 这个 App 实际用的节点链接：有指定且指定还在列表里就用
+    // 指定，否则用全局活动节点
+    public func effectiveLink(for appInfo: LCAppInfo?) -> String {
+        if let appInfo,
+           let override = Self.nodeOverride(for: appInfo),
+           nodeLinks.contains(override) {
+            return override
+        }
+        return nodeLink
+    }
+
     // MARK: - 插件部署（signApp 签名前调用）
 
     // 按标记把 CZFProxy.dylib 同步进该 App 的专属插件目录：
@@ -172,15 +202,17 @@ public final class CZFVPNManager {
     // 被标记 App 启动前调用：核心已在跑且节点没换就直接返回；
     // 失败只记 lastError 不抛——游客侧插件有 fail-open，核心不
     // 在时 App 直连不断网。
-    public func ensureRunning() {
+    public func ensureRunning(for appInfo: LCAppInfo? = nil) {
         // 有被标记 App 在启动：取消待执行的自动停，并记下时间
         pendingStopWork?.cancel()
         pendingStopWork = nil
         lastFlaggedLaunchAt = Date()
-        let link = nodeLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 用这个 App 自己的节点（指定过就用指定，没指定跟随
+        // 全局）：核心在跑但节点不是它要的，按它的节点重启
+        let link = effectiveLink(for: appInfo).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !link.isEmpty else { return }
         if isRunning && runningLink == link { return }
-        _ = start()
+        _ = start(withLink: link)
     }
 
     // 多任务列表变化后由 MultitaskDockManager 调用：还在跑的
@@ -207,7 +239,13 @@ public final class CZFVPNManager {
 
     @discardableResult
     public func start() -> Bool {
-        let link = nodeLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        start(withLink: nodeLink)
+    }
+
+    // 用指定链接起核心：已在跑且正是这条链接就直接成功；
+    // 在跑的是别的节点先停再按这条起
+    private func start(withLink rawLink: String) -> Bool {
+        let link = rawLink.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !link.isEmpty else {
             lastError = "还没填节点链接"
             return false
