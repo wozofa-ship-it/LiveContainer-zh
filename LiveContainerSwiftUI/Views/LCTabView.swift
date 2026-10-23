@@ -60,8 +60,11 @@ struct LCTabView: View {
         .onAppear {
             // 提前把多任务管理器建起来：全局手势识别器和 Darwin
             // 监听都在它的 init 里装配，懒到第一个 App 打开才建，
-            // 刚进 LiveContainer 在主界面就滑不出面板（用户实测）
-            _ = MultitaskDockManager.shared
+            // 刚进 LiveContainer 在主界面就滑不出面板（用户实测）。
+            // 管理器是 iOS 16+ 类型，与 AppDelegate 部署插件同款守卫
+            if #available(iOS 16.0, *) {
+                _ = MultitaskDockManager.shared
+            }
             // 每次打开 App 通知源页自动刷新一次（节流在源页那边）
             NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
             // 预热节点核心：有标了 VPN 的 App 时提前起核心，
