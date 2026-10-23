@@ -1834,17 +1834,10 @@ struct CollapsedDockView: View {
     
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            Color.blue.opacity(isHidden ? 0.4 : 0.8),
-                            Color.blue.opacity(isHidden ? 0.3 : 0.6)
-                        ]),
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            // 蓝色渐变改平实心蓝：与面板主按钮同语言（渐变是旧
+            // 糖果皮的一部分）；隐藏态靠透明度压暗的语义不变
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.blue.opacity(isHidden ? 0.5 : 0.9))
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
             
             Group {
@@ -1861,7 +1854,7 @@ struct CollapsedDockView: View {
             .shadow(color: .black.opacity(0.3), radius: 1, x: 0, y: 1)
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(isHidden ? 0.2 : 0.3), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.3), radius: 3, x: 0, y: 2)
@@ -1877,19 +1870,17 @@ struct CollapseButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     
     var body: some View {
+        // 与面板控制行同款：浅灰底 + 深色图标、圆角 12，去掉
+        // 实心灰块和白色描边（旧糖果皮，面板换皮时这边漏了）
         ZStack {
-            RoundedRectangle(cornerRadius: 8)  
-                .fill(Color.gray.opacity(0.8))
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray5))
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-            
+
             Image(systemName: "chevron.down")
-                .foregroundColor(.white)
+                .foregroundColor(.primary)
                 .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)  
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
         .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.adaptiveIconSize)
     }
 }
@@ -1901,18 +1892,14 @@ struct MinimizeAllButtonView: View {
     
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.gray.opacity(0.8))
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray5))
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-            
+
             Image(systemName: "rectangle.stack.badge.minus")
-                .foregroundColor(.white)
+                .foregroundColor(.primary)
                 .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
     }
 }
 
@@ -1929,19 +1916,19 @@ struct AllAppsButtonView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
             } else {
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 12)
                     .fill(Color.blue.opacity(0.8))
                     .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-                
+
                 Image(systemName: "apps.iphone")
                     .foregroundColor(.white)
                     .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
             }
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(0.2), lineWidth: 1)
         )
     }
@@ -1953,19 +1940,17 @@ struct CloseAllButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     
     var body: some View {
+        // 与面板「关闭全部」同款：浅红底 + 红图标（原实心红块
+        // 太重）；dock 底板是深色，红色透明度比面板略提一档保识别
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.red.opacity(0.8))
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.red.opacity(0.25))
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-            
+
             Image(systemName: "xmark")
-                .foregroundColor(.white)
-                .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .bold))
+                .foregroundColor(.red)
+                .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
     }
 }
 
