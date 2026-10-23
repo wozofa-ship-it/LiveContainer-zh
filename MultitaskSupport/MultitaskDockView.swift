@@ -301,12 +301,15 @@ class AppInfoProvider {
         keyWindow!.bounds.height - safeAreaInsets.top - safeAreaInsets.bottom
     }
     
+    /// 窗口宿主视图的挂载重试计数（见 attachWindowHostingViewWhenReady）
+    private var windowAttachRetries = 0
+
     override init() {
         super.init()
         Self.deployDockGestureTweak()
         registerDockEdgeDarwinObservers()
         startScheduledMinimizeOpenTimer()
-        keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
+        attachWindowHostingViewWhenReady()
         setupDockView()
         NotificationCenter.default.addObserver(
             self,
@@ -322,6 +325,28 @@ class AppInfoProvider {
         )
     }
     
+    /// 把窗口宿主视图挂到根视图的第一个子视图上（挂载目标与
+    /// 原实现一致）。原实现是同步三重强解包
+    /// keyWindow!.rootViewController!.view.subviews.first!：
+    /// 管理器以前只在打开第一个游客 App 时才建、那时窗口层级
+    /// 早已齐全；改为 LiveContainer 主界面出现时提前建后
+    /// （任意位置调面板），init 发生在首帧渲染求值中，层级
+    /// 还没建好，强解包当场陷阱闪退（2026-10-23 21:16 日志
+    /// 符号化实证：LCTabView.body → shared 初始化 → 本 init）。
+    /// 改成就绪才挂、没就绪 0.1 秒重试（上限 50 次约 5 秒），
+    /// 齐了仍挂同一位置，行为与原来一致
+    private func attachWindowHostingViewWhenReady() {
+        if let hostView = keyWindow?.rootViewController?.view.subviews.first {
+            hostView.addSubview(self.windowHostingView)
+            return
+        }
+        windowAttachRetries += 1
+        guard windowAttachRetries <= 50 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.attachWindowHostingViewWhenReady()
+        }
+    }
+
     deinit {
         NotificationCenter.default.removeObserver(self)
         NotificationCenter.default.removeObserver(self, name: UIDevice.orientationDidChangeNotification, object: nil)
