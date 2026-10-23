@@ -1,12 +1,17 @@
 // CZFKeepAlive.m
-// 极简保活插件（LiveContainer 注入用 dylib）v1.1
+// 极简保活插件（LiveContainer 注入用 dylib）v1.2
 // 原理：App 进后台后循环播放无声音频，保持进程不被系统挂起。
 // 设计原则：只做保活这一件事 —— 不用定位、不用画中画、不轮询剪贴板；
 //          前台自动停、后台才开；30 秒看门狗只检查不管闲事；全程异常兜底，绝不让宿主 App 崩。
 // v1.1 优化：静音音频改为内存数据直接播放（initWithData），去掉临时文件落盘与被系统清理的风险。
+// v1.2 优化（减损耗）：白名单门 —— dylib 同目录放 CZFKeepAliveApps.txt
+//          （一行一个 bundle id）时，只给名单里的 App 保活；其他 App
+//          里完全休眠（不注册通知、不碰音频、零损耗）。没这个文件时
+//          维持原行为（所有 App 都保活）。
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <dlfcn.h>
 
 static AVAudioPlayer *gPlayer = nil;
 static NSTimer *gWatchdog = nil;
@@ -89,9 +94,27 @@ static void CZFStopKeepAlive(void) {
     } @catch (__unused NSException *e) {}
 }
 
+// 白名单门：名单文件存在时按名单决定本 App 要不要保活；
+// 文件不存在或读不到，一律保活（不改变现有用法）
+static BOOL CZFShouldActivate(void) {
+    Dl_info info;
+    if (dladdr((void *)&CZFShouldActivate, &info) == 0 || !info.dli_fname) return YES;
+    NSString *dir = [@(info.dli_fname) stringByDeletingLastPathComponent];
+    NSString *listPath = [dir stringByAppendingPathComponent:@"CZFKeepAliveApps.txt"];
+    NSString *content = [NSString stringWithContentsOfFile:listPath encoding:NSUTF8StringEncoding error:nil];
+    if (!content) return YES;
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+    for (NSString *line in [content componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length && [trimmed isEqualToString:bundleId]) return YES;
+    }
+    return NO;
+}
+
 __attribute__((constructor))
 static void CZFKeepAliveInit(void) {
     @autoreleasepool {
+        if (!CZFShouldActivate()) return;
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
         NSOperationQueue *mainQ = [NSOperationQueue mainQueue];
 
