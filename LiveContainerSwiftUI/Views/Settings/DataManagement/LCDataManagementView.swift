@@ -1155,7 +1155,8 @@ struct LCDataManagementView : View {
     /// 数据容器 + 组容器 + 钥匙串快照。backupApps 的批量循环
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws {
+    @discardableResult
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainStatus: OSStatus) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1227,11 +1228,18 @@ struct LCDataManagementView : View {
         // 三处数据不在同一时刻也是信息错乱的来源之一，备齐
         // 了一起回滚才对齐
         let keychainRoot = appBackupURL.appendingPathComponent("Keychain")
+        var keychainCount = 0
+        var keychainStatus: OSStatus = errSecSuccess
         for container in app.uiContainers {
-            if let items = Self.exportKeychainItems(container: container), !items.isEmpty,
-               let data = try? PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0) {
+            let exported = Self.exportKeychainItems(container: container)
+            if exported.status != errSecSuccess && exported.status != errSecItemNotFound && keychainStatus == errSecSuccess {
+                keychainStatus = exported.status
+            }
+            if !exported.items.isEmpty,
+               let data = try? PropertyListSerialization.data(fromPropertyList: exported.items, format: .binary, options: 0) {
                 try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
                 try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
+                keychainCount += exported.items.count
             }
         }
         // 全部写完才换上：删掉旧备份、临时文件夹改名到位。
@@ -1240,6 +1248,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
+        return (keychainCount, keychainStatus)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1276,20 +1285,26 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure): (Int, Error?) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, keychainErr): (Int, Error?, Int, OSStatus) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
                     try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                     var count = 0
                     var backedUpNames: [String] = []
+                    var keychainTotal = 0
+                    var keychainErr: OSStatus = errSecSuccess
                     for (index, app) in apps.enumerated() {
                         let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                         // 进度回主线程刷新：备到第几个、当前哪个
                         DispatchQueue.main.async {
                             self.backupRestoreProgress = "正在备份 \(name)（\(index + 1)/\(apps.count)）"
                         }
-                        try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)
+                        let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)
+                        keychainTotal += one.keychainCount
+                        if one.keychainStatus != errSecSuccess && keychainErr == errSecSuccess {
+                            keychainErr = one.keychainStatus
+                        }
                         count += 1
                         backedUpNames.append(name)
                     }
@@ -1300,9 +1315,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil))
+                    continuation.resume(returning: (count, nil, keychainTotal, keychainErr))
                 } catch {
-                    continuation.resume(returning: (0, error))
+                    continuation.resume(returning: (0, error, 0, errSecSuccess))
                 }
             }
         }
@@ -1311,7 +1326,14 @@ struct LCDataManagementView : View {
             errorInfo = LCUtils.czfFriendlyError(failure)
             errorShow = true
         } else {
-            successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n" + backupRoot.path
+            // 钥匙串导了几条必须报出来：以前恒为 0 也照报"备份
+            // 完成"，用户拿着空备份去恢复才发现没数据。0 条时
+            // 把系统错误码一起带上，一眼定位卡在哪一环
+            successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n钥匙串令牌共导出 \(keychainTotal) 条"
+            if keychainTotal == 0 && keychainErr != errSecSuccess {
+                successInfo += "（导出报错，错误码 \(keychainErr)）"
+            }
+            successInfo += "\n" + backupRoot.path
             successShow = true
         }
     }
@@ -1369,7 +1391,7 @@ struct LCDataManagementView : View {
                     missing.append((folder: appFolder, name: appName, bundleID: appBundleID))
                     continue
                 }
-                if try await Self.restoreOneApp(appFolder: appFolder, app: app) {
+                if (try await Self.restoreOneApp(appFolder: appFolder, app: app)).ok {
                     restoredCount += 1
                     if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
                         versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
@@ -1413,7 +1435,7 @@ struct LCDataManagementView : View {
                 }
                 // 再缓 2 秒等安装收尾落稳，然后恢复这个 App 的数据
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if try await Self.restoreOneApp(appFolder: item.folder, app: installedApp) {
+                if (try await Self.restoreOneApp(appFolder: item.folder, app: installedApp)).ok {
                     installRestoredCount += 1
                     if Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
                         versionMismatchApps.append(item.name)
@@ -1466,11 +1488,22 @@ struct LCDataManagementView : View {
         }
     }
 
+    /// 一次单 App 恢复的结果：ok 之外带上钥匙串的实况（备份
+    /// 里有几条、写回几条、失败时系统给的错误码），失败提示
+    /// 能直接点名卡在哪一环，不再只有一句"没有可恢复的数据"
+    struct RestoreOutcome {
+        var ok = false
+        var keychainFound = 0
+        var keychainImported = 0
+        var keychainStatus: OSStatus = errSecSuccess
+    }
+
     /// 把一个 App 备份文件夹里的数据容器恢复到这个 App 名下。
-    /// 返回 true = 至少拷回一个容器。删后重装时容器名对不上号，
-    /// 按原文件夹名放回原位并登记，登录态才能跟着回来（见内注）。
-    /// 做成静态：安装流程装完新 App 后也要调它自动恢复备份。
-    static func restoreOneApp(appFolder: URL, app: LCAppModel) async throws -> Bool {
+    /// ok = 至少拷回一个容器或写回一条钥匙串。删后重装时容
+    /// 器名对不上号，按原文件夹名放回原位并登记，登录态才能
+    /// 跟着回来（见内注）。做成静态：安装流程装完新 App 后
+    /// 也要调它自动恢复备份。
+    static func restoreOneApp(appFolder: URL, app: LCAppModel) async throws -> RestoreOutcome {
         let fm = FileManager.default
         // 备份里的容器文件夹（跳过 manifest、.app 本体，
         // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）
@@ -1541,9 +1574,16 @@ struct LCDataManagementView : View {
         // 钥匙串写回：备份里哪个容器的快照，就写进这次恢复后
         // 同名容器的组里（组号取目标容器自己的，删后重装时
         // 与备份一致；同名覆盖时按现有容器走，不串号）
+        var outcome = RestoreOutcome()
         let keychainBackup = appFolder.appendingPathComponent("Keychain")
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             let plistFiles = files.filter { $0.pathExtension == "plist" }
+            for file in plistFiles {
+                if let data = try? Data(contentsOf: file),
+                   let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] {
+                    outcome.keychainFound += items.count
+                }
+            }
             // 没容器可落先补一个：刚装完还没打开过的 App 一个
             // 容器都没有（列表里标"数据文件夹未创建"），仅密匙
             // 备份又没有容器文件夹可借道恢复，钥匙串整份落空
@@ -1587,12 +1627,18 @@ struct LCDataManagementView : View {
                 }
                 guard let data,
                       let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
-                if Self.importKeychainItems(items, container: target) > 0 {
+                let writeResult = Self.importKeychainItems(items, container: target)
+                outcome.keychainImported += writeResult.imported
+                if writeResult.imported == 0 && writeResult.lastStatus != errSecSuccess {
+                    outcome.keychainStatus = writeResult.lastStatus
+                }
+                if writeResult.imported > 0 {
                     restoredExtras = true
                 }
             }
         }
-        return restoredContainers > 0 || restoredExtras
+        outcome.ok = restoredContainers > 0 || restoredExtras
+        return outcome
     }
 
     /// 这份备份是不是「仅密匙」范围（manifest 里的 scope 标记；
@@ -1648,56 +1694,84 @@ struct LCDataManagementView : View {
 
     /// 导出一个容器的钥匙串条目。只导通用密码和互联网密码
     /// （登录令牌都在这两类里）；证书/密钥类不做 round-trip。
-    /// 条目只靠组号定位：游客侧 SecItem.m 存入时只改访问组、
-    /// 从不打标签，旧版按标签（=容器文件夹名）过滤永远查不到
-    /// 任何条目，导出的快照恒为空、"仅密匙"备份里根本没有
-    /// 钥匙串文件夹，恢复端再对也无米下锅（真机实测两版）
-    static func exportKeychainItems(container: LCContainer) -> [[String: Any]]? {
+    /// 两路查、合并去重：一路按钥匙串组（游客侧 SecItem.m
+    /// 存入时改的访问组）；一路不限组、按别名查——游客存入
+    /// 每条时都盖了 alis=容器文件夹名，组号记账万一对不上
+    /// 这路也捞得回来。旧版按标签（=容器文件夹名）过滤，而
+    /// 游客从不打标签，导出恒为 0 条、备份恒为空壳（真机
+    /// 实测三版）。返回条目之外带上异常状态码：查询失败不再
+    /// 静默吞掉，完成提示能把错误码亮出来定位
+    static func exportKeychainItems(container: LCContainer) -> (items: [[String: Any]], status: OSStatus) {
         let group = keychainGroupString(groupId: container.keychainGroupId)
         var all: [[String: Any]] = []
-        for cls in [kSecClassGenericPassword, kSecClassInternetPassword] {
-            let query: [String: Any] = [
-                kSecClass as String: cls as String,
-                kSecAttrAccessGroup as String: group,
-                kSecMatchLimit as String: kSecMatchLimitAll as String,
-                kSecReturnAttributes as String: true,
-                kSecReturnData as String: true
-            ]
+        var seen = Set<String>()
+        var worstStatus: OSStatus = errSecSuccess
+        func collect(_ query: [String: Any], cls: String) {
             var result: CFTypeRef?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
-            guard status == errSecSuccess, let items = result as? [[String: Any]] else { continue }
+            guard status == errSecSuccess, let items = result as? [[String: Any]] else {
+                if status != errSecItemNotFound && worstStatus == errSecSuccess {
+                    worstStatus = status
+                }
+                return
+            }
             for item in items {
                 // 只留 plist 能存的类型，引用型字段剔掉
                 var clean: [String: Any] = [:]
                 for (k, v) in item where v is String || v is Data || v is NSNumber || v is Date {
                     clean[k] = v
                 }
-                clean[kSecClass as String] = cls as String
-                all.append(clean)
+                clean[kSecClass as String] = cls
+                // 两路可能捞到同一条，按身份键去重
+                let identity = cls + "|" + String(describing: clean[kSecAttrAccount as String]) + "|" + String(describing: clean[kSecAttrService as String]) + "|" + String(describing: clean[kSecAttrGeneric as String])
+                if seen.insert(identity).inserted {
+                    all.append(clean)
+                }
             }
         }
-        return all
+        for cls in [kSecClassGenericPassword, kSecClassInternetPassword] {
+            let clsString = cls as String
+            collect([
+                kSecClass as String: clsString,
+                kSecAttrAccessGroup as String: group,
+                kSecMatchLimit as String: kSecMatchLimitAll as String,
+                kSecReturnAttributes as String: true,
+                kSecReturnData as String: true
+            ], cls: clsString)
+            collect([
+                kSecClass as String: clsString,
+                "alis": container.folderName,
+                kSecMatchLimit as String: kSecMatchLimitAll as String,
+                kSecReturnAttributes as String: true,
+                kSecReturnData as String: true
+            ], cls: clsString)
+        }
+        return (all, worstStatus)
     }
 
     /// 把钥匙串快照写回目标容器：组号改成目标容器自己的
     /// （同名覆盖恢复时容器组号可能与备份时不同，按现有的
-    /// 写，App 才找得到）；标签保持快照原样——游客侧从来不
-    /// 靠标签定位，强行改成文件夹名没有意义。同步标记要摘
-    /// 掉：宿主没有 iCloud 钥匙串权限，带着 sync 写回会被
-    /// 系统以缺权限拒绝。同键已存在时先删再加，保证值以
-    /// 备份为准。返回真正写进去的条数——以前不看
-    /// SecItemAdd 的结果，一条没写进也报恢复成功，登录态
-    /// 根本没回来还查不出来
+    /// 写，App 才找得到）；别名盖成目标容器的文件夹名——与
+    /// 游客存入时 SecItem.m 盖的 alis 一致，LCUI 按别名清理、
+    /// 导出按别名兜底查都认得出这批条目。同步标记要摘掉：
+    /// 宿主没有 iCloud 钥匙串权限，带着 sync 写回会被系统
+    /// 以缺权限拒绝。同键已存在时先删再加，保证值以备份为
+    /// 准。全量属性写不进时退到最小属性集再试一次：快照里
+    /// 可能带着原进程上下文的键，换个进程写会被系统以参数
+    /// 错误整条拒绝。返回写进条数 + 最后一次失败的错误码，
+    /// 失败不再静默
     @discardableResult
-    static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) -> Int {
+    static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) -> (imported: Int, lastStatus: OSStatus) {
         let group = keychainGroupString(groupId: container.keychainGroupId)
         var imported = 0
+        var lastStatus: OSStatus = errSecSuccess
         for item in items {
             var attrs = item
             attrs.removeValue(forKey: "cdat")
             attrs.removeValue(forKey: "mdat")
             attrs.removeValue(forKey: kSecAttrSynchronizable as String)
             attrs[kSecAttrAccessGroup as String] = group
+            attrs["alis"] = container.folderName
             var status = SecItemAdd(attrs as CFDictionary, nil)
             if status == errSecDuplicateItem {
                 var query = attrs
@@ -1705,11 +1779,36 @@ struct LCDataManagementView : View {
                 SecItemDelete(query as CFDictionary)
                 status = SecItemAdd(attrs as CFDictionary, nil)
             }
+            if status != errSecSuccess {
+                let minimalKeys: [String] = [
+                    kSecClass as String, kSecAttrAccount as String,
+                    kSecAttrService as String, kSecAttrGeneric as String,
+                    kSecAttrLabel as String, kSecAttrAccessible as String,
+                    kSecValueData as String
+                ]
+                var minimal: [String: Any] = [
+                    kSecAttrAccessGroup as String: group,
+                    "alis": container.folderName
+                ]
+                for key in minimalKeys {
+                    if let value = attrs[key] {
+                        minimal[key] = value
+                    }
+                }
+                if minimal[kSecValueData as String] != nil {
+                    var deleteQuery = minimal
+                    deleteQuery.removeValue(forKey: kSecValueData as String)
+                    SecItemDelete(deleteQuery as CFDictionary)
+                    status = SecItemAdd(minimal as CFDictionary, nil)
+                }
+            }
             if status == errSecSuccess {
                 imported += 1
+            } else {
+                lastStatus = status
             }
         }
-        return imported
+        return (imported, lastStatus)
     }
 
     /// 从已添加的源中按 bundleID 或名字查找 App 的下载链接

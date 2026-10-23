@@ -962,9 +962,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             return
         }
-        let ok = (try? await LCDataManagementView.restoreOneApp(appFolder: found, app: app)) ?? false
+        let outcome = try? await LCDataManagementView.restoreOneApp(appFolder: found, app: app)
         await MainActor.run {
-            installInfo = ok ? "「\(name)」已恢复备份记录" : "「\(name)」找到备份记录，但没有可恢复的数据"
+            if outcome?.ok == true {
+                installInfo = "「\(name)」已恢复备份记录"
+            } else if let outcome, outcome.keychainFound > 0 {
+                // 备份里明明有钥匙串却恢复失败：把条数和错误码
+                // 亮出来，卡在哪一环一眼可辨，不再误报"没数据"
+                installInfo = "「\(name)」找到备份记录，钥匙串有 \(outcome.keychainFound) 条但写回失败（错误码 \(outcome.keychainStatus)）"
+            } else {
+                installInfo = "「\(name)」找到备份记录，但没有可恢复的数据"
+            }
             installInfoShow = true
         }
     }
