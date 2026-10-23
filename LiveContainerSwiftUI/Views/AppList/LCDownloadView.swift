@@ -13,6 +13,12 @@ public final class DownloadHelper : ObservableObject {
     @Published var totalSize : Int64 = 0
     @Published var isDownloading = false
     @Published var cancelled = false
+    // 下载弹窗是否被用户收起（收起后留一个小悬浮钮，下载继续、
+    // 界面可以正常操作别的功能，点悬浮钮把弹窗调回来）
+    @Published var minimized = false
+    // 批量安装期间为 true：新下载不把弹窗重新弹出来，
+    // 保持用户上次的收起/展开状态
+    var batchMode = false
     private var downloadTask: URLSessionDownloadTask?
     private var continuation: UnsafeContinuation<(), Never>?
     
@@ -21,11 +27,14 @@ public final class DownloadHelper : ObservableObject {
 
         await MainActor.run {
             cancelled = false
-            
+            if !batchMode {
+                minimized = false
+            }
+
             downloadProgress = 0.0
             downloadedSize = 0
             totalSize = 0
-            
+
             isDownloading = true
         }
         
@@ -99,12 +108,18 @@ struct DownloadAlert : View {
             Text("\(formatBytes(helper.downloadedSize)) / \(formatBytes(helper.totalSize))")
                 .font(.subheadline)
                 .padding(.bottom)
-            
-            Button(action: cancelDownload) {
-                Text("lc.common.cancel".loc)
-                    .foregroundColor(.red)
-                    .padding(.bottom)
+
+            HStack(spacing: 48) {
+                Button(action: { helper.minimized = true }) {
+                    Text("隐藏")
+                        .foregroundColor(.accentColor)
+                }
+                Button(action: cancelDownload) {
+                    Text("lc.common.cancel".loc)
+                        .foregroundColor(.red)
+                }
             }
+            .padding(.bottom)
         }
         .frame(width: 300)
         .background(Color(UIColor.secondarySystemBackground))
@@ -133,11 +148,36 @@ public struct DownloadAlertModifier: ViewModifier {
 
         ZStack {
             content
-            if show {
+            if show && !helper.minimized {
                 DownloadAlert(helper: helper)
-                
             }
-            
+            if show && helper.minimized {
+                // 收起后的小悬浮钮：只占右下角一小块，不挡界面
+                // 操作；显示进度，点一下把下载弹窗调回来
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            helper.minimized = false
+                        } label: {
+                            HStack(spacing: 6) {
+                                ProgressView(value: helper.downloadProgress, total: 1)
+                                    .progressViewStyle(.circular)
+                                Text("下载中 \(Int(helper.downloadProgress * 100))%")
+                                    .font(.caption.bold())
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .shadow(radius: 4)
+                        }
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 100)
+                    }
+                }
+            }
+
         }
         .onChange(of: helper.isDownloading) { newVal in
             withAnimation(.easeInOut(duration: 0.1)) {

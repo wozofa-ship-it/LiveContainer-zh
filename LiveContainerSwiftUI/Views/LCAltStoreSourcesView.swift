@@ -710,11 +710,30 @@ struct LCSourcesView: View {
             guard let source = item.source else { return [] }
             return source.apps.filter { selectedIDs.contains($0.bundleIdentifier) }
         }
-        for app in appsToInstall {
-            install(app: app)
-        }
         isBatchMode = false
         selectedIDs.removeAll()
+        var switchedTab = false
+        for app in appsToInstall {
+            guard let downloadURL = app.latestVersion?.downloadURL else {
+                continue
+            }
+            if downloadURL.pathExtension.lowercased() == "dylib" {
+                // 插件（dylib）走插件安装通道，和以前一样
+                Task { await installTweak(from: downloadURL, name: app.name) }
+                continue
+            }
+            if !switchedTab {
+                withAnimation {
+                    DataManager.shared.model.selectedTab = .apps
+                }
+                switchedTab = true
+            }
+            // 批量安装：全部发给 App 页的安装队列串行执行，
+            // autoReplace = 已装同款直接覆盖、不逐个弹框确认
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL, "autoReplace": true])
+            }
+        }
     }
     
     @MainActor

@@ -45,6 +45,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 新装 App 后自动恢复备份的结果提示
     @State var installInfoShow = false
     @State var installInfo = ""
+    // 安装请求队列（源页批量安装用）：串行下+装，已装的直接覆盖
+    @State var installQueue: [(url: URL, autoReplace: Bool)] = []
+    @State var installQueueRunning = false
     
     // ipa installing stuff
     @State var installprogressVisible = false
@@ -437,7 +440,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.InstallAppNotification)) { obj in
             if let obj2 = obj.object as? [String: Any], let installUrl = obj2["url"] as? URL {
-                Task { await installFromUrl(urlStr: installUrl.absoluteString) }
+                // 全部走队列串行执行：以前忙着装别的时新请求会被
+                // 直接丢掉，批量安装实际只装得上第一个
+                enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.LaunchAppNotification)) { obj in
@@ -601,7 +606,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         extract(path, destination, progress)
     }
     
-    func installIpaFile(_ url:URL) async throws {
+    func installIpaFile(_ url:URL, autoReplace: Bool = false) async throws {
         let fm = FileManager()
         
         let installProgress = Progress.discreteProgress(totalUnitCount: 100)
@@ -679,7 +684,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 self.installOptions.append(AppReplaceOption(isReplace: true, nameOfFolderToInstall: app.appInfo.relativeBundlePath, appToReplace: app))
             }
 
-            guard let installOptionChosen = await installReplaceAlert.open() else {
+            let installOptionChosen: AppReplaceOption?
+            if autoReplace, let existing = sameBundleIdApp.first {
+                // 批量安装指定：已装同款直接覆盖，不弹选择框
+                installOptionChosen = self.installOptions.first { $0.appToReplace == existing }
+            } else if autoReplace {
+                // 只有残留文件夹、没有 App 记录：删掉残留，按
+                // 默认文件夹名全新安装（效果等于覆盖）
+                try? fm.removeItem(at: outputFolder)
+                installOptionChosen = AppReplaceOption(isReplace: false, nameOfFolderToInstall: "\(newAppInfo.bundleIdentifier()!.sanitizeNonACSII()).app")
+            } else {
+                installOptionChosen = await installReplaceAlert.open()
+            }
+
+            guard let installOptionChosen else {
                 // user cancelled
                 self.installprogressVisible = false
                 try fm.removeItem(at: payloadPath)
@@ -920,7 +938,47 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
     
-    func installFromUrl(urlStr: String) async {
+    /// 安装请求队列：下载器全局只有一个、安装器同时只能装
+    /// 一个，源页的批量安装必须一个一个排队来，不然忙着装
+    /// 别的时新请求会被直接丢掉、批量只装得上第一个。单个
+    /// 安装请求也走这里（队列空闲时立即执行，和以前一样）；
+    /// autoReplace 的请求遇到已装同款直接覆盖、不弹选择框
+    func enqueueInstall(url: URL, autoReplace: Bool) {
+        installQueue.append((url: url, autoReplace: autoReplace))
+        guard !installQueueRunning else {
+            return
+        }
+        installQueueRunning = true
+        Task {
+            var processed = 0
+            var batch = false
+            while !installQueue.isEmpty {
+                let item = installQueue.removeFirst()
+                if processed > 0 || !installQueue.isEmpty {
+                    batch = true
+                }
+                // 等手动触发的安装先装完，别互相抢
+                while installprogressVisible {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                if batch {
+                    // 批量期间下载弹窗保持用户上次的收起状态，
+                    // 不然每个 App 都弹一次出来
+                    downloadHelper.batchMode = true
+                }
+                await installFromUrl(urlStr: item.url.absoluteString, autoReplace: item.autoReplace)
+                processed += 1
+            }
+            downloadHelper.batchMode = false
+            installQueueRunning = false
+            if processed > 1 {
+                installInfo = "批量安装完成：共处理 \(processed) 个应用"
+                installInfoShow = true
+            }
+        }
+    }
+
+    func installFromUrl(urlStr: String, autoReplace: Bool = false) async {
         // ignore any install request if we are installing another app
         if self.installprogressVisible {
             return
@@ -990,7 +1048,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             
             do {
-                try await installIpaFile(installUrl)
+                try await installIpaFile(installUrl, autoReplace: autoReplace)
             } catch {
                 errorInfo = error.localizedDescription
                 errorShow = true
@@ -1024,7 +1082,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if downloadHelper.cancelled {
                 return
             }
-            try await installIpaFile(destinationURL)
+            try await installIpaFile(destinationURL, autoReplace: autoReplace)
             try fileManager.removeItem(at: destinationURL)
         } catch {
             errorInfo = error.localizedDescription
