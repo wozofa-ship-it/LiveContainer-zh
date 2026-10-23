@@ -11,6 +11,7 @@
 @interface DecoratedAppSceneViewController()
 @property(nonatomic) NSArray* activatedVerticalConstraints;
 @property(nonatomic) NSString* dataUUID;
+@property(nonatomic) NSString* bundleId;
 @property(nonatomic) int pid;
 @property(nonatomic) CGRect originalFrame;
 @property(nonatomic) UIBarButtonItem *maximizeButton;
@@ -25,6 +26,7 @@
     [rootVC addChildViewController:self];
     
     _dataUUID = dataUUID;
+    _bundleId = bundleId;
     _scaleRatio = 1.0;
     _isMaximized = [NSUserDefaults.lcUserDefaults boolForKey:@"LCLaunchMultitaskMaximized"];
     _appSceneVC = [[AppSceneViewController alloc] initWithBundleId:bundleId dataUUID:dataUUID delegate:self];
@@ -94,21 +96,94 @@
     return self;
 }
 
+// MARK: - 窗口状态还原（CZF）
+// 关窗/最大化切换/拖动结束时，把窗口的小窗尺寸、归一化位置
+// 和全屏状态按 bundleId 存进 lcUserDefaults；下次打开这个
+// App 时在 setupDecoratedView 里还原。设置页开关
+// CZFRestoreWindowState（键不存在 = 开）控制。
+- (BOOL)czfRestoreEnabled {
+    NSUserDefaults *d = NSUserDefaults.lcUserDefaults;
+    return [d objectForKey:@"CZFRestoreWindowState"] == nil || [d boolForKey:@"CZFRestoreWindowState"];
+}
+
+- (NSString *)czfWindowStateKey {
+    return [NSString stringWithFormat:@"CZFWinState-%@", self.bundleId ?: self.dataUUID];
+}
+
+- (NSDictionary *)czfSavedWindowState {
+    if (![self czfRestoreEnabled] || !self.bundleId) {
+        return nil;
+    }
+    return [NSUserDefaults.lcUserDefaults dictionaryForKey:[self czfWindowStateKey]];
+}
+
+- (void)czfSaveWindowState {
+    if (![self czfRestoreEnabled] || !self.bundleId) {
+        return;
+    }
+    CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
+    if (CGRectIsEmpty(maxFrame)) {
+        return;
+    }
+    CGFloat nx, ny, w, h;
+    if (self.isMaximized) {
+        // 最大化时小窗的样子在 originalFrame 里（原点已归一化）
+        nx = self.originalFrame.origin.x;
+        ny = self.originalFrame.origin.y;
+        w = self.originalFrame.size.width;
+        h = self.originalFrame.size.height;
+    } else {
+        nx = self.view.frame.origin.x / maxFrame.size.width;
+        ny = self.view.frame.origin.y / maxFrame.size.height;
+        w = self.view.frame.size.width;
+        h = self.view.frame.size.height;
+    }
+    if (w < 50 || h < 50) {
+        return;
+    }
+    NSDictionary *state = @{@"nx": @(nx), @"ny": @(ny), @"w": @(w), @"h": @(h), @"max": @(self.isMaximized)};
+    [NSUserDefaults.lcUserDefaults setObject:state forKey:[self czfWindowStateKey]];
+}
+
 - (void)setupDecoratedView {
     CGFloat navBarHeight = 44;
     BOOL isLandscape = UIInterfaceOrientationIsLandscape(UIApp.statusBarOrientation);
     CGRect frame = CGRectMake(0, 0, isLandscape ? 480 : 320, (isLandscape ? 320 : 480) + navBarHeight);
     CGPoint rootViewCenter = self.view.superview.center;
     frame.origin = CGPointMake(rootViewCenter.x - frame.size.width / 2, rootViewCenter.y - frame.size.height / 2);
-    
-    if(_isMaximized) {
-        CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
-        // save origin as normalized coordinates
-        frame.origin.x /= maxFrame.size.width;
-        frame.origin.y /= maxFrame.size.height;
-        self.originalFrame = frame;
-    } else {
-        self.view.frame = frame;
+
+    // 有上次关窗时存的窗口状态就还原它（取代默认居中尺寸）
+    NSDictionary *savedState = [self czfSavedWindowState];
+    BOOL restored = NO;
+    if (savedState) {
+        CGFloat sw = [savedState[@"w"] doubleValue];
+        CGFloat sh = [savedState[@"h"] doubleValue];
+        if (sw >= 100 && sh >= 100) {
+            restored = YES;
+            _isMaximized = [savedState[@"max"] boolValue];
+            if (_isMaximized) {
+                self.originalFrame = CGRectMake([savedState[@"nx"] doubleValue], [savedState[@"ny"] doubleValue], sw, sh);
+            } else {
+                CGRect hostBounds = self.view.superview.bounds;
+                if (CGRectIsEmpty(hostBounds)) {
+                    hostBounds = UIScreen.mainScreen.bounds;
+                }
+                frame = CGRectMake([savedState[@"nx"] doubleValue] * hostBounds.size.width, [savedState[@"ny"] doubleValue] * hostBounds.size.height, sw, sh);
+                self.view.frame = frame;
+            }
+        }
+    }
+
+    if (!restored) {
+        if(_isMaximized) {
+            CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
+            // save origin as normalized coordinates
+            frame.origin.x /= maxFrame.size.width;
+            frame.origin.y /= maxFrame.size.height;
+            self.originalFrame = frame;
+        } else {
+            self.view.frame = frame;
+        }
     }
     
     // Navigation bar
@@ -240,6 +315,8 @@
 }
 
 - (void)closeWindow {
+    // 关窗前记下窗口状态，下次打开还原（用户要的核心点）
+    [self czfSaveWindowState];
     _isAppTerminationRequested = true;
     if([_appSceneVC isAppRunning]) {
         [_appSceneVC terminate];
@@ -296,6 +373,7 @@
             [self.view layoutIfNeeded];
         } completion:^(BOOL finished) {
             self.isMaximized = NO;
+            [self czfSaveWindowState];
             // 还原成小窗口后必须重算标题栏显隐：最大化时若快捷栏是
             // 收起的，栏被自动藏了（沉浸全屏）；不重算的话还原后栏
             // 永久卡在隐藏——拖动和最大/最小化按钮都在栏上，窗口
@@ -322,6 +400,7 @@
             
             [self.view layoutIfNeeded];
         } completion:^(BOOL finished) {
+            [self czfSaveWindowState];
             UIImage *restoreImage = [UIImage systemImageNamed:@"arrow.down.right.and.arrow.up.left.circle"];
             UIImageConfiguration *restoreConfig = [UIImageSymbolConfiguration configurationWithPointSize:16.0 weight:UIImageSymbolWeightMedium];
             self.maximizeButton.image = [restoreImage imageWithConfiguration:restoreConfig];
@@ -466,7 +545,10 @@
 
 - (void)moveWindow:(UIPanGestureRecognizer*)sender {
     if(_isMaximized) return;
-    
+    if (sender.state == UIGestureRecognizerStateEnded) {
+        [self czfSaveWindowState];
+    }
+
     CGPoint point = [sender translationInView:self.view];
     [sender setTranslation:CGPointZero inView:self.view];
 
@@ -476,7 +558,10 @@
 
 - (void)resizeWindow:(UIPanGestureRecognizer*)sender {
     if(_isMaximized) return;
-    
+    if (sender.state == UIGestureRecognizerStateEnded) {
+        [self czfSaveWindowState];
+    }
+
     CGPoint point = [sender translationInView:self.view];
     [sender setTranslation:CGPointZero inView:self.view];
 

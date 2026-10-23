@@ -183,8 +183,8 @@ struct DownloadAlert : View {
         }
         .frame(width: 300)
         .background(Color(UIColor.secondarySystemBackground))
-        .cornerRadius(12)
-        .shadow(radius: 10)
+        .cornerRadius(16)
+        .shadow(radius: 16)
         .padding()
     }
     

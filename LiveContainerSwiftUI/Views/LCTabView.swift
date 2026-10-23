@@ -57,6 +57,10 @@ struct LCTabView: View {
                 Spacer()
             }
         )
+        .onAppear {
+            // 每次打开 App 通知源页自动刷新一次（节流在源页那边）
+            NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
+        }
         .downloadAlert(helper: downloadHelper)
         .environmentObject(downloadHelper)
         .alert("lc.common.error".loc, isPresented: $errorShow){

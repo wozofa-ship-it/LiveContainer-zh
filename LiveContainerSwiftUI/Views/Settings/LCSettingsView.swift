@@ -385,6 +385,14 @@ struct LCSettingsView: View {
                             }
                         }
                         .disabled(vpnPinging || vpnNodes.isEmpty)
+                        // 测完后一键切到最快的（只认测通的节点；
+                        // 已经是最快时不显示，省得误会）
+                        if let fastest = vpnPingResults.filter({ $0.value.success }).min(by: { $0.value.delay < $1.value.delay }), fastest.key != vpnActiveIndex {
+                            Button("切到最快") {
+                                CZFVPNManager.shared.setActiveNode(at: fastest.key)
+                                refreshVPNState()
+                            }
+                        }
                         Spacer()
                         Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
                             .font(.footnote)

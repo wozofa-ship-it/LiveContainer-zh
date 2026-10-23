@@ -937,12 +937,38 @@ class AppInfoProvider {
     private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
-    // 边缘手势启用带：边缘起手的触摸只有落在屏幕高度
-    // 20%–60% 一段才算数，上下不调（防误触）。原为 28%–68%，
-    // 2026-10-23 用户真机反馈调用位置偏低，整带往上提高一点。
-    // 插件侧 CZFDockGesture 用同一组比例，保持两边一致。
-    private static let czfEdgeBandTop: CGFloat = 0.20
-    private static let czfEdgeBandBottom: CGFloat = 0.60
+    // 边缘手势启用带：边缘起手的触摸只有落在屏幕高度的一段
+    // 内才算数，上下不调（防误触）。2026-10-23 用户真机反馈
+    // 调用位置偏低，整带由 28%–68% 上移到 20%–60%（=中档）。
+    // 现在跟设置页的灵敏度三档走：低=带更窄（26%–54%）、
+    // 高=带更宽（10%–70%）。插件侧 CZFDockGesture 仍用中档
+    // 的 20%–60% 分发，宿主这边按档位做最终判定。
+    private static var czfEdgeBandTop: CGFloat { czfEdgeBandValues.top }
+    private static var czfEdgeBandBottom: CGFloat { czfEdgeBandValues.bottom }
+    private static var czfEdgeBandValues: (top: CGFloat, bottom: CGFloat) {
+        switch czfEdgeSensitivity {
+        case 0: return (0.26, 0.54)
+        case 2: return (0.10, 0.70)
+        default: return (0.20, 0.60)
+        }
+    }
+    // 灵敏度档位：0 低 1 中（默认）2 高（设置页可调）
+    private static var czfEdgeSensitivity: Int {
+        UserDefaults.standard.object(forKey: "CZFEdgeSensitivity") as? Int ?? 1
+    }
+    // 触发距离系数：低档要拖得更远才认、高档拖一点就认
+    private static var czfThresholdScale: CGFloat {
+        switch czfEdgeSensitivity {
+        case 0: return 1.4
+        case 2: return 0.6
+        default: return 1.0
+        }
+    }
+    // 边缘手势总开关（设置页控制，键不存在 = 开）
+    static var czfEdgeGesturesEnabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: "CZFEdgeGesturesEnabled") == nil || d.bool(forKey: "CZFEdgeGesturesEnabled")
+    }
     private var globalSwipeStartInBand: Bool = true
     private var globalSwipeObserversInstalled = false
     // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
@@ -1017,20 +1043,21 @@ class AppInfoProvider {
     private func processGlobalSwipeFallback(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) {
         let dx = translation.x
         let dy = translation.y
+        let s = Self.czfThresholdScale
         if startEdge == 1 {
             // 2026-10-23 真机纠正后对调：左边缘往里拖（手指右移）
             // = App 面板，往外弹（手指左移）= 源面板。门槛跟着动作
             // 的物理方向走，不跟面板走（往里拖与 App 内横滑同轨，
             // 门槛保持严；往外弹空间小，门槛保持松）
-            if dx <= -15, endX <= 12, abs(dx) > 0.4 * abs(dy) {
+            if dx <= -15 * s, endX <= 12, abs(dx) > 0.4 * abs(dy) {
                 fireDockAction { self.czfOpenSourcesPanel() }
-            } else if dx >= 44, abs(dx) > 0.8 * abs(dy) {
+            } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy) {
                 fireDockAction { self.czfOpenAppPanel() }
             }
         } else if startEdge == 2 {
-            if dx >= 15, endX >= width - 12, abs(dx) > 0.4 * abs(dy) {
+            if dx >= 15 * s, endX >= width - 12, abs(dx) > 0.4 * abs(dy) {
                 fireDockAction { self.czfEdgeRightOutward() }
-            } else if dx <= -44, abs(dx) > 0.8 * abs(dy) {
+            } else if dx <= -44 * s, abs(dx) > 0.8 * abs(dy) {
                 fireDockAction { self.czfEdgeRightInward() }
             }
         }
@@ -1043,15 +1070,16 @@ class AppInfoProvider {
     private func processGlobalSwipe(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
         guard abs(translation.x) > 1.5 * abs(translation.y) else { return false }
         let draggingRight = translation.x > 0
+        let s = Self.czfThresholdScale
         if startEdge == 2 {
             // 右边缘改派：往左（门槛24）/往右（门槛10，往外滑手指
             // 很快出屏）；动作分场景在入口判定（App 内全屏/小窗口，
-            // 主界面状态栏调度）
+            // 主界面状态栏调度）。门槛乘灵敏度系数（设置页三档）
             if draggingRight {
-                guard translation.x > 10 else { return false }
+                guard translation.x > 10 * s else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
             } else {
-                guard abs(translation.x) > 24 else { return false }
+                guard abs(translation.x) > 24 * s else { return false }
                 fireDockAction { self.czfEdgeRightInward() }
             }
             return true
@@ -1062,10 +1090,10 @@ class AppInfoProvider {
             // 走：往里拖与 App 内横滑同轨，30 的门槛只认边缘起手
             // 的决断横拖，不抢 App 自己的滑动。
             if draggingRight {
-                guard translation.x > 30 else { return false }
+                guard translation.x > 30 * s else { return false }
                 fireDockAction { self.czfOpenAppPanel() }
             } else {
-                guard abs(translation.x) > 10 else { return false }
+                guard abs(translation.x) > 10 * s else { return false }
                 fireDockAction { self.czfOpenSourcesPanel() }
             }
             return true
@@ -1139,6 +1167,7 @@ class AppInfoProvider {
     // 栏去掉；左边缘手势（App 面板/源面板开关）不动。宿主窗口手势
     // 与游客插件的 Darwin 通知都汇到这两个入口，场景在此判定。
     @objc public func czfEdgeRightInward() {
+        guard Self.czfEdgeGesturesEnabled else { return }
         guard let app = czfFrontmostApp() else {
             czfOpenAppPanel()
             return
@@ -1150,6 +1179,7 @@ class AppInfoProvider {
     }
 
     @objc public func czfEdgeRightOutward() {
+        guard Self.czfEdgeGesturesEnabled else { return }
         guard let app = czfFrontmostApp() else {
             if isAppPanelOpen {
                 edgeCallbackBuzz()
@@ -1183,6 +1213,7 @@ class AppInfoProvider {
     }
 
     @objc public func czfEdgeLeftOutward() {
+        guard Self.czfEdgeGesturesEnabled else { return }
         guard isVisible || !apps.isEmpty, !isDockHidden, !dockIsOnRightSide else { return }
         edgeCallbackBuzz()
         hideDockToSide()
@@ -1213,6 +1244,7 @@ class AppInfoProvider {
     private var czfLastPanelActionAt = Date.distantPast
 
     @objc public func czfOpenAppPanel() {
+        guard Self.czfEdgeGesturesEnabled else { return }
         guard isVisible || !apps.isEmpty else { return }
         let now = Date()
         guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
@@ -1233,6 +1265,7 @@ class AppInfoProvider {
     // 明确要求）；呈现走 keyWindow 兜底。同样是切换式：已打开
     // 再滑一次关掉。
     @objc public func czfOpenSourcesPanel() {
+        guard Self.czfEdgeGesturesEnabled else { return }
         let now = Date()
         guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
         czfLastPanelActionAt = now

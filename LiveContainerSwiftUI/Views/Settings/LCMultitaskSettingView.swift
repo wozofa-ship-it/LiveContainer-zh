@@ -19,7 +19,14 @@ struct LCMultitaskSettingView: View {
     @AppStorage("LCDockWidth", store: LCUtils.appGroupUserDefault) var dockWidth: Double = 80
     @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
     @AppStorage("LCRedirectURLToHost", store: LCUtils.appGroupUserDefault) var redirectURLToHost = false
-    
+    // 窗口状态还原（CZF）：关窗时记下窗口大小/位置/全屏状态，
+    // 下次打开自动还原（DecoratedAppSceneViewController 读写，
+    // 标准 UserDefaults，与那边 lcUserDefaults 同一本）
+    @AppStorage("CZFRestoreWindowState") var restoreWindowState = true
+    // 边缘手势（CZF）：总开关 + 灵敏度三档，宿主判定侧读取
+    @AppStorage("CZFEdgeGesturesEnabled") var edgeGesturesEnabled = true
+    @AppStorage("CZFEdgeSensitivity") var edgeSensitivity = 1
+
     var body: some View {
         List {
             Section {
@@ -84,6 +91,28 @@ struct LCMultitaskSettingView: View {
                 Toggle(isOn: $hideCollapsedDock) {
                     Text("lc.settings.hideCollapsedDock".loc)
                 }
+            }
+
+            Section {
+                Toggle(isOn: $restoreWindowState) {
+                    Text("记住窗口位置")
+                }
+                Toggle(isOn: $edgeGesturesEnabled) {
+                    Text("边缘手势")
+                }
+                if edgeGesturesEnabled {
+                    Picker(selection: $edgeSensitivity) {
+                        Text("低").tag(0)
+                        Text("中").tag(1)
+                        Text("高").tag(2)
+                    } label: {
+                        Text("手势灵敏度")
+                    }
+                }
+            } header: {
+                Text("窗口与手势")
+            } footer: {
+                Text("记住窗口位置：关掉 App 窗口时记下它的大小、位置和全屏状态，下次打开自动还原。手势灵敏度影响宿主侧的边缘启用范围和触发距离；低档更防误触，高档更好触发。")
             }
         }
         .navigationTitle("lc.appBanner.multitask".loc)

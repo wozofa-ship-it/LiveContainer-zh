@@ -491,6 +491,19 @@ struct LCSourcesView: View {
     @State private var selectedIDs = Set<String>()
     // 可更新数量写到这里，底部「源」标签上显示红点数字
     @AppStorage("CZFUpdatableAppCount") private var updatableCountBadge = 0
+    // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
+    @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
+
+    /// 自动刷新源：打开 App / 切到源页时后台刷一次，更新红点
+    /// 才是准的；5 分钟内重复触发直接跳过，不浪费流量
+    private func autoRefreshSourcesIfNeeded() {
+        let now = Date().timeIntervalSince1970
+        guard now - lastSourceAutoRefresh > 300, !viewModel.sources.isEmpty else {
+            return
+        }
+        lastSourceAutoRefresh = now
+        Task { await viewModel.refreshAllSources() }
+    }
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -649,6 +662,7 @@ struct LCSourcesView: View {
 
         .onAppear {
             updatableCountBadge = updatableApps.count
+            autoRefreshSourcesIfNeeded()
             // 默认自动展开所有源
             expandedSources = Set(viewModel.sources.map { $0.id })
             if !isViewAppeared {
@@ -668,6 +682,11 @@ struct LCSourcesView: View {
             guard sharedModel.selectedTab == .sources, let link else { return }
             sharedModel.deepLink = nil
             handleURL(url: link)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFRefreshSourcesRequest"))) { _ in
+            // App 每次打开时主框架发一次：源页在的话顺手刷新，
+            // 红点不用等用户点进源页才准
+            autoRefreshSourcesIfNeeded()
         }
     }
     
@@ -909,7 +928,7 @@ private struct ManageSourcesSheet: View {
                             HStack(alignment: .top, spacing: 12) {
                                 SourceIconView(url: resolvedIconURL(for: item))
                                     .frame(width: 36, height: 36)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(item.displayName)
                                         .bold()
@@ -1041,7 +1060,7 @@ private struct AltStoreSourceSectionView: View {
                             .foregroundStyle(.secondary)
                         SourceIconView(url: item.primaryIconURL)
                             .frame(width: 36, height: 36)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         Text(item.source?.name ?? item.displayName)
                             .font(.system(.title2).bold())
                     }
@@ -1207,7 +1226,8 @@ private struct LCSourceAppBanner: View {
             HStack(alignment: .center, spacing: 12) {
                 SourceIconView(url: app.iconURL)
                     .frame(width: 60, height: 60)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
                         Text(app.name)
@@ -1399,7 +1419,8 @@ private struct LCSourceAppDetailView: View {
                     HStack(spacing: 12) {
                         SourceIconView(url: app.iconURL)
                             .frame(width: 64, height: 64)
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
                         VStack(alignment: .leading, spacing: 4) {
                             Text(app.name)
                                 .font(.headline)

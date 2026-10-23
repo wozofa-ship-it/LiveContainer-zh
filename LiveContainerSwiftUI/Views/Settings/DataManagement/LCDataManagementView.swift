@@ -35,6 +35,8 @@ struct LCDataManagementView : View {
     @State private var backupSelectedIDs = Set<String>()
     @State private var showRestoreSelect = false
     @State private var backupFolderList: [URL] = []
+    // 每个备份的体积（打开恢复列表时后台算，行里显示 + 底部总占用）
+    @State private var backupSizes: [URL: Int64] = [:]
     @State private var showScheduleBackup = false
     @State private var scheduleEnabled = false
     @State private var scheduleHour = 3
@@ -338,7 +340,7 @@ struct LCDataManagementView : View {
                         VStack(alignment: .leading) {
                             Text(folderURL.lastPathComponent)
                                 .font(.headline)
-                            Text(backupDateText(for: folderURL))
+                            Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                                 .lineLimit(1)
@@ -377,8 +379,18 @@ struct LCDataManagementView : View {
                 .navigationTitle("lc.settings.restoreBackup".loc)
                 .onAppear {
                     backupFolderList = backupFolders()
+                    refreshBackupSizes()
                 }
                 .toolbar {
+                    ToolbarItem(placement: .bottomBar) {
+                        // 备份总占用（备份含整套数据，个头不小，
+                        // 让用户心里有数）
+                        if backupSizes.count == backupFolderList.count && !backupFolderList.isEmpty {
+                            Text("共 \(backupFolderList.count) 个备份，占用 \(backupSizeText(backupSizes.values.reduce(0, +)))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     ToolbarItem(placement: .cancellationAction) {
                         Button("lc.common.cancel".loc) {
                             showRestoreSelect = false
@@ -775,6 +787,47 @@ struct LCDataManagementView : View {
     }
 
     // 备份时间显示：优先 manifest 里记录的，旧备份没有就用 manifest 文件修改时间
+    /// 文件夹递归总大小（备份体积显示用，后台线程算）
+    static func folderSize(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    func backupSizeText(_ size: Int64) -> String {
+        let fmt = ByteCountFormatter()
+        fmt.countStyle = .file
+        return fmt.string(fromByteCount: size)
+    }
+
+    func backupSizeLabel(for folderURL: URL) -> String {
+        guard let size = backupSizes[folderURL] else {
+            return "计算中…"
+        }
+        return backupSizeText(size)
+    }
+
+    func refreshBackupSizes() {
+        let folders = backupFolderList
+        DispatchQueue.global(qos: .utility).async {
+            var map: [URL: Int64] = [:]
+            for folder in folders {
+                map[folder] = Self.folderSize(folder)
+            }
+            DispatchQueue.main.async {
+                backupSizes = map
+            }
+        }
+    }
+
     func backupDateText(for folderURL: URL) -> String {
         let manifestURL = folderURL.appendingPathComponent("manifest.json")
         if let data = try? Data(contentsOf: manifestURL),
