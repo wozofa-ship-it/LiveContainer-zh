@@ -897,6 +897,35 @@ struct LCDataManagementView : View {
                                 try? fm.copyItem(at: srcURL, to: destURL)
                             }
                         }
+                        // 组容器数据（App 与它的扩展/小组件共用的那份）：
+                        // 不在数据容器里，单独存在宿主 Data/AppGroup/
+                        // <组ID> 下，以前从没备份过——恢复后容器回到
+                        // 备份时刻、组数据却停在当前，两边对不上，
+                        // App 里信息就错乱（版本更新后恢复最常见）。
+                        // 隔离组容器的 App 数据在容器内已备，不重复
+                        if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
+                            let groupRoot = appBackupURL.appendingPathComponent("AppGroup")
+                            for groupID in Self.appGroupIDs(for: app) {
+                                let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
+                                if fm.fileExists(atPath: src.path) {
+                                    try? fm.createDirectory(at: groupRoot, withIntermediateDirectories: true)
+                                    try? fm.copyItem(at: src, to: groupRoot.appendingPathComponent(groupID))
+                                }
+                            }
+                        }
+                        // 钥匙串快照（登录令牌本体）：按容器逐个导出。
+                        // 以前令牌只活在系统钥匙串里、不进备份——同机
+                        // 删重装能靠残留找回，换机/重装 LiveContainer
+                        // 就全丢；且恢复时三处数据不在同一时刻也是
+                        // 信息错乱的来源之一，备齐了一起回滚才对齐
+                        let keychainRoot = appBackupURL.appendingPathComponent("Keychain")
+                        for container in app.uiContainers {
+                            if let items = Self.exportKeychainItems(container: container), !items.isEmpty,
+                               let data = try? PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0) {
+                                try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
+                                try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
+                            }
+                        }
                         count += 1
                         backedUpNames.append(appName)
                     }
@@ -936,6 +965,7 @@ struct LCDataManagementView : View {
             var restoredCount = 0
             var missing: [(folder: URL, name: String, bundleID: String)] = []
             var noDataApps: [String] = []
+            var versionMismatchApps: [String] = []
             var missingFolders: [URL] = []
             let allApps = sharedModel.apps + sharedModel.hiddenApps
             for appFolder in appFolders {
@@ -959,8 +989,11 @@ struct LCDataManagementView : View {
                     missing.append((folder: appFolder, name: appName, bundleID: appBundleID))
                     continue
                 }
-                if try await restoreOneApp(appFolder: appFolder, app: app) {
+                if try await Self.restoreOneApp(appFolder: appFolder, app: app) {
                     restoredCount += 1
+                    if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
+                        versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
+                    }
                 } else {
                     noDataApps.append(app.appInfo.displayName() ?? folderName)
                 }
@@ -997,8 +1030,11 @@ struct LCDataManagementView : View {
                 }
                 // 再缓 2 秒等安装收尾落稳，然后恢复这个 App 的数据
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if try await restoreOneApp(appFolder: item.folder, app: installedApp) {
+                if try await Self.restoreOneApp(appFolder: item.folder, app: installedApp) {
                     installRestoredCount += 1
+                    if Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
+                        versionMismatchApps.append(item.name)
+                    }
                 } else {
                     noDataApps.append(item.name)
                 }
@@ -1016,6 +1052,9 @@ struct LCDataManagementView : View {
             if !noDataApps.isEmpty {
                 msg += "\n\n未能恢复数据的 App（备份里没有可对应的数据容器）：\n" + noDataApps.joined(separator: "\n")
             }
+            if !versionMismatchApps.isEmpty {
+                msg += "\n\n备份版本与当前 App 版本不同的（数据已整套按备份时刻恢复；打开后若仍有个别信息异常，是新版读旧数据的兼容问题）：\n" + versionMismatchApps.joined(separator: "\n")
+            }
             successInfo = msg
             successShow = true
         } catch {
@@ -1027,11 +1066,13 @@ struct LCDataManagementView : View {
     /// 把一个 App 备份文件夹里的数据容器恢复到这个 App 名下。
     /// 返回 true = 至少拷回一个容器。删后重装时容器名对不上号，
     /// 按原文件夹名放回原位并登记，登录态才能跟着回来（见内注）。
-    func restoreOneApp(appFolder: URL, app: LCAppModel) async throws -> Bool {
+    /// 做成静态：安装流程装完新 App 后也要调它自动恢复备份。
+    static func restoreOneApp(appFolder: URL, app: LCAppModel) async throws -> Bool {
         let fm = FileManager.default
-        // 备份里的容器文件夹（跳过 manifest 和 .app 本体）
+        // 备份里的容器文件夹（跳过 manifest、.app 本体，
+        // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）
         let containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") }
+            .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }
         // manifest 记着备份时的默认容器名，多个容器时靠它定默认
         var manifestDataUUID = ""
         if let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
@@ -1079,7 +1120,131 @@ struct LCDataManagementView : View {
             app.uiDefaultDataFolder = newDefaultContainer.folderName
             app.appInfo.dataUUID = newDefaultContainer.folderName
         }
-        return restoredContainers > 0
+        var restoredExtras = false
+        // 组容器数据写回：和容器、钥匙串是同一时刻的快照，
+        // 三处一起回滚，App 读到的才是一套对齐的数据
+        let appGroupBackup = appFolder.appendingPathComponent("AppGroup")
+        if let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
+            for groupFolder in groupFolders {
+                let dest = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupFolder.lastPathComponent)
+                if fm.fileExists(atPath: dest.path) {
+                    try? fm.removeItem(at: dest)
+                }
+                if (try? fm.copyItem(at: groupFolder, to: dest)) != nil {
+                    restoredExtras = true
+                }
+            }
+        }
+        // 钥匙串写回：备份里哪个容器的快照，就写进这次恢复后
+        // 同名容器的组里（组号取目标容器自己的，删后重装时
+        // 与备份一致；同名覆盖时按现有容器走，不串号）
+        let keychainBackup = appFolder.appendingPathComponent("Keychain")
+        if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
+            for file in files where file.pathExtension == "plist" {
+                let folderName = file.deletingPathExtension().lastPathComponent
+                guard let target = app.uiContainers.first(where: { $0.folderName == folderName }),
+                      let data = try? Data(contentsOf: file),
+                      let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
+                Self.importKeychainItems(items, container: target)
+                restoredExtras = true
+            }
+        }
+        return restoredContainers > 0 || restoredExtras
+    }
+
+    /// 备份的版本号与当前已装版本是否不同（版本更新后恢复
+    /// 旧备份时提示用，让用户知道数据是旧版时刻的整套快照）
+    static func backupVersionDiffers(appFolder: URL, app: LCAppModel) -> Bool {
+        guard let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let backupVersion = json["version"], !backupVersion.isEmpty,
+              let currentVersion = app.appInfo.version(), !currentVersion.isEmpty else {
+            return false
+        }
+        return backupVersion != currentVersion
+    }
+
+    /// 钥匙串组名：与游客侧 SecItem.m 的拼法一致（组号 0 无后缀）
+    static func keychainGroupString(groupId: Int) -> String {
+        let team = LCSharedUtils.teamIdentifier() ?? ""
+        if groupId == 0 {
+            return "\(team).com.kdt.livecontainer.shared"
+        }
+        return "\(team).com.kdt.livecontainer.shared.\(groupId)"
+    }
+
+    /// 读一个 App 的组容器 ID 列表：从它的可执行文件签名权限里取。
+    /// 排除 LiveContainer 自己的组——那个在游客侧映射到宿主根
+    /// 目录本身，绝不能当数据拷进拷出
+    static func appGroupIDs(for app: LCAppModel) -> [String] {
+        guard let bundlePath = app.appInfo.bundlePath(),
+              let info = NSDictionary(contentsOfFile: bundlePath + "/Info.plist") as? [String: Any],
+              let execName = info["CFBundleExecutable"] as? String,
+              let xml = getExecutableEntitlementXML(bundlePath + "/" + execName),
+              let data = xml.data(using: .utf8) else {
+            return []
+        }
+        var format = PropertyListSerialization.PropertyListFormat.xml
+        guard let dict = try? PropertyListSerialization.propertyList(from: data, format: &format) as? [String: Any],
+              let groups = dict["com.apple.security.application-groups"] as? [String] else {
+            return []
+        }
+        let own = LCSharedUtils.appGroupID()
+        return groups.filter { $0 != own }
+    }
+
+    /// 导出一个容器的钥匙串条目。只导通用密码和互联网密码
+    /// （登录令牌都在这两类里）；证书/密钥类不做 round-trip。
+    /// 条目靠组号 + 标签（=容器文件夹名）定位，与游客侧
+    /// SecItem.m 存入时打的标记一致
+    static func exportKeychainItems(container: LCContainer) -> [[String: Any]]? {
+        let group = keychainGroupString(groupId: container.keychainGroupId)
+        var all: [[String: Any]] = []
+        for cls in [kSecClassGenericPassword, kSecClassInternetPassword] {
+            let query: [String: Any] = [
+                kSecClass as String: cls as String,
+                kSecAttrAccessGroup as String: group,
+                kSecAttrLabel as String: container.folderName,
+                kSecMatchLimit as String: kSecMatchLimitAll as String,
+                kSecReturnAttributes as String: true,
+                kSecReturnData as String: true
+            ]
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            guard status == errSecSuccess, let items = result as? [[String: Any]] else { continue }
+            for item in items {
+                // 只留 plist 能存的类型，引用型字段剔掉
+                var clean: [String: Any] = [:]
+                for (k, v) in item where v is String || v is Data || v is NSNumber || v is Date {
+                    clean[k] = v
+                }
+                clean[kSecClass as String] = cls as String
+                all.append(clean)
+            }
+        }
+        return all
+    }
+
+    /// 把钥匙串快照写回目标容器：组号和标签都改成目标容器
+    /// 自己的（同名覆盖恢复时容器组号可能与备份时不同，
+    /// 按现有的写，App 才找得到）。同键已存在时先删再加，
+    /// 保证值以备份为准
+    static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) {
+        let group = keychainGroupString(groupId: container.keychainGroupId)
+        for item in items {
+            var attrs = item
+            attrs.removeValue(forKey: "cdat")
+            attrs.removeValue(forKey: "mdat")
+            attrs[kSecAttrAccessGroup as String] = group
+            attrs[kSecAttrLabel as String] = container.folderName
+            let status = SecItemAdd(attrs as CFDictionary, nil)
+            if status == errSecDuplicateItem {
+                var query = attrs
+                query.removeValue(forKey: kSecValueData as String)
+                SecItemDelete(query as CFDictionary)
+                SecItemAdd(attrs as CFDictionary, nil)
+            }
+        }
     }
 
     /// 从已添加的源中按 bundleID 或名字查找 App 的下载链接

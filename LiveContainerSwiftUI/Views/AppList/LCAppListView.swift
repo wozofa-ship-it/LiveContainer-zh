@@ -42,6 +42,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var choosingIPA = false
     @State var errorShow = false
     @State var errorInfo = ""
+    // 新装 App 后自动恢复备份的结果提示
+    @State var installInfoShow = false
+    @State var installInfo = ""
     
     // ipa installing stuff
     @State var installprogressVisible = false
@@ -294,6 +297,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             })
         } message: {
             Text(errorInfo)
+        }
+        .alert("提示", isPresented: $installInfoShow){
+            Button("lc.common.ok".loc, action: {
+            })
+        } message: {
+            Text(installInfo)
         }
         .betterFileImporter(isPresented: $choosingIPA, types: [.ipa, .tipa], multiple: false, callback: { fileUrls in
             Task { await startInstallApp(fileUrls[0]) }
@@ -772,18 +781,68 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             } else {
                 let newAppModel = LCAppModel(appInfo: finalNewApp, delegate: self)
                 sharedModel.apps.append(newAppModel)
-                
+
                 // add url schemes
                 if let urlSchemes = finalNewApp.urlSchemes(), urlSchemes.count > 0 {
                     UserDefaults.lcShared().mutableArrayValue(forKey: "LCGuestURLSchemes")
                         .addObjects(from: urlSchemes as! [Any])
                 }
+
+                // 全新安装（非覆盖更新）：自动查这个 App 的备份
+                // 记录，有就直接恢复，没有就提示无备份记录
+                Task { await self.autoRestoreBackupAfterInstall(app: newAppModel) }
             }
 
             self.installprogressVisible = false
         }
     }
-    
+
+    /// 全新安装完成后自动查备份记录（数据管理里备的）：
+    /// 按显示名或 manifest 里的 Bundle ID 匹配备份文件夹，
+    /// 有就直接恢复（容器+组数据+钥匙串整套）并提示已恢复，
+    /// 没有就提示无备份记录。只在全新安装时调——覆盖更新时
+    /// 数据本来就在，拿旧备份回滚反而会把新数据冲掉
+    func autoRestoreBackupAfterInstall(app: LCAppModel) async {
+        let fm = FileManager.default
+        let bundleID = app.appInfo.bundleIdentifier() ?? ""
+        let name = app.appInfo.displayName() ?? bundleID
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let root = docs.appendingPathComponent("Backups")
+        let folders = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        var found: URL?
+        for folder in folders {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else {
+                continue
+            }
+            if folder.lastPathComponent == name {
+                found = folder
+                break
+            }
+            if !bundleID.isEmpty,
+               let data = try? Data(contentsOf: folder.appendingPathComponent("manifest.json")),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+               json["bundleIdentifier"] == bundleID {
+                found = folder
+                break
+            }
+        }
+        guard let found else {
+            await MainActor.run {
+                installInfo = "「\(name)」无备份记录"
+                installInfoShow = true
+            }
+            return
+        }
+        let ok = (try? await LCDataManagementView.restoreOneApp(appFolder: found, app: app)) ?? false
+        await MainActor.run {
+            installInfo = ok ? "「\(name)」已恢复备份记录" : "「\(name)」找到备份记录，但没有可恢复的数据"
+            installInfoShow = true
+        }
+    }
+
     func startInstallFromUrl() async {
         guard let installUrlStr = await installUrlInput.open(), installUrlStr.count > 0 else {
             return
