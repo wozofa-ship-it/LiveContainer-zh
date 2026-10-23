@@ -133,10 +133,16 @@
         w = self.originalFrame.size.width;
         h = self.originalFrame.size.height;
     } else {
-        nx = self.view.frame.origin.x / maxFrame.size.width;
-        ny = self.view.frame.origin.y / maxFrame.size.height;
-        w = self.view.frame.size.width;
-        h = self.view.frame.size.height;
+        // 位置统一从 originalFrame 读：先让系统自己的
+        // updateOriginalFrame 按它那套参照系（安全区内的
+        // maxFrame）把当前帧刷进去，存取同一套算法，
+        // 不再自己另算一套（上一版存时按 maxFrame 归一化、
+        // 恢复时按整屏反算，参照系不一致，大小对位置偏）
+        [self updateOriginalFrame];
+        nx = self.originalFrame.origin.x;
+        ny = self.originalFrame.origin.y;
+        w = self.originalFrame.size.width;
+        h = self.originalFrame.size.height;
     }
     if (w < 50 || h < 50) {
         return;
@@ -164,11 +170,19 @@
             if (_isMaximized) {
                 self.originalFrame = CGRectMake([savedState[@"nx"] doubleValue], [savedState[@"ny"] doubleValue], sw, sh);
             } else {
-                CGRect hostBounds = self.view.superview.bounds;
-                if (CGRectIsEmpty(hostBounds)) {
-                    hostBounds = UIScreen.mainScreen.bounds;
+                // 反算必须和存的时候同一套参照系：安全区内的
+                // maxFrame（原点带安全区偏移），上一版按整屏
+                // 反算，位置整体偏移（大小是绝对值所以没事）
+                CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
+                if (CGRectIsEmpty(maxFrame)) {
+                    maxFrame = UIScreen.mainScreen.bounds;
                 }
-                frame = CGRectMake([savedState[@"nx"] doubleValue] * hostBounds.size.width, [savedState[@"ny"] doubleValue] * hostBounds.size.height, sw, sh);
+                CGFloat ox = maxFrame.origin.x + [savedState[@"nx"] doubleValue] * maxFrame.size.width;
+                CGFloat oy = maxFrame.origin.y + [savedState[@"ny"] doubleValue] * maxFrame.size.height;
+                // 夹回可见范围：换过方向/屏幕时别把窗口放飞
+                ox = MAX(maxFrame.origin.x - sw + 60, MIN(ox, CGRectGetMaxX(maxFrame) - 60));
+                oy = MAX(maxFrame.origin.y, MIN(oy, CGRectGetMaxY(maxFrame) - 60));
+                frame = CGRectMake(ox, oy, sw, sh);
                 self.view.frame = frame;
             }
         }
