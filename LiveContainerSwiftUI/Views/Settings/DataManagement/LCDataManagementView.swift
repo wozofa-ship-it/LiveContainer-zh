@@ -1543,19 +1543,53 @@ struct LCDataManagementView : View {
         // 与备份一致；同名覆盖时按现有容器走，不串号）
         let keychainBackup = appFolder.appendingPathComponent("Keychain")
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
-            for file in files where file.pathExtension == "plist" {
+            let plistFiles = files.filter { $0.pathExtension == "plist" }
+            // 没容器可落先补一个：刚装完还没打开过的 App 一个
+            // 容器都没有（列表里标"数据文件夹未创建"），仅密匙
+            // 备份又没有容器文件夹可借道恢复，钥匙串整份落空
+            // （真机实测：装完自动恢复报"没有可恢复的数据"、
+            // 手动恢复报 0 个）。照 runApp 首启的建法补一个默认
+            // 容器，登录态才有着落
+            if app.uiContainers.isEmpty && !plistFiles.isEmpty {
+                let newName = NSUUID().uuidString
+                let newContainer = LCContainer(folderName: newName, name: newName, isShared: app.appInfo.isShared)
+                var containers = app.uiContainers
+                containers.append(newContainer)
+                app.uiContainers = containers
+                app.appInfo.containers = containers
+                app.uiSelectedContainer = newContainer
+                app.uiDefaultDataFolder = newName
+                app.appInfo.dataUUID = newName
+                if let bundleID = app.appInfo.bundleIdentifier() {
+                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
+                }
+            }
+            for file in plistFiles {
                 let folderName = file.deletingPathExtension().lastPathComponent
-                // 同名容器优先；删后重装、容器已换新名时兜底：备份
-                // 时的默认容器那份（或备份里仅有一份时）落到当前
-                // 默认容器——只备密匙的备份没有容器文件夹可借道
-                // 对号，全靠这条兜底才能在重装后送回登录态
+                // 落点：同名容器优先；对不上号的落当前默认容器
+                // ——仅密匙备份的全部身家就是这几份快照，原逻
+                // 辑只认同名/备份时默认/仅一份三种情况，容器
+                // 名字一换（删后重装、多容器）就整份丢弃，登录
+                // 态永远回不来；并入默认容器同键覆盖以备份为准
                 let target = app.uiContainers.first(where: { $0.folderName == folderName })
-                    ?? ((folderName == manifestDataUUID || files.count == 1) ? (app.uiSelectedContainer ?? app.uiContainers.first) : nil)
-                guard let target,
-                      let data = try? Data(contentsOf: file),
+                    ?? app.uiSelectedContainer
+                    ?? app.uiContainers.first
+                guard let target else { continue }
+                // 从 iCloud 文件夹恢复时文件可能还是占位没下到
+                // 本地（读出来直接失败）：先触发下载、短等重试
+                var data = try? Data(contentsOf: file)
+                if data == nil {
+                    try? fm.startDownloadingUbiquitousItem(at: file)
+                    for _ in 0..<5 where data == nil {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        data = try? Data(contentsOf: file)
+                    }
+                }
+                guard let data,
                       let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
-                Self.importKeychainItems(items, container: target)
-                restoredExtras = true
+                if Self.importKeychainItems(items, container: target) > 0 {
+                    restoredExtras = true
+                }
             }
         }
         return restoredContainers > 0 || restoredExtras
@@ -1647,23 +1681,31 @@ struct LCDataManagementView : View {
     /// 把钥匙串快照写回目标容器：组号和标签都改成目标容器
     /// 自己的（同名覆盖恢复时容器组号可能与备份时不同，
     /// 按现有的写，App 才找得到）。同键已存在时先删再加，
-    /// 保证值以备份为准
-    static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) {
+    /// 保证值以备份为准。返回真正写进去的条数——以前不看
+    /// SecItemAdd 的结果，一条没写进也报恢复成功，登录态
+    /// 根本没回来还查不出来
+    @discardableResult
+    static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) -> Int {
         let group = keychainGroupString(groupId: container.keychainGroupId)
+        var imported = 0
         for item in items {
             var attrs = item
             attrs.removeValue(forKey: "cdat")
             attrs.removeValue(forKey: "mdat")
             attrs[kSecAttrAccessGroup as String] = group
             attrs[kSecAttrLabel as String] = container.folderName
-            let status = SecItemAdd(attrs as CFDictionary, nil)
+            var status = SecItemAdd(attrs as CFDictionary, nil)
             if status == errSecDuplicateItem {
                 var query = attrs
                 query.removeValue(forKey: kSecValueData as String)
                 SecItemDelete(query as CFDictionary)
-                SecItemAdd(attrs as CFDictionary, nil)
+                status = SecItemAdd(attrs as CFDictionary, nil)
+            }
+            if status == errSecSuccess {
+                imported += 1
             }
         }
+        return imported
     }
 
     /// 从已添加的源中按 bundleID 或名字查找 App 的下载链接
