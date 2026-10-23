@@ -33,6 +33,9 @@ struct LCDataManagementView : View {
     @State var successInfo = ""
     @State private var showBackupSelect = false
     @State private var backupSelectedIDs = Set<String>()
+    @State private var showBackupScopeDialog = false
+    @State private var pendingBackupApps: [LCAppModel] = []
+    @State private var scheduleKeychainOnly = false
     @State private var showRestoreSelect = false
     @State private var backupFolderList: [URL] = []
     // 每个备份的体积（打开恢复列表时后台算，行里显示 + 底部总占用）
@@ -198,7 +201,8 @@ struct LCDataManagementView : View {
             
             Section(header: Text("lc.settings.backupRestore".loc)) {
                 Button {
-                    Task { await backupAllApps() }
+                    pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
+                    showBackupScopeDialog = true
                 } label: {
                     Text("lc.settings.backupAll".loc)
                 }
@@ -385,6 +389,19 @@ struct LCDataManagementView : View {
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
         }
+        .confirmationDialog("备份范围", isPresented: $showBackupScopeDialog, titleVisibility: .visible) {
+            Button("只备份密匙（登录状态）") {
+                let apps = pendingBackupApps
+                Task { await backupApps(apps, keychainOnly: true) }
+            }
+            Button("数据 + 密匙（完整备份）") {
+                let apps = pendingBackupApps
+                Task { await backupApps(apps, keychainOnly: false) }
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {}
+        } message: {
+            Text("只备份密匙：只存登录令牌，体积小、备得快，App 重装后恢复即可免登录——大多数 App 选这个就够。完整备份：连 App 数据整套快照，体积大、备得慢。")
+        }
         .sheet(isPresented: $showBackupSelect) {
             NavigationView {
                 List(sharedModel.apps + sharedModel.hiddenApps, id: \.self) { app in
@@ -408,11 +425,11 @@ struct LCDataManagementView : View {
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("lc.settings.backup".loc) {
-                            let selected = (sharedModel.apps + sharedModel.hiddenApps).filter {
+                            pendingBackupApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
                                 backupSelectedIDs.contains($0.appInfo.bundleIdentifier() ?? "")
                             }
                             showBackupSelect = false
-                            Task { await backupApps(selected) }
+                            showBackupScopeDialog = true
                         }
                     }
                 }
@@ -425,7 +442,7 @@ struct LCDataManagementView : View {
                         VStack(alignment: .leading) {
                             Text(folderURL.lastPathComponent)
                                 .font(.headline)
-                            Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))")
+                            Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeIsKeychainOnly(folderURL) ? " · 仅密匙" : "")")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                                 .lineLimit(1)
@@ -524,6 +541,13 @@ struct LCDataManagementView : View {
                     Section {
                         Toggle("启用定时备份", isOn: $scheduleEnabled)
                     }
+                    Section(header: Text("备份范围")) {
+                        Picker("范围", selection: $scheduleKeychainOnly) {
+                            Text("完整（数据+密匙）").tag(false)
+                            Text("只备份密匙").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                    }
                     Section(header: Text("备份时间（每天）")) {
                         HStack {
                             Picker("时", selection: $scheduleHour) {
@@ -605,7 +629,7 @@ struct LCDataManagementView : View {
                             .frame(maxWidth: .infinity)
                         }
                     }
-                    Section(footer: Text("每天到点自动清理图标缓存。打开数据管理页时补执行。")) {
+                    Section(footer: Text("每天到点自动清理图标缓存。当天没赶上时，下次打开 LiveContainer 补执行。")) {
                         EmptyView()
                     }
                 }
@@ -1083,7 +1107,7 @@ struct LCDataManagementView : View {
     /// 删后建）：manifest + .app + 各数据容器 + 组容器 + 钥匙
     /// 串快照。backupApps 的批量循环和覆盖安装前的自动备份
     /// 都走这里。同步执行，调用方自己挪到后台队列
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager) throws {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
         let appBackupURL = backupRoot.appendingPathComponent(appName)
@@ -1101,11 +1125,18 @@ struct LCDataManagementView : View {
             "backupDate": dateFmt.string(from: Date()),
             // 恢复时靠它认出哪个是默认容器：容器文件夹名
             // 是随机 UUID，删后重装会换号，不能靠名字猜
-            "dataUUID": app.appInfo.dataUUID ?? ""
+            "dataUUID": app.appInfo.dataUUID ?? "",
+            // 备份范围：keychain = 只备了钥匙串（登录令牌），没有
+            // 数据容器和 .app 本体；恢复列表据此打「仅密匙」标，
+            // 恢复时钥匙串靠落默认容器的兜底对上号
+            "scope": keychainOnly ? "keychain" : "full"
         ]
         if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
             try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
         }
+        // 只备密匙时跳过 .app 本体、数据容器和组容器（体积大头
+        // 全在这里），只留 manifest + 下面的钥匙串快照
+        if !keychainOnly {
         // 保存 .app bundle 供恢复时参考（iOS 沙盒不允许调用 zip，暂不打包 IPA）
         if let bundlePath = app.appInfo.bundlePath() {
             let bundleURL = URL(fileURLWithPath: bundlePath)
@@ -1134,6 +1165,7 @@ struct LCDataManagementView : View {
                     try? fm.copyItem(at: src, to: groupRoot.appendingPathComponent(groupID))
                 }
             }
+        }
         }
         // 钥匙串快照（登录令牌本体）：按容器逐个导出。以前令
         // 牌只活在系统钥匙串里、不进备份——同机删重装能靠残
@@ -1171,7 +1203,7 @@ struct LCDataManagementView : View {
         }
     }
 
-    func backupApps(_ apps: [LCAppModel]) async {
+    func backupApps(_ apps: [LCAppModel], keychainOnly: Bool = false) async {
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
             errorInfo = "lc.settings.backupFail".loc
@@ -1191,7 +1223,7 @@ struct LCDataManagementView : View {
                     var count = 0
                     var backedUpNames: [String] = []
                     for app in apps {
-                        try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm)
+                        try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)
                         count += 1
                         backedUpNames.append(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
                     }
@@ -1410,7 +1442,13 @@ struct LCDataManagementView : View {
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "plist" {
                 let folderName = file.deletingPathExtension().lastPathComponent
-                guard let target = app.uiContainers.first(where: { $0.folderName == folderName }),
+                // 同名容器优先；删后重装、容器已换新名时兜底：备份
+                // 时的默认容器那份（或备份里仅有一份时）落到当前
+                // 默认容器——只备密匙的备份没有容器文件夹可借道
+                // 对号，全靠这条兜底才能在重装后送回登录态
+                let target = app.uiContainers.first(where: { $0.folderName == folderName })
+                    ?? ((folderName == manifestDataUUID || files.count == 1) ? (app.uiSelectedContainer ?? app.uiContainers.first) : nil)
+                guard let target,
                       let data = try? Data(contentsOf: file),
                       let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
                 Self.importKeychainItems(items, container: target)
@@ -1418,6 +1456,16 @@ struct LCDataManagementView : View {
             }
         }
         return restoredContainers > 0 || restoredExtras
+    }
+
+    /// 这份备份是不是「仅密匙」范围（manifest 里的 scope 标记；
+    /// 旧备份没这个字段，一律按完整备份对待）
+    static func backupScopeIsKeychainOnly(_ folderURL: URL) -> Bool {
+        guard let data = try? Data(contentsOf: folderURL.appendingPathComponent("manifest.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            return false
+        }
+        return json["scope"] == "keychain"
     }
 
     /// 备份的版本号与当前已装版本是否不同（版本更新后恢复
@@ -1694,6 +1742,7 @@ struct LCDataManagementView : View {
         if let ids = defaults.stringArray(forKey: "LCScheduleBackupAppIDs") {
             scheduleSelectedIDs = Set(ids)
         }
+        scheduleKeychainOnly = defaults.bool(forKey: "LCScheduleBackupKeychainOnly")
         // 默认 3:00
         if defaults.object(forKey: "LCScheduleBackupHour") == nil {
             scheduleHour = 3
@@ -1707,6 +1756,7 @@ struct LCDataManagementView : View {
         defaults.set(scheduleHour, forKey: "LCScheduleBackupHour")
         defaults.set(scheduleMinute, forKey: "LCScheduleBackupMinute")
         defaults.set(Array(scheduleSelectedIDs), forKey: "LCScheduleBackupAppIDs")
+        defaults.set(scheduleKeychainOnly, forKey: "LCScheduleBackupKeychainOnly")
         defaults.synchronize()
     }
     
@@ -1719,56 +1769,80 @@ struct LCDataManagementView : View {
     }
     
     func checkAndRunScheduledCache() async {
+        await Self.runScheduledCacheIfDue()
+    }
+
+    /// 定时清理缓存的静默核心（静态：打开 LiveContainer 主界面
+    /// 时也要能触发，不再只等数据管理页打开——原触发点是审计
+    /// 查出的缺陷）。判断口径与原实例版一致：启用 + 今天没清
+    /// 过 + 已到设定时间 → 清一遍图标缓存并记日期
+    static func runScheduledCacheIfDue() async {
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: "LCScheduleCacheEnabled") else { return }
-        // 今天已清理过就跳过
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd"
         let today = formatter.string(from: Date())
         if defaults.string(forKey: "LCScheduleCacheLastDate") == today { return }
-        // 还没到设定时间就跳过
         let hour = defaults.integer(forKey: "LCScheduleCacheHour")
         let minute = defaults.integer(forKey: "LCScheduleCacheMinute")
         let now = Date()
         let cal = Calendar.current
-        let nowHour = cal.component(.hour, from: now)
-        let nowMinute = cal.component(.minute, from: now)
-        if nowHour * 60 + nowMinute < hour * 60 + minute { return }
-        // 执行清理
-        await clearIconCache()
+        if cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now) < hour * 60 + minute { return }
+        for app in DataManager.shared.model.apps {
+            app.appInfo.clearIconCache()
+        }
         defaults.set(today, forKey: "LCScheduleCacheLastDate")
     }
-    
+
     func checkAndRunScheduledBackup() async {
+        await Self.runScheduledBackupIfDue()
+    }
+
+    /// 定时备份的静默核心（静态：同上，主界面打开即查）。判断
+    /// 口径：启用 + 选了 App + 今天没备过 + 已到设定时间 →
+    /// 按设定范围（完整/仅密匙）在后台静默备完才记日期，全
+    /// 失败不记、等下次打开重试。原来走 backupApps 会弹"备
+    /// 份完成"窗，定时触发不弹窗更合适
+    static func runScheduledBackupIfDue() async {
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: "LCScheduleBackupEnabled") else { return }
         guard let ids = defaults.stringArray(forKey: "LCScheduleBackupAppIDs"), !ids.isEmpty else { return }
-        
         let hour = defaults.integer(forKey: "LCScheduleBackupHour")
         let minute = defaults.integer(forKey: "LCScheduleBackupMinute")
-        
-        // 检查今天是否已备份
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyyMMdd"
         let today = dateFormatter.string(from: Date())
-        let lastBackup = defaults.string(forKey: "LCScheduleBackupLastDate") ?? ""
-        if lastBackup == today { return }
-        
-        // 检查是否已到设定时间
+        if defaults.string(forKey: "LCScheduleBackupLastDate") == today { return }
         let calendar = Calendar.current
         let now = Date()
-        let nowHour = calendar.component(.hour, from: now)
-        let nowMinute = calendar.component(.minute, from: now)
-        let nowTotal = nowHour * 60 + nowMinute
-        let scheduleTotal = hour * 60 + minute
-        if nowTotal < scheduleTotal { return }
-        
-        // 执行备份
-        let selected = (sharedModel.apps + sharedModel.hiddenApps).filter {
+        if calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now) < hour * 60 + minute { return }
+        let keychainOnly = defaults.bool(forKey: "LCScheduleBackupKeychainOnly")
+        let model = DataManager.shared.model
+        let selected = (model.apps + model.hiddenApps).filter {
             ids.contains($0.appInfo.bundleIdentifier() ?? "")
         }
-        if !selected.isEmpty {
-            await backupApps(selected)
+        guard !selected.isEmpty else { return }
+        let didBackup: Bool = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let fm = FileManager.default
+                var backedUpNames: [String] = []
+                if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    let backupRoot = docs.appendingPathComponent("Backups")
+                    try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+                    for app in selected {
+                        if (try? Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)) != nil {
+                            backedUpNames.append(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
+                        }
+                    }
+                    if !backedUpNames.isEmpty {
+                        Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
+                        Self.writeCZFSettingsBackup()
+                    }
+                }
+                continuation.resume(returning: !backedUpNames.isEmpty)
+            }
+        }
+        if didBackup {
             defaults.set(today, forKey: "LCScheduleBackupLastDate")
             defaults.synchronize()
         }
