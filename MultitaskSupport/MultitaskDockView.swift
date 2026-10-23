@@ -785,7 +785,7 @@ class AppInfoProvider {
     // 干净再按平时的启动路线重新拉起
     @objc public func restartApp(uuid: String) {
         guard let app = self.apps.first(where: { $0.appUUID == uuid }) else { return }
-        let bundlePath = app.appInfo.relativeBundlePath ?? ""
+        let bundlePath = app.appInfo?.relativeBundlePath ?? ""
         closeAppWindow(uuid: uuid)
         guard !bundlePath.isEmpty else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
