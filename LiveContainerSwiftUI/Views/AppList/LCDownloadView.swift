@@ -31,23 +31,32 @@ public final class DownloadHelper : ObservableObject {
 
     func download(url: URL, to: URL) async throws {
         currentURL = url
-        if let data = savedResumeData, savedResumeURL == url {
-            savedResumeData = nil
-            savedResumeURL = nil
+        // 失败自动重试：最多 3 次（首次 + 2 次重试），网络抖
+        // 一下不用用户再点一次。每次优先用上次留下的续传数
+        // 据接着下（completeCallback 失败时已存好），不从 0
+        // 开始；用户主动取消立即停、不重试
+        var lastError: Error?
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
             do {
-                try await downloadOnce(url: url, to: to, resumeData: data)
+                if let data = savedResumeData, savedResumeURL == url {
+                    savedResumeData = nil
+                    savedResumeURL = nil
+                    try await downloadOnce(url: url, to: to, resumeData: data)
+                } else {
+                    try await downloadOnce(url: url, to: to, resumeData: nil)
+                }
                 return
             } catch {
-                // 续传被拒（数据过期/服务器不支持）时从头再下
-                // 一次兜底；用户主动取消的不要重试
+                lastError = error
                 if cancelled {
                     throw error
                 }
-                try await downloadOnce(url: url, to: to, resumeData: nil)
-                return
             }
         }
-        try await downloadOnce(url: url, to: to, resumeData: nil)
+        throw lastError ?? NSError(domain: "DownloadHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败"])
     }
 
     private func downloadOnce(url: URL, to: URL, resumeData: Data?) async throws {

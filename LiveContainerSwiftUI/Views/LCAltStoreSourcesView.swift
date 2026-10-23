@@ -480,6 +480,26 @@ private extension Color {
     }
 }
 
+/// 「忽略此版本」的存储：键 CZFIgnoredUpdate-<bundleId> 存被
+/// 忽略的版本号。忽略后这个版本不再算有更新（行状态、源标签
+/// 红点、全部更新都跳过）；源里出了更新的版本会重新提醒
+enum CZFUpdateIgnore {
+    static func ignoredVersion(for bundleId: String) -> String? {
+        UserDefaults.standard.string(forKey: "CZFIgnoredUpdate-\(bundleId)")
+    }
+    static func setIgnored(_ version: String?, for bundleId: String) {
+        if let version {
+            UserDefaults.standard.set(version, forKey: "CZFIgnoredUpdate-\(bundleId)")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "CZFIgnoredUpdate-\(bundleId)")
+        }
+    }
+    static func isIgnored(_ app: AltStoreSourceApp) -> Bool {
+        guard let latest = app.latestVersion?.version else { return false }
+        return ignoredVersion(for: app.bundleIdentifier) == latest
+    }
+}
+
 struct LCSourcesView: View {
     @StateObject private var viewModel = AltStoreSourcesViewModel()
     @State private var errorMessage: String?
@@ -788,6 +808,7 @@ struct LCSourcesView: View {
                 guard let latest = app.latestVersion,
                       let installedVersion = installed[app.bundleIdentifier],
                       latest.version.compare(installedVersion, options: .numeric) == .orderedDescending,
+                      CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) != latest.version,
                       seen.insert(app.bundleIdentifier).inserted else {
                     continue
                 }
@@ -1151,6 +1172,8 @@ private struct LCSourceAppBanner: View {
     @EnvironmentObject private var sharedModel: SharedModel
     @State private var showDetail = false
     @State private var copiedCardURL = false
+    // 忽略/取消忽略后翻一下，强制本行按新状态重画
+    @State private var ignoreRefresh = false
     
     private var isInstalled: Bool {
         (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
@@ -1160,10 +1183,12 @@ private struct LCSourceAppBanner: View {
         (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })
     }
     
-    // 源里版本比已装版本新 → 有更新
+    // 源里版本比已装版本新 → 有更新（被用户忽略的这个版本不算）
     private var hasUpdate: Bool {
+        _ = ignoreRefresh
         guard let sourceVersion = app.latestVersion?.version,
               let installed = installedAppModel else { return false }
+        if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
         return Self.isVersion(sourceVersion, newerThan: installed.appInfo.version())
     }
     
@@ -1386,6 +1411,28 @@ private struct LCSourceAppBanner: View {
         .onTapGesture {
             if !isBatchMode {
                 showDetail = true
+            }
+        }
+        .contextMenu {
+            if hasUpdate, let version = app.latestVersion?.version {
+                Button {
+                    CZFUpdateIgnore.setIgnored(version, for: app.bundleIdentifier)
+                    ignoreRefresh.toggle()
+                    // 让源页顺带重算红点和「全部更新」名单（带
+                    // 5 分钟节流，不会频繁打网络）
+                    NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
+                } label: {
+                    Label("忽略此版本", systemImage: "bell.slash")
+                }
+            }
+            if CZFUpdateIgnore.isIgnored(app) {
+                Button {
+                    CZFUpdateIgnore.setIgnored(nil, for: app.bundleIdentifier)
+                    ignoreRefresh.toggle()
+                    NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
+                } label: {
+                    Label("取消忽略更新", systemImage: "bell")
+                }
             }
         }
         .sheet(isPresented: $showDetail) {

@@ -269,6 +269,11 @@
     moveGesture.maximumNumberOfTouches = 1;
     [self.navigationBar addGestureRecognizer:moveGesture];
 
+    // 双击标题栏切换最大化/还原（maximizeWindow 本身就是切换式）
+    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(czfTitleBarDoubleTap)];
+    doubleTap.numberOfTapsRequired = 2;
+    [self.navigationBar addGestureRecognizer:doubleTap];
+
     // Resize handle (idea stolen from Notes debugging window)
     UIPanGestureRecognizer *resizeGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(resizeWindow:)];
     resizeGesture.minimumNumberOfTouches = 1;
@@ -593,17 +598,57 @@
     }];
 }
 
+- (void)czfTitleBarDoubleTap {
+    [self maximizeWindow];
+}
+
+// 拖动结束时离可用区域边缘 18pt 内就吸过去：贴边放窗口
+// 不用小心翼翼对齐。maxFrame 的算法和最大化/还原保持一致
+- (void)czfSnapToEdgesIfNeeded {
+    CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
+    if (CGRectIsEmpty(maxFrame)) {
+        maxFrame = UIScreen.mainScreen.bounds;
+    }
+    CGRect frame = self.view.frame;
+    const CGFloat threshold = 18.0;
+    BOOL changed = NO;
+    if (fabs(frame.origin.x - CGRectGetMinX(maxFrame)) < threshold) {
+        frame.origin.x = CGRectGetMinX(maxFrame);
+        changed = YES;
+    } else if (fabs(CGRectGetMaxX(frame) - CGRectGetMaxX(maxFrame)) < threshold) {
+        frame.origin.x = CGRectGetMaxX(maxFrame) - frame.size.width;
+        changed = YES;
+    }
+    if (fabs(frame.origin.y - CGRectGetMinY(maxFrame)) < threshold) {
+        frame.origin.y = CGRectGetMinY(maxFrame);
+        changed = YES;
+    } else if (fabs(CGRectGetMaxY(frame) - CGRectGetMaxY(maxFrame)) < threshold) {
+        frame.origin.y = CGRectGetMaxY(maxFrame) - frame.size.height;
+        changed = YES;
+    }
+    if (changed) {
+        [UIView animateWithDuration:0.15 animations:^{
+            self.view.frame = frame;
+        }];
+        [self updateOriginalFrame];
+    }
+}
+
 - (void)moveWindow:(UIPanGestureRecognizer*)sender {
     if(_isMaximized) return;
-    if (sender.state == UIGestureRecognizerStateEnded) {
-        [self czfSaveWindowState];
-    }
+    BOOL ended = (sender.state == UIGestureRecognizerStateEnded);
 
     CGPoint point = [sender translationInView:self.view];
     [sender setTranslation:CGPointZero inView:self.view];
 
     self.view.center = CGPointMake(self.view.center.x + point.x, self.view.center.y + point.y);
     [self updateOriginalFrame];
+    if (ended) {
+        // 先吸附再存状态：存下来的是吸附后的位置；顺手修了
+        // 以前存状态在应用最后一段位移之前的小偏差
+        [self czfSnapToEdgesIfNeeded];
+        [self czfSaveWindowState];
+    }
 }
 
 - (void)resizeWindow:(UIPanGestureRecognizer*)sender {
