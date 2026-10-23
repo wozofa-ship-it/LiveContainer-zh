@@ -16,6 +16,7 @@
 @property(nonatomic) CGRect originalFrame;
 @property(nonatomic) UIBarButtonItem *maximizeButton;
 @property(nonatomic) bool isAppTerminationRequested;
+@property(nonatomic) BOOL czfRestoreApplied;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -117,6 +118,46 @@
     return [NSUserDefaults.lcUserDefaults dictionaryForKey:[self czfWindowStateKey]];
 }
 
+// 把存的归一化原点反算成实际 frame：必须用系统自己的约定
+// （原点 = 归一化值 × maxFrame 尺寸，不加安全区原点偏移——
+// updateOriginalFrame 存的时候就是这么存的，加了偏移反而错位）
+- (CGRect)czfDenormalizedFrameForState:(NSDictionary *)state {
+    CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
+    if (CGRectIsEmpty(maxFrame)) {
+        maxFrame = UIScreen.mainScreen.bounds;
+    }
+    CGFloat w = [state[@"w"] doubleValue];
+    CGFloat h = [state[@"h"] doubleValue];
+    CGFloat ox = [state[@"nx"] doubleValue] * maxFrame.size.width;
+    CGFloat oy = [state[@"ny"] doubleValue] * maxFrame.size.height;
+    // 夹回可见范围：换过方向/屏幕时别把窗口放飞
+    CGRect winBounds = CGRectIsEmpty(self.view.window.bounds) ? UIScreen.mainScreen.bounds : self.view.window.bounds;
+    ox = MAX(-w + 60, MIN(ox, winBounds.size.width - 60));
+    oy = MAX(0, MIN(oy, winBounds.size.height - 60));
+    return CGRectMake(ox, oy, w, h);
+}
+
+// 还原的真正落点：窗口建好之后，启动方（LCUtils）会把窗口
+// 无条件摆到屏幕正中，setupDecoratedView 里设的 frame 当场被
+// 覆盖——这就是前两版大小对、位置永远回正中的根因。改在
+// App 初始化完成时再按存的状态摆一次（一次性），这时没人再动它
+- (void)czfApplySavedWindowStateIfNeeded {
+    if (self.czfRestoreApplied) {
+        return;
+    }
+    self.czfRestoreApplied = YES;
+    NSDictionary *savedState = [self czfSavedWindowState];
+    if (!savedState || [savedState[@"max"] boolValue]) {
+        return;
+    }
+    CGFloat w = [savedState[@"w"] doubleValue];
+    CGFloat h = [savedState[@"h"] doubleValue];
+    if (w < 100 || h < 100) {
+        return;
+    }
+    self.view.frame = [self czfDenormalizedFrameForState:savedState];
+}
+
 - (void)czfSaveWindowState {
     if (![self czfRestoreEnabled] || !self.bundleId) {
         return;
@@ -170,19 +211,10 @@
             if (_isMaximized) {
                 self.originalFrame = CGRectMake([savedState[@"nx"] doubleValue], [savedState[@"ny"] doubleValue], sw, sh);
             } else {
-                // 反算必须和存的时候同一套参照系：安全区内的
-                // maxFrame（原点带安全区偏移），上一版按整屏
-                // 反算，位置整体偏移（大小是绝对值所以没事）
-                CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
-                if (CGRectIsEmpty(maxFrame)) {
-                    maxFrame = UIScreen.mainScreen.bounds;
-                }
-                CGFloat ox = maxFrame.origin.x + [savedState[@"nx"] doubleValue] * maxFrame.size.width;
-                CGFloat oy = maxFrame.origin.y + [savedState[@"ny"] doubleValue] * maxFrame.size.height;
-                // 夹回可见范围：换过方向/屏幕时别把窗口放飞
-                ox = MAX(maxFrame.origin.x - sw + 60, MIN(ox, CGRectGetMaxX(maxFrame) - 60));
-                oy = MAX(maxFrame.origin.y, MIN(oy, CGRectGetMaxY(maxFrame) - 60));
-                frame = CGRectMake(ox, oy, sw, sh);
+                // 这里先摆一次（马上会被启动方的居中覆盖，真
+                // 正生效的是初始化完成时 czfApplySavedWindowState
+                // 的那一次，两边用同一个反算函数保持一致）
+                frame = [self czfDenormalizedFrameForState:savedState];
                 self.view.frame = frame;
             }
         }
@@ -463,6 +495,10 @@
             [self presentViewController:alert animated:YES completion:nil];
         } else {
             self.pid = vc.pid;
+            // 先把窗口摆回上次关窗时的位置（启动方在建窗后
+            // 强制居中过，这里摆脱它），再让系统按这个 frame
+            // 刷新 originalFrame，后续场景更新都以此为准
+            [self czfApplySavedWindowStateIfNeeded];
             [self updateOriginalFrame];
             if (self.pidAvailableHandler) {
                 self.pidAvailableHandler(@(self.pid), nil);
