@@ -119,6 +119,14 @@ public final class DownloadHelper : ObservableObject {
                     do {
                         let fm = FileManager.default
                         print(to)
+                        // 目标有同名残留时 moveItem 直接报"已存在
+                        // 同名项目"、下载白下完（真机实测：上次
+                        // 安装没清干净的 tmp 文件、或重试时上一
+                        // 轮已搬到位的文件都会撞上）：搬之前先清
+                        if tempFileURL.standardizedFileURL != to.standardizedFileURL,
+                           fm.fileExists(atPath: to.path) {
+                            try? fm.removeItem(at: to)
+                        }
                         try fm.moveItem(at: tempFileURL, to: to)
                     } catch {
                         ansError = error

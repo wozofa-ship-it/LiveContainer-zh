@@ -1648,8 +1648,10 @@ struct LCDataManagementView : View {
 
     /// 导出一个容器的钥匙串条目。只导通用密码和互联网密码
     /// （登录令牌都在这两类里）；证书/密钥类不做 round-trip。
-    /// 条目靠组号 + 标签（=容器文件夹名）定位，与游客侧
-    /// SecItem.m 存入时打的标记一致
+    /// 条目只靠组号定位：游客侧 SecItem.m 存入时只改访问组、
+    /// 从不打标签，旧版按标签（=容器文件夹名）过滤永远查不到
+    /// 任何条目，导出的快照恒为空、"仅密匙"备份里根本没有
+    /// 钥匙串文件夹，恢复端再对也无米下锅（真机实测两版）
     static func exportKeychainItems(container: LCContainer) -> [[String: Any]]? {
         let group = keychainGroupString(groupId: container.keychainGroupId)
         var all: [[String: Any]] = []
@@ -1657,7 +1659,6 @@ struct LCDataManagementView : View {
             let query: [String: Any] = [
                 kSecClass as String: cls as String,
                 kSecAttrAccessGroup as String: group,
-                kSecAttrLabel as String: container.folderName,
                 kSecMatchLimit as String: kSecMatchLimitAll as String,
                 kSecReturnAttributes as String: true,
                 kSecReturnData as String: true
@@ -1678,10 +1679,13 @@ struct LCDataManagementView : View {
         return all
     }
 
-    /// 把钥匙串快照写回目标容器：组号和标签都改成目标容器
-    /// 自己的（同名覆盖恢复时容器组号可能与备份时不同，
-    /// 按现有的写，App 才找得到）。同键已存在时先删再加，
-    /// 保证值以备份为准。返回真正写进去的条数——以前不看
+    /// 把钥匙串快照写回目标容器：组号改成目标容器自己的
+    /// （同名覆盖恢复时容器组号可能与备份时不同，按现有的
+    /// 写，App 才找得到）；标签保持快照原样——游客侧从来不
+    /// 靠标签定位，强行改成文件夹名没有意义。同步标记要摘
+    /// 掉：宿主没有 iCloud 钥匙串权限，带着 sync 写回会被
+    /// 系统以缺权限拒绝。同键已存在时先删再加，保证值以
+    /// 备份为准。返回真正写进去的条数——以前不看
     /// SecItemAdd 的结果，一条没写进也报恢复成功，登录态
     /// 根本没回来还查不出来
     @discardableResult
@@ -1692,8 +1696,8 @@ struct LCDataManagementView : View {
             var attrs = item
             attrs.removeValue(forKey: "cdat")
             attrs.removeValue(forKey: "mdat")
+            attrs.removeValue(forKey: kSecAttrSynchronizable as String)
             attrs[kSecAttrAccessGroup as String] = group
-            attrs[kSecAttrLabel as String] = container.folderName
             var status = SecItemAdd(attrs as CFDictionary, nil)
             if status == errSecDuplicateItem {
                 var query = attrs
