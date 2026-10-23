@@ -1256,10 +1256,10 @@ private struct LCSourceAppBanner: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
                         Text(app.name)
-                            .font(.system(size: 16)).bold()
+                            .font(.headline)
                         if app.isBeta {
                             Text("lc.sources.badge.beta".loc.uppercased())
-                                .font(.system(size: 9, weight: .heavy))
+                                .font(.caption2.weight(.heavy))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 3)
@@ -1267,12 +1267,12 @@ private struct LCSourceAppBanner: View {
                         }
                     }
                     Text(metadataText)
-                        .font(.system(size: 12))
+                        .font(.caption)
                         .foregroundColor(textColor)
                         .lineLimit(1)
                     if !subtitleText.isEmpty {
                         Text(subtitleText)
-                            .font(.system(size: 11))
+                            .font(.caption2)
                             .foregroundColor(textColor)
                             .lineLimit(1)
                     }
@@ -1287,7 +1287,7 @@ private struct LCSourceAppBanner: View {
                     copiedCardURL = true
                 } label: {
                     Image(systemName: copiedCardURL ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(textColor)
                         .frame(width: 32, height: 32)
                 }
@@ -1298,7 +1298,7 @@ private struct LCSourceAppBanner: View {
                     onToggleSelect()
                 } label: {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 28))
+                        .font(.title)
                         .foregroundColor(isSelected ? .blue : .gray)
                 }
                 .buttonStyle(BasicButtonStyle())
@@ -1320,7 +1320,9 @@ private struct LCSourceAppBanner: View {
                 .frame(height: 32)
                 .fixedSize()
                 .background(
-                    Capsule().fill(Color.gray)
+                    // 下载是可点的主操作：以前平灰和旁边绿/橙
+                    // 状态钮同排，看着像被禁用了，改蓝色
+                    Capsule().fill(Color.blue)
                 )
                 .clipShape(Capsule())
                 let isDylib = (app.latestVersion?.downloadURL.pathExtension.lowercased() == "dylib")

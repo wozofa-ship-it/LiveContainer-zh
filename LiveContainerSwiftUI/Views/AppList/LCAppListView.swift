@@ -1248,7 +1248,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     installUrl = resolvedURL
                     didStartAccessing = resolvedURL.startAccessingSecurityScopedResource()
                 } catch {
-                    errorInfo =  "Failed to resolve shared IPA bookmark: \(error.localizedDescription)"
+                    errorInfo =  "读取共享的 IPA 文件失败：\(LCUtils.czfFriendlyError(error))"
                     errorShow = true
                     return false
                 }
@@ -1275,7 +1275,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 try await installIpaFile(installUrl, autoReplace: autoReplace)
             } catch {
                 installOK = false
-                errorInfo = error.localizedDescription
+                errorInfo = LCUtils.czfFriendlyError(error)
                 errorShow = true
             }
 
@@ -1290,7 +1290,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     try fm.removeItem(at: installUrl)
                 }
             } catch {
-                errorInfo = error.localizedDescription
+                errorInfo = LCUtils.czfFriendlyError(error)
                 errorShow = true
             }
             return installOK
@@ -1323,7 +1323,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             try await installIpaFile(destinationURL, autoReplace: autoReplace)
             try fileManager.removeItem(at: destinationURL)
         } catch {
-            errorInfo = error.localizedDescription
+            errorInfo = LCUtils.czfFriendlyError(error)
             errorShow = true
             return false
         }

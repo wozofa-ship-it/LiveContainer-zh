@@ -611,6 +611,44 @@ extension LCUtils {
         }
     }
     
+    // 把系统/网络的英文报错翻成能看懂的中文并分清原因：安装、
+    // 下载、备份、恢复失败时原来直接弹英文原文（"The Internet
+    // connection appears to be offline." 这类），链接死了、断网了、
+    // 空间满了根本分不清。认不出的仍回落系统描述（系统语言为
+    // 中文时它本身就是中文，不会更差）
+    public static func czfFriendlyError(_ error: Error) -> String {
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost, NSURLErrorDataNotAllowed:
+                return "网络不可用，请检查网络连接后重试"
+            case NSURLErrorTimedOut:
+                return "连接超时，网络太慢或服务器没响应，可以稍后重试"
+            case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+                return "找不到服务器，链接可能已失效"
+            case NSURLErrorCannotConnectToHost:
+                return "连不上服务器，链接可能已失效或服务器已关闭"
+            case NSURLErrorCancelled:
+                return "操作已取消"
+            default:
+                return "网络错误（代码 \(ns.code)），请检查网络后重试"
+            }
+        }
+        // Cocoa 640 = NSFileWriteOutOfSpaceError（写文件空间满）
+        if ns.domain == NSCocoaErrorDomain && ns.code == 640 {
+            return "手机存储空间不足，请先清理空间再重试"
+        }
+        // POSIX ENOSPC(28)：底层写文件时空间满
+        if ns.domain == NSPOSIXErrorDomain && ns.code == 28 {
+            return "手机存储空间不足，请先清理空间再重试"
+        }
+        // Cocoa 260 = NSFileReadNoSuchFileError
+        if ns.domain == NSCocoaErrorDomain && ns.code == 260 {
+            return "文件不存在或已被删除"
+        }
+        return error.localizedDescription
+    }
+
     static func openSideStore(delegate: LCAppModelDelegate? = nil, urlStr: String? = nil) {
         let sideStoreApp = LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared, delegate: delegate)
         

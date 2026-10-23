@@ -439,6 +439,7 @@ struct LCSettingsView: View {
                                 var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                                 for (i, r) in results.enumerated() { map[i] = r }
                                 vpnPingResults = map
+                                savePingResults()
                                 vpnPinging = false
                                 refreshVPNState()
                             }
@@ -723,6 +724,47 @@ struct LCSettingsView: View {
         vpnCoreRunning = CZFVPNManager.shared.isRunning
         vpnStatusMessage = CZFVPNManager.shared.lastError
         vpnHostProxy = CZFVPNManager.isHostProxyEnabled
+        // 内存里的测速结果被清空（增删/导入/排序都会清）时，
+        // 从落盘缓存按节点内容重建，没测过的节点不显示
+        if vpnPingResults.isEmpty && !vpnPinging {
+            restorePingResults()
+        }
+    }
+
+    // MARK: - 测速结果持久化（打磨：以前只存内存，增删/导入任一
+    // 节点就整表清零、重启也没了，而测速要停一次核心，代价不小。
+    // 按节点链接内容存：增删别的节点不影响已有结果，重排后按
+    // 内容对回新下标。编码：≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时）
+    private static let pingCacheKey = "CZFVPNPingCache"
+
+    private func savePingResults() {
+        // 先剪掉已不在列表里的节点，缓存不无限长
+        var merged = (UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) as? [String: Int] ?? [:])
+            .filter { vpnNodes.contains($0.key) }
+        for (index, result) in vpnPingResults {
+            guard vpnNodes.indices.contains(index) else { continue }
+            merged[vpnNodes[index]] = result.success ? result.delay : (result.delay == 11000 ? -2 : -1)
+        }
+        UserDefaults.standard.set(merged, forKey: Self.pingCacheKey)
+    }
+
+    private func restorePingResults() {
+        let cache = UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) as? [String: Int] ?? [:]
+        guard !cache.isEmpty else { return }
+        var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+        for (index, link) in vpnNodes.enumerated() {
+            guard let v = cache[link] else { continue }
+            if v >= 0 {
+                map[index] = CZFVPNManager.CZFNodePingResult(success: true, delay: v)
+            } else if v == -2 {
+                map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 11000)
+            } else {
+                map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 10000)
+            }
+        }
+        if !map.isEmpty {
+            vpnPingResults = map
+        }
     }
 
     func openGitHub() {

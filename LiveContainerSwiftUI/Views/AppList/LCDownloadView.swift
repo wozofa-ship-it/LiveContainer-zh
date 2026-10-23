@@ -61,6 +61,8 @@ public final class DownloadHelper : ObservableObject {
 
     private func downloadOnce(url: URL, to: URL, resumeData: Data?) async throws {
         var ansError: Error? = nil
+        // 本次下载建的会话，结束时要释放（见方法末尾）
+        var createdSession: URLSession? = nil
 
         await MainActor.run {
             cancelled = false
@@ -127,6 +129,7 @@ public final class DownloadHelper : ObservableObject {
                 }
 
             }), delegateQueue: .main)
+            createdSession = session
 
             if let resumeData {
                 downloadTask = session.downloadTask(withResumeData: resumeData)
@@ -135,6 +138,10 @@ public final class DownloadHelper : ObservableObject {
             }
             downloadTask?.resume()
         }
+        // 会话用完释放：以前每次下载（重试、预取都会叠加）都新
+        // 建一个后台会话且从不 invalidate，只增不减地挂在系统
+        // 里。任务已结束/失败/取消走到这里，收尾释放正合适
+        createdSession?.finishTasksAndInvalidate()
         if let ansError {
             throw ansError
         }
@@ -178,22 +185,31 @@ struct DownloadAlert : View {
                 .font(.subheadline)
                 .padding(.bottom)
 
-            HStack(spacing: 48) {
+            // 按钮与收起态胶囊、全 App 的胶囊按钮同一套语言：
+            // 以前是纯文字钮，混在材质卡上像没做完
+            HStack(spacing: 12) {
                 Button(action: { helper.minimized = true }) {
                     Text("隐藏")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 8)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
                         .foregroundColor(.accentColor)
                 }
                 Button(action: cancelDownload) {
                     Text("lc.common.cancel".loc)
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 8)
+                        .background(Color.red.opacity(0.12), in: Capsule())
                         .foregroundColor(.red)
                 }
             }
             .padding(.bottom)
         }
-        .frame(width: 300)
-        .background(Color(UIColor.secondarySystemBackground))
-        .cornerRadius(16)
-        .shadow(radius: 16)
+        .frame(width: 320)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: .black.opacity(0.15), radius: 16, x: 0, y: 8)
         .padding()
     }
     
@@ -279,10 +295,21 @@ class DownloadDelegate: NSObject, URLSessionDownloadDelegate {
             if (200...299).contains(statusCode) {
                 completeCallback(location, nil)
             } else {
-                completeCallback(location, NSError(domain: "", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP Error: \(statusCode)"]))
+                // 报错说人话并分清原因：以前一律英文 "HTTP Error:
+                // 404"，链接死了都看不出来
+                let message: String
+                switch statusCode {
+                case 404:
+                    message = "下载链接已失效（服务器返回 404）"
+                case 403:
+                    message = "服务器拒绝下载（403），链接可能已过期或需要登录"
+                default:
+                    message = "下载失败，服务器返回 \(statusCode)"
+                }
+                completeCallback(location, NSError(domain: "", code: statusCode, userInfo: [NSLocalizedDescriptionKey: message]))
             }
         } else {
-            completeCallback(location, NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"]))
+            completeCallback(location, NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败：服务器没有返回有效文件"]))
         }
         
 

@@ -31,6 +31,9 @@ struct LCDataManagementView : View {
     @State var errorInfo = ""
     @State var successShow = false
     @State var successInfo = ""
+    // 备份/恢复进行中的进度文案（第几个、当前哪个 App）：
+    // 以前全程黑盒，GB 级备份只能干等、卡没卡都不知道
+    @State private var backupRestoreProgress: String? = nil
     @State private var showBackupSelect = false
     @State private var backupSelectedIDs = Set<String>()
     @State private var showBackupScopeDialog = false
@@ -202,6 +205,15 @@ struct LCDataManagementView : View {
             }
             
             Section(header: Text("lc.settings.backupRestore".loc)) {
+                if let progress = backupRestoreProgress {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text(progress)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
                 Button {
                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
                     showBackupScopeDialog = true
@@ -468,7 +480,7 @@ struct LCDataManagementView : View {
                                 Image(systemName: "square.and.arrow.up")
                                 Text("导出")
                             }
-                            .foregroundColor(.orange)
+                            .foregroundColor(.blue)
                         }
                         .buttonStyle(.bordered)
                     }
@@ -513,9 +525,11 @@ struct LCDataManagementView : View {
                                     // 总报告：原来每个备份弹一次自己
                                     // 的结果窗，十几个备份要点掉十几层
                                     var lines: [String] = []
-                                    for folderURL in backupFolderList {
+                                    for (index, folderURL) in backupFolderList.enumerated() {
+                                        backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(backupFolderList.count)）"
                                         lines.append(await restoreFromBackup(at: folderURL, presentResult: false))
                                     }
+                                    backupRestoreProgress = nil
                                     successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
                                     successShow = true
                                 }
@@ -749,10 +763,18 @@ struct LCDataManagementView : View {
         for name in appNames {
             let src = backupRoot.appendingPathComponent(name)
             let dest = extURL.appendingPathComponent(name)
+            // 防丢：先拷到临时名、拷完再换上；原来是先删外部
+            // 那份再拷，拷到一半断网/被杀就是外部新旧两空。
+            // 临时名带点前缀，恢复列表（skipsHiddenFiles）不显示
+            let tmp = extURL.appendingPathComponent(".czf-sync-tmp-\(name)")
+            if fm.fileExists(atPath: tmp.path) {
+                try? fm.removeItem(at: tmp)
+            }
+            guard (try? fm.copyItem(at: src, to: tmp)) != nil else { continue }
             if fm.fileExists(atPath: dest.path) {
                 try? fm.removeItem(at: dest)
             }
-            try? fm.copyItem(at: src, to: dest)
+            try? fm.moveItem(at: tmp, to: dest)
         }
     }
 
@@ -1105,7 +1127,7 @@ struct LCDataManagementView : View {
             successInfo = "已删除备份：\(backupURL.lastPathComponent)"
             successShow = true
         } catch {
-            errorInfo = "删除失败：\(error.localizedDescription)"
+            errorInfo = "删除失败：\(LCUtils.czfFriendlyError(error))"
             errorShow = true
         }
     }
@@ -1128,16 +1150,23 @@ struct LCDataManagementView : View {
         await backupApps(allApps)
     }
 
-    /// 把一个 App 的整套数据备份到 Backups/<显示名>（存在先
-    /// 删后建）：manifest + .app + 各数据容器 + 组容器 + 钥匙
-    /// 串快照。backupApps 的批量循环和覆盖安装前的自动备份
-    /// 都走这里。同步执行，调用方自己挪到后台队列
+    /// 把一个 App 的整套数据备份到 Backups/<显示名>（先写
+    /// 临时目录、写完换名覆盖，防丢）：manifest + .app + 各
+    /// 数据容器 + 组容器 + 钥匙串快照。backupApps 的批量循环
+    /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
+    /// 挪到后台队列
     static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-        // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
-        let appBackupURL = backupRoot.appendingPathComponent(appName)
+        // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
+        // 备份列表扫不到），全部写完最后一步才换名上位。原来是
+        // 先删旧备份再重建，写到一半失败/空间满/被系统杀掉，
+        // 就是新旧两空——仅密匙备份以后是登录命根子，不能赌。
+        // 临时目录与 Backups 同卷，换名是瞬间完成的改名操作
+        let finalURL = backupRoot.appendingPathComponent(appName)
+        let appBackupURL = backupRoot.deletingLastPathComponent()
+            .appendingPathComponent(".czf-backup-tmp-\(appName)")
         if fm.fileExists(atPath: appBackupURL.path) {
-            try fm.removeItem(at: appBackupURL)
+            try? fm.removeItem(at: appBackupURL)
         }
         try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
         // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
@@ -1205,6 +1234,12 @@ struct LCDataManagementView : View {
                 try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
             }
         }
+        // 全部写完才换上：删掉旧备份、临时文件夹改名到位。
+        // 中途任何一步抛错都走不到这里，旧备份原样保留
+        if fm.fileExists(atPath: finalURL.path) {
+            try fm.removeItem(at: finalURL)
+        }
+        try fm.moveItem(at: appBackupURL, to: finalURL)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1236,6 +1271,7 @@ struct LCDataManagementView : View {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
+        backupRestoreProgress = "正在备份（0/\(apps.count)）…"
         // 拷贝重活整体挪到后台队列：原来这段在打开页面触发定时备份时
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
@@ -1247,10 +1283,18 @@ struct LCDataManagementView : View {
                     try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                     var count = 0
                     var backedUpNames: [String] = []
-                    for app in apps {
+                    for (index, app) in apps.enumerated() {
+                        let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                        // 进度回主线程刷新：备到第几个、当前哪个
+                        DispatchQueue.main.async {
+                            self.backupRestoreProgress = "正在备份 \(name)（\(index + 1)/\(apps.count)）"
+                        }
                         try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)
                         count += 1
-                        backedUpNames.append(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
+                        backedUpNames.append(name)
+                    }
+                    DispatchQueue.main.async {
+                        self.backupRestoreProgress = "正在同步到备份文件夹…"
                     }
                     // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
@@ -1262,8 +1306,9 @@ struct LCDataManagementView : View {
                 }
             }
         }
+        backupRestoreProgress = nil
         if let failure {
-            errorInfo = failure.localizedDescription
+            errorInfo = LCUtils.czfFriendlyError(failure)
             errorShow = true
         } else {
             successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n" + backupRoot.path
@@ -1278,6 +1323,9 @@ struct LCDataManagementView : View {
     @discardableResult
     func restoreFromBackup(at backupURL: URL, presentResult: Bool = true) async -> String {
         let fm = FileManager.default
+        if presentResult {
+            backupRestoreProgress = "正在恢复 \(backupURL.lastPathComponent)…"
+        }
         do {
             // 新结构：backupURL 直接是单个 App 的备份文件夹（如 Backups/GitHub/）
             // 兼容旧结构：如果是时间戳文件夹，里面是多个 App 文件夹
@@ -1297,8 +1345,11 @@ struct LCDataManagementView : View {
             var versionMismatchApps: [String] = []
             var missingFolders: [URL] = []
             let allApps = sharedModel.apps + sharedModel.hiddenApps
-            for appFolder in appFolders {
+            for (index, appFolder) in appFolders.enumerated() {
                 let folderName = appFolder.lastPathComponent
+                if presentResult {
+                    backupRestoreProgress = "正在恢复 \(folderName)（\(index + 1)/\(appFolders.count)）"
+                }
                 // 先按显示名匹配，再按 Bundle ID 匹配
                 guard let app = allApps.first(where: {
                     ($0.appInfo.displayName() ?? "") == folderName ||
@@ -1335,6 +1386,9 @@ struct LCDataManagementView : View {
             var installNotFound: [String] = []
             var installFailed: [String] = []
             for item in missing {
+                if presentResult {
+                    backupRestoreProgress = "正在安装并恢复 \(item.name)（等安装完成）…"
+                }
                 guard let downloadURL = await searchSourceForApp(bundleID: item.bundleID, name: item.name) else {
                     installNotFound.append(item.name)
                     continue
@@ -1398,13 +1452,17 @@ struct LCDataManagementView : View {
             if !issues.isEmpty {
                 line += "（" + issues.joined(separator: "、") + "）"
             }
+            if presentResult {
+                backupRestoreProgress = nil
+            }
             return line
         } catch {
             if presentResult {
-                errorInfo = error.localizedDescription
+                backupRestoreProgress = nil
+                errorInfo = LCUtils.czfFriendlyError(error)
                 errorShow = true
             }
-            return "\(backupURL.lastPathComponent)：恢复失败（\(error.localizedDescription)）"
+            return "\(backupURL.lastPathComponent)：恢复失败（\(LCUtils.czfFriendlyError(error))）"
         }
     }
 

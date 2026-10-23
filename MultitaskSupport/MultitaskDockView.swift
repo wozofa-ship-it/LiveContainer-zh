@@ -1348,7 +1348,8 @@ class AppInfoProvider {
         backdrop.isHidden = true
         backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
         window.addSubview(backdrop)
-        // 面板本体：底部 60% 高，上圆角
+        // 面板本体：底部 75% 高，上圆角（60% 时顶栏+固定区+运行区
+        // 就吃掉一半，列表只剩两行，用户真机点名太挤、遮挡）
         let rootView = AnyView(
             AllAppsListView()
                 .environmentObject(self)
@@ -1356,7 +1357,7 @@ class AppInfoProvider {
         )
         let host = UIHostingController(rootView: rootView)
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.75)
         host.view.layer.cornerRadius = 16
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -1388,7 +1389,7 @@ class AppInfoProvider {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.6
+            let panelHeight = b.height * 0.75
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -1719,8 +1720,9 @@ public struct MultitaskDockSwiftView: View {
             .padding(dynamicPadding)
             .sheet(isPresented: $showAllApps) {
                 AllAppsListView()
-                    // 只留一个半屏档位：两个档位时系统会先拉高抽屉、列表滚不动
-                    .presentationDetents([.fraction(0.6)])
+                    // 只留一个档位：两个档位时系统会先拉高抽屉、列表滚不动；
+                    // 高度与手势覆盖层一致 75%（60% 太挤、遮行）
+                    .presentationDetents([.fraction(0.75)])
                     .presentationDragIndicator(.visible)
             }
             .onReceive(NotificationCenter.default.publisher(for: .czfOpenAllAppsPanel)) { _ in
@@ -2028,9 +2030,10 @@ struct PinnedAppsStripView: View {
     }
 
     var body: some View {
-        // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
-        // 点名"太丑"的主因）；图标尺寸/圆角与下面运行区、列表
-        // 行统一（46pt / 圆角 12）
+        // 与下面控制卡、列表行同款卡片（secondarySystemBackground
+        // / 圆角 16 / 左右对齐）：上一版去掉灰卡后整条裸贴在面板
+        // 白底上飘着，和下方成套的卡片脱节，用户真机截图仍点名
+        // 丑。卡中卡的问题在嵌套两层，这里只留一层、与下方同款
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
                 Image(systemName: "pin.fill")
@@ -2050,14 +2053,14 @@ struct PinnedAppsStripView: View {
                         ForEach(pinnedApps, id: \.self) { app in
                             VStack(spacing: 4) {
                                 RunningAppIcon(appInfo: app.appInfo)
-                                    .frame(width: 46, height: 46)
+                                    .frame(width: 48, height: 48)
                                     .clipShape(RoundedRectangle(cornerRadius: 12))
                                     .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 Text(app.appInfo.displayName() ?? "")
                                     .font(.caption2)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(.primary)
                                     .lineLimit(1)
-                                    .frame(width: 56)
+                                    .frame(width: 58)
                             }
                             .contentShape(Rectangle())
                             .onTapGesture { onLaunch(app) }
@@ -2066,9 +2069,13 @@ struct PinnedAppsStripView: View {
                 }
             }
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 4)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
     }
 }
 
@@ -2089,9 +2096,25 @@ struct AllAppsListView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
 
     var body: some View {
-        NavigationView {
-            ScrollViewReader { proxy in
+        // 不用 NavigationView：空标题的导航栏白占一条高度，面板
+        // 本来就只有半屏多；原来挂的 .searchable 绑的是常量空串
+        // （根本不筛选），iOS 26 还把它渲染成悬浮条压在面板底部，
+        // 遮住最后一行（用户真机点名"一拉出来都遮挡住了"）。改成
+        // 自带一行紧凑顶栏：左边关闭钮，下面直接接固定区，
+        // 省下的高度全留给列表
+        ScrollViewReader { proxy in
             VStack(spacing: 0) {
+                HStack {
+                    Button { closePanel() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 2)
                 // 顶部固定区（用户定）：不要"App"标题，换成可固定
                 // 的 App 小图标横排（长按下面列表行固定/取消），
                 // 固定区不随列表滚动
@@ -2120,19 +2143,6 @@ struct AllAppsListView: View {
                 // 不留上次滑动的位置）
                 proxy.scrollTo("czfAppPanelTop", anchor: .top)
             }
-            }
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button { closePanel() } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-            .searchable(text: .constant(""), prompt: "搜索")
             }
         }
     }
