@@ -19,6 +19,8 @@ public final class DownloadHelper : ObservableObject {
     // 批量安装期间为 true：新下载不把弹窗重新弹出来，
     // 保持用户上次的收起/展开状态
     var batchMode = false
+    // 进度发布节流用：上次发布进度的时间
+    private var lastProgressPublish = Date.distantPast
     private var downloadTask: URLSessionDownloadTask?
     private var continuation: UnsafeContinuation<(), Never>?
     
@@ -44,6 +46,18 @@ public final class DownloadHelper : ObservableObject {
             let bgConfig = CZFVPNManager.hostDownloadConfiguration(identifier: "com.livecontainer.download.\(UUID().uuidString)")
             let session = URLSession(configuration: bgConfig, delegate: DownloadDelegate(progressCallback: { progress, downloaded, total in
                 Task{ await MainActor.run {
+                    // 节流：进度回调一秒能来几十次，每次都发布
+                    // 会让监听这个对象的整个 App 列表跟着重绘，
+                    // 下载中滑动就一卡一卡。进度变化不到 1% 且
+                    // 离上次发布不到 0.25 秒的直接跳过，最后一
+                    // 下（100%）照常发布
+                    let now = Date()
+                    if progress < 1,
+                       abs(progress - self.downloadProgress) < 0.01,
+                       now.timeIntervalSince(self.lastProgressPublish) < 0.25 {
+                        return
+                    }
+                    self.lastProgressPublish = now
                     self.downloadProgress = progress
                     self.downloadedSize = downloaded
                     self.totalSize = total
