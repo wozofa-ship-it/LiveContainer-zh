@@ -1156,7 +1156,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainStatus: OSStatus) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainStatus: OSStatus, keychainVisible: Int) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1230,16 +1230,20 @@ struct LCDataManagementView : View {
         let keychainRoot = appBackupURL.appendingPathComponent("Keychain")
         var keychainCount = 0
         var keychainStatus: OSStatus = errSecSuccess
+        // 整表先捞一次（有权访问的全部条目），再按容器归属挑：
+        // 逐容器查在真机上对在用 App 恒返回 0 条且无错误码，
+        // 整表捞是唯一能确认"到底有没有、归谁"的查法
+        let dump = Self.dumpAllKeychainItems()
+        if dump.status != errSecSuccess && dump.status != errSecItemNotFound {
+            keychainStatus = dump.status
+        }
         for container in app.uiContainers {
-            let exported = Self.exportKeychainItems(container: container)
-            if exported.status != errSecSuccess && exported.status != errSecItemNotFound && keychainStatus == errSecSuccess {
-                keychainStatus = exported.status
-            }
-            if !exported.items.isEmpty,
-               let data = try? PropertyListSerialization.data(fromPropertyList: exported.items, format: .binary, options: 0) {
+            let items = Self.exportKeychainItems(container: container, dump: dump.items)
+            if !items.isEmpty,
+               let data = try? PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0) {
                 try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
                 try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
-                keychainCount += exported.items.count
+                keychainCount += items.count
             }
         }
         // 全部写完才换上：删掉旧备份、临时文件夹改名到位。
@@ -1248,7 +1252,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainStatus)
+        return (keychainCount, keychainStatus, dump.items.count)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1285,7 +1289,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, keychainErr): (Int, Error?, Int, OSStatus) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, keychainErr, keychainVisible): (Int, Error?, Int, OSStatus, Int) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1294,6 +1298,7 @@ struct LCDataManagementView : View {
                     var backedUpNames: [String] = []
                     var keychainTotal = 0
                     var keychainErr: OSStatus = errSecSuccess
+                    var keychainVisible = 0
                     for (index, app) in apps.enumerated() {
                         let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                         // 进度回主线程刷新：备到第几个、当前哪个
@@ -1302,6 +1307,7 @@ struct LCDataManagementView : View {
                         }
                         let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)
                         keychainTotal += one.keychainCount
+                        keychainVisible = max(keychainVisible, one.keychainVisible)
                         if one.keychainStatus != errSecSuccess && keychainErr == errSecSuccess {
                             keychainErr = one.keychainStatus
                         }
@@ -1315,9 +1321,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, keychainErr))
+                    continuation.resume(returning: (count, nil, keychainTotal, keychainErr, keychainVisible))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, errSecSuccess))
+                    continuation.resume(returning: (0, error, 0, errSecSuccess, 0))
                 }
             }
         }
@@ -1328,10 +1334,14 @@ struct LCDataManagementView : View {
         } else {
             // 钥匙串导了几条必须报出来：以前恒为 0 也照报"备份
             // 完成"，用户拿着空备份去恢复才发现没数据。0 条时
-            // 把系统错误码一起带上，一眼定位卡在哪一环
+            // 把整表可见条数和系统错误码一起带上，一眼定位卡
+            // 在哪一环
             successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n钥匙串令牌共导出 \(keychainTotal) 条"
-            if keychainTotal == 0 && keychainErr != errSecSuccess {
-                successInfo += "（导出报错，错误码 \(keychainErr)）"
+            if keychainTotal == 0 {
+                successInfo += "（整表可见 \(keychainVisible) 条）"
+                if keychainErr != errSecSuccess {
+                    successInfo += "（导出报错，错误码 \(keychainErr)）"
+                }
             }
             successInfo += "\n" + backupRoot.path
             successShow = true
@@ -1692,28 +1702,31 @@ struct LCDataManagementView : View {
         return groups.filter { $0 != own }
     }
 
-    /// 导出一个容器的钥匙串条目。只导通用密码和互联网密码
-    /// （登录令牌都在这两类里）；证书/密钥类不做 round-trip。
-    /// 两路查、合并去重：一路按钥匙串组（游客侧 SecItem.m
-    /// 存入时改的访问组）；一路不限组、按别名查——游客存入
-    /// 每条时都盖了 alis=容器文件夹名，组号记账万一对不上
-    /// 这路也捞得回来。旧版按标签（=容器文件夹名）过滤，而
-    /// 游客从不打标签，导出恒为 0 条、备份恒为空壳（真机
-    /// 实测三版）。返回条目之外带上异常状态码：查询失败不再
-    /// 静默吞掉，完成提示能把错误码亮出来定位
-    static func exportKeychainItems(container: LCContainer) -> (items: [[String: Any]], status: OSStatus) {
-        let group = keychainGroupString(groupId: container.keychainGroupId)
+    /// 把本进程有权访问的钥匙串条目整表捞出来（只捞通用密码
+    /// 和互联网密码，登录令牌都在这两类里；同步与本地存储都
+    /// 算）。逐组查、按别名查在真机上对在用 App 都返回 0 条
+    /// 且无错误码（v133–v135 实测）——不管条目实际落在哪个
+    /// 组、哪个存储，整表捞回来在内存里按归属挑，是唯一能
+    /// 确认"到底有没有"的查法。附带异常状态码，查询失败不
+    /// 再静默吞掉
+    static func dumpAllKeychainItems() -> (items: [[String: Any]], status: OSStatus) {
         var all: [[String: Any]] = []
-        var seen = Set<String>()
         var worstStatus: OSStatus = errSecSuccess
-        func collect(_ query: [String: Any], cls: String) {
+        for cls in [kSecClassGenericPassword, kSecClassInternetPassword] {
+            let query: [String: Any] = [
+                kSecClass as String: cls as String,
+                kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+                kSecMatchLimit as String: kSecMatchLimitAll as String,
+                kSecReturnAttributes as String: true,
+                kSecReturnData as String: true
+            ]
             var result: CFTypeRef?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
             guard status == errSecSuccess, let items = result as? [[String: Any]] else {
                 if status != errSecItemNotFound && worstStatus == errSecSuccess {
                     worstStatus = status
                 }
-                return
+                continue
             }
             for item in items {
                 // 只留 plist 能存的类型，引用型字段剔掉
@@ -1721,32 +1734,21 @@ struct LCDataManagementView : View {
                 for (k, v) in item where v is String || v is Data || v is NSNumber || v is Date {
                     clean[k] = v
                 }
-                clean[kSecClass as String] = cls
-                // 两路可能捞到同一条，按身份键去重
-                let identity = cls + "|" + String(describing: clean[kSecAttrAccount as String]) + "|" + String(describing: clean[kSecAttrService as String]) + "|" + String(describing: clean[kSecAttrGeneric as String])
-                if seen.insert(identity).inserted {
-                    all.append(clean)
-                }
+                clean[kSecClass as String] = cls as String
+                all.append(clean)
             }
         }
-        for cls in [kSecClassGenericPassword, kSecClassInternetPassword] {
-            let clsString = cls as String
-            collect([
-                kSecClass as String: clsString,
-                kSecAttrAccessGroup as String: group,
-                kSecMatchLimit as String: kSecMatchLimitAll as String,
-                kSecReturnAttributes as String: true,
-                kSecReturnData as String: true
-            ], cls: clsString)
-            collect([
-                kSecClass as String: clsString,
-                "alis": container.folderName,
-                kSecMatchLimit as String: kSecMatchLimitAll as String,
-                kSecReturnAttributes as String: true,
-                kSecReturnData as String: true
-            ], cls: clsString)
-        }
         return (all, worstStatus)
+    }
+
+    /// 从整表里挑属于这个容器的条目：访问组对上，或别名
+    /// （游客存入时 SecItem.m 盖的容器文件夹名）对上
+    static func exportKeychainItems(container: LCContainer, dump: [[String: Any]]) -> [[String: Any]] {
+        let group = keychainGroupString(groupId: container.keychainGroupId)
+        return dump.filter { item in
+            (item[kSecAttrAccessGroup as String] as? String) == group
+                || (item["alis"] as? String) == container.folderName
+        }
     }
 
     /// 把钥匙串快照写回目标容器：组号改成目标容器自己的
