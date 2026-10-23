@@ -18,6 +18,8 @@ struct LCTabView: View {
     @State var shouldToggleMainWindowOpen = false
     @Environment(\.scenePhase) var scenePhase
     @StateObject var downloadHelper = DownloadHelper()
+    // 「源」标签的更新红点数字（源页算好写进来的）
+    @AppStorage("CZFUpdatableAppCount") var updatableAppCount = 0
 
     let pub = NotificationCenter.default.publisher(for: UIScene.didDisconnectNotification)
     
@@ -28,6 +30,7 @@ struct LCTabView: View {
                     .tabItem {
                         Label("lc.tabView.sources".loc, systemImage: "books.vertical")
                     }
+                    .badge(updatableAppCount > 0 ? updatableAppCount : 0)
                     .tag(LCTabIdentifier.sources)
             }
             LCAppListView()

@@ -23,8 +23,34 @@ public final class DownloadHelper : ObservableObject {
     private var lastProgressPublish = Date.distantPast
     private var downloadTask: URLSessionDownloadTask?
     private var continuation: UnsafeContinuation<(), Never>?
-    
+    // 断点续传：中断（取消/失败）时留下的续传数据和它对应的
+    // 地址，下次下同一个地址时接着下，不用从 0 开始
+    private var savedResumeData: Data?
+    private var savedResumeURL: URL?
+    private var currentURL: URL?
+
     func download(url: URL, to: URL) async throws {
+        currentURL = url
+        if let data = savedResumeData, savedResumeURL == url {
+            savedResumeData = nil
+            savedResumeURL = nil
+            do {
+                try await downloadOnce(url: url, to: to, resumeData: data)
+                return
+            } catch {
+                // 续传被拒（数据过期/服务器不支持）时从头再下
+                // 一次兜底；用户主动取消的不要重试
+                if cancelled {
+                    throw error
+                }
+                try await downloadOnce(url: url, to: to, resumeData: nil)
+                return
+            }
+        }
+        try await downloadOnce(url: url, to: to, resumeData: nil)
+    }
+
+    private func downloadOnce(url: URL, to: URL, resumeData: Data?) async throws {
         var ansError: Error? = nil
 
         await MainActor.run {
@@ -69,6 +95,14 @@ public final class DownloadHelper : ObservableObject {
                 if let error {
                     print(error)
                     ansError = error
+                    // 失败时系统给了续传数据就留着，下次接着下
+                    if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
+                        self.savedResumeData = data
+                        self.savedResumeURL = url
+                    }
+                } else {
+                    self.savedResumeData = nil
+                    self.savedResumeURL = nil
                 }
                 if let tempFileURL {
                     do {
@@ -85,7 +119,11 @@ public final class DownloadHelper : ObservableObject {
 
             }), delegateQueue: .main)
 
-            downloadTask = session.downloadTask(with: url)
+            if let resumeData {
+                downloadTask = session.downloadTask(withResumeData: resumeData)
+            } else {
+                downloadTask = session.downloadTask(with: url)
+            }
             downloadTask?.resume()
         }
         if let ansError {
@@ -99,7 +137,15 @@ public final class DownloadHelper : ObservableObject {
         }
         cancelled = true
         continuation = nil
-        downloadTask?.cancel()
+        // 带续传数据的取消：系统把下好的部分留成续传数据，
+        // 下次下同一个地址接着下，不用从 0 开始
+        downloadTask?.cancel(byProducingResumeData: { [weak self] data in
+            guard let self, let data else {
+                return
+            }
+            self.savedResumeData = data
+            self.savedResumeURL = self.currentURL
+        })
         isDownloading = false
     }
 }

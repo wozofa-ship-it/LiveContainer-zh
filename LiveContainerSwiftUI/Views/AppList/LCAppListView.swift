@@ -8,6 +8,7 @@
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 class SearchContext: ObservableObject {
     @Published var query: String = ""
@@ -52,6 +53,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var installQueueTotal = 0
     @State var installQueueDone = 0
     @State var installQueueCurrent = ""
+    // 点顶部小条打开的队列名单（可删单个、可取消剩余）
+    @State var queueSheetShow = false
     
     // ipa installing stuff
     @State var installprogressVisible = false
@@ -326,7 +329,53 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 .background(.ultraThinMaterial, in: Capsule())
                 .shadow(radius: 4)
                 .padding(.top, 6)
-                .allowsHitTesting(false)
+                .onTapGesture {
+                    queueSheetShow = true
+                }
+            }
+        }
+        .sheet(isPresented: $queueSheetShow) {
+            // 队列名单：正在装的 + 还在排队的，排队的可以
+            // 单个移除，也可以一键取消剩余全部（正在装的那个
+            // 不受影响，会装完）
+            NavigationView {
+                List {
+                    Section("正在安装") {
+                        Text(installQueueCurrent.isEmpty ? "—" : installQueueCurrent)
+                            .lineLimit(1)
+                    }
+                    Section("排队中（\(installQueue.count)）") {
+                        ForEach(Array(installQueue.enumerated()), id: \.offset) { _, item in
+                            HStack {
+                                Text(item.url.lastPathComponent)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button(role: .destructive) {
+                                    if let idx = installQueue.firstIndex(where: { $0.url == item.url && $0.autoReplace == item.autoReplace }) {
+                                        installQueue.remove(at: idx)
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark.circle")
+                                }
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("安装队列")
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("取消剩余全部", role: .destructive) {
+                            installQueue.removeAll()
+                            queueSheetShow = false
+                        }
+                        .disabled(installQueue.isEmpty)
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("关闭") {
+                            queueSheetShow = false
+                        }
+                    }
+                }
             }
         }
         .betterFileImporter(isPresented: $choosingIPA, types: [.ipa, .tipa], multiple: false, callback: { fileUrls in
@@ -630,7 +679,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     func installIpaFile(_ url:URL, autoReplace: Bool = false) async throws {
         let fm = FileManager()
-        
+
+        // 装之前先看空间：解包 + 落盘 + 签名大约要 IPA 体积
+        // 的 3 倍，空间不够时原来是装到一半才失败、报错还看
+        // 不懂；现在提前明确告诉差多少。小包不查（误差大）
+        if let attrs = try? fm.attributesOfItem(atPath: url.path),
+           let ipaSize = (attrs[.size] as? NSNumber)?.int64Value, ipaSize > 50 * 1024 * 1024,
+           let fsAttrs = try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let freeSize = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value {
+            let need = ipaSize * 3
+            if freeSize < need {
+                let fmt = ByteCountFormatter()
+                fmt.countStyle = .file
+                throw "存储空间不足：安装这个应用约需 \(fmt.string(fromByteCount: need)) 空闲空间，当前只剩 \(fmt.string(fromByteCount: freeSize))"
+            }
+        }
+
         let installProgress = Progress.discreteProgress(totalUnitCount: 100)
         self.installProgressPercentage = 0.0
         self.installObserver = installProgress.observe(\.fractionCompleted) { p, v in
@@ -1037,7 +1101,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if processed > 1 {
                 installInfo = "批量安装完成：共处理 \(processed) 个应用"
                 installInfoShow = true
+                notifyBatchDone(processed)
             }
+        }
+    }
+
+    /// 批量安装全部完成时发一条本地通知：批量装十几个要
+    /// 很久，用户切去干别的也能知道装完了（在 App 里时只
+    /// 进通知中心，不弹横幅，靠顶部小条和汇总弹窗就够了）
+    func notifyBatchDone(_ count: Int) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else {
+                return
+            }
+            let content = UNMutableNotificationContent()
+            content.title = "批量安装完成"
+            content.body = "共处理 \(count) 个应用"
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "CZFBatchInstall-\(UUID().uuidString)", content: content, trigger: nil))
         }
     }
 

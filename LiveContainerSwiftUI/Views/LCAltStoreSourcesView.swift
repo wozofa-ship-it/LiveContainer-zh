@@ -489,6 +489,8 @@ struct LCSourcesView: View {
     @State private var isManagingSources = false
     @State private var isBatchMode = false
     @State private var selectedIDs = Set<String>()
+    // 可更新数量写到这里，底部「源」标签上显示红点数字
+    @AppStorage("CZFUpdatableAppCount") private var updatableCountBadge = 0
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -646,6 +648,7 @@ struct LCSourcesView: View {
         .searchable(text: $searchContext.query, placement: .navigationBarDrawer(displayMode: .always))
 
         .onAppear {
+            updatableCountBadge = updatableApps.count
             // 默认自动展开所有源
             expandedSources = Set(viewModel.sources.map { $0.id })
             if !isViewAppeared {
@@ -656,6 +659,7 @@ struct LCSourcesView: View {
             }
         }
         .onChange(of: viewModel.sources) { newSources in
+            updatableCountBadge = updatableApps.count
             let newSet = Set(newSources.map { $0.id })
             // 新加入的源自动展开，保留已有的展开状态
             expandedSources = expandedSources.intersection(newSet).union(newSet)
