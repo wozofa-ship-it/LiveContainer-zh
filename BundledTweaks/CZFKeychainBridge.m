@@ -18,8 +18,12 @@
 
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
-#import <Security/SecTask.h>
 #import <unistd.h>
+
+// iOS SDK 没有 SecTask.h（宿主工程也是自声明的，见
+// LiveContainer/FoundationPrivate.h），这里照抄声明
+void *SecTaskCreateFromSelf(CFAllocatorRef allocator);
+CFTypeRef SecTaskCopyValueForEntitlement(void *task, CFStringRef key, CFErrorRef *error);
 
 static NSString *CZFKBTeamIdentifier(void) {
     // 与 LCSharedUtils.teamIdentifier 同一套取法（SecTask 读
