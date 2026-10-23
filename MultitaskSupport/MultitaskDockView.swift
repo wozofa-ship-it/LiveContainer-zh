@@ -937,11 +937,12 @@ class AppInfoProvider {
     private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
-    // 边缘手势启用带（用户画定）：边缘起手的触摸只有落在屏幕
-    // 高度约 28%–68% 的中段才算数，上下两段不调（防误触）。
+    // 边缘手势启用带：边缘起手的触摸只有落在屏幕高度
+    // 20%–60% 一段才算数，上下不调（防误触）。原为 28%–68%，
+    // 2026-10-23 用户真机反馈调用位置偏低，整带往上提高一点。
     // 插件侧 CZFDockGesture 用同一组比例，保持两边一致。
-    private static let czfEdgeBandTop: CGFloat = 0.28
-    private static let czfEdgeBandBottom: CGFloat = 0.68
+    private static let czfEdgeBandTop: CGFloat = 0.20
+    private static let czfEdgeBandBottom: CGFloat = 0.60
     private var globalSwipeStartInBand: Bool = true
     private var globalSwipeObserversInstalled = false
     // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
@@ -1017,13 +1018,14 @@ class AppInfoProvider {
         let dx = translation.x
         let dy = translation.y
         if startEdge == 1 {
-            // 往左滑出：净位移往左 ≥15、落点贴边 12 内、方向比底线 0.4
+            // 2026-10-23 真机纠正后对调：左边缘往里拖（手指右移）
+            // = App 面板，往外弹（手指左移）= 源面板。门槛跟着动作
+            // 的物理方向走，不跟面板走（往里拖与 App 内横滑同轨，
+            // 门槛保持严；往外弹空间小，门槛保持松）
             if dx <= -15, endX <= 12, abs(dx) > 0.4 * abs(dy) {
-                fireDockAction { self.czfOpenAppPanel() }
-            } else if dx >= 44, abs(dx) > 0.8 * abs(dy) {
-                // 往右源面板：起手已在 44 带内（比插件漏斗的 64 带更
-                // 严），净位移 ≥44、方向比底线 0.8
                 fireDockAction { self.czfOpenSourcesPanel() }
+            } else if dx >= 44, abs(dx) > 0.8 * abs(dy) {
+                fireDockAction { self.czfOpenAppPanel() }
             }
         } else if startEdge == 2 {
             if dx >= 15, endX >= width - 12, abs(dx) > 0.4 * abs(dy) {
@@ -1054,16 +1056,17 @@ class AppInfoProvider {
             }
             return true
         } else if startEdge == 1 {
-            // 往右=源面板（门槛30），往左=打开 App 面板（往外滑，门槛10）。
-            // 原往右是唤出左侧快捷栏：用户定左边缘
-            // 往右改派源面板，与插件侧判定保持一致；门槛 30 与插件 pan
-            // 路径对齐，只认边缘起手的决断横拖，不抢 App 自己的滑动。
+            // 左边缘（2026-10-23 真机纠正后对调）：往里拖（手指
+            // 右移，门槛30）= App 面板；往外弹（手指左移，门槛10）
+            // = 源面板。与插件侧判定保持一致；门槛跟着物理方向
+            // 走：往里拖与 App 内横滑同轨，30 的门槛只认边缘起手
+            // 的决断横拖，不抢 App 自己的滑动。
             if draggingRight {
                 guard translation.x > 30 else { return false }
-                fireDockAction { self.czfOpenSourcesPanel() }
+                fireDockAction { self.czfOpenAppPanel() }
             } else {
                 guard abs(translation.x) > 10 else { return false }
-                fireDockAction { self.czfOpenAppPanel() }
+                fireDockAction { self.czfOpenSourcesPanel() }
             }
             return true
         } else {
@@ -1185,11 +1188,13 @@ class AppInfoProvider {
         hideDockToSide()
     }
 
-    // 左边缘往左滑：打开 App 面板。面板独立呈现，不联动快捷栏——
-    // 栏藏着就保持藏着（用户定：调面板时不许把栏也带出来）。
-    // 2026-10-21 定案：左滑就是调面板，全屏同理，不用小窗口绕路
-    //（#91 的先还原小窗口已删）。触发收不到的根因在插件侧（系统左
-    // 边缘手势截走触摸），已由插件的 sendEvent 触摸漏斗修复。
+    // App 面板入口：左边缘往里拖（手指右移）调出（2026-10-23
+    // 真机纠正对调：此前按"手指往左移"实现，与用户实际动作
+    // 正好相反）。面板独立呈现，不联动快捷栏——栏藏着就保持
+    // 藏着（用户定：调面板时不许把栏也带出来）。全屏同理，不
+    // 用小窗口绕路（#91 的先还原小窗口已删）。触发收不到的
+    // 根因在插件侧（系统左边缘手势截走触摸），已由插件的
+    // sendEvent 触摸漏斗修复。
     // 两个面板当前是否打开（以面板视图 isHidden 为准，与呈现层同源）
     private var isAppPanelOpen: Bool {
         guard let host = czfPanelOverlayHost else { return false }
@@ -1222,10 +1227,11 @@ class AppInfoProvider {
         presentAllAppsPanel()
     }
 
-    // 左边缘往右滑：打开源面板（2026-10-21 用户定，与往左滑的 App
-    // 面板对称）。故意不加 isVisible/!apps 守卫：没打开任何 App、在
-    // 主界面时也要能调出（用户明确要求）；呈现走 keyWindow 兜底。
-    // 同样是切换式：已打开再滑一次关掉。
+    // 源面板入口：左边缘往外弹（手指左移）调出（2026-10-23
+    // 对调后，与往里拖的 App 面板对称）。故意不加 isVisible/
+    // !apps 守卫：没打开任何 App、在主界面时也要能调出（用户
+    // 明确要求）；呈现走 keyWindow 兜底。同样是切换式：已打开
+    // 再滑一次关掉。
     @objc public func czfOpenSourcesPanel() {
         let now = Date()
         guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
@@ -1558,10 +1564,11 @@ class AppInfoProvider {
 
         if swipeDistance > Constants.edgeSwipeThreshold, !czfEdgeSwipeLatched {
             czfEdgeSwipeLatched = true
-            // 左边缘往右滑改派源面板（用户定，与全局甩手判定一致）；
+            // 左边缘（屏幕边缘手势只能往里拖）= App 面板
+            // （2026-10-23 对调后，与全局甩手判定一致）；
             // 右边缘照旧唤出快捷栏
             if gesture.edges == .left {
-                czfOpenSourcesPanel()
+                czfOpenAppPanel()
             } else {
                 showDockFromHidden()
             }
@@ -2148,7 +2155,7 @@ struct AllAppsListView: View {
     }
 }
 
-// MARK: - Sources Panel View（左边缘往右滑调出，与 App 面板对称）
+// MARK: - Sources Panel View（左边缘往外弹调出，与 App 面板对称；2026-10-23 对调）
 // 数据复用源页面的 AltStoreSourcesViewModel（进面板自动加载+刷新，
 // 每次调出计数变化再刷一次）；行卡片按源页 LCSourceAppBanner 的状态
 // 逻辑简化（复制/下载/安装/打开/更新/已安装），安装走与源页完全相同

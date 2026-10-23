@@ -356,17 +356,6 @@ struct LCDataManagementView : View {
                         }
                         .buttonStyle(.bordered)
                         Button {
-                            showRestoreSelect = false
-                            Task { await installMissingApps(from: folderURL) }
-                        } label: {
-                            HStack {
-                                Image(systemName: "arrow.down.circle")
-                                Text("安装")
-                            }
-                            .foregroundColor(.green)
-                        }
-                        .buttonStyle(.bordered)
-                        Button {
                             presentExportPicker(for: folderURL)
                         } label: {
                             HStack {
@@ -1091,83 +1080,6 @@ struct LCDataManagementView : View {
             app.appInfo.dataUUID = newDefaultContainer.folderName
         }
         return restoredContainers > 0
-    }
-
-    func installMissingApps(from backupURL: URL) async {
-        let fm = FileManager.default
-        do {
-            // 新结构：backupURL 直接是单个 App 的备份文件夹；兼容旧时间戳结构
-            let manifestURL = backupURL.appendingPathComponent("manifest.json")
-            let isSingleAppFolder = fm.fileExists(atPath: manifestURL.path)
-            let appFolders: [URL]
-            if isSingleAppFolder {
-                appFolders = [backupURL]
-            } else {
-                appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
-            }
-            let allApps = sharedModel.apps + sharedModel.hiddenApps
-            var toInstall: [(name: String, bundleID: String)] = []
-            for appFolder in appFolders {
-                let folderName = appFolder.lastPathComponent
-                // 跳过 manifest.json 和 .app bundle，只处理数据文件夹
-                if folderName == "manifest.json" || folderName.hasSuffix(".app") { continue }
-                let manifestURL = appFolder.appendingPathComponent("manifest.json")
-                var bundleID = ""
-                var displayName = folderName
-                // 尝试从 manifest 读取
-                if let data = try? Data(contentsOf: manifestURL),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-                    bundleID = json["bundleIdentifier"] ?? ""
-                    if let dn = json["displayName"], !dn.isEmpty { displayName = dn }
-                }
-                // 检查是否已安装
-                let installed = allApps.contains {
-                    ($0.appInfo.displayName() ?? "") == folderName ||
-                    ($0.appInfo.bundleIdentifier() ?? "") == folderName ||
-                    (!(bundleID.isEmpty) && ($0.appInfo.bundleIdentifier() ?? "") == bundleID)
-                }
-                if !installed {
-                    toInstall.append((name: displayName, bundleID: bundleID))
-                }
-            }
-            if toInstall.isEmpty {
-                await MainActor.run {
-                    successInfo = "所有 App 均已安装，无需安装"
-                    successShow = true
-                }
-            } else {
-                // 优先从已添加的源查找 IPA
-                var installedCount = 0
-                var notFound: [String] = []
-                for item in toInstall {
-                    if let downloadURL = await searchSourceForApp(bundleID: item.bundleID, name: item.name) {
-                        // 找到源，通过通知触发安装
-                        await MainActor.run {
-                            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL])
-                        }
-                        installedCount += 1
-                    } else {
-                        notFound.append(item.name)
-                    }
-                }
-                var msg = ""
-                if installedCount > 0 {
-                    msg += "已从源找到 \(installedCount) 个 App 并开始安装\n"
-                }
-                if !notFound.isEmpty {
-                    msg += "\n未在源中找到（请手动到 App 页导入 IPA）：\n" + notFound.joined(separator: "\n")
-                }
-                await MainActor.run {
-                    successInfo = msg.isEmpty ? "未找到可安装的 App" : msg
-                    successShow = true
-                }
-            }
-        } catch {
-            await MainActor.run {
-                errorInfo = "扫描备份失败：\(error.localizedDescription)"
-                errorShow = true
-            }
-        }
     }
 
     /// 从已添加的源中按 bundleID 或名字查找 App 的下载链接
