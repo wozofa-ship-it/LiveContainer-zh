@@ -36,6 +36,10 @@ import Intents
             MultitaskDockManager.deployDockGestureTweak()
         }
 
+        // 部署钥匙串桥插件（游客进程内导出/写回钥匙串）到全局
+        // Tweaks 并签名，同样赶在任何游客 App 启动前
+        LCDataManagementView.deployKeychainBridgeTweak()
+
         return true
     }
     

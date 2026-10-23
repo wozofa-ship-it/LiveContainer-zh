@@ -1156,7 +1156,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainStatus: OSStatus, keychainVisible: Int) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1229,18 +1229,18 @@ struct LCDataManagementView : View {
         // 了一起回滚才对齐
         let keychainRoot = appBackupURL.appendingPathComponent("Keychain")
         var keychainCount = 0
-        var keychainStatus: OSStatus = errSecSuccess
-        // 整表先捞一次（有权访问的全部条目），再按容器归属挑：
-        // 逐容器查在真机上对在用 App 恒返回 0 条且无错误码，
-        // 整表捞是唯一能确认"到底有没有、归谁"的查法
-        let dump = Self.dumpAllKeychainItems()
-        if dump.status != errSecSuccess && dump.status != errSecItemNotFound {
-            keychainStatus = dump.status
-        }
+        var keychainHasSnapshot = false
+        // 钥匙串快照改读游客进程内钥匙串桥（CZFKeychainBridge）
+        // 写在容器根目录的文件：宿主侧 SecItem 查询在这台机上
+        // 恒为空（按组/按别名/整表捞五版实测全是 0 条且无错误
+        // 码），游客自己导的才作数。快照文件不存在 = 这个 App
+        // 装上钥匙串桥之后还没被打开过
         for container in app.uiContainers {
-            let items = Self.exportKeychainItems(container: container, dump: dump.items)
-            if !items.isEmpty,
-               let data = try? PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0) {
+            let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
+            guard let data = try? Data(contentsOf: dumpURL),
+                  let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
+            keychainHasSnapshot = true
+            if !items.isEmpty {
                 try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
                 try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
                 keychainCount += items.count
@@ -1252,7 +1252,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainStatus, dump.items.count)
+        return (keychainCount, keychainHasSnapshot)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1289,7 +1289,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, keychainErr, keychainVisible): (Int, Error?, Int, OSStatus, Int) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing): (Int, Error?, Int, Bool) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1297,8 +1297,7 @@ struct LCDataManagementView : View {
                     var count = 0
                     var backedUpNames: [String] = []
                     var keychainTotal = 0
-                    var keychainErr: OSStatus = errSecSuccess
-                    var keychainVisible = 0
+                    var snapshotMissing = false
                     for (index, app) in apps.enumerated() {
                         let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                         // 进度回主线程刷新：备到第几个、当前哪个
@@ -1307,9 +1306,8 @@ struct LCDataManagementView : View {
                         }
                         let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)
                         keychainTotal += one.keychainCount
-                        keychainVisible = max(keychainVisible, one.keychainVisible)
-                        if one.keychainStatus != errSecSuccess && keychainErr == errSecSuccess {
-                            keychainErr = one.keychainStatus
+                        if !one.keychainHasSnapshot {
+                            snapshotMissing = true
                         }
                         count += 1
                         backedUpNames.append(name)
@@ -1321,9 +1319,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, keychainErr, keychainVisible))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, errSecSuccess, 0))
+                    continuation.resume(returning: (0, error, 0, false))
                 }
             }
         }
@@ -1333,15 +1331,13 @@ struct LCDataManagementView : View {
             errorShow = true
         } else {
             // 钥匙串导了几条必须报出来：以前恒为 0 也照报"备份
-            // 完成"，用户拿着空备份去恢复才发现没数据。0 条时
-            // 把整表可见条数和系统错误码一起带上，一眼定位卡
-            // 在哪一环
+            // 完成"，用户拿着空备份去恢复才发现没数据。快照是
+            // 游客进程内的钥匙串桥在 App 打开时写的；0 条时按
+            // 有没有快照分两种说法：没快照 = 装上这版后还没打
+            // 开过那个 App；有快照还空 = 桥确认它没存令牌
             successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n钥匙串令牌共导出 \(keychainTotal) 条"
             if keychainTotal == 0 {
-                successInfo += "（整表可见 \(keychainVisible) 条）"
-                if keychainErr != errSecSuccess {
-                    successInfo += "（导出报错，错误码 \(keychainErr)）"
-                }
+                successInfo += snapshotMissing ? "（还没有密匙快照：先打开一次要备份的 App，再回来备份）" : "（密匙快照是空的）"
             }
             successInfo += "\n" + backupRoot.path
             successShow = true
@@ -1505,6 +1501,7 @@ struct LCDataManagementView : View {
         var ok = false
         var keychainFound = 0
         var keychainImported = 0
+        var keychainQueued = 0
         var keychainStatus: OSStatus = errSecSuccess
     }
 
@@ -1645,6 +1642,14 @@ struct LCDataManagementView : View {
                 if writeResult.imported > 0 {
                     restoredExtras = true
                 }
+                // 宿主写回在这台机上同样靠不住（同一套 SecItem，
+                // 读恒空的前车之鉴）：快照同时放进目标容器，游客
+                // 下次打开时由进程内的钥匙串桥在 App 读令牌之前
+                // 写回——这一份落了地，恢复就算数
+                if (try? data.write(to: target.containerURL.appendingPathComponent("CZFKeychainImport.plist"))) != nil {
+                    outcome.keychainQueued += items.count
+                    restoredExtras = true
+                }
             }
         }
         outcome.ok = restoredContainers > 0 || restoredExtras
@@ -1702,52 +1707,32 @@ struct LCDataManagementView : View {
         return groups.filter { $0 != own }
     }
 
-    /// 把本进程有权访问的钥匙串条目整表捞出来（只捞通用密码
-    /// 和互联网密码，登录令牌都在这两类里；同步与本地存储都
-    /// 算）。逐组查、按别名查在真机上对在用 App 都返回 0 条
-    /// 且无错误码（v133–v135 实测）——不管条目实际落在哪个
-    /// 组、哪个存储，整表捞回来在内存里按归属挑，是唯一能
-    /// 确认"到底有没有"的查法。附带异常状态码，查询失败不
-    /// 再静默吞掉
-    static func dumpAllKeychainItems() -> (items: [[String: Any]], status: OSStatus) {
-        var all: [[String: Any]] = []
-        var worstStatus: OSStatus = errSecSuccess
-        for cls in [kSecClassGenericPassword, kSecClassInternetPassword] {
-            let query: [String: Any] = [
-                kSecClass as String: cls as String,
-                kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
-                kSecMatchLimit as String: kSecMatchLimitAll as String,
-                kSecReturnAttributes as String: true,
-                kSecReturnData as String: true
-            ]
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching(query as CFDictionary, &result)
-            guard status == errSecSuccess, let items = result as? [[String: Any]] else {
-                if status != errSecItemNotFound && worstStatus == errSecSuccess {
-                    worstStatus = status
+    /// 把钥匙串桥插件部署到两个全局 Tweaks 文件夹（与手势
+    /// 插件同一套路：比内容、只签换掉的文件）。游客启动时由
+    /// TweakLoader 加载它，在游客进程内导出/写回钥匙串——
+    /// 宿主侧 SecItem 读游客钥匙串在这台机上恒为空，只能
+    /// 借游客自己的进程
+    static func deployKeychainBridgeTweak() {
+        let fm = FileManager.default
+        guard let src = Bundle.main.url(forResource: "CZFKeychainBridge", withExtension: "dylib") else { return }
+        let srcData = try? Data(contentsOf: src)
+        var copiedDests: [URL] = []
+        for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
+            let dest = folder.appendingPathComponent("CZFKeychainBridge.dylib")
+            let destData = try? Data(contentsOf: dest)
+            if destData != srcData {
+                try? fm.removeItem(at: dest)
+                if (try? fm.copyItem(at: src, to: dest)) != nil {
+                    copiedDests.append(dest)
                 }
-                continue
-            }
-            for item in items {
-                // 只留 plist 能存的类型，引用型字段剔掉
-                var clean: [String: Any] = [:]
-                for (k, v) in item where v is String || v is Data || v is NSNumber || v is Date {
-                    clean[k] = v
-                }
-                clean[kSecClass as String] = cls as String
-                all.append(clean)
             }
         }
-        return (all, worstStatus)
-    }
-
-    /// 从整表里挑属于这个容器的条目：访问组对上，或别名
-    /// （游客存入时 SecItem.m 盖的容器文件夹名）对上
-    static func exportKeychainItems(container: LCContainer, dump: [[String: Any]]) -> [[String: Any]] {
-        let group = keychainGroupString(groupId: container.keychainGroupId)
-        return dump.filter { item in
-            (item[kSecAttrAccessGroup as String] as? String) == group
-                || (item["alis"] as? String) == container.folderName
+        if !copiedDests.isEmpty {
+            Task(priority: .userInitiated) {
+                for dest in copiedDests {
+                    try? await LCUtils.signSingleTweakFile(dest)
+                }
+            }
         }
     }
 
