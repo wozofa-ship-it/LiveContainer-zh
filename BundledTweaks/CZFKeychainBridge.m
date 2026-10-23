@@ -127,7 +127,7 @@ static void CZFKBExport(NSString *home, NSString *group, NSString *folderName) {
         // 万一对不上这路也捞得回来
         collect(@{
             (__bridge NSString *)kSecClass: cls,
-            (__bridge NSString *)kSecAttrAlias: folderName,
+            @"alis": folderName,
             (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
             (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
             (__bridge NSString *)kSecReturnAttributes: @YES,
@@ -156,7 +156,7 @@ static void CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
             // 写会被系统以缺权限拒绝（宿主写回的老教训）
             [item removeObjectForKey:(__bridge NSString *)kSecAttrSynchronizable];
             item[(__bridge NSString *)kSecAttrAccessGroup] = group;
-            item[(__bridge NSString *)kSecAttrAlias] = folderName;
+            item[@"alis"] = folderName;
             // 同键先删再加，保证值以备份为准
             NSMutableDictionary *identity = [NSMutableDictionary dictionary];
             identity[(__bridge NSString *)kSecClass] = cls;
@@ -174,7 +174,7 @@ static void CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
                 for (NSString *k in @[(__bridge NSString *)kSecClass, (__bridge NSString *)kSecAttrAccount,
                                       (__bridge NSString *)kSecAttrService, (__bridge NSString *)kSecAttrGeneric,
                                       (__bridge NSString *)kSecAttrLabel, (__bridge NSString *)kSecAttrAccessible,
-                                      (__bridge NSString *)kSecAttrAccessGroup, (__bridge NSString *)kSecAttrAlias,
+                                      (__bridge NSString *)kSecAttrAccessGroup, @"alis",
                                       (__bridge NSString *)kSecValueData]) {
                     if (item[k]) minimal[k] = item[k];
                 }
