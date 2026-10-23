@@ -134,7 +134,7 @@ struct LCDataManagementView : View {
             } header: {
                 Text("设置备份")
             } footer: {
-                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置打包成一个 JSON 文件。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
+                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；每次备份 App 时那份也会自动刷新。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
             }
             .fileImporter(isPresented: $showSettingsImporter, allowedContentTypes: [UTType.json]) { result in
                 switch result {
@@ -707,6 +707,39 @@ struct LCDataManagementView : View {
         }
     }
 
+    // 生成设置备份 JSON 并落盘：本地文稿根目录一份；已设置外部
+    // 备份文件夹（「iCloud 备份文件夹」选的那个）时，同一份直接
+    // 写进那个文件夹根目录，与 App 备份放一起，不用再手动选位置。
+    // 静态：备份 App 的后台流程结束时也顺手刷新一份（自动备份）。
+    @discardableResult
+    static func writeCZFSettingsBackup() -> (local: URL?, externalFolderName: String?) {
+        let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
+        var payload: [String: Any] = [:]
+        for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) {
+            payload[key] = value
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
+            return (nil, nil)
+        }
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return (nil, nil) }
+        let localURL = docs.appendingPathComponent("CZFSettingsBackup.json")
+        var writtenLocal: URL? = nil
+        do {
+            try data.write(to: localURL, options: .atomic)
+            writtenLocal = localURL
+        } catch { }
+        var extName: String? = nil
+        if let extURL = Self.externalBackupFolderURL() {
+            let dest = extURL.appendingPathComponent("CZFSettingsBackup.json")
+            do {
+                try data.write(to: dest, options: .atomic)
+                extName = extURL.lastPathComponent
+            } catch { }
+        }
+        return (writtenLocal, extName)
+    }
+
     // 兜底同步：把本地备份里外部文件夹还缺的/过期的补过去（选文件夹后、打开数据管理页时调用）
     static func syncAllLocalBackupsToExternalFolder() {
         guard let extURL = Self.externalBackupFolderURL() else { return }
@@ -924,29 +957,21 @@ struct LCDataManagementView : View {
         }
     }
 
-    /// 导出全部 CZF 设置（标准 UserDefaults 里 CZF 开头的键，
-    /// 跳过红点计数、上次刷新时间这类临时状态）到 JSON 并走
-    /// 系统导出选择器（可存 iCloud 云盘/文件）
+    /// 导出全部 CZF 设置：直接落盘，不再弹保存位置选择——
+    /// 本地文稿根目录一份；选了「iCloud 备份文件夹」的话，
+    /// 那个文件夹里自动也存一份（与 App 备份同处）
     func exportCZFSettings() {
-        let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
-        var payload: [String: Any] = [:]
-        for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) {
-            payload[key] = value
+        let (local, extName) = Self.writeCZFSettingsBackup()
+        if local != nil {
+            if let extName {
+                settingsTransferMessage = "设置备份已存好（CZFSettingsBackup.json）：本地文稿根目录一份，你选的备份文件夹「\(extName)」里也一份"
+            } else {
+                settingsTransferMessage = "设置备份已存到本地文稿根目录（CZFSettingsBackup.json）。在下面选好「iCloud 备份文件夹」后，导出会自动也存一份到那个文件夹"
+            }
+        } else {
+            settingsTransferMessage = "导出失败：设置备份写不进去"
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
-            settingsTransferMessage = "导出失败：设置序列化不了"
-            showSettingsTransferAlert = true
-            return
-        }
-        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("CZFSettingsBackup.json")
-        do {
-            try data.write(to: url, options: .atomic)
-            presentExportPicker(for: url)
-        } catch {
-            settingsTransferMessage = "导出失败：\(error.localizedDescription)"
-            showSettingsTransferAlert = true
-        }
+        showSettingsTransferAlert = true
     }
 
     /// 导入设置备份：只认 CZF 开头的键，逐个写回标准
@@ -1172,6 +1197,8 @@ struct LCDataManagementView : View {
                     }
                     // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
+                    // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
+                    Self.writeCZFSettingsBackup()
                     continuation.resume(returning: (count, nil))
                 } catch {
                     continuation.resume(returning: (0, error))
