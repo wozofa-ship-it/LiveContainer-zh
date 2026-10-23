@@ -37,6 +37,17 @@ struct LCDataManagementView : View {
     @State private var backupFolderList: [URL] = []
     // 每个备份的体积（打开恢复列表时后台算，行里显示 + 底部总占用）
     @State private var backupSizes: [URL: Int64] = [:]
+    // 储存总览（进页面时后台算）：备份总占用、已下载 IPA、
+    // 数据占用最大的几个 App
+    @State private var storageBackupBytes: Int64 = -1
+    @State private var storageIPAFiles: [(url: URL, size: Int64)] = []
+    @State private var storageIPATotal: Int64 = 0
+    @State private var storageAppSizes: [(name: String, size: Int64)] = []
+    @State private var showClearIPAsConfirm = false
+    // 设置导出/导入
+    @State private var showSettingsImporter = false
+    @State private var settingsTransferMessage: String?
+    @State private var showSettingsTransferAlert = false
     @State private var showScheduleBackup = false
     @State private var scheduleEnabled = false
     @State private var scheduleHour = 3
@@ -64,8 +75,91 @@ struct LCDataManagementView : View {
     }
     
     var body: some View {
-    
+
         Form {
+            Section {
+                if storageBackupBytes < 0 {
+                    Text("正在统计…")
+                        .foregroundColor(.secondary)
+                } else {
+                    HStack {
+                        Text("备份占用")
+                        Spacer()
+                        Text(backupSizeText(storageBackupBytes))
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("已下载的 IPA（\(storageIPAFiles.count) 个）")
+                        Spacer()
+                        Text(backupSizeText(storageIPATotal))
+                            .foregroundColor(.secondary)
+                    }
+                    ForEach(Array(storageAppSizes.enumerated()), id: \.offset) { _, item in
+                        HStack {
+                            Text(item.name)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(backupSizeText(item.size))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    if !storageIPAFiles.isEmpty {
+                        Button(role: .destructive) {
+                            showClearIPAsConfirm = true
+                        } label: {
+                            Text("清理已下载的 IPA")
+                        }
+                    }
+                }
+            } header: {
+                Text("储存总览")
+            } footer: {
+                Text("「已下载的 IPA」是在源里点「下载」存进来的安装包，装完就没用了、可以放心清。App 列表是数据占用最大的几个（只列前 5）。")
+            }
+            .task {
+                computeStorageStats()
+            }
+            .confirmationDialog("删除这 \(storageIPAFiles.count) 个已下载的 IPA（共 \(backupSizeText(storageIPATotal))）？", isPresented: $showClearIPAsConfirm, titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
+                    for item in storageIPAFiles {
+                        try? FileManager.default.removeItem(at: item.url)
+                    }
+                    computeStorageStats()
+                }
+                Button("lc.common.cancel".loc, role: .cancel) {}
+            }
+
+            Section {
+                Button {
+                    exportCZFSettings()
+                } label: {
+                    Text("导出设置")
+                }
+                Button {
+                    showSettingsImporter = true
+                } label: {
+                    Text("导入设置")
+                }
+            } header: {
+                Text("设置备份")
+            } footer: {
+                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置打包成一个 JSON 文件。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
+            }
+            .fileImporter(isPresented: $showSettingsImporter, allowedContentTypes: [UTType.json]) { result in
+                switch result {
+                case .success(let url):
+                    importCZFSettings(from: url)
+                case .failure(let error):
+                    settingsTransferMessage = "导入失败：\(error.localizedDescription)"
+                    showSettingsTransferAlert = true
+                }
+            }
+            .alert("设置备份", isPresented: $showSettingsTransferAlert) {
+                Button("lc.common.ok".loc) {}
+            } message: {
+                Text(settingsTransferMessage ?? "")
+            }
+
             Section {
                 if sharedModel.multiLCStatus != 2 {
                     Button {
@@ -813,6 +907,94 @@ struct LCDataManagementView : View {
             return "计算中…"
         }
         return backupSizeText(size)
+    }
+
+    /// 储存总览统计：备份总占用 + Documents 根目录的 .ipa
+    /// （源里「下载」存的位置）+ 各 App 容器数据占用前 5。
+    /// 全在后台线程算，算完回主线程刷界面
+    func computeStorageStats() {
+        let apps = sharedModel.apps + sharedModel.hiddenApps
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let backupsBytes = Self.folderSize(docs.appendingPathComponent("Backups"))
+            var ipaFiles: [(url: URL, size: Int64)] = []
+            if let entries = try? fm.contentsOfDirectory(at: docs, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
+                for entry in entries where entry.pathExtension.lowercased() == "ipa" {
+                    let size = (try? entry.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+                    ipaFiles.append((entry, size))
+                }
+            }
+            var appSizes: [(name: String, size: Int64)] = []
+            for app in apps {
+                var total: Int64 = 0
+                for container in app.uiContainers {
+                    total += Self.folderSize(container.containerURL)
+                }
+                if total > 0 {
+                    appSizes.append((app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown", total))
+                }
+            }
+            appSizes.sort { $0.size > $1.size }
+            let top = Array(appSizes.prefix(5))
+            let ipaTotal = ipaFiles.reduce(0) { $0 + $1.size }
+            DispatchQueue.main.async {
+                storageBackupBytes = backupsBytes
+                storageIPAFiles = ipaFiles
+                storageIPATotal = ipaTotal
+                storageAppSizes = top
+            }
+        }
+    }
+
+    /// 导出全部 CZF 设置（标准 UserDefaults 里 CZF 开头的键，
+    /// 跳过红点计数、上次刷新时间这类临时状态）到 JSON 并走
+    /// 系统导出选择器（可存 iCloud 云盘/文件）
+    func exportCZFSettings() {
+        let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
+        var payload: [String: Any] = [:]
+        for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) {
+            payload[key] = value
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
+            settingsTransferMessage = "导出失败：设置序列化不了"
+            showSettingsTransferAlert = true
+            return
+        }
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("CZFSettingsBackup.json")
+        do {
+            try data.write(to: url, options: .atomic)
+            presentExportPicker(for: url)
+        } catch {
+            settingsTransferMessage = "导出失败：\(error.localizedDescription)"
+            showSettingsTransferAlert = true
+        }
+    }
+
+    /// 导入设置备份：只认 CZF 开头的键，逐个写回标准
+    /// UserDefaults。JSON 数字回来是 NSNumber，UserDefaults
+    /// 读写都认，不用特殊处理
+    func importCZFSettings(from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        guard let data = try? Data(contentsOf: url),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            settingsTransferMessage = "导入失败：这个文件不是有效的设置备份"
+            showSettingsTransferAlert = true
+            return
+        }
+        var count = 0
+        for (key, value) in dict where key.hasPrefix("CZF") {
+            UserDefaults.standard.set(value, forKey: key)
+            count += 1
+        }
+        settingsTransferMessage = "已导入 \(count) 项设置，重启 LiveContainer 后全部生效"
+        showSettingsTransferAlert = true
     }
 
     func refreshBackupSizes() {

@@ -47,7 +47,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var installInfoShow = false
     @State var installInfo = ""
     // 安装请求队列（源页批量安装用）：串行下+装，已装的直接覆盖
-    @State var installQueue: [(url: URL, autoReplace: Bool)] = []
+    @State var installQueue: [(url: URL, autoReplace: Bool, preview: Bool)] = []
+    // 安装前预览（源里单个安装时，下完先弹信息卡确认再装）
+    @State var installPreviewShow = false
+    @State var installPreviewText = ""
+    @State var installPreviewContinuation: CheckedContinuation<Bool, Never>? = nil
     @State var installQueueRunning = false
     // 队列进度（App 页顶部小条显示用）
     @State var installQueueTotal = 0
@@ -314,6 +318,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } message: {
             Text(installInfo)
         }
+        .alert("安装前预览", isPresented: $installPreviewShow){
+            Button("安装", action: {
+                installPreviewContinuation?.resume(returning: true)
+                installPreviewContinuation = nil
+            })
+            Button("lc.common.cancel".loc, role: .cancel, action: {
+                installPreviewContinuation?.resume(returning: false)
+                installPreviewContinuation = nil
+            })
+        } message: {
+            Text(installPreviewText)
+        }
         .overlay(alignment: .top) {
             // 批量安装进行时，App 页顶部的小进度条：装到第几个、
             // 正在装哪个，一眼能看到（单个安装不显示）
@@ -513,7 +529,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if let obj2 = obj.object as? [String: Any], let installUrl = obj2["url"] as? URL {
                 // 全部走队列串行执行：以前忙着装别的时新请求会被
                 // 直接丢掉，批量安装实际只装得上第一个
-                enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false)
+                enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false, preview: (obj2["preview"] as? Bool) ?? false)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.LaunchAppNotification)) { obj in
@@ -1035,8 +1051,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 别的时新请求会被直接丢掉、批量只装得上第一个。单个
     /// 安装请求也走这里（队列空闲时立即执行，和以前一样）；
     /// autoReplace 的请求遇到已装同款直接覆盖、不弹选择框
-    func enqueueInstall(url: URL, autoReplace: Bool) {
-        installQueue.append((url: url, autoReplace: autoReplace))
+    func enqueueInstall(url: URL, autoReplace: Bool, preview: Bool = false) {
+        installQueue.append((url: url, autoReplace: autoReplace, preview: preview))
         guard !installQueueRunning else {
             return
         }
@@ -1088,7 +1104,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                     }
                 }
-                await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace)
+                await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview)
                 if let prefetchFile {
                     try? FileManager.default.removeItem(at: prefetchFile)
                 }
@@ -1123,7 +1139,52 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
-    func installFromUrl(urlStr: String, autoReplace: Bool = false) async {
+    /// 安装前预览文案：把刚下载的 IPA 解开读 Info.plist，
+    /// 拼出名称/版本/Bundle ID/大小/声明的权限。解不开或
+    /// 读不到就返回 nil（不拦，照常安装）
+    func makeInstallPreviewText(forIpa url: URL) async -> String? {
+        let fm = FileManager.default
+        let previewDir = fm.temporaryDirectory.appendingPathComponent("CZFInstallPreview")
+        try? fm.removeItem(at: previewDir)
+        try? fm.createDirectory(at: previewDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: previewDir) }
+        let progress = Progress.discreteProgress(totalUnitCount: 100)
+        guard await decompress(url.path, previewDir.path, progress) == 0 else { return nil }
+        let payloadPath = previewDir.appendingPathComponent("Payload")
+        guard let contents = try? fm.contentsOfDirectory(atPath: payloadPath.path),
+              let appName = contents.first(where: { $0.hasSuffix(".app") }) else { return nil }
+        let infoURL = payloadPath.appendingPathComponent(appName).appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: infoURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
+        let name = (plist["CFBundleDisplayName"] as? String) ?? (plist["CFBundleName"] as? String) ?? appName
+        let version = (plist["CFBundleShortVersionString"] as? String) ?? "?"
+        let bundleId = (plist["CFBundleIdentifier"] as? String) ?? "?"
+        let fmt = ByteCountFormatter()
+        fmt.countStyle = .file
+        let sizeText = ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber).map { fmt.string(fromByteCount: $0.int64Value) } ?? "?"
+        let permissionMap: [(String, String)] = [
+            ("NSCameraUsageDescription", "相机"),
+            ("NSMicrophoneUsageDescription", "麦克风"),
+            ("NSPhotoLibraryUsageDescription", "相册"),
+            ("NSLocationWhenInUseUsageDescription", "定位"),
+            ("NSLocationAlwaysAndWhenInUseUsageDescription", "定位"),
+            ("NSContactsUsageDescription", "通讯录"),
+            ("NSFaceIDUsageDescription", "Face ID"),
+            ("NSBluetoothAlwaysUsageDescription", "蓝牙"),
+            ("NSLocalNetworkUsageDescription", "本地网络"),
+            ("NSUserTrackingUsageDescription", "跨 App 跟踪"),
+            ("NSHealthShareUsageDescription", "健康数据"),
+        ]
+        var perms: [String] = []
+        for (key, label) in permissionMap where plist[key] != nil && !perms.contains(label) {
+            perms.append(label)
+        }
+        var lines = ["\(name)（版本 \(version)）", "Bundle ID：\(bundleId)", "大小：\(sizeText)"]
+        lines.append(perms.isEmpty ? "声明的权限：无特殊权限" : "声明的权限：\(perms.joined(separator: "、"))")
+        return lines.joined(separator: "\n")
+    }
+
+    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false) async {
         // ignore any install request if we are installing another app
         if self.installprogressVisible {
             return
@@ -1226,6 +1287,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             try await downloadHelper.download(url: installUrl, to: destinationURL)
             if downloadHelper.cancelled {
                 return
+            }
+            if preview, let text = await makeInstallPreviewText(forIpa: destinationURL) {
+                // 下完了先弹信息卡：用户点「安装」才继续，
+                // 点「取消」删掉临时包、什么都不装
+                let proceed = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                    installPreviewContinuation = cont
+                    installPreviewText = text
+                    installPreviewShow = true
+                }
+                if !proceed {
+                    try? fileManager.removeItem(at: destinationURL)
+                    return
+                }
             }
             try await installIpaFile(destinationURL, autoReplace: autoReplace)
             try fileManager.removeItem(at: destinationURL)

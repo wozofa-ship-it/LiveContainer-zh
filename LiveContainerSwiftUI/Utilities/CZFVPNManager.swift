@@ -74,6 +74,70 @@ public final class CZFVPNManager {
         UserDefaults.standard.set(links, forKey: Self.nodeListKey)
     }
 
+    // 用一批新链接整体替换节点列表（订阅刷新用）：尽量保留
+    // 当前活动节点（按内容找回），找不到就落到第一个
+    public func replaceAllNodes(_ newLinks: [String]) {
+        let cleaned = newLinks
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return }
+        let previousActive = nodeLink
+        UserDefaults.standard.set(cleaned, forKey: Self.nodeListKey)
+        if let idx = cleaned.firstIndex(of: previousActive) {
+            UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+        } else {
+            UserDefaults.standard.set(0, forKey: Self.activeNodeKey)
+        }
+        applyActiveNodeChange()
+    }
+
+    /// 拉订阅内容并解析出节点链接：机场订阅通常是整段 base64
+    /// （解开后一行一条链接），也有直接一行一条的明文格式，
+    /// 两种都认；只保留带 :// 的行（vless/vmess/trojan/ss 等）
+    public static func fetchSubscriptionLinks(urlString: String, completion: @escaping (Result<[String], Error>) -> Void) {
+        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            completion(.failure(NSError(domain: "CZFVPN", code: -1, userInfo: [NSLocalizedDescriptionKey: "订阅地址不对"])))
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        // 不少机场按客户端 UA 返回不同格式，给个常见客户端的
+        // UA 拿到原始分享链接列表
+        request.setValue("Shadowrocket/2.2.50", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let data, let raw = String(data: data, encoding: .utf8) else {
+                completion(.failure(NSError(domain: "CZFVPN", code: -2, userInfo: [NSLocalizedDescriptionKey: "订阅内容读不出来"])))
+                return
+            }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            var text = trimmed
+            // 整体 base64 就先解开（去掉空白后能整段解码、且
+            // 解出来含 :// 才算数，明文格式不会误伤）；有的
+            // 机场用 URL 安全变体（- 和 _），一并兼容
+            let compact = trimmed.components(separatedBy: .whitespacesAndNewlines).joined()
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            if !compact.isEmpty, compact.count % 4 == 0,
+               let decoded = Data(base64Encoded: compact),
+               let decodedText = String(data: decoded, encoding: .utf8),
+               decodedText.contains("://") {
+                text = decodedText
+            }
+            let links = text.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.contains("://") }
+            if links.isEmpty {
+                completion(.failure(NSError(domain: "CZFVPN", code: -3, userInfo: [NSLocalizedDescriptionKey: "订阅里没找到节点链接"])))
+            } else {
+                completion(.success(links))
+            }
+        }.resume()
+    }
+
     public func removeNode(at index: Int) {
         var links = nodeLinks
         guard links.indices.contains(index) else { return }
