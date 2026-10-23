@@ -48,6 +48,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 安装请求队列（源页批量安装用）：串行下+装，已装的直接覆盖
     @State var installQueue: [(url: URL, autoReplace: Bool)] = []
     @State var installQueueRunning = false
+    // 队列进度（App 页顶部小条显示用）
+    @State var installQueueTotal = 0
+    @State var installQueueDone = 0
+    @State var installQueueCurrent = ""
     
     // ipa installing stuff
     @State var installprogressVisible = false
@@ -306,6 +310,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             })
         } message: {
             Text(installInfo)
+        }
+        .overlay(alignment: .top) {
+            // 批量安装进行时，App 页顶部的小进度条：装到第几个、
+            // 正在装哪个，一眼能看到（单个安装不显示）
+            if installQueueRunning && installQueueTotal > 1 {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("队列安装中 \(installQueueDone + 1)/\(installQueueTotal)：\(installQueueCurrent)")
+                        .font(.caption.bold())
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+                .shadow(radius: 4)
+                .padding(.top, 6)
+                .allowsHitTesting(false)
+            }
         }
         .betterFileImporter(isPresented: $choosingIPA, types: [.ipa, .tipa], multiple: false, callback: { fileUrls in
             Task { await startInstallApp(fileUrls[0]) }
@@ -715,6 +737,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 try fm.removeItem(at: outputFolder)
             }
         }
+        // 覆盖已有 App 前，先把它的整套数据自动备份一份
+        //（容器+组数据+钥匙串，与手动备份同一位置、新的盖
+        // 旧的）：新版装上有问题时，能从数据管理里恢复回滚
+        if let appToReplace {
+            await LCDataManagementView.autoBackupBeforeOverwrite(appToReplace)
+        }
         // Move it!
         try fm.moveItem(at: appFolderPath, to: outputFolder)
         let finalNewApp = LCAppInfo(bundlePath: outputFolder.path)
@@ -952,11 +980,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         Task {
             var processed = 0
             var batch = false
+            // 预下载好的下一个安装包：装当前这个的同时，后台
+            // 先把下一个下好，轮到它时直接装，省一半等待
+            var prefetched: (url: URL, file: URL)? = nil
             while !installQueue.isEmpty {
                 let item = installQueue.removeFirst()
                 if processed > 0 || !installQueue.isEmpty {
                     batch = true
                 }
+                installQueueTotal = processed + 1 + installQueue.count
+                installQueueDone = processed
+                installQueueCurrent = item.url.lastPathComponent
                 // 等手动触发的安装先装完，别互相抢
                 while installprogressVisible {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -966,8 +1000,37 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 不然每个 App 都弹一次出来
                     downloadHelper.batchMode = true
                 }
-                await installFromUrl(urlStr: item.url.absoluteString, autoReplace: item.autoReplace)
+                // 本轮装哪个地址：有预下载好的就用本地文件
+                var installStr = item.url.absoluteString
+                var prefetchFile: URL? = nil
+                if let pf = prefetched, pf.url == item.url {
+                    installStr = pf.file.absoluteString
+                    prefetchFile = pf.file
+                    prefetched = nil
+                }
+                // 后台预下载队列里的下一个（用独立的下载器，
+                // 不占界面上那个；下失败了轮到时走正常下载）
+                var prefetchTask: Task<(URL, URL)?, Never>? = nil
+                if let next = installQueue.first, !next.url.isFileURL {
+                    let nextURL = next.url
+                    prefetchTask = Task {
+                        let helper = DownloadHelper()
+                        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("CZFPrefetch-\(UUID().uuidString).ipa")
+                        do {
+                            try await helper.download(url: nextURL, to: dest)
+                            return (nextURL, dest)
+                        } catch {
+                            return nil
+                        }
+                    }
+                }
+                await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace)
+                if let prefetchFile {
+                    try? FileManager.default.removeItem(at: prefetchFile)
+                }
                 processed += 1
+                installQueueDone = processed
+                prefetched = await prefetchTask?.value ?? nil
             }
             downloadHelper.batchMode = false
             installQueueRunning = false

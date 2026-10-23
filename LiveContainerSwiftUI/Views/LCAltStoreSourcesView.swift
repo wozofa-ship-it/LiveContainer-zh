@@ -564,6 +564,15 @@ struct LCSourcesView: View {
                         }
                     }
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    // 有已装 App 能更新时才出现：一键全走批量队列
+                    // （串行装、已装直接覆盖、覆盖前自动备份）
+                    if !updatableApps.isEmpty {
+                        Button("全部更新(\(updatableApps.count))") {
+                            installBatch(updatableApps)
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack {
                         if isBatchMode {
@@ -712,8 +721,16 @@ struct LCSourcesView: View {
         }
         isBatchMode = false
         selectedIDs.removeAll()
+        installBatch(appsToInstall)
+    }
+
+    /// 批量安装一组 App（勾选批量装、「全部更新」共用）：
+    /// 全部发给 App 页的安装队列串行执行，autoReplace =
+    /// 已装同款直接覆盖、不逐个弹框确认
+    @MainActor
+    private func installBatch(_ apps: [AltStoreSourceApp]) {
         var switchedTab = false
-        for app in appsToInstall {
+        for app in apps {
             guard let downloadURL = app.latestVersion?.downloadURL else {
                 continue
             }
@@ -728,12 +745,33 @@ struct LCSourcesView: View {
                 }
                 switchedTab = true
             }
-            // 批量安装：全部发给 App 页的安装队列串行执行，
-            // autoReplace = 已装同款直接覆盖、不逐个弹框确认
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL, "autoReplace": true])
             }
         }
+    }
+
+    /// 已装且源里有更高版本的 App（「全部更新」的名单）：
+    /// 版本号按数字段比较（1.10 > 1.9），同名只算一次
+    private var updatableApps: [AltStoreSourceApp] {
+        let installed = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
+            ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.version() ?? "")
+        }, uniquingKeysWith: { first, _ in first })
+        var result: [AltStoreSourceApp] = []
+        var seen = Set<String>()
+        for item in viewModel.sources {
+            guard let source = item.source else { continue }
+            for app in source.apps {
+                guard let latest = app.latestVersion,
+                      let installedVersion = installed[app.bundleIdentifier],
+                      latest.version.compare(installedVersion, options: .numeric) == .orderedDescending,
+                      seen.insert(app.bundleIdentifier).inserted else {
+                    continue
+                }
+                result.append(app)
+            }
+        }
+        return result
     }
     
     @MainActor

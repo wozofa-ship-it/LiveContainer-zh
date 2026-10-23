@@ -842,6 +842,98 @@ struct LCDataManagementView : View {
         await backupApps(allApps)
     }
 
+    /// 把一个 App 的整套数据备份到 Backups/<显示名>（存在先
+    /// 删后建）：manifest + .app + 各数据容器 + 组容器 + 钥匙
+    /// 串快照。backupApps 的批量循环和覆盖安装前的自动备份
+    /// 都走这里。同步执行，调用方自己挪到后台队列
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager) throws {
+        let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+        // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
+        let appBackupURL = backupRoot.appendingPathComponent(appName)
+        if fm.fileExists(atPath: appBackupURL.path) {
+            try fm.removeItem(at: appBackupURL)
+        }
+        try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
+        // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
+        let manifest: [String: String] = [
+            "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
+            "displayName": app.appInfo.displayName() ?? "",
+            "version": app.appInfo.version() ?? "",
+            "backupDate": dateFmt.string(from: Date()),
+            // 恢复时靠它认出哪个是默认容器：容器文件夹名
+            // 是随机 UUID，删后重装会换号，不能靠名字猜
+            "dataUUID": app.appInfo.dataUUID ?? ""
+        ]
+        if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
+            try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
+        }
+        // 保存 .app bundle 供恢复时参考（iOS 沙盒不允许调用 zip，暂不打包 IPA）
+        if let bundlePath = app.appInfo.bundlePath() {
+            let bundleURL = URL(fileURLWithPath: bundlePath)
+            let destAppURL = appBackupURL.appendingPathComponent(bundleURL.lastPathComponent)
+            try? fm.copyItem(at: bundleURL, to: destAppURL)
+        }
+        for container in app.uiContainers {
+            let srcURL = container.containerURL
+            let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
+            if fm.fileExists(atPath: srcURL.path) {
+                try? fm.copyItem(at: srcURL, to: destURL)
+            }
+        }
+        // 组容器数据（App 与它的扩展/小组件共用的那份）：不在
+        // 数据容器里，单独存在宿主 Data/AppGroup/<组ID> 下，
+        // 以前从没备份过——恢复后容器回到备份时刻、组数据却
+        // 停在当前，两边对不上，App 里信息就错乱（版本更新
+        // 后恢复最常见）。隔离组容器的 App 数据在容器内已备，
+        // 不重复
+        if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
+            let groupRoot = appBackupURL.appendingPathComponent("AppGroup")
+            for groupID in Self.appGroupIDs(for: app) {
+                let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
+                if fm.fileExists(atPath: src.path) {
+                    try? fm.createDirectory(at: groupRoot, withIntermediateDirectories: true)
+                    try? fm.copyItem(at: src, to: groupRoot.appendingPathComponent(groupID))
+                }
+            }
+        }
+        // 钥匙串快照（登录令牌本体）：按容器逐个导出。以前令
+        // 牌只活在系统钥匙串里、不进备份——同机删重装能靠残
+        // 留找回，换机/重装 LiveContainer 就全丢；且恢复时
+        // 三处数据不在同一时刻也是信息错乱的来源之一，备齐
+        // 了一起回滚才对齐
+        let keychainRoot = appBackupURL.appendingPathComponent("Keychain")
+        for container in app.uiContainers {
+            if let items = Self.exportKeychainItems(container: container), !items.isEmpty,
+               let data = try? PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0) {
+                try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
+                try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
+            }
+        }
+    }
+
+    /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
+    /// 一份到 Backups/<显示名>（与手动备份同一位置、新的盖
+    /// 旧的），新版装上有问题时能在数据管理里恢复回滚。
+    /// 备份失败不挡安装，静默跳过
+    static func autoBackupBeforeOverwrite(_ app: LCAppModel) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let fm = FileManager.default
+                if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    let root = docs.appendingPathComponent("Backups")
+                    try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+                    try? Self.backupOneAppSync(app, backupRoot: root, fm: fm)
+                    if let name = app.appInfo.displayName() {
+                        Self.syncBackupsToExternalFolder(appNames: [name], backupRoot: root)
+                    }
+                }
+                continuation.resume()
+            }
+        }
+    }
+
     func backupApps(_ apps: [LCAppModel]) async {
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
@@ -862,72 +954,9 @@ struct LCDataManagementView : View {
                     var count = 0
                     var backedUpNames: [String] = []
                     for app in apps {
-                        let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-                        // 按 App 名建文件夹，存在则先删除再重建（直接覆盖）
-                        let appBackupURL = backupRoot.appendingPathComponent(appName)
-                        if fm.fileExists(atPath: appBackupURL.path) {
-                            try fm.removeItem(at: appBackupURL)
-                        }
-                        try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
-                        // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
-                        let dateFmt = DateFormatter()
-                        dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
-                        let manifest: [String: String] = [
-                            "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
-                            "displayName": app.appInfo.displayName() ?? "",
-                            "version": app.appInfo.version() ?? "",
-                            "backupDate": dateFmt.string(from: Date()),
-                            // 恢复时靠它认出哪个是默认容器：容器文件夹名
-                            // 是随机 UUID，删后重装会换号，不能靠名字猜
-                            "dataUUID": app.appInfo.dataUUID ?? ""
-                        ]
-                        if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
-                            try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
-                        }
-                        // 保存 .app bundle 供恢复时参考（iOS 沙盒不允许调用 zip，暂不打包 IPA）
-                        if let bundlePath = app.appInfo.bundlePath() {
-                            let bundleURL = URL(fileURLWithPath: bundlePath)
-                            let destAppURL = appBackupURL.appendingPathComponent(bundleURL.lastPathComponent)
-                            try? fm.copyItem(at: bundleURL, to: destAppURL)
-                        }
-                        for container in app.uiContainers {
-                            let srcURL = container.containerURL
-                            let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
-                            if fm.fileExists(atPath: srcURL.path) {
-                                try? fm.copyItem(at: srcURL, to: destURL)
-                            }
-                        }
-                        // 组容器数据（App 与它的扩展/小组件共用的那份）：
-                        // 不在数据容器里，单独存在宿主 Data/AppGroup/
-                        // <组ID> 下，以前从没备份过——恢复后容器回到
-                        // 备份时刻、组数据却停在当前，两边对不上，
-                        // App 里信息就错乱（版本更新后恢复最常见）。
-                        // 隔离组容器的 App 数据在容器内已备，不重复
-                        if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
-                            let groupRoot = appBackupURL.appendingPathComponent("AppGroup")
-                            for groupID in Self.appGroupIDs(for: app) {
-                                let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
-                                if fm.fileExists(atPath: src.path) {
-                                    try? fm.createDirectory(at: groupRoot, withIntermediateDirectories: true)
-                                    try? fm.copyItem(at: src, to: groupRoot.appendingPathComponent(groupID))
-                                }
-                            }
-                        }
-                        // 钥匙串快照（登录令牌本体）：按容器逐个导出。
-                        // 以前令牌只活在系统钥匙串里、不进备份——同机
-                        // 删重装能靠残留找回，换机/重装 LiveContainer
-                        // 就全丢；且恢复时三处数据不在同一时刻也是
-                        // 信息错乱的来源之一，备齐了一起回滚才对齐
-                        let keychainRoot = appBackupURL.appendingPathComponent("Keychain")
-                        for container in app.uiContainers {
-                            if let items = Self.exportKeychainItems(container: container), !items.isEmpty,
-                               let data = try? PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0) {
-                                try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
-                                try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
-                            }
-                        }
+                        try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm)
                         count += 1
-                        backedUpNames.append(appName)
+                        backedUpNames.append(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
                     }
                     // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
