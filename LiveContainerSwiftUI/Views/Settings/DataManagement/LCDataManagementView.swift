@@ -1128,13 +1128,18 @@ struct LCDataManagementView : View {
     func deleteBackup(at backupURL: URL) {
         do {
             try FileManager.default.removeItem(at: backupURL)
-            // 直接从列表移除，不开关 sheet
             backupFolderList.removeAll { $0 == backupURL }
+            // 成功/失败提示挂在外层页面上：恢复选择 sheet 还开着
+            // 时弹它会被 sheet 盖住（提示看不见、底下按钮全点
+            // 不动，非得切出去再回来才恢复）——先关 sheet、下一
+            // 轮再弹提示
+            showRestoreSelect = false
             successInfo = "已删除备份：\(backupURL.lastPathComponent)"
-            successShow = true
+            DispatchQueue.main.async { self.successShow = true }
         } catch {
+            showRestoreSelect = false
             errorInfo = "删除失败：\(LCUtils.czfFriendlyError(error))"
-            errorShow = true
+            DispatchQueue.main.async { self.errorShow = true }
         }
     }
 
@@ -1147,8 +1152,11 @@ struct LCDataManagementView : View {
             }
         }
         backupFolderList = backupFolders()
+        // 同上：先关 sheet 再弹提示，否则提示被 sheet 盖住、
+        // 页面按钮点不动
+        showRestoreSelect = false
         successInfo = "已删除 \(deleted) 个备份"
-        successShow = true
+        DispatchQueue.main.async { self.successShow = true }
     }
 
     func backupAllApps() async {
@@ -1236,10 +1244,9 @@ struct LCDataManagementView : View {
             }
         }
         } else {
-            // 登录态档：容器只挑会话文件（Library/Documents 里
-            // ≤5MB 小文件、容器根的 LCContainerInfo.plist——恢
-            // 复补容器时靠它认组号；单容器封顶 300MB），组容器
-            // 同规则；钥匙串快照在下面照旧备
+            // 登录态档：容器整棵树里 ≤5MB 的小文件（Library、
+            // Documents、LCAppGroup 等全扫；单容器封顶 300MB），
+            // 组容器同规则；钥匙串快照在下面照旧备
             for container in app.uiContainers {
                 let srcURL = container.containerURL
                 if fm.fileExists(atPath: srcURL.path) {
@@ -1653,7 +1660,7 @@ struct LCDataManagementView : View {
                     // 登录态备份只有半套会话文件：合并进现有
                     // 容器（同名文件覆盖、其他数据不动），整
                     // 容器替换会把没备的那半套数据删掉
-                    if Self.mergeLoginStateFiles(from: containerFolder, to: live.containerURL, fm: fm) > 0 {
+                    if Self.mergeLoginStateFiles(from: containerFolder, to: live.containerURL, fm: fm, mirrorGroupToHost: live.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath) > 0 {
                         restoredContainers += 1
                     }
                     continue
@@ -1736,7 +1743,7 @@ struct LCDataManagementView : View {
                 if n == "manifest.json" || n.hasSuffix(".app") || n == "AppGroup" || n == "Keychain" { continue }
                 guard let target = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n })
                         ?? app.uiSelectedContainer ?? app.uiContainers.first else { continue }
-                if Self.mergeLoginStateFiles(from: folder, to: target.containerURL, fm: fm) > 0 {
+                if Self.mergeLoginStateFiles(from: folder, to: target.containerURL, fm: fm, mirrorGroupToHost: target.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath) > 0 {
                     restoredExtras = true
                 }
             }
@@ -1852,54 +1859,66 @@ struct LCDataManagementView : View {
         }
     }
 
-    /// 登录态文件的相对路径清单：Library 和 Documents 里 ≤5MB
-    /// 的小文件、容器根的 LCContainerInfo.plist。v141 曾把
-    /// Library/Caches 一刀切掉，结果抖音的会话文件正好在里面
-    /// （备份只抓到身份文件 1 个、恢复报 0）——缓存目录也按
-    /// 小文件规则收，大文件（视频分片、草稿媒体）仍排除
+    /// 登录态文件的相对路径清单：整棵容器树里 ≤5MB 的小
+    /// 文件（Library、Documents、LCAppGroup 等所有顶级目录
+    /// 都扫）。v142 只扫 Library/Documents，漏了隔离组容器
+    /// LCAppGroup/<组ID>/——抖音/红果这类把会话放组容器的
+    /// App 正好撞上，备份只剩身份文件、恢复报 0。排除：
+    /// tmp（临时文件）、钥匙串桥自己的 3 个根文件、符号链接
+    /// （防循环/重复）。LCContainerInfo.plist 照收（恢复补
+    /// 容器时靠它认组号）
     static func loginStateRelativePaths(in container: URL, fm: FileManager) -> [String] {
         var result: [String] = []
-        if fm.fileExists(atPath: container.appendingPathComponent("LCContainerInfo.plist").path) {
-            result.append("LCContainerInfo.plist")
-        }
         let prefix = container.path + "/"
-        for sub in ["Library", "Documents"] {
-            let dir = container.appendingPathComponent(sub)
-            if let e = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) {
-                for case let file as URL in e {
-                    guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                          v.isRegularFile == true, (v.fileSize ?? 0) <= 5 * 1024 * 1024 else { continue }
-                    result.append(file.path.replacingOccurrences(of: prefix, with: ""))
-                }
+        let bridgeFiles: Set<String> = ["CZFKeychainDump.plist", "CZFKeychainImport.plist", "CZFKeychainBridgeStatus.txt"]
+        if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: []) {
+            for case let file as URL in e {
+                guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+                      v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) <= 5 * 1024 * 1024 else { continue }
+                let rel = file.path.replacingOccurrences(of: prefix, with: "")
+                let top = rel.split(separator: "/").first.map(String.init) ?? ""
+                if top == "tmp" { continue }
+                if !rel.contains("/") && bridgeFiles.contains(rel) { continue }
+                result.append(rel)
             }
         }
         return result
     }
 
     /// 登录态范围里因超 5MB 被跳过的大文件数（备份弹窗报
-    /// 出来定位用：某 App 会话文件若偏大，在这里现形）
+    /// 出来定位用：某 App 会话文件若偏大，在这里现形；扫
+    /// 描范围与上面清单一致——整棵容器树、排除 tmp/链接）
     static func loginStateSkippedLargeCount(in container: URL, fm: FileManager) -> Int {
         var count = 0
-        for sub in ["Library", "Documents"] {
-            let dir = container.appendingPathComponent(sub)
-            if let e = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) {
-                for case let file as URL in e {
-                    guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                          v.isRegularFile == true, (v.fileSize ?? 0) > 5 * 1024 * 1024 else { continue }
-                    count += 1
-                }
+        let prefix = container.path + "/"
+        if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: []) {
+            for case let file as URL in e {
+                guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+                      v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) > 5 * 1024 * 1024 else { continue }
+                let rel = file.path.replacingOccurrences(of: prefix, with: "")
+                if rel.split(separator: "/").first.map(String.init) == "tmp" { continue }
+                count += 1
             }
         }
         return count
     }
 
-    /// 路径清单按目录分组计数（备份弹窗报分布用；身份文件
-    /// 不算会话文件，不进分布）
+    /// 路径清单按顶级目录分组计数（备份弹窗报分布用；身份
+    /// 文件不算会话文件，不进分布；LCAppGroup 按组 ID 单列，
+    /// 一眼看出会话是不是在组容器里）
     static func loginStateDirBreakdown(for paths: [String]) -> [String: Int] {
         var d: [String: Int] = [:]
         for rel in paths where rel != "LCContainerInfo.plist" {
-            let dir = rel.contains("/") ? rel.split(separator: "/").dropLast().joined(separator: "/") : "(根目录)"
-            d[dir, default: 0] += 1
+            let parts = rel.split(separator: "/")
+            let key: String
+            if parts.count <= 1 {
+                key = "(根目录)"
+            } else if parts[0] == "LCAppGroup", parts.count >= 2 {
+                key = "LCAppGroup/" + parts[1]
+            } else {
+                key = String(parts[0])
+            }
+            d[key, default: 0] += 1
         }
         return d
     }
@@ -1933,9 +1952,13 @@ struct LCDataManagementView : View {
 
     /// 把登录态文件合并进现有容器（恢复用：同名文件逐个覆盖，
     /// 容器里其他文件不动；LCContainerInfo.plist 是活容器自己
-    /// 的身份文件，永不覆盖）。返回合并了几个文件
+    /// 的身份文件，永不覆盖）。返回合并了几个文件。
+    /// mirrorGroupToHost：目标容器没开隔离组时，备份里的
+    /// LCAppGroup/<组ID>/ 同步镜像一份到宿主组容器目录——
+    /// 游客读组数据走哪边取决于容器当时的隔离开关，两边都
+    /// 落一份才不会因开关状态错位而读空（不计入合并数）
     @discardableResult
-    static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> Int {
+    static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager, mirrorGroupToHost: URL? = nil) -> Int {
         var count = 0
         for rel in loginStateRelativePaths(in: src, fm: fm) {
             if rel == "LCContainerInfo.plist" { continue }
@@ -1947,6 +1970,18 @@ struct LCDataManagementView : View {
             }
             if (try? fm.copyItem(at: s, to: d)) != nil {
                 count += 1
+            }
+            if let host = mirrorGroupToHost {
+                let parts = rel.split(separator: "/")
+                if parts.count >= 3 && parts[0] == "LCAppGroup" {
+                    let rest = parts.dropFirst(2).joined(separator: "/")
+                    let hd = host.appendingPathComponent(String(parts[1])).appendingPathComponent(rest)
+                    try? fm.createDirectory(at: hd.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if fm.fileExists(atPath: hd.path) {
+                        try? fm.removeItem(at: hd)
+                    }
+                    try? fm.copyItem(at: s, to: hd)
+                }
             }
         }
         return count
