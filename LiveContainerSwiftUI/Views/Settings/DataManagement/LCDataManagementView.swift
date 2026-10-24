@@ -1207,7 +1207,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkippedLarge: Int) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkippedLarge: Int, loginLargeCount: Int) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1224,6 +1224,7 @@ struct LCDataManagementView : View {
         var loginFileCount = 0
         var loginBreakdown: [String: Int] = [:]
         var loginSkippedLarge = 0
+        var loginLargeCount = 0
         // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
@@ -1290,6 +1291,7 @@ struct LCDataManagementView : View {
                     let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
                     let r = Self.copyLoginStateFiles(from: srcURL, to: destURL, fm: fm)
                     loginFileCount += r.count
+                    loginLargeCount += r.largeCount
                     for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
                     loginSkippedLarge += Self.loginStateSkippedLargeCount(in: srcURL, fm: fm)
                 }
@@ -1302,6 +1304,7 @@ struct LCDataManagementView : View {
                         try? fm.createDirectory(at: groupRoot, withIntermediateDirectories: true)
                         let r = Self.copyLoginStateFiles(from: src, to: groupRoot.appendingPathComponent(groupID), fm: fm)
                         loginFileCount += r.count
+                        loginLargeCount += r.largeCount
                         for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
                         loginSkippedLarge += Self.loginStateSkippedLargeCount(in: src, fm: fm)
                     }
@@ -1345,7 +1348,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkippedLarge)
+        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkippedLarge, loginLargeCount)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1382,7 +1385,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedLargeTotal): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedLargeTotal, loginLargeTotal): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, Int) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1393,6 +1396,7 @@ struct LCDataManagementView : View {
                     var loginFileTotal = 0
                     var loginBreakdownTotal: [String: Int] = [:]
                     var loginSkippedLargeTotal = 0
+                    var loginLargeTotal = 0
                     var snapshotMissing = false
                     var bridgeStatuses: [String] = []
                     for (index, app) in apps.enumerated() {
@@ -1404,6 +1408,7 @@ struct LCDataManagementView : View {
                         let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
                         keychainTotal += one.keychainCount
                         loginFileTotal += one.loginFileCount
+                        loginLargeTotal += one.loginLargeCount
                         for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
                         loginSkippedLargeTotal += one.loginSkippedLarge
                         if !one.keychainHasSnapshot {
@@ -1422,9 +1427,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedLargeTotal))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedLargeTotal, loginLargeTotal))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0))
+                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, 0))
                 }
             }
         }
@@ -1451,8 +1456,11 @@ struct LCDataManagementView : View {
                     // 完整备份在弹窗里长得一样，误导人去恢复
                     successInfo += "\n会话文件共 0 个"
                 }
+                if loginLargeTotal > 0 {
+                    successInfo += "\n大文件已纳入 \(loginLargeTotal) 个"
+                }
                 if loginSkippedLargeTotal > 0 {
-                    successInfo += "\n超 5MB 跳过 \(loginSkippedLargeTotal) 个文件"
+                    successInfo += "\n缓存大文件跳过 \(loginSkippedLargeTotal) 个"
                 }
             }
             if !bridgeStatuses.isEmpty {
@@ -1723,7 +1731,7 @@ struct LCDataManagementView : View {
                 // 登录态备份的空壳（只剩身份文件、没有会话文件）
                 // 不登记成容器：否则安装后误报「已恢复备份记录」，
                 // 登录其实没回来；钥匙串部分走下面兜底建容器那套
-                let realFiles = Self.loginStateRelativePaths(in: containerFolder, fm: fm).filter { $0 != "LCContainerInfo.plist" }
+                let realFiles = (Self.loginStateRelativePaths(in: containerFolder, fm: fm) + Self.loginStateLargePaths(in: containerFolder, fm: fm)).filter { $0 != "LCContainerInfo.plist" }
                 if realFiles.isEmpty {
                     continue
                 }
@@ -2038,9 +2046,31 @@ struct LCDataManagementView : View {
         return result
     }
 
-    /// 登录态范围里因超 5MB 被跳过的大文件数（备份弹窗报
-    /// 出来定位用：某 App 会话文件若偏大，在这里现形；扫
-    /// 描范围与上面清单一致——整棵容器树、排除 tmp/链接）
+    /// 登录态大文件（>5MB）清单：会话数据库可能很大（如字
+    /// 节系 UnifyStorage.sqlite），5MB 一刀切会把它连同 -wal
+    /// 一起拆散——主库被跳过、-wal 被拷走，恢复后 -wal 成孤
+    /// 儿、App 建新库，残留的用户 ID 对不上新会话就报“登录
+    /// 态已过期”。大文件照收，但排除 Caches（可清除缓存、
+    /// 视频/网络缓存大头，不可能是登录态）与 tmp/链接；与小
+    /// 文件共用单容器 300MB 总预算，小文件先拷
+    static func loginStateLargePaths(in container: URL, fm: FileManager) -> [String] {
+        var result: [String] = []
+        if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: []) {
+            for case let file as URL in e {
+                guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+                      v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) > 5 * 1024 * 1024,
+                      let rel = Self.relativePath(of: file, under: container) else { continue }
+                let parts = rel.split(separator: "/")
+                if parts.first == "tmp" { continue }
+                if parts.contains("Caches") { continue }
+                result.append(rel)
+            }
+        }
+        return result
+    }
+
+    /// 登录态范围里因在 Caches/tmp 下而被跳过的大文件数
+    /// （备份弹窗报出来定位用；不在这两处的都已纳入）
     static func loginStateSkippedLargeCount(in container: URL, fm: FileManager) -> Int {
         var count = 0
         if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: []) {
@@ -2048,8 +2078,8 @@ struct LCDataManagementView : View {
                 guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
                       v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) > 5 * 1024 * 1024,
                       let rel = Self.relativePath(of: file, under: container) else { continue }
-                if rel.split(separator: "/").first.map(String.init) == "tmp" { continue }
-                count += 1
+                let parts = rel.split(separator: "/")
+                if parts.first == "tmp" || parts.contains("Caches") { count += 1 }
             }
         }
         return count
@@ -2080,12 +2110,16 @@ struct LCDataManagementView : View {
     /// 的文件跳过不拷。返回（实拷的会话文件数，目录分布）——
     /// 身份文件照拷但不计入文件数，它不是会话数据
     @discardableResult
-    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> (count: Int, breakdown: [String: Int]) {
+    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> (count: Int, breakdown: [String: Int], largeCount: Int) {
         var count = 0
+        var largeCount = 0
         var bytes = 0
         var copied: [String] = []
-        let paths = loginStateRelativePaths(in: src, fm: fm)
-        for rel in paths {
+        // 小文件先拷（预算优先给会话小文件），大文件随后、
+        // 共用 300MB 预算
+        let smallPaths = loginStateRelativePaths(in: src, fm: fm)
+        let largePaths = loginStateLargePaths(in: src, fm: fm)
+        for rel in smallPaths + largePaths {
             let s = src.appendingPathComponent(rel)
             let size = (try? s.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             if bytes + size > 300 * 1024 * 1024 { continue }
@@ -2096,10 +2130,11 @@ struct LCDataManagementView : View {
                 copied.append(rel)
                 if rel != "LCContainerInfo.plist" {
                     count += 1
+                    if largePaths.contains(rel) { largeCount += 1 }
                 }
             }
         }
-        return (count, loginStateDirBreakdown(for: copied))
+        return (count, loginStateDirBreakdown(for: copied), largeCount)
     }
 
     /// 把登录态文件合并进现有容器（恢复用：同名文件逐个覆盖，
@@ -2112,7 +2147,7 @@ struct LCDataManagementView : View {
     @discardableResult
     static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager, mirrorGroupToHost: URL? = nil) -> Int {
         var count = 0
-        for rel in loginStateRelativePaths(in: src, fm: fm) {
+        for rel in loginStateRelativePaths(in: src, fm: fm) + loginStateLargePaths(in: src, fm: fm) {
             if rel == "LCContainerInfo.plist" { continue }
             let s = src.appendingPathComponent(rel)
             let d = dst.appendingPathComponent(rel)
