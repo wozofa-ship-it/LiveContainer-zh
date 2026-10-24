@@ -147,10 +147,16 @@ struct LCAppSettingsView: View {
                 }
                 if !model.uiIsShared {
                     Menu {
-                        Picker(selection: $model.uiTweakFolder , label: Text("")) {
-                            Label("lc.common.none".loc, systemImage: "nosign").tag(Optional<String>(nil))
-                            ForEach(sharedModel.tweakFolderNames, id:\.self) { folderName in
-                                Text(folderName).tag(Optional(folderName))
+                        Button {
+                            model.uiTweakFolder = nil
+                        } label: {
+                            Text(model.uiTweakFolders.isEmpty ? "✓ \("lc.common.none".loc)" : "lc.common.none".loc)
+                        }
+                        ForEach(sharedModel.tweakFolderNames, id:\.self) { folderName in
+                            Button {
+                                model.toggleTweakFolder(folderName)
+                            } label: {
+                                Text(model.uiTweakFolders.contains(folderName) ? "✓ \(folderName)" : folderName)
                             }
                         }
                     } label: {
@@ -158,7 +164,7 @@ struct LCAppSettingsView: View {
                             Text("lc.appSettings.tweakFolder".loc)
                                 .foregroundColor(.primary)
                             Spacer()
-                            Text(model.uiTweakFolder == nil ? "None" : model.uiTweakFolder!)
+                            Text(model.uiTweakFolders.isEmpty ? "None" : (model.uiTweakFolders.count == 1 ? model.uiTweakFolders[0] : "\(model.uiTweakFolders.count) 个"))
                                 .multilineTextAlignment(.trailing)
                         }
                     }
@@ -169,7 +175,7 @@ struct LCAppSettingsView: View {
                         Text("lc.appSettings.tweakFolder".loc)
                             .foregroundColor(.primary)
                         Spacer()
-                        Text(model.uiTweakFolder == nil ? "lc.common.none".loc : model.uiTweakFolder!)
+                        Text(model.uiTweakFolders.isEmpty ? "lc.common.none".loc : model.uiTweakFolders.joined(separator: "、"))
                             .foregroundColor(.gray)
                             .multilineTextAlignment(.trailing)
                     }
@@ -834,7 +840,9 @@ struct LCAppSettingsView: View {
                 sharedModel.appDataFolderNames.append(container.folderName)
             }
             if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
-                sharedModel.tweakFolderNames.append(tweakFolder)
+                for name in LCAppModel.czfSplitTweakFolders(tweakFolder) where !sharedModel.tweakFolderNames.contains(name) {
+                    sharedModel.tweakFolderNames.append(name)
+                }
                 model.uiTweakFolder = tweakFolder
             }
             

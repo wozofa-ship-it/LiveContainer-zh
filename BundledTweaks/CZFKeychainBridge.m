@@ -111,7 +111,7 @@ static NSDictionary *CZFKBCleanItem(NSDictionary *item, NSString *cls) {
 static NSInteger CZFKBStatEntitled = 0;
 static NSInteger CZFKBStatAlias = 0;
 
-static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *folderName) {
+static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName) {
     NSMutableArray *all = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     void (^collect)(NSDictionary *, NSInteger *) = ^(NSDictionary *query, NSInteger *stat) {
@@ -122,6 +122,15 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
         if (![items isKindOfClass:NSArray.class]) return;
         for (NSDictionary *item in items) {
             if (![item isKindOfClass:NSDictionary.class]) continue;
+            // 只收本 App 的：逐组扫会扫到别的 App 存在同批共
+            // 享组里的条目，混进来恢复时会把别人的令牌写进这
+            // 个 App、同键不同值还会在去重时互相顶掉。归属看
+            // 条目自己的 agrp（=本容器组）或 alis（=本容器名）
+            NSString *itemGroup = item[(__bridge NSString *)kSecAttrAccessGroup];
+            NSString *itemAlias = item[@"alis"];
+            BOOL mine = (group && itemGroup && [itemGroup isEqualToString:group])
+                     || (itemAlias && [itemAlias isEqualToString:folderName]);
+            if (!mine) continue;
             NSString *cls = item[(__bridge NSString *)kSecClass] ?: (__bridge NSString *)kSecClassGenericPassword;
             NSDictionary *clean = CZFKBCleanItem(item, cls);
             NSString *identity = [NSString stringWithFormat:@"%@|%@|%@|%@",
@@ -172,20 +181,30 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
     }
 }
 
+// 写回记账：总数、首个失败状态码，写进状态回执
+static NSInteger CZFKBStatImportTotal = 0;
+static OSStatus CZFKBStatImportFail = 0;
+
 static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
     NSString *path = [home stringByAppendingPathComponent:@"CZFKeychainImport.plist"];
     NSData *data = [NSData dataWithContentsOfFile:path];
     if (!data) return 0;
     NSInteger imported = 0;
+    CZFKBStatImportTotal = 0;
+    CZFKBStatImportFail = 0;
     id parsed = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:nil];
     if ([parsed isKindOfClass:NSArray.class]) {
         for (NSDictionary *raw in (NSArray *)parsed) {
             if (![raw isKindOfClass:NSDictionary.class]) continue;
             NSString *cls = raw[(__bridge NSString *)kSecClass] ?: (__bridge NSString *)kSecClassGenericPassword;
+            CZFKBStatImportTotal += 1;
             NSMutableDictionary *item = [CZFKBCleanItem(raw, cls) mutableCopy];
             // 同步标记摘掉：没有 iCloud 钥匙串权限，带着 sync
             // 写会被系统以缺权限拒绝（宿主写回的老教训）
             [item removeObjectForKey:(__bridge NSString *)kSecAttrSynchronizable];
+            // 创建/修改时间是系统盖的，带着写会被整条拒绝
+            [item removeObjectForKey:(__bridge NSString *)kSecAttrCreationDate];
+            [item removeObjectForKey:(__bridge NSString *)kSecAttrModificationDate];
             item[(__bridge NSString *)kSecAttrAccessGroup] = group;
             item[@"alis"] = folderName;
             // 同键先删再加，保证值以备份为准
@@ -197,11 +216,12 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
             }
             SecItemDelete((__bridge CFDictionaryRef)identity);
             OSStatus status = SecItemAdd((__bridge CFDictionaryRef)item, nil);
-            if (status == errSecSuccess) imported += 1;
-            if (status == errSecParam) {
-                // 全量属性写不进：退到最小属性集再试一次（快照
-                // 里可能带着原进程上下文的键，换个进程写会被
-                // 系统整条拒绝）
+            if (status == errSecSuccess) {
+                imported += 1;
+            } else {
+                // 全量属性写不进（不管什么错）：退到最小属性集
+                // 再试一次（快照里可能带着原进程上下文的键，
+                // 换个进程写会被系统整条拒绝）
                 NSMutableDictionary *minimal = [NSMutableDictionary dictionary];
                 for (NSString *k in @[(__bridge NSString *)kSecClass, (__bridge NSString *)kSecAttrAccount,
                                       (__bridge NSString *)kSecAttrService, (__bridge NSString *)kSecAttrGeneric,
@@ -211,7 +231,12 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
                     if (item[k]) minimal[k] = item[k];
                 }
                 SecItemDelete((__bridge CFDictionaryRef)identity);
-                if (SecItemAdd((__bridge CFDictionaryRef)minimal, nil) == errSecSuccess) imported += 1;
+                OSStatus retry = SecItemAdd((__bridge CFDictionaryRef)minimal, nil);
+                if (retry == errSecSuccess) {
+                    imported += 1;
+                } else if (CZFKBStatImportFail == 0) {
+                    CZFKBStatImportFail = retry;
+                }
             }
         }
     }
@@ -265,16 +290,17 @@ static void CZFKBRun(void) {
         if (group) {
             imported = CZFKBImport(home, group, folderName);
         }
-        CZFKBExport(home, entitled ?: @[], folderName);
+        CZFKBExport(home, entitled ?: @[], group, folderName);
         // 状态回执：宿主备份弹窗直接带出来，桥跑没跑、组对
         // 不对、条目在不在，一行定案
         BOOL inEntitled = group && [entitled containsObject:group];
         NSString *status = [NSString stringWithFormat:
-            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld） imported=%ld",
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld） imported=%ld/%ld fail=%d",
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
             (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias),
-            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)imported];
+            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)imported,
+            (long)CZFKBStatImportTotal, (int)CZFKBStatImportFail];
         [status writeToFile:[home stringByAppendingPathComponent:@"CZFKeychainBridgeStatus.txt"]
                  atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch (NSException *e) {

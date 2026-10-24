@@ -133,11 +133,15 @@ static void TweakLoaderConstructor() {
         }
     }
 
-    // Load selected tweak folder, recursively
+    // Load selected tweak folders, recursively（多选：文件夹
+    // 名以 | 拼接，逐个加载；旧的单值就是单元素，天然兼容）
     if (tweakFolderName.length > 0) {
         NSLog(@"Loading tweaks from the selected folder");
-        NSString *tweakFolder = [globalTweakFolder stringByAppendingPathComponent:tweakFolderName];
-        loadTweaksRecursively([NSURL fileURLWithPath:tweakFolder], errors);
+        for (NSString *name in [tweakFolderName componentsSeparatedByString:@"|"]) {
+            if (name.length == 0) continue;
+            NSString *tweakFolder = [globalTweakFolder stringByAppendingPathComponent:name];
+            loadTweaksRecursively([NSURL fileURLWithPath:tweakFolder], errors);
+        }
     }
 
     if (errors.count > 0) {

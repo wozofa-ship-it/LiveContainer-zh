@@ -37,6 +37,9 @@ struct LCDataManagementView : View {
     @State private var showBackupSelect = false
     @State private var backupSelectedIDs = Set<String>()
     @State private var showBackupScopeDialog = false
+    @State private var showRestoreScopeDialog = false
+    @State private var pendingRestoreURL: URL? = nil
+    @State private var pendingRestoreAll = false
     @State private var pendingBackupApps: [LCAppModel] = []
     @State private var scheduleKeychainOnly = false
     @State private var showRestoreSelect = false
@@ -416,6 +419,17 @@ struct LCDataManagementView : View {
         } message: {
             Text("只备份密匙：只存登录令牌，体积小、备得快，App 重装后恢复即可免登录——大多数 App 选这个就够。完整备份：连 App 数据整套快照，体积大、备得慢。")
         }
+        .confirmationDialog("恢复范围", isPresented: $showRestoreScopeDialog, titleVisibility: .visible) {
+            Button("只恢复密匙（登录状态）") {
+                startPendingRestore(keychainOnly: true)
+            }
+            Button("恢复全部数据") {
+                startPendingRestore(keychainOnly: false)
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {}
+        } message: {
+            Text("只恢复密匙：只写回登录令牌，App 现在的数据不动。恢复全部数据：数据容器整套按备份时刻还原，会覆盖当前数据。")
+        }
         .sheet(isPresented: $showBackupSelect) {
             NavigationView {
                 List(sharedModel.apps + sharedModel.hiddenApps, id: \.self) { app in
@@ -464,7 +478,9 @@ struct LCDataManagementView : View {
                         Spacer()
                         Button {
                             showRestoreSelect = false
-                            Task { await restoreFromBackup(at: folderURL) }
+                            pendingRestoreURL = folderURL
+                            pendingRestoreAll = false
+                            showRestoreScopeDialog = true
                         } label: {
                             HStack {
                                 Image(systemName: "arrow.clockwise.circle")
@@ -520,19 +536,9 @@ struct LCDataManagementView : View {
                         Menu {
                             Button {
                                 showRestoreSelect = false
-                                Task {
-                                    // 逐个静默恢复、只在最后弹一个
-                                    // 总报告：原来每个备份弹一次自己
-                                    // 的结果窗，十几个备份要点掉十几层
-                                    var lines: [String] = []
-                                    for (index, folderURL) in backupFolderList.enumerated() {
-                                        backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(backupFolderList.count)）"
-                                        lines.append(await restoreFromBackup(at: folderURL, presentResult: false))
-                                    }
-                                    backupRestoreProgress = nil
-                                    successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
-                                    successShow = true
-                                }
+                                pendingRestoreURL = nil
+                                pendingRestoreAll = true
+                                showRestoreScopeDialog = true
                             } label: {
                                 Label("一键恢复全部", systemImage: "arrow.clockwise.circle")
                             }
@@ -1173,6 +1179,10 @@ struct LCDataManagementView : View {
         // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
+        // 默认容器的钥匙串组号也记下：删后重装恢复时新建的
+        // 兜底容器照这个组号建，写回的条目 agrp 和快照里
+        // 原样对齐，不用等桥二次改写
+        let defaultContainer = app.uiContainers.first(where: { $0.folderName == (app.appInfo.dataUUID ?? "") }) ?? app.uiContainers.first
         let manifest: [String: String] = [
             "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
             "displayName": app.appInfo.displayName() ?? "",
@@ -1181,6 +1191,7 @@ struct LCDataManagementView : View {
             // 恢复时靠它认出哪个是默认容器：容器文件夹名
             // 是随机 UUID，删后重装会换号，不能靠名字猜
             "dataUUID": app.appInfo.dataUUID ?? "",
+            "keychainGroupId": defaultContainer.map { String($0.keychainGroupId) } ?? "",
             // 备份范围：keychain = 只备了钥匙串（登录令牌），没有
             // 数据容器和 .app 本体；恢复列表据此打「仅密匙」标，
             // 恢复时钥匙串靠落默认容器的兜底对上号
@@ -1359,11 +1370,36 @@ struct LCDataManagementView : View {
     }
 
 
+    /// 恢复范围弹窗选完后分发：单个恢复走 pendingRestoreURL，
+    /// 一键恢复全部走 pendingRestoreAll（同一个范围套全部）
+    func startPendingRestore(keychainOnly: Bool) {
+        if pendingRestoreAll {
+            pendingRestoreAll = false
+            Task { await restoreAllBackups(keychainOnly: keychainOnly) }
+        } else if let url = pendingRestoreURL {
+            pendingRestoreURL = nil
+            Task { await restoreFromBackup(at: url, keychainOnly: keychainOnly) }
+        }
+    }
+
+    /// 一键恢复全部：逐个静默恢复、只在最后弹一个总报告（原
+    /// 来每个备份弹一次自己的结果窗，十几个备份要点掉十几层）
+    func restoreAllBackups(keychainOnly: Bool) async {
+        var lines: [String] = []
+        for (index, folderURL) in backupFolderList.enumerated() {
+            backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(backupFolderList.count)）"
+            lines.append(await restoreFromBackup(at: folderURL, presentResult: false, keychainOnly: keychainOnly))
+        }
+        backupRestoreProgress = nil
+        successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
+        successShow = true
+    }
+
     /// 恢复一个备份文件夹。presentResult=true（恢复单个时）照旧
     /// 弹完整报告；false（一键恢复全部逐个调）时不弹窗，返回一行
     /// 摘要给调用方汇总成一个总报告。返回值单个恢复时不用
     @discardableResult
-    func restoreFromBackup(at backupURL: URL, presentResult: Bool = true) async -> String {
+    func restoreFromBackup(at backupURL: URL, presentResult: Bool = true, keychainOnly: Bool = false) async -> String {
         let fm = FileManager.default
         if presentResult {
             backupRestoreProgress = "正在恢复 \(backupURL.lastPathComponent)…"
@@ -1382,6 +1418,9 @@ struct LCDataManagementView : View {
                 appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
             }
             var restoredCount = 0
+            var keychainFoundTotal = 0
+            var keychainQueuedTotal = 0
+            var keychainImportedTotal = 0
             var missing: [(folder: URL, name: String, bundleID: String)] = []
             var noDataApps: [String] = []
             var versionMismatchApps: [String] = []
@@ -1411,7 +1450,11 @@ struct LCDataManagementView : View {
                     missing.append((folder: appFolder, name: appName, bundleID: appBundleID))
                     continue
                 }
-                if (try await Self.restoreOneApp(appFolder: appFolder, app: app)).ok {
+                let outcome = try await Self.restoreOneApp(appFolder: appFolder, app: app, keychainOnly: keychainOnly)
+                keychainFoundTotal += outcome.keychainFound
+                keychainQueuedTotal += outcome.keychainQueued
+                keychainImportedTotal += outcome.keychainImported
+                if outcome.ok {
                     restoredCount += 1
                     if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
                         versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
@@ -1455,7 +1498,11 @@ struct LCDataManagementView : View {
                 }
                 // 再缓 2 秒等安装收尾落稳，然后恢复这个 App 的数据
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if (try await Self.restoreOneApp(appFolder: item.folder, app: installedApp)).ok {
+                let outcome2 = try await Self.restoreOneApp(appFolder: item.folder, app: installedApp, keychainOnly: keychainOnly)
+                keychainFoundTotal += outcome2.keychainFound
+                keychainQueuedTotal += outcome2.keychainQueued
+                keychainImportedTotal += outcome2.keychainImported
+                if outcome2.ok {
                     installRestoredCount += 1
                     if Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
                         versionMismatchApps.append(item.name)
@@ -1465,6 +1512,9 @@ struct LCDataManagementView : View {
                 }
             }
             var msg = String(format: "lc.settings.restoreComplete".loc, restoredCount + installRestoredCount)
+            if keychainFoundTotal > 0 {
+                msg += "\n\n钥匙串：备份含 \(keychainFoundTotal) 条，已排队 \(keychainQueuedTotal) 条（打开 App 时由桥写回），宿主直写 \(keychainImportedTotal) 条"
+            }
             if installRestoredCount > 0 {
                 msg += "\n\n其中 \(installRestoredCount) 个是先安装再恢复的"
             }
@@ -1524,17 +1574,26 @@ struct LCDataManagementView : View {
     /// 器名对不上号，按原文件夹名放回原位并登记，登录态才能
     /// 跟着回来（见内注）。做成静态：安装流程装完新 App 后
     /// 也要调它自动恢复备份。
-    static func restoreOneApp(appFolder: URL, app: LCAppModel) async throws -> RestoreOutcome {
+    static func restoreOneApp(appFolder: URL, app: LCAppModel, keychainOnly: Bool = false) async throws -> RestoreOutcome {
         let fm = FileManager.default
         // 备份里的容器文件夹（跳过 manifest、.app 本体，
-        // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）
-        let containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }
-        // manifest 记着备份时的默认容器名，多个容器时靠它定默认
+        // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）。
+        // 仅密匙模式不碰容器：App 现有数据原样保留，只写回令牌
+        var containerFolders: [URL] = []
+        if !keychainOnly {
+            containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }
+        }
+        // manifest 记着备份时的默认容器名，多个容器时靠它定默认；
+        // 组号记着备份时的钥匙串组，恢复补容器时照它建
         var manifestDataUUID = ""
+        var manifestKeychainGroupId: Int? = nil
         if let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
             manifestDataUUID = json["dataUUID"] ?? ""
+            if let g = json["keychainGroupId"], let gv = Int(g) {
+                manifestKeychainGroupId = gv
+            }
         }
         var restoredContainers = 0
         var newDefaultContainer: LCContainer?
@@ -1581,7 +1640,7 @@ struct LCDataManagementView : View {
         // 组容器数据写回：和容器、钥匙串是同一时刻的快照，
         // 三处一起回滚，App 读到的才是一套对齐的数据
         let appGroupBackup = appFolder.appendingPathComponent("AppGroup")
-        if let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
+        if !keychainOnly, let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
             for groupFolder in groupFolders {
                 let dest = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupFolder.lastPathComponent)
                 if fm.fileExists(atPath: dest.path) {
@@ -1612,7 +1671,11 @@ struct LCDataManagementView : View {
             // 手动恢复报 0 个）。照 runApp 首启的建法补一个默认
             // 容器，登录态才有着落
             if app.uiContainers.isEmpty && !plistFiles.isEmpty {
-                let newName = NSUUID().uuidString
+                // 容器名直接用备份时的原名（manifest 的
+                // dataUUID）：快照文件名、别名都按原名记账，
+                // 同名对上目标容器是第一优先落点，不用再靠
+                // 默认容器兜底猜；组号同样照备份时的建
+                let newName = manifestDataUUID.isEmpty ? NSUUID().uuidString : manifestDataUUID
                 let newContainer = LCContainer(folderName: newName, name: newName, isShared: app.appInfo.isShared)
                 var containers = app.uiContainers
                 containers.append(newContainer)
@@ -1622,7 +1685,7 @@ struct LCDataManagementView : View {
                 app.uiDefaultDataFolder = newName
                 app.appInfo.dataUUID = newName
                 if let bundleID = app.appInfo.bundleIdentifier() {
-                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
+                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
                 }
             }
             for file in plistFiles {

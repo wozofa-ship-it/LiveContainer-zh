@@ -41,6 +41,27 @@ class LCAppModel: ObservableObject, Hashable {
             appInfo.tweakFolder = uiTweakFolder
         }
     }
+    /// 模块文件夹多选：存储仍是一个字符串（LCTweakFolder），
+    /// 多个文件夹名用 | 拼接——旧的单值天然就是单元素，向后
+    /// 兼容不用迁移。TweakLoader 侧按同一规则拆开逐个加载
+    static func czfSplitTweakFolders(_ raw: String?) -> [String] {
+        (raw ?? "").split(separator: "|").map { String($0) }.filter { !$0.isEmpty }
+    }
+    static func czfJoinTweakFolders(_ folders: [String]) -> String? {
+        folders.isEmpty ? nil : folders.joined(separator: "|")
+    }
+    var uiTweakFolders: [String] {
+        Self.czfSplitTweakFolders(uiTweakFolder)
+    }
+    func toggleTweakFolder(_ name: String) {
+        var folders = uiTweakFolders
+        if let idx = folders.firstIndex(of: name) {
+            folders.remove(at: idx)
+        } else {
+            folders.append(name)
+        }
+        uiTweakFolder = Self.czfJoinTweakFolders(folders)
+    }
     @Published var uiDoSymlinkInbox : Bool {
         didSet {
             appInfo.doSymlinkInbox = uiDoSymlinkInbox
@@ -448,39 +469,42 @@ class LCAppModel: ObservableObject, Hashable {
             }}
         }
 
-        // 单 App VPN（验证版）：开着 VPN 又没专属插件目录的，先给
-        // 它建一个名为 CZFVPN 的目录名，重定向插件才有地方部署
-        if CZFVPNManager.isEnabled(for: appInfo), appInfo.tweakFolder == nil {
-            appInfo.tweakFolder = "CZFVPN"
-        }
-
-        // sign its tweak
-        guard let tweakFolder = appInfo.tweakFolder else {
-            return
-        }
-
-        let tweakFolderUrl : URL
-        if(appInfo.isShared) {
-            tweakFolderUrl = LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolder)
-        } else {
-            tweakFolderUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
-        }
-        // 单 App VPN（验证版）：签名之前按标记同步重定向插件。
-        // 刚换上的新插件单独补一签（照手势插件的部署法）：批量
-        // 签名带指纹缓存，新文件有被误判"已验过"跳过的先例
-        // （真机出过签名无效被拒载），单独签没有缓存判断、必签。
-        if CZFVPNManager.syncProxyTweak(for: appInfo, tweakFolderUrl: tweakFolderUrl) {
-            let proxyUrl = tweakFolderUrl.appendingPathComponent("CZFProxy.dylib")
-            try? await LCUtils.signSingleTweakFile(proxyUrl)
-            if !checkCodeSignature((proxyUrl.path as NSString).utf8String) {
-                // 第一签验不过就再签一次（下面的批量签名还会再兜底）
-                try? await LCUtils.signSingleTweakFile(proxyUrl)
+        // 单 App VPN（验证版）：开着 VPN 又没选 CZFVPN 目录的，
+        // 把它加进模块文件夹列表，重定向插件才有地方部署
+        if CZFVPNManager.isEnabled(for: appInfo) {
+            var folders = Self.czfSplitTweakFolders(appInfo.tweakFolder)
+            if !folders.contains("CZFVPN") {
+                folders.append("CZFVPN")
+                appInfo.tweakFolder = Self.czfJoinTweakFolders(folders)
             }
         }
-        try await LCUtils.signTweaks(tweakFolderUrl: tweakFolderUrl, force: force) { p in
-            Task{ await MainActor.run {
-                self.isSigningInProgress = true
-            }}
+
+        // 逐个签所选的模块文件夹（多选；一个没选就直接收尾，
+        // 和旧版 guard 返回等价）
+        for tweakFolder in Self.czfSplitTweakFolders(appInfo.tweakFolder) {
+            let tweakFolderUrl: URL
+            if appInfo.isShared {
+                tweakFolderUrl = LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolder)
+            } else {
+                tweakFolderUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
+            }
+            // 单 App VPN（验证版）：签名之前按标记同步重定向插件。
+            // 刚换上的新插件单独补一签（照手势插件的部署法）：批量
+            // 签名带指纹缓存，新文件有被误判"已验过"跳过的先例
+            // （真机出过签名无效被拒载），单独签没有缓存判断、必签。
+            if tweakFolder == "CZFVPN", CZFVPNManager.syncProxyTweak(for: appInfo, tweakFolderUrl: tweakFolderUrl) {
+                let proxyUrl = tweakFolderUrl.appendingPathComponent("CZFProxy.dylib")
+                try? await LCUtils.signSingleTweakFile(proxyUrl)
+                if !checkCodeSignature((proxyUrl.path as NSString).utf8String) {
+                    // 第一签验不过就再签一次（下面的批量签名还会再兜底）
+                    try? await LCUtils.signSingleTweakFile(proxyUrl)
+                }
+            }
+            try await LCUtils.signTweaks(tweakFolderUrl: tweakFolderUrl, force: force) { p in
+                Task{ await MainActor.run {
+                    self.isSigningInProgress = true
+                }}
+            }
         }
     }
 

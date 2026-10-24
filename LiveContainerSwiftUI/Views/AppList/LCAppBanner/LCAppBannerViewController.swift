@@ -221,14 +221,23 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             }
         })
 
-        // Tweak/Module Picker (direct in context menu)
-        let tweakActions = [nil as String?] + DataManager.shared.model.tweakFolderNames.map { $0 as String? }
-        let tweakMenuActions = tweakActions.map { [weak self] folderName in
+        // Tweak/Module Picker（多选：点一下勾上/再点取消，
+        // 可同时选多个模块文件夹，启动时逐个加载；「无」清空）
+        let selectedFolders = LCAppModel.czfSplitTweakFolders(model.uiTweakFolder)
+        var tweakMenuActions: [UIAction] = [
             UIAction(
-                title: folderName ?? "lc.common.none".loc,
-                state: model.uiTweakFolder == folderName ? .on : .off
+                title: "lc.common.none".loc,
+                state: selectedFolders.isEmpty ? .on : .off
             ) { _ in
-                model.uiTweakFolder = folderName
+                model.uiTweakFolder = nil
+            }
+        ]
+        tweakMenuActions += DataManager.shared.model.tweakFolderNames.map { folderName in
+            UIAction(
+                title: folderName,
+                state: selectedFolders.contains(folderName) ? .on : .off
+            ) { _ in
+                model.toggleTweakFolder(folderName)
             }
         }
         sectionChildren.append(UIMenu(

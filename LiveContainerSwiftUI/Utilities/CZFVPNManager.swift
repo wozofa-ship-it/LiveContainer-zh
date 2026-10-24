@@ -634,7 +634,10 @@ public final class CZFVPNManager {
     }
 
     public static func proxyStatsText(for appInfo: LCAppInfo) -> String? {
-        guard let folderName = appInfo.tweakFolder ?? (isEnabled(for: appInfo) ? "CZFVPN" : nil) else { return nil }
+        // 统计文件在插件自己的目录（CZFVPN）里：多选时先找它，
+        // 没有再退第一个文件夹（旧单选行为），都没有才看开关默认
+        let czfFolders = LCAppModel.czfSplitTweakFolders(appInfo.tweakFolder)
+        guard let folderName = czfFolders.first(where: { $0 == "CZFVPN" }) ?? czfFolders.first ?? (isEnabled(for: appInfo) ? "CZFVPN" : nil) else { return nil }
         let base = appInfo.isShared ? LCPath.lcGroupTweakPath : LCPath.tweakPath
         let folder = base.appendingPathComponent(folderName)
         // 统计按 App 分文件（插件按包名命名）；老版的共用文件兜底
