@@ -43,12 +43,6 @@ import Intents
         return true
     }
 
-    // 回到前台时检查签名到期：有 App 在提前天数内到期就
-    // 自动拉起 Side 续全部（一天最多一次，见 CZFSignatureExpiry）
-    func applicationDidBecomeActive(_ application: UIApplication) {
-        CZFSignatureExpiryReader.maybeAutoRenew()
-    }
-
     func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
         configuration.delegateClass = SceneDelegate.self

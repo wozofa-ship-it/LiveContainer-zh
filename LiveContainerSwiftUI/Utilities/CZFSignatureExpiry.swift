@@ -30,10 +30,8 @@ struct CZFSignatureExpiry: Identifiable {
 }
 
 enum CZFSignatureExpiryReader {
-    static let autoRenewEnabledKey = "CZFAutoRenewEnabled"
-    static let aheadDaysKey = "CZFRenewAheadDays"
-    static let lastAutoRenewKey = "CZFLastAutoRenewDate"
-    static let aheadOptions = [1, 2, 3, 5, 7]
+    // 只剩只读展示：自动续签已去掉（2026-10-25，见设置页注释），
+    // 下面不再有任何拉起 Side 重签的代码。
 
     // 抓快照（主线程调）：宿主自己 + 全部游客 App（含隐藏的，
     // 续签不分显隐）；真正读文件放后台做，不堵 UI
@@ -82,32 +80,4 @@ enum CZFSignatureExpiryReader {
         return nil
     }
 
-    static var triggeredToday: Bool {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return UserDefaults.standard.string(forKey: lastAutoRenewKey) == f.string(from: Date())
-    }
-
-    // 自动续签（App 前台时调）：最近到期 ≤ 提前天数、且今天
-    // 还没触发过，就拉起 Side 的 refresh-all 续全部；一天最
-    // 多一次，续上后到期日往后推、条件自然解除，续失败也
-    // 不会每次前台都弹
-    static func maybeAutoRenew() {
-        guard UserDefaults.standard.object(forKey: autoRenewEnabledKey) as? Bool ?? true else { return }
-        guard !triggeredToday else { return }
-        let ahead = UserDefaults.standard.object(forKey: aheadDaysKey) as? Int ?? 2
-        let entries = snapshotEntries(apps: DataManager.shared.model.apps, hiddenApps: DataManager.shared.model.hiddenApps)
-        DispatchQueue.global(qos: .utility).async {
-            let nearest = loadAll(entries: entries).map(\.daysLeft).min()
-            guard let nearest = nearest, nearest <= ahead else { return }
-            let f = DateFormatter()
-            f.dateFormat = "yyyy-MM-dd"
-            UserDefaults.standard.set(f.string(from: Date()), forKey: lastAutoRenewKey)
-            DispatchQueue.main.async {
-                if let url = URL(string: "sideinstaller://refresh-all") {
-                    UIApplication.shared.open(url)
-                }
-            }
-        }
-    }
 }

@@ -40,14 +40,14 @@ struct LCSettingsView: View {
 
     @State private var certificateDataFound = false
 
-    // 签名剩余时间：续签区里列各 App 到期日 + 自动续签开关
-    @AppStorage("CZFAutoRenewEnabled") var autoRenewEnabled = true
-    @AppStorage("CZFRenewAheadDays") var renewAheadDays = 2
+    // 签名剩余时间：续签区里只列各 App 到期日（只读展示）。
+    // 自动续签已去掉（2026-10-25）：回到前台拉起 Side 重签
+    // 全部会动各 App 的签名，Side 用的证书和 LC 存的不一致
+    // 时团队对不上、游客弹签名无效——用户亲指就是加了续签
+    // 之后开始报错，自动续签这部分不要了，显示保留。
     @State private var signatureExpiries: [CZFSignatureExpiry] = []
-    @State private var autoRenewTriggeredToday = false
     private func refreshSignatureExpiries() {
         let entries = CZFSignatureExpiryReader.snapshotEntries(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps)
-        autoRenewTriggeredToday = CZFSignatureExpiryReader.triggeredToday
         DispatchQueue.global(qos: .userInitiated).async {
             let list = CZFSignatureExpiryReader.loadAll(entries: entries)
             DispatchQueue.main.async { signatureExpiries = list }
@@ -187,26 +187,14 @@ struct LCSettingsView: View {
                                 Spacer()
                                 Text("\(e.label) · \(e.dateText)到期")
                                     .font(.caption)
-                                    .foregroundColor(e.daysLeft <= renewAheadDays ? .red : .secondary)
+                                    .foregroundColor(e.daysLeft <= 2 ? .red : .secondary)
                             }
                         }
-                    }
-                    Toggle("到期自动续签", isOn: $autoRenewEnabled)
-                    Picker("提前续签", selection: $renewAheadDays) {
-                        ForEach(CZFSignatureExpiryReader.aheadOptions, id: \.self) { d in
-                            Text("\(d) 天").tag(d)
-                        }
-                    }
-                    .disabled(!autoRenewEnabled)
-                    if autoRenewTriggeredToday {
-                        Text("今天已自动拉起过一次 SideInstaller 🅥 续签")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
                     }
                 } header: {
                     Text("续签")
                 } footer: {
-                    Text("点一下跳到 SideInstaller 🅥，自动续签全部个人 ID 签名的 App（包括 LiveContainer 自己，赶在签名到期前续上）。前提：LiveContainer 的安装包已放进 SideInstaller 🅥 的文件里、签名团队一致；若 SideInstaller 🅥 里没有它的安装包，会被跳过续不到。开着“到期自动续签”时，LiveContainer 回到前台发现有 App 在提前天数内到期，会自动跳去 SideInstaller 🅥 续全部，一天最多一次。")
+                    Text("点一下跳到 SideInstaller 🅥，自动续签全部个人 ID 签名的 App（包括 LiveContainer 自己，赶在签名到期前续上）。前提：LiveContainer 的安装包已放进 SideInstaller 🅥 的文件里、签名团队一致；若 SideInstaller 🅥 里没有它的安装包，会被跳过续不到。")
                 }
                 .onAppear { refreshSignatureExpiries() }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in

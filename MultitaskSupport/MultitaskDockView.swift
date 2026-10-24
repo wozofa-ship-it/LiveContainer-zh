@@ -1365,7 +1365,7 @@ class AppInfoProvider {
         let host = UIHostingController(rootView: rootView)
         let b = window.bounds
         host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
-        host.view.layer.cornerRadius = 16
+        host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
         host.view.isHidden = true
@@ -1375,6 +1375,16 @@ class AppInfoProvider {
         let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
         drag.delegate = self
         host.view.addGestureRecognizer(drag)
+        // 边缘横滑切源面板（用户定）：面板打开时遮罩盖全屏、原来的
+        // 边缘手势被挡，只能靠面板自己身上的手势切；UIScreenEdgePan
+        // 只认贴边起手，不抢面板里横滑条的滚动；遮罩和面板本体各
+        // 挂一个（一个手势只能挂一个视图）
+        let edgeToSources = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(self.czfAppPanelEdgeSwitched(_:)))
+        edgeToSources.edges = .left
+        backdrop.addGestureRecognizer(edgeToSources)
+        let edgeToSourcesOnPanel = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(self.czfAppPanelEdgeSwitched(_:)))
+        edgeToSourcesOnPanel.edges = .left
+        host.view.addGestureRecognizer(edgeToSourcesOnPanel)
         czfPanelOverlayBackdrop = backdrop
         czfPanelOverlayHost = host
     }
@@ -1500,7 +1510,7 @@ class AppInfoProvider {
         let host = UIHostingController(rootView: rootView)
         let b = window.bounds
         host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
-        host.view.layer.cornerRadius = 16
+        host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
         host.view.isHidden = true
@@ -1509,6 +1519,14 @@ class AppInfoProvider {
         let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
         drag.delegate = self
         host.view.addGestureRecognizer(drag)
+        // 边缘横滑切 App 面板（用户定，与 App 面板那侧镜像）：右缘
+        // 往左滑切回 App 面板，同样只认贴边起手、不抢横滑条滚动
+        let edgeToApps = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(self.czfSourcesPanelEdgeSwitched(_:)))
+        edgeToApps.edges = .right
+        backdrop.addGestureRecognizer(edgeToApps)
+        let edgeToAppsOnPanel = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(self.czfSourcesPanelEdgeSwitched(_:)))
+        edgeToAppsOnPanel.edges = .right
+        host.view.addGestureRecognizer(edgeToAppsOnPanel)
         czfSourcesOverlayBackdrop = backdrop
         czfSourcesOverlayHost = host
     }
@@ -1537,6 +1555,67 @@ class AppInfoProvider {
                 host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
             }
         }
+    }
+
+    // 面板互切（用户定）：App 面板左缘往右滑切源面板、源面板右缘
+    // 往左滑切 App 面板。面板打开时遮罩盖全屏、原来的边缘手势被
+    // 挡，只能靠面板自己身上的边缘手势切；切换时遮罩不闪（新遮
+    // 罩直接显到 1、旧遮罩动画完再藏），两面板同时上下滑（旧的
+    // 下去、新的上来），看着像翻页，不是一关一开；0.4 秒节流和
+    // 开面板同款，防连滑叠动画。
+    private func switchPanels(toSources: Bool) {
+        DispatchQueue.main.async {
+            guard Self.czfEdgeGesturesEnabled else { return }
+            let now = Date()
+            guard now.timeIntervalSince(self.czfLastPanelActionAt) > 0.4 else { return }
+            guard toSources ? self.isAppPanelOpen : self.isSourcesPanelOpen else { return }
+            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            self.czfLastPanelActionAt = now
+            self.edgeCallbackBuzz()
+            if toSources {
+                self.ensureSourcesOverlay(in: window)
+            } else {
+                self.ensurePanelOverlay(in: window)
+            }
+            guard let oldHost = toSources ? self.czfPanelOverlayHost : self.czfSourcesOverlayHost,
+                  let oldBackdrop = toSources ? self.czfPanelOverlayBackdrop : self.czfSourcesOverlayBackdrop,
+                  let newHost = toSources ? self.czfSourcesOverlayHost : self.czfPanelOverlayHost,
+                  let newBackdrop = toSources ? self.czfSourcesOverlayBackdrop : self.czfPanelOverlayBackdrop else { return }
+            let b = window.bounds
+            let panelHeight = b.height * 0.6
+            if toSources {
+                self.czfSourcesPanelOpenCounter += 1
+            } else {
+                self.czfAppPanelOpenCounter += 1
+            }
+            window.bringSubviewToFront(newBackdrop)
+            window.bringSubviewToFront(newHost.view)
+            newBackdrop.frame = b
+            newBackdrop.isHidden = false
+            newBackdrop.alpha = 1
+            newHost.view.isHidden = false
+            if newHost.view.frame.height != panelHeight {
+                newHost.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: panelHeight)
+            }
+            let oldHeight = oldHost.view.frame.height
+            UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
+                oldHost.view.frame = oldHost.view.frame.offsetBy(dx: 0, dy: oldHeight)
+                newHost.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
+            } completion: { _ in
+                oldBackdrop.isHidden = true
+                oldHost.view.isHidden = true
+            }
+        }
+    }
+
+    @objc private func czfAppPanelEdgeSwitched(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        switchPanels(toSources: true)
+    }
+
+    @objc private func czfSourcesPanelEdgeSwitched(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        switchPanels(toSources: false)
     }
 
     @objc private func czfSourcesBackdropTapped() {
@@ -2045,15 +2124,14 @@ struct PinnedAppsStripView: View {
 
     var body: some View {
         // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
-        // 点名"太丑"的主因）；图标 46pt / 圆角 12，与运行区
-        // 相同，列表行图标是 52pt（主行稍大，左边缘对齐即可）
+        // 点名"太丑"的主因）；图标 40pt / 圆角 12（用户定小点），
+        // 运行区 46pt、列表行 52pt，左边缘对齐即可
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
+                // “固定”俩字已去掉（用户定）：只留图钉标示，
+                // 标题行不占字，看着干净
                 Image(systemName: "pin.fill")
                     .font(.caption2)
-                Text("固定")
-                    .font(.caption)
-                    .fontWeight(.semibold)
                 Spacer()
                 // 关闭钮并进这一行（原来单独占一整行顶栏，顶部
                 // 一层叠一层，用户点名挤）；动作与原 ✕ 相同
@@ -2074,7 +2152,7 @@ struct PinnedAppsStripView: View {
                             // 固定区只留图标、不要名字（用户定）：名字
                             // 字号小又挤，图标本身已够认；点按仍打开
                             RunningAppIcon(appInfo: app.appInfo)
-                                .frame(width: 46, height: 46)
+                                .frame(width: 40, height: 40)
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                                 .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 .contentShape(Rectangle())
@@ -2577,7 +2655,7 @@ private struct SourcePanelRow: View {
         }
         .padding(10)
         .background {
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 20)
                 .fill(Color(.secondarySystemBackground))
         }
     }
@@ -2646,7 +2724,7 @@ private struct RunningAppsStripView: View {
             }
         }
         .background(Color(UIColor.secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
     }
 
     // 固定按钮：浅底 + 深色图标（原来整块实心灰/红加白描边太
@@ -2823,7 +2901,7 @@ struct AppCardRow: View {
         }
         .padding(10)
         .background(Color(.secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
         // 长按行：固定到面板顶部 / 取消固定（用户定）；
         // 正在运行的还多两个：重启（卡死时一步恢复）、关闭
         .contextMenu {
