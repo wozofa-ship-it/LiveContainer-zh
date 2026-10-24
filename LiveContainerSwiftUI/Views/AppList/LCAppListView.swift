@@ -37,6 +37,18 @@ struct AppReplaceOption : Hashable {
     var appToReplace: LCAppModel?
 }
 
+// 待安装队列项：url 安装与 plist 安装共用一个队
+private enum CZFPendingInstall {
+    case url(String, Bool, Bool)
+    case plist(String)
+    var urlStr: String {
+        switch self {
+        case .url(let s, _, _): return s
+        case .plist(let s): return s
+        }
+    }
+}
+
 struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var didAppear = false
     // ipa choosing stuff
@@ -62,6 +74,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     // ipa installing stuff
     @State var installprogressVisible = false
+    // 安装排队：进行中再点安装不再静默丢掉，排进队、当前装完
+    // 接着装（defer 里出队一个）；同地址重复点只排一次
+    @State private var pendingInstalls: [CZFPendingInstall] = []
     @State var installProgressPercentage : Float = 0.0
     @State var installObserver : NSKeyValueObservation?
     
@@ -682,10 +697,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             self.installprogressVisible = true
             try await installIpaFile(fileUrl)
             try FileManager.default.removeItem(at: fileUrl)
+            // installIpaFile 成功路不一定清 flag，这里先清再出队，
+            // 否则队里那个撞上正忙会重新排队、一直等不到
+            self.installprogressVisible = false
+            drainPendingInstalls()
         } catch {
             errorInfo = error.localizedDescription
             errorShow = true
             self.installprogressVisible = false
+            drainPendingInstalls()
         }
     }
     
@@ -989,7 +1009,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
     
     func installFromPlist(urlStr: String) async {
+        // 进行中再点：同样排队（与 url 安装共用一个队）
         if self.installprogressVisible {
+            if !pendingInstalls.contains(where: { $0.urlStr == urlStr }) {
+                pendingInstalls.append(.plist(urlStr))
+            }
             return
         }
         
@@ -1209,9 +1233,27 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 无返回值，汇总只能报"共处理 N 个"，挂了几个看不出来）。
     /// 单个安装的调用方不关心返回值，照旧靠 errorShow 弹窗
     @discardableResult
+    // 出队一个接着装：Task 里跑，撞上正忙会重新排队，不丢不死循环
+    private func drainPendingInstalls() {
+        guard !pendingInstalls.isEmpty else { return }
+        let next = pendingInstalls.removeFirst()
+        Task {
+            switch next {
+            case .url(let s, let r, let p):
+                await installFromUrl(urlStr: s, autoReplace: r, preview: p)
+            case .plist(let s):
+                await installFromPlist(urlStr: s)
+            }
+        }
+    }
+
     func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false) async -> Bool {
-        // ignore any install request if we are installing another app
+        // 进行中再点安装：排进队、当前装完接着装，不再静默丢掉
         if self.installprogressVisible {
+            let item = CZFPendingInstall.url(urlStr, autoReplace, preview)
+            if !pendingInstalls.contains(where: { $0.urlStr == urlStr }) {
+                pendingInstalls.append(item)
+            }
             return false
         }
 
@@ -1230,8 +1272,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         self.installprogressVisible = true
         defer {
             self.installprogressVisible = false
+            drainPendingInstalls()
         }
-        
+
         if installUrl.isFileURL {
             // install from local, we directly call local install method
             let fileExtension = installUrl.pathExtension.lowercased()

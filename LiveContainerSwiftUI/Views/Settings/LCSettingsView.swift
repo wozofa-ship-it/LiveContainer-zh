@@ -39,7 +39,21 @@ struct LCSettingsView: View {
     @State var successInfo = ""
 
     @State private var certificateDataFound = false
-    
+
+    // 签名剩余时间：续签区里列各 App 到期日 + 自动续签开关
+    @AppStorage("CZFAutoRenewEnabled") var autoRenewEnabled = true
+    @AppStorage("CZFRenewAheadDays") var renewAheadDays = 2
+    @State private var signatureExpiries: [CZFSignatureExpiry] = []
+    @State private var autoRenewTriggeredToday = false
+    private func refreshSignatureExpiries() {
+        let entries = CZFSignatureExpiryReader.snapshotEntries(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps)
+        autoRenewTriggeredToday = CZFSignatureExpiryReader.triggeredToday
+        DispatchQueue.global(qos: .userInitiated).async {
+            let list = CZFSignatureExpiryReader.loadAll(entries: entries)
+            DispatchQueue.main.async { signatureExpiries = list }
+        }
+    }
+
     @StateObject private var certificateImportAlert = YesNoHelper()
     @StateObject private var certificateImportFromBuiltInSideStoreAlert = YesNoHelper()
     @StateObject private var certificateRemoveAlert = YesNoHelper()
@@ -160,10 +174,43 @@ struct LCSettingsView: View {
                                 .foregroundStyle(.blue)
                         }
                     }
+                    // 各 App 签名剩余时间（按到期日从近到远排，
+                    // 快到期的标红；读不到描述文件的 App 不列）
+                    if signatureExpiries.isEmpty {
+                        Text("未读到签名到期时间")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(signatureExpiries) { e in
+                            HStack {
+                                Text(e.name)
+                                Spacer()
+                                Text("\(e.label) · \(e.dateText)到期")
+                                    .font(.caption)
+                                    .foregroundColor(e.daysLeft <= renewAheadDays ? .red : .secondary)
+                            }
+                        }
+                    }
+                    Toggle("到期自动续签", isOn: $autoRenewEnabled)
+                    Picker("提前续签", selection: $renewAheadDays) {
+                        ForEach(CZFSignatureExpiryReader.aheadOptions, id: \.self) { d in
+                            Text("\(d) 天").tag(d)
+                        }
+                    }
+                    .disabled(!autoRenewEnabled)
+                    if autoRenewTriggeredToday {
+                        Text("今天已自动拉起过一次 Side 续签")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 } header: {
                     Text("续签")
                 } footer: {
-                    Text("点一下跳到 Side 🅥，自动续签全部个人 ID 签名的 App（包括 LiveContainer 自己，赶在签名到期前续上）。前提：LiveContainer 的安装包已放进 Side 的文件里、签名团队一致；若 Side 里没有它的安装包，会被跳过续不到。")
+                    Text("点一下跳到 Side 🅥，自动续签全部个人 ID 签名的 App（包括 LiveContainer 自己，赶在签名到期前续上）。前提：LiveContainer 的安装包已放进 Side 的文件里、签名团队一致；若 Side 里没有它的安装包，会被跳过续不到。开着“到期自动续签”时，LiveContainer 回到前台发现有 App 在提前天数内到期，会自动跳去 Side 续全部，一天最多一次。")
+                }
+                .onAppear { refreshSignatureExpiries() }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                    refreshSignatureExpiries()
                 }
                 if (store != .Unknown && store != .ADP) || LCUtils.isAppGroupAltStoreLike() {
                     Section{

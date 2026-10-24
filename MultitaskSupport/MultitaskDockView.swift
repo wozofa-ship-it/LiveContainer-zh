@@ -2085,19 +2085,14 @@ struct PinnedAppsStripView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 14) {
                         ForEach(pinnedApps, id: \.self) { app in
-                            VStack(spacing: 4) {
-                                RunningAppIcon(appInfo: app.appInfo)
-                                    .frame(width: 46, height: 46)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                                    .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
-                                Text(app.appInfo.displayName() ?? "")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                    .frame(width: 56)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture { onLaunch(app) }
+                            // 固定区只留图标、不要名字（用户定）：名字
+                            // 字号小又挤，图标本身已够认；点按仍打开
+                            RunningAppIcon(appInfo: app.appInfo)
+                                .frame(width: 46, height: 46)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                                .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
+                                .contentShape(Rectangle())
+                                .onTapGesture { onLaunch(app) }
                         }
                     }
                 }
@@ -2139,13 +2134,15 @@ struct AllAppsListView: View {
                 // 的 App 小图标横排（长按下面列表行固定/取消），
                 // 固定区不随列表滚动
                 PinnedAppsStripView(onLaunch: { app in launchApp(app) }, onClose: { closePanel() })
+                // 状态栏条固定在顶部，不随列表滚动（原来在
+                // ScrollView 里，往下翻卡片后收起/最小化/
+                // 关闭全部就没了，得翻回顶部）
+                RunningAppsStripView { closePanel() }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    // 顶部状态栏（用户要求）：固定按钮 + 已打开
-                    // 的 App 横排，没打开 App 时也显示（固定按钮
-                    // 仍然可用）
-                    RunningAppsStripView { closePanel() }
-                        .id("czfAppPanelTop")
                     ForEach(sortManager.sortedApps, id: \.self) { app in
                         AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
@@ -2157,6 +2154,7 @@ struct AllAppsListView: View {
                     }
                 }
                 .padding()
+                .id("czfAppPanelTop")
             }
             .onChange(of: dockManager.czfAppPanelOpenCounter) { _ in
                 // 每次调出回到初始状态：滚回最顶部（用户定，
@@ -2272,13 +2270,17 @@ struct SourcesPanelView: View {
     var body: some View {
         NavigationView {
             ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）
+                RunningAppsStripView { closePanel() }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    // 顶部状态栏（与 App 面板一致）：固定按钮 +
-                    // 已打开的 App 横排
-                    RunningAppsStripView { closePanel() }
-                        .padding(.horizontal)
-                        .id("czfSourcesPanelTop")
+                    // 滚回顶部锚点（条子已挪到 ScrollView 外面，
+                    // 这里留个 0 高锚点，调出面板仍滚回最顶部）
+                    Color.clear.frame(height: 0).id("czfSourcesPanelTop")
                     if viewModel.sources.isEmpty {
                         Text("还没有添加源")
                             .foregroundColor(.secondary)
@@ -2340,6 +2342,7 @@ struct SourcesPanelView: View {
                 Button("好") { errorMessage = nil }
             } message: {
                 Text(errorMessage ?? "")
+            }
             }
             }
         }
