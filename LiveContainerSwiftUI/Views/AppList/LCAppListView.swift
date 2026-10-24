@@ -147,7 +147,41 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
     }
-    
+
+    // 浏览器式搜索（2026-10-24 用户定）：搜索框不再只滤已装 App，
+    // 输入像网址就把网址放最上面点开直达，其他输入给一行网上搜索，
+    // 点开走应用内浏览器（复用已有的 LCWebView 全屏页）。
+    private var czfSearchText: String {
+        searchContext.debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // 输入像网址才返回可直开的 URL：带 http(s):// 的直接用；不带
+    // 协议的域名（如 example.com、www.example.com）补 https；带空
+    // 格的短语、纯版本号、带大写的包名一律不算网址。
+    private var czfSearchURL: URL? {
+        let q = czfSearchText
+        guard !q.isEmpty, !q.contains(" ") else { return nil }
+        if let comps = URLComponents(string: q), let scheme = comps.scheme?.lowercased(),
+           (scheme == "http" || scheme == "https"), comps.host != nil {
+            return comps.url
+        }
+        // 带其他协议头的（如 ftp://、xxx://）不是网址输入，不补协议
+        if q.contains("://") { return nil }
+        guard q.contains(".") else { return nil }
+        let parts = q.split(separator: ".")
+        let isIPv4 = parts.count == 4 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy({ $0.isNumber }) }
+        guard parts.count >= 2,
+              (isIPv4 || (q == q.lowercased() && parts.last!.count >= 2 && parts.last!.allSatisfy({ $0.isLetter }))) else { return nil }
+        return URL(string: "https://" + q)
+    }
+
+    private var czfSearchWebURL: URL? {
+        let q = czfSearchText
+        guard !q.isEmpty else { return nil }
+        let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+        return URL(string: "https://www.baidu.com/s?wd=" + encoded)
+    }
+
     init() {
         _installOptions = State(initialValue: [])
     }
@@ -164,6 +198,53 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 .hidden()
                 
                 LazyVStack {
+                    // 浏览器式搜索行：有输入时才出现，网址放最上面
+                    if !czfSearchText.isEmpty {
+                        if let url = czfSearchURL {
+                            Button {
+                                Task { await openWebView(urlString: url.absoluteString) }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "globe")
+                                        .font(.title3)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("打开网址")
+                                            .font(.headline)
+                                        Text(url.absoluteString)
+                                            .font(.subheadline)
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(10)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Button {
+                            if let url = czfSearchWebURL {
+                                Task { await openWebView(urlString: url.absoluteString) }
+                            }
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.title3)
+                                Text("在网上搜索“\(czfSearchText)”")
+                                    .font(.headline)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(10)
+                            .background(Color(.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                        }
+                        .buttonStyle(.plain)
+                    }
                     ForEach(filteredApps, id: \.self) { app in
                         LCAppBanner(appModel: app, delegate: self)
                     }

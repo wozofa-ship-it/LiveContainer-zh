@@ -979,18 +979,18 @@ class AppInfoProvider {
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
     // 边缘手势启用带：边缘起手的触摸只有落在屏幕高度的一段
-    // 内才算数，上下不调（防误触）。2026-10-23 用户真机反馈
-    // 调用位置偏低，整带由 28%–68% 上移到 20%–60%（=中档）。
-    // 现在跟设置页的灵敏度三档走：低=带更窄（26%–54%）、
-    // 高=带更宽（10%–70%）。插件侧 CZFDockGesture 仍用中档
-    // 的 20%–60% 分发，宿主这边按档位做最终判定。
+    // 内才算数，上下不调（防误触）。2026-10-24 用户红圈定：
+    // 调用带移到屏幕底部 10%–30% 一段（从顶算 70%–90%，
+    // 别再放中间）；三档同中心 80%，低=带更窄、高=带更宽。
+    // TweakLoader 内手势用中档值，宿主这边按档位做
+    // 最终判定，两边中档必须同值。
     private static var czfEdgeBandTop: CGFloat { czfEdgeBandValues.top }
     private static var czfEdgeBandBottom: CGFloat { czfEdgeBandValues.bottom }
     private static var czfEdgeBandValues: (top: CGFloat, bottom: CGFloat) {
         switch czfEdgeSensitivity {
-        case 0: return (0.26, 0.54)
-        case 2: return (0.10, 0.70)
-        default: return (0.20, 0.60)
+        case 0: return (0.75, 0.85)
+        case 2: return (0.65, 0.95)
+        default: return (0.70, 0.90)
         }
     }
     // 灵敏度档位：0 低 1 中（默认）2 高（设置页可调）
@@ -1053,7 +1053,7 @@ class AppInfoProvider {
         // 其余动作入口（显隐快捷栏/全屏切换）自带场景守卫，在主
         // 界面裸跑时各自落空，不会误触发。
         //
-        // 判定模型与游客插件（CZFDockGesture）对齐：滑动中过门槛即
+        // 判定模型与 TweakLoader 内手势对齐：滑动中过门槛即
         // 触发（不等抬指），终结/被取消时再走一遍宽松兜底（只看物理
         // 结果：净位移方向 + 落点贴边，方向比只留底线）。原来只在
         // .ended 拿全程位移卡 1.5 倍方向比——手指在屏幕上/下部天然
@@ -1080,7 +1080,7 @@ class AppInfoProvider {
         }
     }
 
-    // 终结兜底判定：与 CZFDockGesture 触摸漏斗的终结规则同参。
+    // 终结兜底判定：与 TweakLoader 内手势触摸漏斗的终结规则同参。
     // 只认边缘起手；任意位置起手不兜底（防误触设计不变）。
     private func processGlobalSwipeFallback(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) {
         let dx = translation.x
@@ -1587,30 +1587,13 @@ class AppInfoProvider {
     // 静态方法：宿主一启动（AppDelegate）就调，赶在任何游客 App 启动之前，
     // 避开签名缓存与启动抢跑。管理器初始化时也会再调一次（幂等）。
     static func deployDockGestureTweak() {
+        // 手势不再作为独立插件下发（2026-10-24 用户亲定：别再注入）：
+        // 手势代码已随 TweakLoader 编译进启动器，这里只清掉全局插件
+        // 目录里残留的旧独立文件——不清的话 TweakLoader 还会把它
+        // 当插件 dlopen，双份挂钩、手势触发两次。
         let fm = FileManager.default
-        guard let src = Bundle.main.url(forResource: "CZFDockGesture", withExtension: "dylib") else { return }
-        // 必须比内容：旧版只比大小，同体积的不同构建被误判为已最新，
-        // 插件改了却部署不出去（#91/#93 两次真机测试因此作废）。
-        let srcData = try? Data(contentsOf: src)
-        var copiedDests: [URL] = []
         for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
-            let dest = folder.appendingPathComponent("CZFDockGesture.dylib")
-            let destData = try? Data(contentsOf: dest)
-            if destData != srcData {
-                try? fm.removeItem(at: dest)
-                if (try? fm.copyItem(at: src, to: dest)) != nil {
-                    copiedDests.append(dest)
-                }
-            }
-        }
-        // 只签刚替换的那一个文件：原来整夹 force 重签两个全局目录，
-        // 插件越多越慢，其余文件签名没动过，不陪着重签。
-        if !copiedDests.isEmpty {
-            Task(priority: .userInitiated) {
-                for dest in copiedDests {
-                    try? await LCUtils.signSingleTweakFile(dest)
-                }
-            }
+            try? fm.removeItem(at: folder.appendingPathComponent("CZFDockGesture.dylib"))
         }
     }
 
@@ -2602,29 +2585,55 @@ private struct RunningAppsStripView: View {
     let onSwitch: () -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
-                    dockManager.toggleDockCollapse()
-                    onSwitch()
+        // 没运行 App 时三个按钮均分整行：原来横滑布局里三个
+        // 按钮全挤左边、右边空一大截，怎么看怎么偏；有运行
+        // App 时仍走横滑，不影响
+        Group {
+            if dockManager.apps.isEmpty {
+                HStack {
+                    Spacer()
+                    fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
+                        dockManager.toggleDockCollapse()
+                        onSwitch()
+                    }
+                    Spacer()
+                    fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
+                        dockManager.minimizeAllWindows()
+                        onSwitch()
+                    }
+                    Spacer()
+                    fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
+                        dockManager.closeAllWindows()
+                        onSwitch()
+                    }
+                    Spacer()
                 }
-                fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
-                    dockManager.minimizeAllWindows()
-                    onSwitch()
-                }
-                fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
-                    dockManager.closeAllWindows()
-                    onSwitch()
-                }
-                if !dockManager.apps.isEmpty {
-                    Divider().frame(height: 50)
-                }
-                ForEach(dockManager.apps) { runningApp in
-                    runningAppItem(runningApp)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
+                            dockManager.toggleDockCollapse()
+                            onSwitch()
+                        }
+                        fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
+                            dockManager.minimizeAllWindows()
+                            onSwitch()
+                        }
+                        fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
+                            dockManager.closeAllWindows()
+                            onSwitch()
+                        }
+                        Divider().frame(height: 50)
+                        ForEach(dockManager.apps) { runningApp in
+                            runningAppItem(runningApp)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
         }
         .background(Color(UIColor.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -2771,7 +2780,7 @@ struct AppCardRow: View {
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 7)
                     .background(Color(.systemGray5))
                     .clipShape(Capsule())
@@ -2783,7 +2792,7 @@ struct AppCardRow: View {
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 7)
                     .background(Color(.systemGray5))
                     .clipShape(Capsule())
@@ -2796,7 +2805,7 @@ struct AppCardRow: View {
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 7)
                     .background(Color.blue)
                     .clipShape(Capsule())

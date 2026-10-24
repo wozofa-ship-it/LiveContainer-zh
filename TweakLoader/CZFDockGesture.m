@@ -1,11 +1,15 @@
 // CZFDockGesture.m
-// 快捷栏边缘手势（游客 App 内部版）
+// 快捷栏边缘手势（游客 App 内部版，随 TweakLoader 编译进启动器）
 //
 // 背景：游客 App 的内容是场景托管的远程视图，触摸不经过宿主窗口，
 // 宿主侧装的手势识别器永远收不到 App 内部的触摸（悬浮窗方案 #83/#84
-// 真机验证全屏下基本无效）。本插件随全局 Tweaks 加载进每一个游客 App，
-// 在 App 自己的窗口上装边缘拖动手势，触发后通过 Darwin 跨进程通知
-// 回调宿主进程的 MultitaskDockManager。
+// 真机验证全屏下基本无效）。所以手势代码必须跑在游客进程里，
+// 但 2026-10-24 起不再作为独立插件 dylib 下发：独立文件走插件
+// 加载那一步，签名一出问题就全量弹窗、手势全挂（用户亲定：别再
+// 注入）。本文件改为随 TweakLoader 一起编译进启动器——启动器经
+// 补丁的加载命令随游客启动而载入、签名与启动链路一体，手势不再
+// 经过插件加载，插件签名出问题也拖不垮手势。旧的独立文件由宿主
+// 启动时从全局插件目录清掉，防双份挂钩。
 //
 // 行为：只观察不拦截（cancelsTouchesInView=NO + 同时识别）。
 // 判定用「起手位置 + 当前位移」：滑动过程中持续判定，一过门槛立刻
@@ -40,9 +44,9 @@
 static const void *kCZFDockGestureInstalledKey = &kCZFDockGestureInstalledKey;
 // 起手位置：0=不在边缘 1=左边缘 2=右边缘（shouldReceive 时记录，handler 里判定）
 static NSInteger gCZFStartEdge = 0;
-// 起手高度是否在启用带内：边缘手势只认屏幕高度 20%–60% 一段
-//（2026-10-23 用户反馈调用位置偏低，整带往上提高，与宿主同值）
-//（用户画定，上下两段不调防误触；与宿主侧同一组比例）
+// 起手高度是否在启用带内：边缘手势只认屏幕高度 70%–90% 一段
+//（=距底部 10%–30%，2026-10-24 用户红圈定，别再放中间，
+// 与宿主中档同值；上下两段不调防误触）
 static BOOL gCZFStartInBand = YES;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;
@@ -115,7 +119,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     CGPoint loc = [touch locationInView:window];
     CGFloat width = window.bounds.size.width;
     CGFloat height = window.bounds.size.height;
-    gCZFStartInBand = (loc.y >= height * 0.20 && loc.y <= height * 0.60);
+    gCZFStartInBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
     // 全部接收、只记录起手位置；是否触发在 handler 按起手+位移判定
     if (loc.x >= width - 44) {
         gCZFStartEdge = 2;
@@ -265,10 +269,10 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
             case UITouchPhaseBegan: {
                 // 记录带放宽到 96：抬手兜底规则需要它；移动中的提前
                 // 触发仍只认 64 带内起手（见 Moved 分支）。另加启用
-                // 带（与宿主同比例）：带外起手不记录，手势只认
-                // 屏幕高度中段。
+                // 带（与宿主中档同值）：带外起手不记录，手势只认
+                // 屏幕高度下段（距底部 10%–30%）。
                 CGFloat winHeight = window.bounds.size.height;
-                if (loc.x <= 96 && loc.y >= winHeight * 0.20 && loc.y <= winHeight * 0.60) {
+                if (loc.x <= 96 && loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90) {
                     gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO ];
                 }
                 break;
@@ -378,7 +382,10 @@ static void CZFDockGestureTryInstall(void) {
     }
 }
 
-__attribute__((constructor)) static void CZFDockGestureInit(void) {
+// 由 TweakLoaderConstructor 调用（不是自己的 constructor）：
+// 这样禁注入的 App（dontInjectTweakLoader）不会装手势；且没选
+// 任何插件的游客也能用手势——手势是启动器自带功能，不是插件。
+void CZFDockGestureInstall(void) {
     @autoreleasepool {
         CZFInstallSendEventHook();
         [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeKeyNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {

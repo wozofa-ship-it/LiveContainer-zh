@@ -76,6 +76,11 @@ static void showDlerrAlert(NSString *error) {
     objc_setAssociatedObject(alert, @"window", window, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// 手势不再是独立插件：代码随 TweakLoader 编译进启动器，
+// 这里统一装上（禁注入的 App 直接 return，不装；没选插件的
+// 游客也照样有手势）。
+extern void CZFDockGestureInstall(void);
+
  __attribute__((constructor))
 static void TweakLoaderConstructor() {
     const char *tweakFolderC = getenv("LC_GLOBAL_TWEAKS_FOLDER");
@@ -87,6 +92,8 @@ static void TweakLoaderConstructor() {
         NSLog(@"Skip loading tweaks");
         return;
     }
+
+    CZFDockGestureInstall();
     
     NSMutableArray *errors = [NSMutableArray new];
     

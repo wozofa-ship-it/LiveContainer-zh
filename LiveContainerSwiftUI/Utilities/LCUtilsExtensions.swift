@@ -40,18 +40,24 @@ extension LCUtils {
         if !force, isTweakFolderVerified(tweakFolderUrl) {
             return
         }
-        // 落盘验签指纹（按证书 Team 分键）：冷启动第一次验签时，
-        // 指纹没变的文件跳过 checkCodeSignature 的逐个内核校验——
-        // 插件文件夹文件一多，这是冷启后第一次打开 App 的主要
-        // 耗时之一。换证书（Team 变）后读的是另一张表，旧指纹
-        // 不复用；Team 取不到时整套不用，退回逐个内核校验。
+        // 落盘验签指纹（按证书 Team 分键）：指纹对得上的文件
+        // 就是本 Team 签过的，直接跳过——插件文件夹文件一多，
+        // 这是冷启后第一次打开 App 的主要耗时之一。注意：绝不
+        // 能把“通用验签通过”当成“本 Team 签过”记下来——通用
+        // 验签只认签名本身有效，不认团队，旧团队签的文件也能
+        // 通过，记下来就再也不会重签，游客里 dlopen 照样报签
+        // 名无效（2026-10-24 全量弹窗就是这么来的）。所以没
+        // 指纹的文件必须实签一次，签完再记；只有 Team 取不到、
+        // 根本没表可查时，才退回逐个内核校验（不记指纹）。
+        // v2：v1 表里已混进只验过没签过的文件，换键后下一版
+        // 启动时全部重签一次自愈。
         var fingerprintKey: String? = nil
         var fingerprints: [String: String] = [:]
         var fingerprintsChanged = false
         if let certData = certificateData(),
            let certPassword = LCSharedUtils.certificatePassword(),
            let teamId = getCertTeamId(withKeyData: certData, password: certPassword) {
-            let key = "LCVerifiedTweakFingerprints_\(teamId)"
+            let key = "LCVerifiedTweakFingerprints_\(teamId)_v2"
             fingerprintKey = key
             fingerprints = appGroupUserDefault.dictionary(forKey: key) as? [String: String] ?? [:]
         }
@@ -103,11 +109,9 @@ extension LCUtils {
                 if fingerprints[fileURL.path] == fingerprint {
                     continue;
                 }
-                if checkCodeSignature((fileURL.path as NSString).utf8String) {
-                    if fingerprintKey != nil {
-                        fingerprints[fileURL.path] = fingerprint
-                        fingerprintsChanged = true
-                    }
+                // 没指纹的一律实签（见上文注释）；只有 Team 取不到、
+                // 无表可查时，才用通用验签兜底，且不记指纹。
+                if fingerprintKey == nil, checkCodeSignature((fileURL.path as NSString).utf8String) {
                     continue;
                 }
             }
