@@ -479,6 +479,36 @@ class LCAppModel: ObservableObject, Hashable {
             }
         }
 
+        // 证书缺失时不再静默放行：没证书就签不了任何插件，
+        // signTweaks 顶层 guard 会直接 return，游客照常启动、
+        // 插件用旧签名加载必弹 Failed to load tweaks——
+        // 2026-10-24 全量弹窗的根因就是证书丢了之后这里一直
+        // 静默放行（钥匙串桥签名三版一模一样，证明机上签名
+        // 根本没跑过）。有插件要签却没证书时直接报错，让用户
+        // 去设置里重导证书，而不是放进游客弹看不懂的错。
+        // 没插件的游客、禁注入的游客不受影响，照常启动。
+        if !appInfo.dontInjectTweakLoader,
+           LCSharedUtils.certificatePassword() == nil || LCUtils.certificateData() == nil {
+            let fm = FileManager.default
+            func folderHasTweak(_ url: URL) -> Bool {
+                guard let e = fm.enumerator(at: url, includingPropertiesForKeys: nil) else { return false }
+                for case let u as URL in e {
+                    if u.pathExtension == "dylib" || u.pathExtension == "framework" { return true }
+                }
+                return false
+            }
+            var hasTweaks = folderHasTweak(LCPath.tweakPath)
+            if !hasTweaks {
+                for f in Self.czfSplitTweakFolders(appInfo.tweakFolder) {
+                    let u = appInfo.isShared ? LCPath.lcGroupTweakPath.appendingPathComponent(f) : LCPath.tweakPath.appendingPathComponent(f)
+                    if folderHasTweak(u) { hasTweaks = true; break }
+                }
+            }
+            if hasTweaks {
+                throw "证书缺失，插件无法签名：请到设置 → 证书里重新导入证书，再打开 App"
+            }
+        }
+
         // 逐个签所选的模块文件夹（多选；一个没选就直接收尾，
         // 和旧版 guard 返回等价）
         for tweakFolder in Self.czfSplitTweakFolders(appInfo.tweakFolder) {

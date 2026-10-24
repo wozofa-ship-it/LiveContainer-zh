@@ -2026,9 +2026,12 @@ final class CZFPinnedAppsStore: ObservableObject {
     }
 }
 
-// 面板顶部固定区（美化版）：浅灰圆角卡片 + 「固定」小标题，
-// 固定的 App 小图标（40pt）横排，点按打开；没固定过时卡片
-// 里给一行提示怎么固定
+// 面板顶部固定区：直接贴面板底色排版，不套灰卡；图标
+// 横排，点按打开；没固定过时给一行提示怎么固定。
+// 视觉对齐（2026-10-24）：面板三段统一外边距 16、内容列
+// 对齐到 26（外 16 + 内 10，与运行条、列表行图标列同线）、
+// 段间距统一 10；固定区图标行单独内缩 10，标题行不动
+// （标题对齐卡片背景边，图标对齐图标列）。
 @available(iOS 16.0, *)
 struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
@@ -2042,8 +2045,8 @@ struct PinnedAppsStripView: View {
 
     var body: some View {
         // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
-        // 点名"太丑"的主因）；图标尺寸/圆角与下面运行区、列表
-        // 行统一（46pt / 圆角 12）
+        // 点名"太丑"的主因）；图标 46pt / 圆角 12，与运行区
+        // 相同，列表行图标是 52pt（主行稍大，左边缘对齐即可）
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
                 Image(systemName: "pin.fill")
@@ -2078,12 +2081,15 @@ struct PinnedAppsStripView: View {
                                 .onTapGesture { onLaunch(app) }
                         }
                     }
+                    // 图标列对齐：固定区图标左边缘与运行条、列表行
+                    // 图标列同线（外 16 + 内 10 = 26），标题行不动
+                    .padding(.leading, 10)
                 }
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 4)
+        .padding(.top, 16)
+        .padding(.bottom, 2)
     }
 }
 
@@ -2136,7 +2142,9 @@ struct AllAppsListView: View {
                         })
                     }
                 }
-                .padding()
+                // 列表外边距显式写死 16：与固定区、运行条外边距
+                // 同线；顶部不留白，运行条底 10 就是段间距
+                .padding([.horizontal, .bottom], 16)
                 .id("czfAppPanelTop")
             }
             .onChange(of: dockManager.czfAppPanelOpenCounter) { _ in
@@ -2625,7 +2633,9 @@ private struct RunningAppsStripView: View {
                             dockManager.closeAllWindows()
                             onSwitch()
                         }
-                        Divider().frame(height: 50)
+                        // 分隔线不写死高度，随条子内容撑满（原来
+                        // 50 写死了，比图标+文字矮一截，看着断开）
+                        Divider()
                         ForEach(dockManager.apps) { runningApp in
                             runningAppItem(runningApp)
                         }
