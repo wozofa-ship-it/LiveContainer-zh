@@ -608,7 +608,10 @@ struct LCDataManagementView : View {
                 } message: {
                     Text("将删除当前列表里的全部 \(backupFolderList.count) 个备份，此操作不可恢复")
                 }
-                .confirmationDialog("确定删除这个备份？", isPresented: $showDeleteBackupConfirm, titleVisibility: .visible) {
+                // 单个删除改用 alert：同页已有两个 confirmationDialog
+                // 时确认框会一闪而过（多 dialog 同层抢占）；alert
+                // 在 sheet 内是唯一弹窗，不抢占
+                .alert("确定删除这个备份？", isPresented: $showDeleteBackupConfirm) {
                     Button("删除", role: .destructive) {
                         if let url = pendingDeleteBackupURL {
                             deleteBackup(at: url)
@@ -1902,15 +1905,27 @@ struct LCDataManagementView : View {
     /// 桥文件、符号链接。容器内直接用相对路径，宿主组容器
     /// 记 AppGroup/<组ID>/相对路径，多容器时再加容器文件夹
     /// 名前缀区分
+    /// 容器内相对路径：两边都先解析符号链接再剥前缀。直接字
+    /// 符串剥前缀会撞 /var → /private/var 解析不一致：枚举器
+    /// 回的是 /private/var/...，容器路径是 /var/...，剥完剩
+    /// “/privateLibrary/…”这种脏路径——备份拷到错目录、恢复
+    /// 合并到错目录、tmp/桥文件排除失效、空壳判定失效，登录
+    /// 态全程丢包。这就是 v141–v145 登录态死活回不来的根因
+    static func relativePath(of file: URL, under container: URL) -> String? {
+        let base = container.resolvingSymlinksInPath().path
+        let full = file.resolvingSymlinksInPath().path
+        guard full.hasPrefix(base + "/") else { return nil }
+        return String(full.dropFirst(base.count + 1))
+    }
+
     static func loginTreeInventory(in container: URL, fm: FileManager, prefix: String = "") -> [String: String] {
         var inv: [String: String] = [:]
-        let base = container.path + "/"
         let bridgeFiles: Set<String> = ["CZFKeychainDump.plist", "CZFKeychainImport.plist", "CZFKeychainBridgeStatus.txt"]
         if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey], options: []) {
             for case let file as URL in e {
                 guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]),
-                      v.isRegularFile == true, v.isSymbolicLink != true else { continue }
-                let rel = file.path.replacingOccurrences(of: base, with: "")
+                      v.isRegularFile == true, v.isSymbolicLink != true,
+                      let rel = Self.relativePath(of: file, under: container) else { continue }
                 let top = rel.split(separator: "/").first.map(String.init) ?? ""
                 if top == "tmp" { continue }
                 if !rel.contains("/") && bridgeFiles.contains(rel) { continue }
@@ -2008,13 +2023,12 @@ struct LCDataManagementView : View {
     /// 容器时靠它认组号）
     static func loginStateRelativePaths(in container: URL, fm: FileManager) -> [String] {
         var result: [String] = []
-        let prefix = container.path + "/"
         let bridgeFiles: Set<String> = ["CZFKeychainDump.plist", "CZFKeychainImport.plist", "CZFKeychainBridgeStatus.txt"]
         if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: []) {
             for case let file as URL in e {
                 guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
-                      v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) <= 5 * 1024 * 1024 else { continue }
-                let rel = file.path.replacingOccurrences(of: prefix, with: "")
+                      v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) <= 5 * 1024 * 1024,
+                      let rel = Self.relativePath(of: file, under: container) else { continue }
                 let top = rel.split(separator: "/").first.map(String.init) ?? ""
                 if top == "tmp" { continue }
                 if !rel.contains("/") && bridgeFiles.contains(rel) { continue }
@@ -2029,12 +2043,11 @@ struct LCDataManagementView : View {
     /// 描范围与上面清单一致——整棵容器树、排除 tmp/链接）
     static func loginStateSkippedLargeCount(in container: URL, fm: FileManager) -> Int {
         var count = 0
-        let prefix = container.path + "/"
         if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: []) {
             for case let file as URL in e {
                 guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
-                      v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) > 5 * 1024 * 1024 else { continue }
-                let rel = file.path.replacingOccurrences(of: prefix, with: "")
+                      v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? 0) > 5 * 1024 * 1024,
+                      let rel = Self.relativePath(of: file, under: container) else { continue }
                 if rel.split(separator: "/").first.map(String.init) == "tmp" { continue }
                 count += 1
             }
