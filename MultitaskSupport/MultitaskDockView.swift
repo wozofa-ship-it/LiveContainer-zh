@@ -1897,23 +1897,41 @@ struct CollapsedDockView: View {
     }
 }
 
+// dock 小按钮底色/图标色：必须跟底板实际渲染走——v149 回归
+// 教训：白底白字只在深色底板上可见；iOS 26 液态玻璃底板是
+// 浅色磨砂，白按钮直接隐身（位置还在、能点但看不见）。玻璃
+// 下用状态栏条同款浅灰底 + 深色图标，深色底板下用半透明
+// 浅底 + 白图标，跟底板取同一个判断条件
+private enum CZFDockButtonStyle {
+    static var tile: Color {
+        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+            return Color(.systemGray5)
+        }
+        return Color.white.opacity(0.15)
+    }
+    static var glyph: Color {
+        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+            return .primary
+        }
+        return .white
+    }
+}
+
 // MARK: - Collapse Button View
 @available(iOS 16.0, *)
 struct CollapseButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     
     var body: some View {
-        // #12/#14：dock 按钮统一走深色底板语言——半透明浅底 +
-        // 白图标（原来浅灰底 + 深色图标是面板控制行的配色，
-        // 贴在深色底板上像两块补丁；关闭全部的红底白字已是
-        // 这路语言，这边跟它对齐）
+        // #12/#14：跟底板走（见 CZFDockButtonStyle，玻璃下浅灰
+        // 底 + 深色图标，深色底板下半透明浅底 + 白图标）
         ZStack {
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.15))
+                .fill(CZFDockButtonStyle.tile)
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
 
             Image(systemName: "chevron.down")
-                .foregroundColor(.white)
+                .foregroundColor(CZFDockButtonStyle.glyph)
                 .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
         }
         .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.adaptiveIconSize)
@@ -1926,14 +1944,14 @@ struct MinimizeAllButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     
     var body: some View {
-        // #12/#14：同收起钮，深色底板语言（半透明浅底 + 白图标）
+        // #12/#14：同收起钮，跟底板走（见 CZFDockButtonStyle）
         ZStack {
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.15))
+                .fill(CZFDockButtonStyle.tile)
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
 
             Image(systemName: "rectangle.stack.badge.minus")
-                .foregroundColor(.white)
+                .foregroundColor(CZFDockButtonStyle.glyph)
                 .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
         }
     }

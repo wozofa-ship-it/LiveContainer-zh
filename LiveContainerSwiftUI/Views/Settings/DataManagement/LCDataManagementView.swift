@@ -365,18 +365,21 @@ struct LCDataManagementView : View {
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
         } message: {
-            Text("只备份登录态：存登录令牌和会话文件，体积小、备得快，App 重装后恢复即可免登录——大多数 App 选这个就够。完整备份：连 App 数据整套快照，体积大、备得慢。")
+            Text("只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
         }
+        // 恢复范围弹窗优化：说明不再把两个选项的解释挤成一整段
+        // （扫一眼分不清）；安全的选项只留一句说明，危险的选项
+        // 标红、后果直接写进按钮上，点之前就看得见
         .confirmationDialog("恢复范围", isPresented: $showRestoreScopeDialog, titleVisibility: .visible) {
             Button("只恢复登录态") {
                 startPendingRestore(loginOnly: true)
             }
-            Button("恢复全部数据") {
+            Button("恢复全部数据（会覆盖当前数据）", role: .destructive) {
                 startPendingRestore(loginOnly: false)
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
         } message: {
-            Text("只恢复登录态：只写回登录令牌和会话文件，App 现在的其他数据不动。恢复全部数据：数据容器整套按备份时刻还原，会覆盖当前数据。")
+            Text("只恢复登录态：只写回登录，现有数据不动。")
         }
         .sheet(isPresented: $showBackupSelect) {
             NavigationView {
