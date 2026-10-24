@@ -1720,10 +1720,19 @@ struct LCDataManagementView : View {
                     restoredExtras = true
                 }
                 // 宿主写回在这台机上同样靠不住（同一套 SecItem，
-                // 读恒空的前车之鉴）：快照同时放进目标容器，游客
+                // 读恒空的前车之鉴）：快照同时放进容器，游客
                 // 下次打开时由进程内的钥匙串桥在 App 读令牌之前
-                // 写回——这一份落了地，恢复就算数
-                if (try? data.write(to: target.containerURL.appendingPathComponent("CZFKeychainImport.plist"))) != nil {
+                // 写回——这一份落了地，恢复就算数。写进这个
+                // App 的每一个容器（不只目标容器）：启动时实际
+                // 用哪个容器由 App 状态决定，只写一个出现过文
+                // 件在 A、启动进 B、桥扑空的错位，全写堵死
+                var queuedAny = false
+                for container in app.uiContainers {
+                    if (try? data.write(to: container.containerURL.appendingPathComponent("CZFKeychainImport.plist"))) != nil {
+                        queuedAny = true
+                    }
+                }
+                if queuedAny {
                     outcome.keychainQueued += items.count
                     restoredExtras = true
                 }

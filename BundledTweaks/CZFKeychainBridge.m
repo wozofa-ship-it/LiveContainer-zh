@@ -181,8 +181,12 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
     }
 }
 
-// 写回记账：总数、首个失败状态码，写进状态回执
+// 写回记账：总数、成功数、首个失败状态码，写进状态回执。
+// 成功数单独存静态量：一次启动桥会跑两遍（构造函数+启动
+// 完成通知），第二遍没有排队文件、本地计数是 0，回执要报
+// 的是"最近一次真写回"的战果，不能被第二遍的 0 冲掉
 static NSInteger CZFKBStatImportTotal = 0;
+static NSInteger CZFKBStatImported = 0;
 static OSStatus CZFKBStatImportFail = 0;
 
 static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
@@ -243,11 +247,17 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
     // 处理完就删：失败的条目不值得每次启动重试，免得一份坏
     // 快照反复拖慢打开
     [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    CZFKBStatImported = imported;
     return imported;
 }
 
 static void CZFKBRun(void) {
     @try {
+        // 导出计数每遍重数：一次启动桥跑两遍（构造函数+启动
+        // 完成通知），不重置回执会翻倍（真机出过 exported=200
+        // 而实际 100 条）
+        CZFKBStatEntitled = 0;
+        CZFKBStatAlias = 0;
         // 等 LCBootstrap 把 HOME 指到容器、容器信息文件落位
         // （构造函数跑在引导之前是常态）
         NSString *home = nil;
@@ -299,7 +309,7 @@ static void CZFKBRun(void) {
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
             (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias),
-            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)imported,
+            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)CZFKBStatImported,
             (long)CZFKBStatImportTotal, (int)CZFKBStatImportFail];
         [status writeToFile:[home stringByAppendingPathComponent:@"CZFKeychainBridgeStatus.txt"]
                  atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -308,8 +318,40 @@ static void CZFKBRun(void) {
     }
 }
 
+// 构造阶段的抢先写回（同步）：HOME 已指到容器且有排队文件
+// 时，当场把令牌导进去——赶在 App 自己的代码读钥匙串之
+// 前。后台流程是异步的，App 启动早期读钥匙串可能抢在它前
+// 面，那就是恢复了却显示未登录的时序坑。返回 YES 表示已
+// 处理或无事可做；NO 表示 HOME 还没就位、交给后台长轮询
+static BOOL CZFKBTryImportEarly(void) {
+    @try {
+        const char *envHome = getenv("HOME");
+        if (!envHome) return NO;
+        NSString *home = @(envHome);
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[home stringByAppendingPathComponent:@"LCContainerInfo.plist"]];
+        if (!info) return NO;
+        NSString *importPath = [home stringByAppendingPathComponent:@"CZFKeychainImport.plist"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:importPath]) return YES;
+        NSInteger groupId = [info[@"keychainGroupId"] integerValue];
+        NSString *group = CZFKBGroupString(CZFKBTeamIdentifier(), groupId);
+        if (!group) return NO;
+        CZFKBImport(home, group, home.lastPathComponent);
+        return YES;
+    } @catch (NSException *e) {
+        return NO;
+    }
+}
+
 __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
-    // 挪到后台队列：构造函数里同步等引导会拖住 dyld
+    // 先在构造线程上抢一轮写回（HOME 没就位就短轮询
+    // ≤0.5 秒），抢不到再交给后台长轮询；全量流程（导出+
+    // 回执+兜底导入）照常在后台跑一遍
+    if (!CZFKBTryImportEarly()) {
+        for (int i = 0; i < 10; i++) {
+            usleep(50000);
+            if (CZFKBTryImportEarly()) break;
+        }
+    }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         CZFKBRun();
     });
