@@ -73,6 +73,26 @@ static NSString *CZFKBGroupString(NSString *team, NSInteger groupId) {
     return [NSString stringWithFormat:@"%@.com.kdt.livecontainer.shared.%ld", team, (long)groupId];
 }
 
+// 本进程签名里真正被授权的钥匙串组全表：团队前缀以签名实
+// 际写死的为准（个人 ID 重签后宿主与游客两个进程读到的团
+// 队 ID 可能不一致，靠拼字符串永远对不上）。条目不管躺在
+// 哪个获授权的组里，逐组查都能捞到
+static NSArray<NSString *> *CZFKBEntitledGroups(void) {
+    void *taskSelf = SecTaskCreateFromSelf(NULL);
+    if (!taskSelf) return nil;
+    CFErrorRef error = NULL;
+    CFTypeRef cfans = SecTaskCopyValueForEntitlement(taskSelf, CFSTR("keychain-access-groups"), &error);
+    CFRelease(taskSelf);
+    if (error) CFRelease(error);
+    if (!cfans) return nil;
+    if (CFGetTypeID(cfans) == CFArrayGetTypeID()) {
+        // 所有权交给 ARC：不能先 CFRelease 再返回桥接引用
+        return (__bridge_transfer NSArray *)cfans;
+    }
+    CFRelease(cfans);
+    return nil;
+}
+
 // 只留 plist 能存的类型，引用型字段剔掉（与宿主导出旧逻辑一致）
 static NSDictionary *CZFKBCleanItem(NSDictionary *item, NSString *cls) {
     NSMutableDictionary *clean = [NSMutableDictionary dictionary];
@@ -87,10 +107,14 @@ static NSDictionary *CZFKBCleanItem(NSDictionary *item, NSString *cls) {
     return clean;
 }
 
-static void CZFKBExport(NSString *home, NSString *group, NSString *folderName) {
+// 导出各路的新增条数（去重后按来源记账），写进状态回执
+static NSInteger CZFKBStatEntitled = 0;
+static NSInteger CZFKBStatAlias = 0;
+
+static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *folderName) {
     NSMutableArray *all = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
-    void (^collect)(NSDictionary *) = ^(NSDictionary *query) {
+    void (^collect)(NSDictionary *, NSInteger *) = ^(NSDictionary *query, NSInteger *stat) {
         CFTypeRef result = nil;
         OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
         if (status != errSecSuccess || !result) return;
@@ -111,20 +135,26 @@ static void CZFKBExport(NSString *home, NSString *group, NSString *folderName) {
             if ([seen containsObject:identity]) continue;
             [seen addObject:identity];
             [all addObject:clean];
+            if (stat) *stat += 1;
         }
     };
+    CZFKBStatEntitled = 0;
+    CZFKBStatAlias = 0;
     for (NSString *cls in @[(__bridge NSString *)kSecClassGenericPassword, (__bridge NSString *)kSecClassInternetPassword]) {
-        // 一路按本容器钥匙串组查
-        collect(@{
-            (__bridge NSString *)kSecClass: cls,
-            (__bridge NSString *)kSecAttrAccessGroup: group,
-            (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-            (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
-            (__bridge NSString *)kSecReturnAttributes: @YES,
-            (__bridge NSString *)kSecReturnData: @YES,
-        });
-        // 一路按别名查（存入时盖的容器文件夹名），组号记账
-        // 万一对不上这路也捞得回来
+        // 主路：逐个获授权组查。游客钩子写条目时把组改成本
+        // 容器的组，那个组必在这张表里；团队前缀对不上也不
+        // 影响——表里是签名写死的原串
+        for (NSString *g in entitledGroups) {
+            collect(@{
+                (__bridge NSString *)kSecClass: cls,
+                (__bridge NSString *)kSecAttrAccessGroup: g,
+                (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+                (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
+                (__bridge NSString *)kSecReturnAttributes: @YES,
+                (__bridge NSString *)kSecReturnData: @YES,
+            }, &CZFKBStatEntitled);
+        }
+        // 兜底按别名查（存入时盖的容器文件夹名）
         collect(@{
             (__bridge NSString *)kSecClass: cls,
             @"alis": folderName,
@@ -132,7 +162,7 @@ static void CZFKBExport(NSString *home, NSString *group, NSString *folderName) {
             (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
             (__bridge NSString *)kSecReturnAttributes: @YES,
             (__bridge NSString *)kSecReturnData: @YES,
-        });
+        }, &CZFKBStatAlias);
     }
     // 空的也写：文件存在本身就是"桥跑过、快照为空"的凭据，
     // 宿主据此区分"还没打开过 App"和"真没令牌"
@@ -142,10 +172,11 @@ static void CZFKBExport(NSString *home, NSString *group, NSString *folderName) {
     }
 }
 
-static void CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
+static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
     NSString *path = [home stringByAppendingPathComponent:@"CZFKeychainImport.plist"];
     NSData *data = [NSData dataWithContentsOfFile:path];
-    if (!data) return;
+    if (!data) return 0;
+    NSInteger imported = 0;
     id parsed = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:nil];
     if ([parsed isKindOfClass:NSArray.class]) {
         for (NSDictionary *raw in (NSArray *)parsed) {
@@ -166,6 +197,7 @@ static void CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
             }
             SecItemDelete((__bridge CFDictionaryRef)identity);
             OSStatus status = SecItemAdd((__bridge CFDictionaryRef)item, nil);
+            if (status == errSecSuccess) imported += 1;
             if (status == errSecParam) {
                 // 全量属性写不进：退到最小属性集再试一次（快照
                 // 里可能带着原进程上下文的键，换个进程写会被
@@ -179,13 +211,14 @@ static void CZFKBImport(NSString *home, NSString *group, NSString *folderName) {
                     if (item[k]) minimal[k] = item[k];
                 }
                 SecItemDelete((__bridge CFDictionaryRef)identity);
-                SecItemAdd((__bridge CFDictionaryRef)minimal, nil);
+                if (SecItemAdd((__bridge CFDictionaryRef)minimal, nil) == errSecSuccess) imported += 1;
             }
         }
     }
     // 处理完就删：失败的条目不值得每次启动重试，免得一份坏
     // 快照反复拖慢打开
     [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    return imported;
 }
 
 static void CZFKBRun(void) {
@@ -209,11 +242,41 @@ static void CZFKBRun(void) {
         }
         if (!home) return; // 不在游客容器里（宿主自载等场景），什么都不做
         NSInteger groupId = [info[@"keychainGroupId"] integerValue];
-        NSString *group = CZFKBGroupString(CZFKBTeamIdentifier(), groupId);
-        if (!group) return;
+        NSString *team = CZFKBTeamIdentifier();
+        NSString *group = CZFKBGroupString(team, groupId);
+        NSArray<NSString *> *entitled = CZFKBEntitledGroups();
+        if (!group && entitled.count == 0) return;
         NSString *folderName = home.lastPathComponent;
-        CZFKBImport(home, group, folderName);
-        CZFKBExport(home, group, folderName);
+        // 钩子同款自检：本容器组到底在不在本进程的授权里。
+        // 不在（-34018）= 钩子根本没装上，App 的钥匙串调用
+        // 全部落空、登录只能走文件——回执里写清，不再瞎猜
+        OSStatus probe = 0;
+        if (group) {
+            NSDictionary *probeQuery = @{
+                (__bridge NSString *)kSecClass: (__bridge NSString *)kSecClassGenericPassword,
+                (__bridge NSString *)kSecAttrAccount: @"NonExistentKey",
+                (__bridge NSString *)kSecAttrService: @"NonExistentService",
+                (__bridge NSString *)kSecAttrAccessGroup: group,
+                (__bridge NSString *)kSecReturnData: @NO,
+            };
+            probe = SecItemCopyMatching((__bridge CFDictionaryRef)probeQuery, nil);
+        }
+        NSInteger imported = 0;
+        if (group) {
+            imported = CZFKBImport(home, group, folderName);
+        }
+        CZFKBExport(home, entitled ?: @[], folderName);
+        // 状态回执：宿主备份弹窗直接带出来，桥跑没跑、组对
+        // 不对、条目在不在，一行定案
+        BOOL inEntitled = group && [entitled containsObject:group];
+        NSString *status = [NSString stringWithFormat:
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld） imported=%ld",
+            team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
+            (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
+            (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias),
+            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)imported];
+        [status writeToFile:[home stringByAppendingPathComponent:@"CZFKeychainBridgeStatus.txt"]
+                 atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch (NSException *e) {
         // 桥是配角：任何异常都吞掉，不许拖垮 App 启动
     }

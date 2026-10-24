@@ -1156,7 +1156,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1235,7 +1235,14 @@ struct LCDataManagementView : View {
         // 恒为空（按组/按别名/整表捞五版实测全是 0 条且无错误
         // 码），游客自己导的才作数。快照文件不存在 = 这个 App
         // 装上钥匙串桥之后还没被打开过
+        var bridgeStatus: String? = nil
         for container in app.uiContainers {
+            // 桥的状态回执：备份弹窗要带出来定案（桥跑没跑、
+            // 组对不对、条目在不在），取第一个有的容器那份
+            if bridgeStatus == nil,
+               let s = try? String(contentsOf: container.containerURL.appendingPathComponent("CZFKeychainBridgeStatus.txt"), encoding: .utf8) {
+                bridgeStatus = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
             guard let data = try? Data(contentsOf: dumpURL),
                   let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
@@ -1252,7 +1259,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainHasSnapshot)
+        return (keychainCount, keychainHasSnapshot, bridgeStatus)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1289,7 +1296,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing): (Int, Error?, Int, Bool) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses): (Int, Error?, Int, Bool, [String]) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1298,6 +1305,7 @@ struct LCDataManagementView : View {
                     var backedUpNames: [String] = []
                     var keychainTotal = 0
                     var snapshotMissing = false
+                    var bridgeStatuses: [String] = []
                     for (index, app) in apps.enumerated() {
                         let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                         // 进度回主线程刷新：备到第几个、当前哪个
@@ -1309,6 +1317,9 @@ struct LCDataManagementView : View {
                         if !one.keychainHasSnapshot {
                             snapshotMissing = true
                         }
+                        if let s = one.bridgeStatus {
+                            bridgeStatuses.append("\(name)：\(s)")
+                        }
                         count += 1
                         backedUpNames.append(name)
                     }
@@ -1319,9 +1330,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false))
+                    continuation.resume(returning: (0, error, 0, false, []))
                 }
             }
         }
@@ -1338,6 +1349,9 @@ struct LCDataManagementView : View {
             successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n钥匙串令牌共导出 \(keychainTotal) 条"
             if keychainTotal == 0 {
                 successInfo += snapshotMissing ? "（还没有密匙快照：先打开一次要备份的 App，再回来备份）" : "（密匙快照是空的）"
+            }
+            if !bridgeStatuses.isEmpty {
+                successInfo += "\n—— 桥回执 ——\n" + bridgeStatuses.joined(separator: "\n")
             }
             successInfo += "\n" + backupRoot.path
             successShow = true
