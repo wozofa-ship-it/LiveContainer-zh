@@ -1162,7 +1162,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkippedLarge: Int) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1177,6 +1177,8 @@ struct LCDataManagementView : View {
         }
         try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
         var loginFileCount = 0
+        var loginBreakdown: [String: Int] = [:]
+        var loginSkippedLarge = 0
         // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
@@ -1234,15 +1236,18 @@ struct LCDataManagementView : View {
             }
         }
         } else {
-            // 登录态档：容器只挑会话文件（整 Library 除 Caches、
-            // Documents 只收 ≤5MB 小文件、容器根的
-            // LCContainerInfo.plist——恢复补容器时靠它认组号），
-            // 组容器同规则；钥匙串快照在下面照旧备
+            // 登录态档：容器只挑会话文件（Library/Documents 里
+            // ≤5MB 小文件、容器根的 LCContainerInfo.plist——恢
+            // 复补容器时靠它认组号；单容器封顶 300MB），组容器
+            // 同规则；钥匙串快照在下面照旧备
             for container in app.uiContainers {
                 let srcURL = container.containerURL
                 if fm.fileExists(atPath: srcURL.path) {
                     let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
-                    loginFileCount += Self.copyLoginStateFiles(from: srcURL, to: destURL, fm: fm)
+                    let r = Self.copyLoginStateFiles(from: srcURL, to: destURL, fm: fm)
+                    loginFileCount += r.count
+                    for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
+                    loginSkippedLarge += Self.loginStateSkippedLargeCount(in: srcURL, fm: fm)
                 }
             }
             if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
@@ -1251,7 +1256,10 @@ struct LCDataManagementView : View {
                     let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
                     if fm.fileExists(atPath: src.path) {
                         try? fm.createDirectory(at: groupRoot, withIntermediateDirectories: true)
-                        loginFileCount += Self.copyLoginStateFiles(from: src, to: groupRoot.appendingPathComponent(groupID), fm: fm)
+                        let r = Self.copyLoginStateFiles(from: src, to: groupRoot.appendingPathComponent(groupID), fm: fm)
+                        loginFileCount += r.count
+                        for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
+                        loginSkippedLarge += Self.loginStateSkippedLargeCount(in: src, fm: fm)
                     }
                 }
             }
@@ -1293,7 +1301,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount)
+        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkippedLarge)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1330,7 +1338,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal): (Int, Error?, Int, Bool, [String], Int) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedLargeTotal): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1339,6 +1347,8 @@ struct LCDataManagementView : View {
                     var backedUpNames: [String] = []
                     var keychainTotal = 0
                     var loginFileTotal = 0
+                    var loginBreakdownTotal: [String: Int] = [:]
+                    var loginSkippedLargeTotal = 0
                     var snapshotMissing = false
                     var bridgeStatuses: [String] = []
                     for (index, app) in apps.enumerated() {
@@ -1350,6 +1360,8 @@ struct LCDataManagementView : View {
                         let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
                         keychainTotal += one.keychainCount
                         loginFileTotal += one.loginFileCount
+                        for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
+                        loginSkippedLargeTotal += one.loginSkippedLarge
                         if !one.keychainHasSnapshot {
                             snapshotMissing = true
                         }
@@ -1366,9 +1378,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedLargeTotal))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, [], 0))
+                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0))
                 }
             }
         }
@@ -1386,8 +1398,14 @@ struct LCDataManagementView : View {
             if keychainTotal == 0 {
                 successInfo += snapshotMissing ? "（还没有密匙快照：先打开一次要备份的 App，再回来备份）" : "（密匙快照是空的）"
             }
-            if loginOnly && loginFileTotal > 0 {
-                successInfo += "\n会话文件共 \(loginFileTotal) 个"
+            if loginOnly {
+                if loginFileTotal > 0 {
+                    let dist = loginBreakdownTotal.keys.sorted().map { "\($0) \(loginBreakdownTotal[$0] ?? 0)" }.joined(separator: " · ")
+                    successInfo += "\n会话文件共 \(loginFileTotal) 个（\(dist)）"
+                }
+                if loginSkippedLargeTotal > 0 {
+                    successInfo += "\n超 5MB 跳过 \(loginSkippedLargeTotal) 个文件"
+                }
             }
             if !bridgeStatuses.isEmpty {
                 successInfo += "\n—— 桥回执 ——\n" + bridgeStatuses.joined(separator: "\n")
@@ -1653,6 +1671,15 @@ struct LCDataManagementView : View {
             // 旧名对不上——按原文件夹名把整个容器放回原位并登记：
             // 容器里的 LCContainerInfo.plist 记着钥匙串组号，文件
             // 和钥匙串指向一起回来，登录态才能跟着恢复
+            if isLoginBackup {
+                // 登录态备份的空壳（只剩身份文件、没有会话文件）
+                // 不登记成容器：否则安装后误报「已恢复备份记录」，
+                // 登录其实没回来；钥匙串部分走下面兜底建容器那套
+                let realFiles = Self.loginStateRelativePaths(in: containerFolder, fm: fm).filter { $0 != "LCContainerInfo.plist" }
+                if realFiles.isEmpty {
+                    continue
+                }
+            }
             let root = app.appInfo.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
             let destURL = root.appendingPathComponent(folderName)
             if fm.fileExists(atPath: destURL.path) {
@@ -1825,50 +1852,83 @@ struct LCDataManagementView : View {
         }
     }
 
-    /// 登录态文件的相对路径清单：整 Library（除 Caches 缓存）、
-    /// Documents 里 ≤5MB 的小文件、容器根的 LCContainerInfo.plist。
-    /// 登录令牌的藏身处就这些；视频缓存、草稿媒体等大头不在内
+    /// 登录态文件的相对路径清单：Library 和 Documents 里 ≤5MB
+    /// 的小文件、容器根的 LCContainerInfo.plist。v141 曾把
+    /// Library/Caches 一刀切掉，结果抖音的会话文件正好在里面
+    /// （备份只抓到身份文件 1 个、恢复报 0）——缓存目录也按
+    /// 小文件规则收，大文件（视频分片、草稿媒体）仍排除
     static func loginStateRelativePaths(in container: URL, fm: FileManager) -> [String] {
         var result: [String] = []
         if fm.fileExists(atPath: container.appendingPathComponent("LCContainerInfo.plist").path) {
             result.append("LCContainerInfo.plist")
         }
         let prefix = container.path + "/"
-        let library = container.appendingPathComponent("Library")
-        if let e = fm.enumerator(at: library, includingPropertiesForKeys: [.isRegularFileKey], options: []) {
-            for case let file as URL in e {
-                let rel = file.path.replacingOccurrences(of: prefix, with: "")
-                if rel.hasPrefix("Library/Caches/") { continue }
-                if (try? file.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
-                    result.append(rel)
+        for sub in ["Library", "Documents"] {
+            let dir = container.appendingPathComponent(sub)
+            if let e = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) {
+                for case let file as URL in e {
+                    guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                          v.isRegularFile == true, (v.fileSize ?? 0) <= 5 * 1024 * 1024 else { continue }
+                    result.append(file.path.replacingOccurrences(of: prefix, with: ""))
                 }
-            }
-        }
-        let documents = container.appendingPathComponent("Documents")
-        if let e = fm.enumerator(at: documents, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) {
-            for case let file as URL in e {
-                guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                      v.isRegularFile == true, (v.fileSize ?? 0) <= 5 * 1024 * 1024 else { continue }
-                result.append(file.path.replacingOccurrences(of: prefix, with: ""))
             }
         }
         return result
     }
 
-    /// 把登录态文件从 src 拷到 dst（备份用：dst 是新建的空
-    /// 目录，逐个建中间目录直拷）。返回拷了几个文件
-    @discardableResult
-    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> Int {
+    /// 登录态范围里因超 5MB 被跳过的大文件数（备份弹窗报
+    /// 出来定位用：某 App 会话文件若偏大，在这里现形）
+    static func loginStateSkippedLargeCount(in container: URL, fm: FileManager) -> Int {
         var count = 0
-        for rel in loginStateRelativePaths(in: src, fm: fm) {
-            let s = src.appendingPathComponent(rel)
-            let d = dst.appendingPathComponent(rel)
-            try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if (try? fm.copyItem(at: s, to: d)) != nil {
-                count += 1
+        for sub in ["Library", "Documents"] {
+            let dir = container.appendingPathComponent(sub)
+            if let e = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) {
+                for case let file as URL in e {
+                    guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                          v.isRegularFile == true, (v.fileSize ?? 0) > 5 * 1024 * 1024 else { continue }
+                    count += 1
+                }
             }
         }
         return count
+    }
+
+    /// 路径清单按目录分组计数（备份弹窗报分布用；身份文件
+    /// 不算会话文件，不进分布）
+    static func loginStateDirBreakdown(for paths: [String]) -> [String: Int] {
+        var d: [String: Int] = [:]
+        for rel in paths where rel != "LCContainerInfo.plist" {
+            let dir = rel.contains("/") ? rel.split(separator: "/").dropLast().joined(separator: "/") : "(根目录)"
+            d[dir, default: 0] += 1
+        }
+        return d
+    }
+
+    /// 把登录态文件从 src 拷到 dst（备份用：dst 是新建的空
+    /// 目录，逐个建中间目录直拷）。单容器封顶 300MB，超了
+    /// 的文件跳过不拷。返回（实拷的会话文件数，目录分布）——
+    /// 身份文件照拷但不计入文件数，它不是会话数据
+    @discardableResult
+    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> (count: Int, breakdown: [String: Int]) {
+        var count = 0
+        var bytes = 0
+        var copied: [String] = []
+        let paths = loginStateRelativePaths(in: src, fm: fm)
+        for rel in paths {
+            let s = src.appendingPathComponent(rel)
+            let size = (try? s.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            if bytes + size > 300 * 1024 * 1024 { continue }
+            let d = dst.appendingPathComponent(rel)
+            try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if (try? fm.copyItem(at: s, to: d)) != nil {
+                bytes += size
+                copied.append(rel)
+                if rel != "LCContainerInfo.plist" {
+                    count += 1
+                }
+            }
+        }
+        return (count, loginStateDirBreakdown(for: copied))
     }
 
     /// 把登录态文件合并进现有容器（恢复用：同名文件逐个覆盖，
