@@ -43,6 +43,10 @@ struct LCDataManagementView : View {
     @State private var pendingBackupApps: [LCAppModel] = []
     @State private var scheduleKeychainOnly = false
     @State private var showRestoreSelect = false
+    // 恢复选择 sheet 内的操作反馈（删备份等）：必须挂在 sheet
+    // 自己身上——v143 试过先关 sheet 再弹外层提示，还是有盖住/
+    // 卡住的可能；sheet 内的事就在 sheet 内交代，不跨层弹提示
+    @State private var restoreSheetNotice: String? = nil
     @State private var backupFolderList: [URL] = []
     // 每个备份的体积（打开恢复列表时后台算，行里显示 + 底部总占用）
     @State private var backupSizes: [URL: Int64] = [:]
@@ -515,13 +519,19 @@ struct LCDataManagementView : View {
                 .navigationTitle("lc.settings.restoreBackup".loc)
                 .onAppear {
                     backupFolderList = backupFolders()
+                    restoreSheetNotice = nil
                     refreshBackupSizes()
                 }
                 .toolbar {
                     ToolbarItem(placement: .bottomBar) {
-                        // 备份总占用（备份含整套数据，个头不小，
-                        // 让用户心里有数）
-                        if backupSizes.count == backupFolderList.count && !backupFolderList.isEmpty {
+                        // sheet 内操作反馈优先显示（删备份的结果
+                        // 在这里交代，不跨层弹外层提示）；无反馈
+                        // 时显示备份总占用
+                        if let notice = restoreSheetNotice {
+                            Text(notice)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else if backupSizes.count == backupFolderList.count && !backupFolderList.isEmpty {
                             Text("共 \(backupFolderList.count) 个备份，占用 \(backupSizeText(backupSizes.values.reduce(0, +)))")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -1129,17 +1139,12 @@ struct LCDataManagementView : View {
         do {
             try FileManager.default.removeItem(at: backupURL)
             backupFolderList.removeAll { $0 == backupURL }
-            // 成功/失败提示挂在外层页面上：恢复选择 sheet 还开着
-            // 时弹它会被 sheet 盖住（提示看不见、底下按钮全点
-            // 不动，非得切出去再回来才恢复）——先关 sheet、下一
-            // 轮再弹提示
-            showRestoreSelect = false
-            successInfo = "已删除备份：\(backupURL.lastPathComponent)"
-            DispatchQueue.main.async { self.successShow = true }
+            // 反馈只写 sheet 底部的提示行：不关 sheet、不弹外
+            // 层提示——删完留在列表里继续操作，跨层弹提示是
+            // 前两版按钮点不动的根源
+            restoreSheetNotice = "已删除备份：\(backupURL.lastPathComponent)"
         } catch {
-            showRestoreSelect = false
-            errorInfo = "删除失败：\(LCUtils.czfFriendlyError(error))"
-            DispatchQueue.main.async { self.errorShow = true }
+            restoreSheetNotice = "删除失败：\(LCUtils.czfFriendlyError(error))"
         }
     }
 
@@ -1152,11 +1157,7 @@ struct LCDataManagementView : View {
             }
         }
         backupFolderList = backupFolders()
-        // 同上：先关 sheet 再弹提示，否则提示被 sheet 盖住、
-        // 页面按钮点不动
-        showRestoreSelect = false
-        successInfo = "已删除 \(deleted) 个备份"
-        DispatchQueue.main.async { self.successShow = true }
+        restoreSheetNotice = "已删除 \(deleted) 个备份"
     }
 
     func backupAllApps() async {
