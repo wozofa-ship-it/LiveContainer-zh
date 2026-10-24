@@ -47,19 +47,15 @@ struct LCDataManagementView : View {
     // 自己身上——v143 试过先关 sheet 再弹外层提示，还是有盖住/
     // 卡住的可能；sheet 内的事就在 sheet 内交代，不跨层弹提示
     @State private var restoreSheetNotice: String? = nil
-    // 登录文件对比结果 sheet
-    @State private var showLoginDiffSheet = false
-    @State private var loginDiffText = ""
     @State private var backupFolderList: [URL] = []
+    // iCloud 备份列表（恢复 sheet 里与本地同屏显示，不再先弹
+    // “选哪个文件夹”再进单源列表；未设 iCloud 文件夹时为空）
+    @State private var externalBackupFolderList: [URL] = []
+    // 恢复 sheet 内选 iCloud 文件夹用的 picker（挂在 sheet 内，
+    // 不跟父页的 picker 抢同一个 sheet 位）
+    @State private var showRestoreSheetFolderPicker = false
     // 每个备份的体积（打开恢复列表时后台算，行里显示 + 底部总占用）
     @State private var backupSizes: [URL: Int64] = [:]
-    // 储存总览（进页面时后台算）：备份总占用、已下载 IPA。
-    // 各 App 的数据占用不重复统计——设置里的「存储管理」页
-    // （上游自带）已经有完整的分 App 明细
-    @State private var storageBackupBytes: Int64 = -1
-    @State private var storageIPAFiles: [(url: URL, size: Int64)] = []
-    @State private var storageIPATotal: Int64 = 0
-    @State private var showClearIPAsConfirm = false
     // 设置导出/导入
     @State private var showSettingsImporter = false
     @State private var settingsTransferMessage: String?
@@ -76,8 +72,8 @@ struct LCDataManagementView : View {
     @State private var cacheScheduleMinute = 0
     @State private var showFolderPicker = false
     @State private var externalFolderName: String? = nil
-    @State private var showRestoreSourceDialog = false
-    @State private var restoreFromExternal = false
+    // 注：恢复合一后不再有“选哪个文件夹”dialog，restoreFromExternal
+    // 与 backupFolders() 无参版随之退役（sheet 直接调 fromExternal 版）
     @State private var showDeleteAllBackupsConfirm = false
     @State private var showDeleteBackupConfirm = false
     @State private var pendingDeleteBackupURL: URL? = nil
@@ -95,48 +91,8 @@ struct LCDataManagementView : View {
     var body: some View {
 
         Form {
-            Section {
-                if storageBackupBytes < 0 {
-                    Text("正在统计…")
-                        .foregroundColor(.secondary)
-                } else {
-                    HStack {
-                        Text("备份占用")
-                        Spacer()
-                        Text(backupSizeText(storageBackupBytes))
-                            .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Text("已下载的 IPA（\(storageIPAFiles.count) 个）")
-                        Spacer()
-                        Text(backupSizeText(storageIPATotal))
-                            .foregroundColor(.secondary)
-                    }
-                    if !storageIPAFiles.isEmpty {
-                        Button(role: .destructive) {
-                            showClearIPAsConfirm = true
-                        } label: {
-                            Text("清理已下载的 IPA")
-                        }
-                    }
-                }
-            } header: {
-                Text("储存总览")
-            } footer: {
-                Text("「已下载的 IPA」是在源里点「下载」存进来的安装包，装完就没用了、可以放心清。每个 App 的数据占用明细在设置里的「存储管理」页看。")
-            }
-            .task {
-                computeStorageStats()
-            }
-            .confirmationDialog("删除这 \(storageIPAFiles.count) 个已下载的 IPA（共 \(backupSizeText(storageIPATotal))）？", isPresented: $showClearIPAsConfirm, titleVisibility: .visible) {
-                Button("删除", role: .destructive) {
-                    for item in storageIPAFiles {
-                        try? FileManager.default.removeItem(at: item.url)
-                    }
-                    computeStorageStats()
-                }
-                Button("lc.common.cancel".loc, role: .cancel) {}
-            }
+            // #20：储存总览已拆成独立文件 LCStorageOverviewSection
+            LCStorageOverviewSection()
 
             Section {
                 Button {
@@ -214,18 +170,6 @@ struct LCDataManagementView : View {
 
             }
 
-            Section(header: Text("登录文件定位")) {
-                Text("别再猜筛网：先在登出状态点“记录快照”，再进 App 登录，回来点“对比快照”——登录前后新增/变化的文件就是登录文件。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Button("① 记录快照（登出状态下点）") {
-                    recordLoginSnapshot()
-                }
-                Button("② 对比快照（登录后点）") {
-                    diffLoginSnapshot()
-                }
-            }
-
             Section(header: Text("lc.settings.backupRestore".loc)) {
                 if let progress = backupRestoreProgress {
                     HStack(spacing: 8) {
@@ -262,13 +206,9 @@ struct LCDataManagementView : View {
                     }
                 }
                 Button {
-                    // 设了外部文件夹就先让用户选从哪恢复，没设直接开本地
-                    if Self.externalBackupFolderURL() != nil {
-                        showRestoreSourceDialog = true
-                    } else {
-                        restoreFromExternal = false
-                        showRestoreSelect = true
-                    }
+                    // 恢复合一：直接开 sheet，本地 + iCloud 同屏，
+                    // 不再先弹“选哪个文件夹”
+                    showRestoreSelect = true
                 } label: {
                     Text("lc.settings.restoreBackup".loc)
                 }
@@ -409,39 +349,10 @@ struct LCDataManagementView : View {
         .onAppear {
             onAppearFunc()
         }
-        .sheet(isPresented: $showLoginDiffSheet) {
-            NavigationView {
-                ScrollView {
-                    Text(loginDiffText)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .navigationTitle("登录文件对比结果")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("完成") { showLoginDiffSheet = false }
-                    }
-                }
-            }
-        }
         .sheet(isPresented: $showFolderPicker) {
             FolderPickerView { url in
                 saveExternalBackupFolder(url)
             }
-        }
-        .confirmationDialog("选择从哪个文件夹恢复", isPresented: $showRestoreSourceDialog, titleVisibility: .visible) {
-            Button("本地备份") {
-                restoreFromExternal = false
-                showRestoreSelect = true
-            }
-            Button("iCloud 文件夹（\(externalFolderName ?? "")）") {
-                restoreFromExternal = true
-                showRestoreSelect = true
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {}
         }
         .confirmationDialog("备份范围", isPresented: $showBackupScopeDialog, titleVisibility: .visible) {
             Button("只备份登录态") {
@@ -502,56 +413,39 @@ struct LCDataManagementView : View {
         }
         .sheet(isPresented: $showRestoreSelect) {
             NavigationView {
-                List(backupFolderList, id: \.self) { folderURL in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(folderURL.lastPathComponent)
-                                .font(.headline)
-                            Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                                .lineLimit(1)
+                // 恢复合一：本地 + iCloud 同屏两个区，不再先弹
+                // “选哪个文件夹”再进单源列表；iCloud 未设时
+                // 区里直接给选文件夹入口
+                List {
+                    Section("本地备份") {
+                        if backupFolderList.isEmpty {
+                            Text("暂无备份")
+                                .foregroundColor(.secondary)
                         }
-                        Spacer()
-                        Button {
-                            showRestoreSelect = false
-                            pendingRestoreURL = folderURL
-                            pendingRestoreAll = false
-                            showRestoreScopeDialog = true
-                        } label: {
-                            HStack {
-                                Image(systemName: "arrow.clockwise.circle")
-                                Text("恢复")
-                            }
-                            .foregroundColor(.blue)
+                        ForEach(backupFolderList, id: \.self) { folderURL in
+                            restoreRow(for: folderURL)
                         }
-                        .buttonStyle(.bordered)
-                        Button {
-                            presentExportPicker(for: folderURL)
-                        } label: {
-                            HStack {
-                                Image(systemName: "square.and.arrow.up")
-                                Text("导出")
-                            }
-                            .foregroundColor(.blue)
-                        }
-                        .buttonStyle(.bordered)
                     }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            // 删单个备份原来左滑直接删（删全部反而有
-                            // 确认框）：备份含整套数据/登录态，误滑
-                            // 不可恢复，先确认再删
-                            pendingDeleteBackupURL = folderURL
-                            showDeleteBackupConfirm = true
-                        } label: {
-                            Label("删除", systemImage: "trash")
+                    Section("iCloud 备份") {
+                        if Self.externalBackupFolderURL() != nil {
+                            if externalBackupFolderList.isEmpty {
+                                Text("暂无备份")
+                                    .foregroundColor(.secondary)
+                            }
+                            ForEach(externalBackupFolderList, id: \.self) { folderURL in
+                                restoreRow(for: folderURL)
+                            }
+                        } else {
+                            Button("选择 iCloud 备份文件夹") {
+                                showRestoreSheetFolderPicker = true
+                            }
                         }
                     }
                 }
                 .navigationTitle("lc.settings.restoreBackup".loc)
                 .onAppear {
-                    backupFolderList = backupFolders()
+                    backupFolderList = backupFolders(fromExternal: false)
+                    externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
                     restoreSheetNotice = nil
                     refreshBackupSizes()
                 }
@@ -564,8 +458,8 @@ struct LCDataManagementView : View {
                             Text(notice)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
-                        } else if backupSizes.count == backupFolderList.count && !backupFolderList.isEmpty {
-                            Text("共 \(backupFolderList.count) 个备份，占用 \(backupSizeText(backupSizes.values.reduce(0, +)))")
+                        } else if backupSizes.count == backupFolderList.count + externalBackupFolderList.count && !(backupFolderList.isEmpty && externalBackupFolderList.isEmpty) {
+                            Text("本地 \(backupFolderList.count) 个 · iCloud \(externalBackupFolderList.count) 个，共占用 \(backupSizeText(backupSizes.values.reduce(0, +)))")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -606,7 +500,7 @@ struct LCDataManagementView : View {
                     }
                     Button("lc.common.cancel".loc, role: .cancel) {}
                 } message: {
-                    Text("将删除当前列表里的全部 \(backupFolderList.count) 个备份，此操作不可恢复")
+                    Text("将删除本地 \(backupFolderList.count) 个 + iCloud \(externalBackupFolderList.count) 个备份，此操作不可恢复")
                 }
                 // 单个删除改用 alert：同页已有两个 confirmationDialog
                 // 时确认框会一闪而过（多 dialog 同层抢占）；alert
@@ -623,6 +517,15 @@ struct LCDataManagementView : View {
                     }
                 } message: {
                     Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」，此操作不可恢复")
+                }
+                // iCloud 未设时在 sheet 内直接选文件夹：选完
+                // 刷新 iCloud 列表 + 体积，不用关 sheet 重进
+                .sheet(isPresented: $showRestoreSheetFolderPicker) {
+                    FolderPickerView { url in
+                        saveExternalBackupFolder(url)
+                        externalBackupFolderList = backupFolders(fromExternal: true)
+                        refreshBackupSizes()
+                    }
                 }
             }
         }
@@ -1023,10 +926,6 @@ struct LCDataManagementView : View {
         }
     }
 
-    func backupFolders() -> [URL] {
-        return backupFolders(fromExternal: restoreFromExternal)
-    }
-
     // 备份时间显示：优先 manifest 里记录的，旧备份没有就用 manifest 文件修改时间
     /// 文件夹递归总大小（备份体积显示用，后台线程算）
     static func folderSize(_ url: URL) -> Int64 {
@@ -1054,30 +953,6 @@ struct LCDataManagementView : View {
             return "计算中…"
         }
         return backupSizeText(size)
-    }
-
-    /// 储存总览统计：备份总占用 + Documents 根目录的 .ipa
-    /// （源里「下载」存的位置）。各 App 数据占用不在这里重
-    /// 复统计（「存储管理」页已有）。后台线程算完回主线程
-    func computeStorageStats() {
-        DispatchQueue.global(qos: .utility).async {
-            let fm = FileManager.default
-            let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let backupsBytes = Self.folderSize(docs.appendingPathComponent("Backups"))
-            var ipaFiles: [(url: URL, size: Int64)] = []
-            if let entries = try? fm.contentsOfDirectory(at: docs, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
-                for entry in entries where entry.pathExtension.lowercased() == "ipa" {
-                    let size = (try? entry.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-                    ipaFiles.append((entry, size))
-                }
-            }
-            let ipaTotal = ipaFiles.reduce(0) { $0 + $1.size }
-            DispatchQueue.main.async {
-                storageBackupBytes = backupsBytes
-                storageIPAFiles = ipaFiles
-                storageIPATotal = ipaTotal
-            }
-        }
     }
 
     /// 导出全部 CZF 设置：直接落盘，不再弹保存位置选择——
@@ -1122,15 +997,40 @@ struct LCDataManagementView : View {
         showSettingsTransferAlert = true
     }
 
+    // #23：Backups 树单次遍历——原来恢复 sheet 里每个备份各
+    // 递归扫一遍（N 个备份 = N 遍整树），现在每个根目录只扫
+    // 一遍、按顶级文件夹归集大小；本地 + iCloud 两个根各一遍
     func refreshBackupSizes() {
-        let folders = backupFolderList
+        let localFolders = backupFolderList
+        let externalFolders = externalBackupFolderList
+        let extRoot = Self.externalBackupFolderURL()
         DispatchQueue.global(qos: .utility).async {
             var map: [URL: Int64] = [:]
-            for folder in folders {
-                map[folder] = Self.folderSize(folder)
+            let fm = FileManager.default
+            if let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+                Self.accumulateSizes(into: &map, folders: localFolders, root: docsURL.appendingPathComponent("Backups"), fm: fm)
+            }
+            if let extURL = extRoot {
+                Self.accumulateSizes(into: &map, folders: externalFolders, root: extURL, fm: fm)
             }
             DispatchQueue.main.async {
                 backupSizes = map
+            }
+        }
+    }
+
+    // 单次枚举一棵树、按顶级文件夹归集文件大小。相对路径必须
+    // 先解符号链接再剥前缀：枚举器给 /private/var，容器路径
+    // 是 /var，直接拼会脏（v146 修过的同款坑）
+    static func accumulateSizes(into map: inout [URL: Int64], folders: [URL], root: URL, fm: FileManager) {
+        for folder in folders { map[folder] = 0 }
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) else { return }
+        for case let fileURL as URL in enumerator {
+            guard let rel = Self.relativePath(of: fileURL, under: root),
+                  let top = rel.split(separator: "/").first.map(String.init),
+                  let folder = folders.first(where: { $0.lastPathComponent == top }) else { continue }
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                map[folder, default: 0] += Int64(size)
             }
         }
     }
@@ -1171,10 +1071,61 @@ struct LCDataManagementView : View {
             .sorted { (try? $0.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast > (try? $1.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast) ?? Date.distantPast }
     }
 
+    // 恢复 sheet 的一行：本地/iCloud 两个区共用同一行式样
+    @ViewBuilder
+    func restoreRow(for folderURL: URL) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(folderURL.lastPathComponent)
+                    .font(.headline)
+                Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                showRestoreSelect = false
+                pendingRestoreURL = folderURL
+                pendingRestoreAll = false
+                showRestoreScopeDialog = true
+            } label: {
+                HStack {
+                    Image(systemName: "arrow.clockwise.circle")
+                    Text("恢复")
+                }
+                .foregroundColor(.blue)
+            }
+            .buttonStyle(.bordered)
+            Button {
+                presentExportPicker(for: folderURL)
+            } label: {
+                HStack {
+                    Image(systemName: "square.and.arrow.up")
+                    Text("导出")
+                }
+                .foregroundColor(.blue)
+            }
+            .buttonStyle(.bordered)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                // 删单个备份原来左滑直接删（删全部反而有
+                // 确认框）：备份含整套数据/登录态，误滑
+                // 不可恢复，先确认再删
+                pendingDeleteBackupURL = folderURL
+                showDeleteBackupConfirm = true
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+    }
+
     func deleteBackup(at backupURL: URL) {
         do {
             try FileManager.default.removeItem(at: backupURL)
             backupFolderList.removeAll { $0 == backupURL }
+            externalBackupFolderList.removeAll { $0 == backupURL }
             // 反馈只写 sheet 底部的提示行：不关 sheet、不弹外
             // 层提示——删完留在列表里继续操作，跨层弹提示是
             // 前两版按钮点不动的根源
@@ -1187,13 +1138,28 @@ struct LCDataManagementView : View {
     func deleteAllBackups() {
         let fm = FileManager.default
         var deleted = 0
-        for url in backupFolderList {
+        for url in backupFolderList + externalBackupFolderList {
             if (try? fm.removeItem(at: url)) != nil {
                 deleted += 1
             }
         }
-        backupFolderList = backupFolders()
+        backupFolderList = backupFolders(fromExternal: false)
+        externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
         restoreSheetNotice = "已删除 \(deleted) 个备份"
+    }
+
+    /// 恢复/导出“全部”用的合并列表：本地在前，iCloud 只补
+    /// 本地没有的同名备份（同名以本地为准，本地通常更新；
+    /// 避免同一 App 被旧 iCloud 备份二次覆盖）
+    func mergedBackupFolders() -> [URL] {
+        var seen = Set<String>()
+        var merged: [URL] = []
+        for folder in backupFolderList + externalBackupFolderList {
+            if seen.insert(folder.lastPathComponent).inserted {
+                merged.append(folder)
+            }
+        }
+        return merged
     }
 
     func backupAllApps() async {
@@ -1479,9 +1445,10 @@ struct LCDataManagementView : View {
     /// 一键恢复全部：逐个静默恢复、只在最后弹一个总报告（原
     /// 来每个备份弹一次自己的结果窗，十几个备份要点掉十几层）
     func restoreAllBackups(loginOnly: Bool) async {
+        let merged = mergedBackupFolders()
         var lines: [String] = []
-        for (index, folderURL) in backupFolderList.enumerated() {
-            backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(backupFolderList.count)）"
+        for (index, folderURL) in merged.enumerated() {
+            backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(merged.count)）"
             lines.append(await restoreFromBackup(at: folderURL, presentResult: false, loginOnly: loginOnly))
         }
         backupRestoreProgress = nil
@@ -1564,11 +1531,15 @@ struct LCDataManagementView : View {
             var installRestoredCount = 0
             var installNotFound: [String] = []
             var installFailed: [String] = []
+            // #5：源只拉一次——原来每缺一个 App 就把全部源 JSON
+            // 重新拉一遍（N 个缺 App = N × 全源请求），现在先
+            // 一次拉全表、后面只查表；没缺 App 时不拉
+            let sourceApps = missing.isEmpty ? [] : await fetchAllSourceApps()
             for item in missing {
                 if presentResult {
                     backupRestoreProgress = "正在安装并恢复 \(item.name)（等安装完成）…"
                 }
-                guard let downloadURL = await searchSourceForApp(bundleID: item.bundleID, name: item.name) else {
+                guard let downloadURL = downloadURLForApp(bundleID: item.bundleID, name: item.name, in: sourceApps) else {
                     installNotFound.append(item.name)
                     continue
                 }
@@ -1918,101 +1889,6 @@ struct LCDataManagementView : View {
         return String(full.dropFirst(base.count + 1))
     }
 
-    static func loginTreeInventory(in container: URL, fm: FileManager, prefix: String = "") -> [String: String] {
-        var inv: [String: String] = [:]
-        let bridgeFiles: Set<String> = ["CZFKeychainDump.plist", "CZFKeychainImport.plist", "CZFKeychainBridgeStatus.txt"]
-        if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey], options: []) {
-            for case let file as URL in e {
-                guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]),
-                      v.isRegularFile == true, v.isSymbolicLink != true,
-                      let rel = Self.relativePath(of: file, under: container) else { continue }
-                let top = rel.split(separator: "/").first.map(String.init) ?? ""
-                if top == "tmp" { continue }
-                if !rel.contains("/") && bridgeFiles.contains(rel) { continue }
-                inv[prefix + rel] = "\(v.fileSize ?? 0)-\(v.contentModificationDate?.timeIntervalSince1970 ?? 0)"
-            }
-        }
-        return inv
-    }
-
-    /// 一个 App 当前的登录树清单：各数据容器 + 非隔离时的宿
-    /// 主组容器（登录文件可能在任一边）
-    func currentLoginInventory(for app: LCAppModel, fm: FileManager) -> [String: String] {
-        var inv: [String: String] = [:]
-        for container in app.uiContainers {
-            if fm.fileExists(atPath: container.containerURL.path) {
-                inv.merge(Self.loginTreeInventory(in: container.containerURL, fm: fm, prefix: container.folderName + "/")) { _, new in new }
-            }
-        }
-        if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
-            for gid in Self.appGroupIDs(for: app) {
-                let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(gid)
-                if fm.fileExists(atPath: src.path) {
-                    inv.merge(Self.loginTreeInventory(in: src, fm: fm, prefix: "AppGroup/\(gid)/")) { _, new in new }
-                }
-            }
-        }
-        return inv
-    }
-
-    static func loginSnapshotURL() -> URL? {
-        guard let doc = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
-        return doc.appendingPathComponent("CZFLoginDiff/snapshot.json")
-    }
-
-    /// ① 记录快照：所有 App 当前的登录树清单写进快照文件
-    func recordLoginSnapshot() {
-        let fm = FileManager.default
-        guard let url = Self.loginSnapshotURL() else { return }
-        var snap: [String: [String: String]] = [:]
-        for app in sharedModel.apps + sharedModel.hiddenApps {
-            guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { continue }
-            snap[bid] = currentLoginInventory(for: app, fm: fm)
-        }
-        do {
-            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: snap, options: .prettyPrinted)
-            try data.write(to: url)
-            successInfo = "快照已记录：\(snap.count) 个 App（登出状态）"
-            successShow = true
-        } catch {
-            errorInfo = "快照记录失败：\(LCUtils.czfFriendlyError(error))"
-            errorShow = true
-        }
-    }
-
-    /// ② 对比快照：登录后重扫，与快照比新增/变化的文件
-    /// 就是登录文件（按 App 分组列出，单 App 最多列 60 条）
-    func diffLoginSnapshot() {
-        let fm = FileManager.default
-        guard let url = Self.loginSnapshotURL(),
-              let data = try? Data(contentsOf: url),
-              let snap = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
-            errorInfo = "还没有快照：先在登出状态点“记录快照”"
-            errorShow = true
-            return
-        }
-        var lines: [String] = []
-        for app in sharedModel.apps + sharedModel.hiddenApps {
-            guard let bid = app.appInfo.bundleIdentifier(), let old = snap[bid] else { continue }
-            let cur = currentLoginInventory(for: app, fm: fm)
-            var added: [String] = []
-            var changed: [String] = []
-            for (k, v) in cur {
-                if old[k] == nil { added.append(k) }
-                else if old[k] != v { changed.append(k) }
-            }
-            if added.isEmpty && changed.isEmpty { continue }
-            let name = app.appInfo.displayName() ?? bid
-            lines.append("【\(name)】新增 \(added.count) 个，变化 \(changed.count) 个")
-            let all = (added + changed).sorted()
-            for k in all.prefix(60) { lines.append("  " + k) }
-            if all.count > 60 { lines.append("  ……等共 \(all.count) 个") }
-        }
-        loginDiffText = lines.isEmpty ? "对比完成：没有 App 在登录前后新增/变化文件（快照与现在一致）" : lines.joined(separator: "\n")
-        showLoginDiffSheet = true
-    }
-
     /// 登录态文件清单（递归）：整棵容器树全收——含 tmp、
     /// Caches、符号链接（解析后按真实文件收录，祖先链防
     /// 循环）。完整备份能恢复而登录备份不能，差集只剩这
@@ -2275,35 +2151,42 @@ struct LCDataManagementView : View {
         return (imported, lastStatus)
     }
 
-    /// 从已添加的源中按 bundleID 或名字查找 App 的下载链接
-    func searchSourceForApp(bundleID: String, name: String) async -> URL? {
+    /// #5 配套：已添加的源表一次拉全（恢复未装 App 时调用方
+    /// 先拉一次，后面每个缺 App 只查这张表，不再每 App 重拉全源）
+    func fetchAllSourceApps() async -> [[String: Any]] {
         let defaults = UserDefaults.standard
         let stored = defaults.array(forKey: "LCAltStoreSourceURLs") as? [String] ?? []
+        var all: [[String: Any]] = []
         for urlString in stored {
             guard let sourceURL = URL(string: urlString) else { continue }
             do {
                 let (data, _) = try await CZFVPNManager.hostSession().data(from: sourceURL)
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let apps = json["apps"] as? [[String: Any]] else { continue }
-                for app in apps {
-                    let appBundleID = app["bundleIdentifier"] as? String ?? ""
-                    let appName = app["name"] as? String ?? ""
-                    let match = (!bundleID.isEmpty && appBundleID == bundleID) || (!name.isEmpty && appName == name)
-                    if match {
-                        // 优先取 versions[0].downloadURL，兼容顶层 downloadURL
-                        var downloadString: String? = app["downloadURL"] as? String
-                        if downloadString == nil,
-                           let versions = app["versions"] as? [[String: Any]],
-                           let first = versions.first {
-                            downloadString = first["downloadURL"] as? String
-                        }
-                        if let ds = downloadString, let url = URL(string: ds) {
-                            return url
-                        }
-                    }
-                }
+                all += apps
             } catch {
                 continue
+            }
+        }
+        return all
+    }
+
+    // 纯查表：不碰网络。优先取 versions[0].downloadURL，兼容顶层 downloadURL
+    func downloadURLForApp(bundleID: String, name: String, in sourceApps: [[String: Any]]) -> URL? {
+        for app in sourceApps {
+            let appBundleID = app["bundleIdentifier"] as? String ?? ""
+            let appName = app["name"] as? String ?? ""
+            let match = (!bundleID.isEmpty && appBundleID == bundleID) || (!name.isEmpty && appName == name)
+            if match {
+                var downloadString: String? = app["downloadURL"] as? String
+                if downloadString == nil,
+                   let versions = app["versions"] as? [[String: Any]],
+                   let first = versions.first {
+                    downloadString = first["downloadURL"] as? String
+                }
+                if let ds = downloadString, let url = URL(string: ds) {
+                    return url
+                }
             }
         }
         return nil
@@ -2582,7 +2465,7 @@ struct LCDataManagementView : View {
     }
 
     func presentExportPickerForAll() {
-        let urls = backupFolderList
+        let urls = mergedBackupFolders()
         guard !urls.isEmpty else { return }
         let picker = UIDocumentPickerViewController(forExporting: urls, asCopy: true)
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

@@ -65,7 +65,12 @@ struct LCSettingsView: View {
     @AppStorage("LCSelected32BitEmulator", store: LCUtils.appGroupUserDefault) var selected32BitEmulator : String = ""
     @AppStorage("LCKeepSelectedWhenQuit") var keepSelectedWhenQuit = false
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
-    @AppStorage("LCKeepAliveEnabled") var keepAliveEnabled = false
+    // 保活默认开：掉线根因——开关存在 UserDefaults 里，删了
+    // 重装就归零；以前开着时全局注入、切后台不掉线，重装后
+    // 开关回到关、打开设置页时 onAppear 还会把 dylib 删掉，
+    // 之后一切换后台就被系统挂起断网。默认开 + 启动同步，
+    // 重装后第一次启动即恢复保活；不想保活再手动关
+    @AppStorage("LCKeepAliveEnabled") var keepAliveEnabled = true
     @State var vpnCoreRunning = false
     @State var vpnStatusMessage: String?
     @State var vpnNewNodeText = ""
@@ -681,10 +686,18 @@ struct LCSettingsView: View {
     
     // 保活开关同步：开 → 把内置保活 dylib 放入全局 Tweaks 根目录并立即签名（没签名游客进程加载不了）；
     // 关 → 移出。onAppear 时也会调用一次，补齐/更新文件。
+    // 静态版供 App 启动时同步：只靠设置页 onAppear 的话，
+    // 重装后用户不打开设置页、保活就一直没部署。
     func syncKeepAliveTweak(enabled: Bool) {
+        Self.syncKeepAliveTweak(enabled: enabled, forceSign: true)
+    }
+
+    static func syncKeepAliveTweak(enabled: Bool, forceSign: Bool) {
         let fm = FileManager.default
         guard let src = Bundle.main.url(forResource: "CZFKeepAlive", withExtension: "dylib") else { return }
+        var copied = false
         for folder in [LCPath.tweakPath, LCPath.lcGroupTweakPath] {
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
             let dest = folder.appendingPathComponent("CZFKeepAlive.dylib")
             if enabled {
                 // 同手势插件部署：比内容不比大小，防同体积新构建部署不出去
@@ -692,19 +705,29 @@ struct LCSettingsView: View {
                 let destData = try? Data(contentsOf: dest)
                 if destData != srcData {
                     try? fm.removeItem(at: dest)
-                    try? fm.copyItem(at: src, to: dest)
+                    if (try? fm.copyItem(at: src, to: dest)) != nil {
+                        copied = true
+                    }
                 }
             } else {
                 try? fm.removeItem(at: dest)
             }
         }
-        if enabled {
-            // 拷贝后（或文件已在但可能没签过）强制签一遍全局目录，签好才能被加载
+        if enabled && (forceSign || copied) {
+            // 设置页来时强制签一遍（文件已在但可能没签过）；
+            // 启动同步只在新拷时签，不拖启动
             Task {
                 try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.tweakPath, force: true)
                 try? await LCUtils.signTweaks(tweakFolderUrl: LCPath.lcGroupTweakPath, force: true)
             }
         }
+    }
+
+    /// 启动同步保活：读开关（没存过 = 默认开），部署/移除
+    /// dylib。App 启动即做，不等用户打开设置页
+    static func syncKeepAliveAtLaunch() {
+        let enabled = UserDefaults.standard.object(forKey: "LCKeepAliveEnabled") as? Bool ?? true
+        syncKeepAliveTweak(enabled: enabled, forceSign: false)
     }
 
     /// 订阅导入的实际替换动作：导入按钮（列表为空时直达）和

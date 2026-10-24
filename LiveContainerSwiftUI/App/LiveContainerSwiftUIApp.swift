@@ -89,7 +89,11 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
         } catch {
             NSLog("[LC] error:\(error)")
         }
-        
+
+        // 保活启动同步：重装后开关默认开，第一次启动即把
+        // dylib 部署进全局 Tweaks，不等用户打开设置页
+        LCSettingsView.syncKeepAliveAtLaunch()
+
         DataManager.shared.model.apps = tempApps
         DataManager.shared.model.arm32EmuApps = tempArm32EmuApps
         DataManager.shared.model.hiddenApps = tempHiddenApps

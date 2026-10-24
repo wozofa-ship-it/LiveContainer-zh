@@ -1903,15 +1903,17 @@ struct CollapseButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     
     var body: some View {
-        // 与面板控制行同款：浅灰底 + 深色图标、圆角 12，去掉
-        // 实心灰块和白色描边（旧糖果皮，面板换皮时这边漏了）
+        // #12/#14：dock 按钮统一走深色底板语言——半透明浅底 +
+        // 白图标（原来浅灰底 + 深色图标是面板控制行的配色，
+        // 贴在深色底板上像两块补丁；关闭全部的红底白字已是
+        // 这路语言，这边跟它对齐）
         ZStack {
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.systemGray5))
+                .fill(Color.white.opacity(0.15))
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
 
             Image(systemName: "chevron.down")
-                .foregroundColor(.primary)
+                .foregroundColor(.white)
                 .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
         }
         .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.adaptiveIconSize)
@@ -1924,13 +1926,14 @@ struct MinimizeAllButtonView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     
     var body: some View {
+        // #12/#14：同收起钮，深色底板语言（半透明浅底 + 白图标）
         ZStack {
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.systemGray5))
+                .fill(Color.white.opacity(0.15))
                 .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
 
             Image(systemName: "rectangle.stack.badge.minus")
-                .foregroundColor(.primary)
+                .foregroundColor(.white)
                 .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
         }
     }
@@ -2468,7 +2471,8 @@ private struct SourcePanelRow: View {
                 }
             }
             .frame(width: 48, height: 48)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            // #15：圆角统一 12，跟顶部状态栏条/面板行同款（原来这里 10）
+            .clipShape(RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 4) {
                 Text(app.name)
                     .font(.system(size: 15)).bold()
