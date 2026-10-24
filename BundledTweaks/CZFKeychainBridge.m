@@ -367,4 +367,16 @@ __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
             CZFKBRun();
         });
     }];
+    // 切后台再刷新一次快照：登录往往发生在启动之后，不刷的
+    // 话用户登录完立刻去备份、读到的还是启动时的旧快照
+    // （抖音实测踩过：登录后没重开，导出恒为旧值）
+    static id czfkbBackgroundObserver;
+    czfkbBackgroundObserver = [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidEnterBackgroundNotification"
+                                                      object:nil
+                                                       queue:nil
+                                                  usingBlock:^(NSNotification *note) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            CZFKBRun();
+        });
+    }];
 }

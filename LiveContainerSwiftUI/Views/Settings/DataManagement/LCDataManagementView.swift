@@ -407,28 +407,28 @@ struct LCDataManagementView : View {
             Button("lc.common.cancel".loc, role: .cancel) {}
         }
         .confirmationDialog("备份范围", isPresented: $showBackupScopeDialog, titleVisibility: .visible) {
-            Button("只备份密匙（登录状态）") {
+            Button("只备份登录态") {
                 let apps = pendingBackupApps
-                Task { await backupApps(apps, keychainOnly: true) }
+                Task { await backupApps(apps, loginOnly: true) }
             }
-            Button("数据 + 密匙（完整备份）") {
+            Button("完整备份（数据 + 登录态）") {
                 let apps = pendingBackupApps
-                Task { await backupApps(apps, keychainOnly: false) }
+                Task { await backupApps(apps, loginOnly: false) }
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
         } message: {
-            Text("只备份密匙：只存登录令牌，体积小、备得快，App 重装后恢复即可免登录——大多数 App 选这个就够。完整备份：连 App 数据整套快照，体积大、备得慢。")
+            Text("只备份登录态：存登录令牌和会话文件，体积小、备得快，App 重装后恢复即可免登录——大多数 App 选这个就够。完整备份：连 App 数据整套快照，体积大、备得慢。")
         }
         .confirmationDialog("恢复范围", isPresented: $showRestoreScopeDialog, titleVisibility: .visible) {
-            Button("只恢复密匙（登录状态）") {
-                startPendingRestore(keychainOnly: true)
+            Button("只恢复登录态") {
+                startPendingRestore(loginOnly: true)
             }
             Button("恢复全部数据") {
-                startPendingRestore(keychainOnly: false)
+                startPendingRestore(loginOnly: false)
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
         } message: {
-            Text("只恢复密匙：只写回登录令牌，App 现在的数据不动。恢复全部数据：数据容器整套按备份时刻还原，会覆盖当前数据。")
+            Text("只恢复登录态：只写回登录令牌和会话文件，App 现在的其他数据不动。恢复全部数据：数据容器整套按备份时刻还原，会覆盖当前数据。")
         }
         .sheet(isPresented: $showBackupSelect) {
             NavigationView {
@@ -470,7 +470,7 @@ struct LCDataManagementView : View {
                         VStack(alignment: .leading) {
                             Text(folderURL.lastPathComponent)
                                 .font(.headline)
-                            Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeIsKeychainOnly(folderURL) ? " · 仅密匙" : "")")
+                            Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                                 .lineLimit(1)
@@ -588,8 +588,8 @@ struct LCDataManagementView : View {
                     }
                     Section(header: Text("备份范围")) {
                         Picker("范围", selection: $scheduleKeychainOnly) {
-                            Text("完整（数据+密匙）").tag(false)
-                            Text("只备份密匙").tag(true)
+                            Text("完整（数据+登录态）").tag(false)
+                            Text("只备份登录态").tag(true)
                         }
                         .pickerStyle(.segmented)
                     }
@@ -1162,7 +1162,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, keychainOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1176,6 +1176,7 @@ struct LCDataManagementView : View {
             try? fm.removeItem(at: appBackupURL)
         }
         try fm.createDirectory(at: appBackupURL, withIntermediateDirectories: true)
+        var loginFileCount = 0
         // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
@@ -1192,17 +1193,17 @@ struct LCDataManagementView : View {
             // 是随机 UUID，删后重装会换号，不能靠名字猜
             "dataUUID": app.appInfo.dataUUID ?? "",
             "keychainGroupId": defaultContainer.map { String($0.keychainGroupId) } ?? "",
-            // 备份范围：keychain = 只备了钥匙串（登录令牌），没有
-            // 数据容器和 .app 本体；恢复列表据此打「仅密匙」标，
-            // 恢复时钥匙串靠落默认容器的兜底对上号
-            "scope": keychainOnly ? "keychain" : "full"
+            // 备份范围：login = 登录态档（钥匙串快照 + 会话文件，
+            // 没有 .app 本体和整套数据）；full = 整套都备。恢复
+            // 列表据此打标；旧备份的 keychain（纯钥匙串）照旧认
+            "scope": loginOnly ? "login" : "full"
         ]
         if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
             try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
         }
-        // 只备密匙时跳过 .app 本体、数据容器和组容器（体积大头
-        // 全在这里），只留 manifest + 下面的钥匙串快照
-        if !keychainOnly {
+        // 完整档才整拷 .app 本体、数据容器和组容器（体积大头
+        // 全在这里）；登录态档只挑会话文件，见 else 分支
+        if !loginOnly {
         // 保存 .app bundle 供恢复时参考（iOS 沙盒不允许调用 zip，暂不打包 IPA）
         if let bundlePath = app.appInfo.bundlePath() {
             let bundleURL = URL(fileURLWithPath: bundlePath)
@@ -1232,6 +1233,28 @@ struct LCDataManagementView : View {
                 }
             }
         }
+        } else {
+            // 登录态档：容器只挑会话文件（整 Library 除 Caches、
+            // Documents 只收 ≤5MB 小文件、容器根的
+            // LCContainerInfo.plist——恢复补容器时靠它认组号），
+            // 组容器同规则；钥匙串快照在下面照旧备
+            for container in app.uiContainers {
+                let srcURL = container.containerURL
+                if fm.fileExists(atPath: srcURL.path) {
+                    let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
+                    loginFileCount += Self.copyLoginStateFiles(from: srcURL, to: destURL, fm: fm)
+                }
+            }
+            if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
+                let groupRoot = appBackupURL.appendingPathComponent("AppGroup")
+                for groupID in Self.appGroupIDs(for: app) {
+                    let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
+                    if fm.fileExists(atPath: src.path) {
+                        try? fm.createDirectory(at: groupRoot, withIntermediateDirectories: true)
+                        loginFileCount += Self.copyLoginStateFiles(from: src, to: groupRoot.appendingPathComponent(groupID), fm: fm)
+                    }
+                }
+            }
         }
         // 钥匙串快照（登录令牌本体）：按容器逐个导出。以前令
         // 牌只活在系统钥匙串里、不进备份——同机删重装能靠残
@@ -1270,7 +1293,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainHasSnapshot, bridgeStatus)
+        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1294,7 +1317,7 @@ struct LCDataManagementView : View {
         }
     }
 
-    func backupApps(_ apps: [LCAppModel], keychainOnly: Bool = false) async {
+    func backupApps(_ apps: [LCAppModel], loginOnly: Bool = false) async {
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
             errorInfo = "lc.settings.backupFail".loc
@@ -1307,7 +1330,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses): (Int, Error?, Int, Bool, [String]) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal): (Int, Error?, Int, Bool, [String], Int) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1315,6 +1338,7 @@ struct LCDataManagementView : View {
                     var count = 0
                     var backedUpNames: [String] = []
                     var keychainTotal = 0
+                    var loginFileTotal = 0
                     var snapshotMissing = false
                     var bridgeStatuses: [String] = []
                     for (index, app) in apps.enumerated() {
@@ -1323,8 +1347,9 @@ struct LCDataManagementView : View {
                         DispatchQueue.main.async {
                             self.backupRestoreProgress = "正在备份 \(name)（\(index + 1)/\(apps.count)）"
                         }
-                        let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)
+                        let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
                         keychainTotal += one.keychainCount
+                        loginFileTotal += one.loginFileCount
                         if !one.keychainHasSnapshot {
                             snapshotMissing = true
                         }
@@ -1341,9 +1366,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, []))
+                    continuation.resume(returning: (0, error, 0, false, [], 0))
                 }
             }
         }
@@ -1361,6 +1386,9 @@ struct LCDataManagementView : View {
             if keychainTotal == 0 {
                 successInfo += snapshotMissing ? "（还没有密匙快照：先打开一次要备份的 App，再回来备份）" : "（密匙快照是空的）"
             }
+            if loginOnly && loginFileTotal > 0 {
+                successInfo += "\n会话文件共 \(loginFileTotal) 个"
+            }
             if !bridgeStatuses.isEmpty {
                 successInfo += "\n—— 桥回执 ——\n" + bridgeStatuses.joined(separator: "\n")
             }
@@ -1372,23 +1400,23 @@ struct LCDataManagementView : View {
 
     /// 恢复范围弹窗选完后分发：单个恢复走 pendingRestoreURL，
     /// 一键恢复全部走 pendingRestoreAll（同一个范围套全部）
-    func startPendingRestore(keychainOnly: Bool) {
+    func startPendingRestore(loginOnly: Bool) {
         if pendingRestoreAll {
             pendingRestoreAll = false
-            Task { await restoreAllBackups(keychainOnly: keychainOnly) }
+            Task { await restoreAllBackups(loginOnly: loginOnly) }
         } else if let url = pendingRestoreURL {
             pendingRestoreURL = nil
-            Task { await restoreFromBackup(at: url, keychainOnly: keychainOnly) }
+            Task { await restoreFromBackup(at: url, loginOnly: loginOnly) }
         }
     }
 
     /// 一键恢复全部：逐个静默恢复、只在最后弹一个总报告（原
     /// 来每个备份弹一次自己的结果窗，十几个备份要点掉十几层）
-    func restoreAllBackups(keychainOnly: Bool) async {
+    func restoreAllBackups(loginOnly: Bool) async {
         var lines: [String] = []
         for (index, folderURL) in backupFolderList.enumerated() {
             backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(backupFolderList.count)）"
-            lines.append(await restoreFromBackup(at: folderURL, presentResult: false, keychainOnly: keychainOnly))
+            lines.append(await restoreFromBackup(at: folderURL, presentResult: false, loginOnly: loginOnly))
         }
         backupRestoreProgress = nil
         successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
@@ -1399,7 +1427,7 @@ struct LCDataManagementView : View {
     /// 弹完整报告；false（一键恢复全部逐个调）时不弹窗，返回一行
     /// 摘要给调用方汇总成一个总报告。返回值单个恢复时不用
     @discardableResult
-    func restoreFromBackup(at backupURL: URL, presentResult: Bool = true, keychainOnly: Bool = false) async -> String {
+    func restoreFromBackup(at backupURL: URL, presentResult: Bool = true, loginOnly: Bool = false) async -> String {
         let fm = FileManager.default
         if presentResult {
             backupRestoreProgress = "正在恢复 \(backupURL.lastPathComponent)…"
@@ -1450,7 +1478,7 @@ struct LCDataManagementView : View {
                     missing.append((folder: appFolder, name: appName, bundleID: appBundleID))
                     continue
                 }
-                let outcome = try await Self.restoreOneApp(appFolder: appFolder, app: app, keychainOnly: keychainOnly)
+                let outcome = try await Self.restoreOneApp(appFolder: appFolder, app: app, loginOnly: loginOnly)
                 keychainFoundTotal += outcome.keychainFound
                 keychainQueuedTotal += outcome.keychainQueued
                 keychainImportedTotal += outcome.keychainImported
@@ -1498,7 +1526,7 @@ struct LCDataManagementView : View {
                 }
                 // 再缓 2 秒等安装收尾落稳，然后恢复这个 App 的数据
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                let outcome2 = try await Self.restoreOneApp(appFolder: item.folder, app: installedApp, keychainOnly: keychainOnly)
+                let outcome2 = try await Self.restoreOneApp(appFolder: item.folder, app: installedApp, loginOnly: loginOnly)
                 keychainFoundTotal += outcome2.keychainFound
                 keychainQueuedTotal += outcome2.keychainQueued
                 keychainImportedTotal += outcome2.keychainImported
@@ -1574,13 +1602,16 @@ struct LCDataManagementView : View {
     /// 器名对不上号，按原文件夹名放回原位并登记，登录态才能
     /// 跟着回来（见内注）。做成静态：安装流程装完新 App 后
     /// 也要调它自动恢复备份。
-    static func restoreOneApp(appFolder: URL, app: LCAppModel, keychainOnly: Bool = false) async throws -> RestoreOutcome {
+    static func restoreOneApp(appFolder: URL, app: LCAppModel, loginOnly: Bool = false) async throws -> RestoreOutcome {
         let fm = FileManager.default
+        // 登录态备份的容器里只有半套会话文件，恢复走合并（见
+        // 循环内分支）；完整备份整套替换；只恢复登录态时完整
+        // 备份的容器不进循环，会话文件在下面单独合并
+        let isLoginBackup = Self.backupScope(of: appFolder) == "login"
         // 备份里的容器文件夹（跳过 manifest、.app 本体，
-        // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）。
-        // 仅密匙模式不碰容器：App 现有数据原样保留，只写回令牌
+        // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）
         var containerFolders: [URL] = []
-        if !keychainOnly {
+        if !loginOnly || isLoginBackup {
             containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
                 .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }
         }
@@ -1600,6 +1631,15 @@ struct LCDataManagementView : View {
         for containerFolder in containerFolders {
             let folderName = containerFolder.lastPathComponent
             if let live = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == folderName }) {
+                if isLoginBackup {
+                    // 登录态备份只有半套会话文件：合并进现有
+                    // 容器（同名文件覆盖、其他数据不动），整
+                    // 容器替换会把没备的那半套数据删掉
+                    if Self.mergeLoginStateFiles(from: containerFolder, to: live.containerURL, fm: fm) > 0 {
+                        restoredContainers += 1
+                    }
+                    continue
+                }
                 // 同名容器还在（没删过 App）：原地覆盖
                 let destURL = live.containerURL
                 if fm.fileExists(atPath: destURL.path) {
@@ -1640,13 +1680,36 @@ struct LCDataManagementView : View {
         // 组容器数据写回：和容器、钥匙串是同一时刻的快照，
         // 三处一起回滚，App 读到的才是一套对齐的数据
         let appGroupBackup = appFolder.appendingPathComponent("AppGroup")
-        if !keychainOnly, let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
+        if !loginOnly || isLoginBackup, let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
             for groupFolder in groupFolders {
                 let dest = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupFolder.lastPathComponent)
+                if isLoginBackup && fm.fileExists(atPath: dest.path) {
+                    // 登录态档的组容器同样是半套：合并，不整替
+                    if Self.mergeLoginStateFiles(from: groupFolder, to: dest, fm: fm) > 0 {
+                        restoredExtras = true
+                    }
+                    continue
+                }
                 if fm.fileExists(atPath: dest.path) {
                     try? fm.removeItem(at: dest)
                 }
                 if (try? fm.copyItem(at: groupFolder, to: dest)) != nil {
+                    restoredExtras = true
+                }
+            }
+        }
+        // 完整备份 + 只恢复登录态：整套容器不动，只把备份容器
+        // 里的会话文件合并进现有容器（钥匙串在下面照常写回）；
+        // 容器一个都没有（刚装完）时跳过文件部分，钥匙串兜底
+        // 建容器那套逻辑照旧
+        if loginOnly && !isLoginBackup {
+            let topFolders = (try? fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)) ?? []
+            for folder in topFolders {
+                let n = folder.lastPathComponent
+                if n == "manifest.json" || n.hasSuffix(".app") || n == "AppGroup" || n == "Keychain" { continue }
+                guard let target = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n })
+                        ?? app.uiSelectedContainer ?? app.uiContainers.first else { continue }
+                if Self.mergeLoginStateFiles(from: folder, to: target.containerURL, fm: fm) > 0 {
                     restoredExtras = true
                 }
             }
@@ -1742,14 +1805,91 @@ struct LCDataManagementView : View {
         return outcome
     }
 
-    /// 这份备份是不是「仅密匙」范围（manifest 里的 scope 标记；
-    /// 旧备份没这个字段，一律按完整备份对待）
-    static func backupScopeIsKeychainOnly(_ folderURL: URL) -> Bool {
+    /// 这份备份的范围（manifest 里的 scope 标记；旧备份没有
+    /// 这个字段，一律按完整备份对待，返回空串）
+    static func backupScope(of folderURL: URL) -> String {
         guard let data = try? Data(contentsOf: folderURL.appendingPathComponent("manifest.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
-            return false
+            return ""
         }
-        return json["scope"] == "keychain"
+        return json["scope"] ?? ""
+    }
+
+    /// 备份列表上的范围角标：登录态档和旧的纯钥匙串档分开标，
+    /// 完整备份不标
+    static func backupScopeBadge(_ folderURL: URL) -> String {
+        switch backupScope(of: folderURL) {
+        case "keychain": return " · 仅密匙"
+        case "login": return " · 登录态"
+        default: return ""
+        }
+    }
+
+    /// 登录态文件的相对路径清单：整 Library（除 Caches 缓存）、
+    /// Documents 里 ≤5MB 的小文件、容器根的 LCContainerInfo.plist。
+    /// 登录令牌的藏身处就这些；视频缓存、草稿媒体等大头不在内
+    static func loginStateRelativePaths(in container: URL, fm: FileManager) -> [String] {
+        var result: [String] = []
+        if fm.fileExists(atPath: container.appendingPathComponent("LCContainerInfo.plist").path) {
+            result.append("LCContainerInfo.plist")
+        }
+        let prefix = container.path + "/"
+        let library = container.appendingPathComponent("Library")
+        if let e = fm.enumerator(at: library, includingPropertiesForKeys: [.isRegularFileKey], options: []) {
+            for case let file as URL in e {
+                let rel = file.path.replacingOccurrences(of: prefix, with: "")
+                if rel.hasPrefix("Library/Caches/") { continue }
+                if (try? file.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+                    result.append(rel)
+                }
+            }
+        }
+        let documents = container.appendingPathComponent("Documents")
+        if let e = fm.enumerator(at: documents, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) {
+            for case let file as URL in e {
+                guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                      v.isRegularFile == true, (v.fileSize ?? 0) <= 5 * 1024 * 1024 else { continue }
+                result.append(file.path.replacingOccurrences(of: prefix, with: ""))
+            }
+        }
+        return result
+    }
+
+    /// 把登录态文件从 src 拷到 dst（备份用：dst 是新建的空
+    /// 目录，逐个建中间目录直拷）。返回拷了几个文件
+    @discardableResult
+    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> Int {
+        var count = 0
+        for rel in loginStateRelativePaths(in: src, fm: fm) {
+            let s = src.appendingPathComponent(rel)
+            let d = dst.appendingPathComponent(rel)
+            try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if (try? fm.copyItem(at: s, to: d)) != nil {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// 把登录态文件合并进现有容器（恢复用：同名文件逐个覆盖，
+    /// 容器里其他文件不动；LCContainerInfo.plist 是活容器自己
+    /// 的身份文件，永不覆盖）。返回合并了几个文件
+    @discardableResult
+    static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> Int {
+        var count = 0
+        for rel in loginStateRelativePaths(in: src, fm: fm) {
+            if rel == "LCContainerInfo.plist" { continue }
+            let s = src.appendingPathComponent(rel)
+            let d = dst.appendingPathComponent(rel)
+            try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: d.path) {
+                try? fm.removeItem(at: d)
+            }
+            if (try? fm.copyItem(at: s, to: d)) != nil {
+                count += 1
+            }
+        }
+        return count
     }
 
     /// 备份的版本号与当前已装版本是否不同（版本更新后恢复
@@ -2121,7 +2261,7 @@ struct LCDataManagementView : View {
 
     /// 定时备份的静默核心（静态：同上，主界面打开即查）。判断
     /// 口径：启用 + 选了 App + 今天没备过 + 已到设定时间 →
-    /// 按设定范围（完整/仅密匙）在后台静默备完才记日期，全
+    /// 按设定范围（完整/登录态）在后台静默备完才记日期，全
     /// 失败不记、等下次打开重试。原来走 backupApps 会弹"备
     /// 份完成"窗，定时触发不弹窗更合适
     static func runScheduledBackupIfDue() async {
@@ -2137,7 +2277,7 @@ struct LCDataManagementView : View {
         let calendar = Calendar.current
         let now = Date()
         if calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now) < hour * 60 + minute { return }
-        let keychainOnly = defaults.bool(forKey: "LCScheduleBackupKeychainOnly")
+        let loginOnly = defaults.bool(forKey: "LCScheduleBackupKeychainOnly")
         let model = DataManager.shared.model
         let selected = (model.apps + model.hiddenApps).filter {
             ids.contains($0.appInfo.bundleIdentifier() ?? "")
@@ -2151,7 +2291,7 @@ struct LCDataManagementView : View {
                     let backupRoot = docs.appendingPathComponent("Backups")
                     try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                     for app in selected {
-                        if (try? Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, keychainOnly: keychainOnly)) != nil {
+                        if (try? Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)) != nil {
                             backedUpNames.append(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
                         }
                     }
