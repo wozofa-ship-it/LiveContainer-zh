@@ -47,6 +47,9 @@ struct LCDataManagementView : View {
     // 自己身上——v143 试过先关 sheet 再弹外层提示，还是有盖住/
     // 卡住的可能；sheet 内的事就在 sheet 内交代，不跨层弹提示
     @State private var restoreSheetNotice: String? = nil
+    // 登录文件对比结果 sheet
+    @State private var showLoginDiffSheet = false
+    @State private var loginDiffText = ""
     @State private var backupFolderList: [URL] = []
     // 每个备份的体积（打开恢复列表时后台算，行里显示 + 底部总占用）
     @State private var backupSizes: [URL: Int64] = [:]
@@ -210,7 +213,19 @@ struct LCDataManagementView : View {
                 }
 
             }
-            
+
+            Section(header: Text("登录文件定位")) {
+                Text("别再猜筛网：先在登出状态点“记录快照”，再进 App 登录，回来点“对比快照”——登录前后新增/变化的文件就是登录文件。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Button("① 记录快照（登出状态下点）") {
+                    recordLoginSnapshot()
+                }
+                Button("② 对比快照（登录后点）") {
+                    diffLoginSnapshot()
+                }
+            }
+
             Section(header: Text("lc.settings.backupRestore".loc)) {
                 if let progress = backupRestoreProgress {
                     HStack(spacing: 8) {
@@ -393,6 +408,24 @@ struct LCDataManagementView : View {
 
         .onAppear {
             onAppearFunc()
+        }
+        .sheet(isPresented: $showLoginDiffSheet) {
+            NavigationView {
+                ScrollView {
+                    Text(loginDiffText)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .navigationTitle("登录文件对比结果")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { showLoginDiffSheet = false }
+                    }
+                }
+            }
         }
         .sheet(isPresented: $showFolderPicker) {
             FolderPickerView { url in
@@ -1410,6 +1443,10 @@ struct LCDataManagementView : View {
                 if loginFileTotal > 0 {
                     let dist = loginBreakdownTotal.keys.sorted().map { "\($0) \(loginBreakdownTotal[$0] ?? 0)" }.joined(separator: " · ")
                     successInfo += "\n会话文件共 \(loginFileTotal) 个（\(dist)）"
+                } else {
+                    // 0 也要明说：以前 0 时整行消失，空备份和
+                    // 完整备份在弹窗里长得一样，误导人去恢复
+                    successInfo += "\n会话文件共 0 个"
                 }
                 if loginSkippedLargeTotal > 0 {
                     successInfo += "\n超 5MB 跳过 \(loginSkippedLargeTotal) 个文件"
@@ -1858,6 +1895,107 @@ struct LCDataManagementView : View {
         case "login": return " · 登录态"
         default: return ""
         }
+    }
+
+    /// 登录文件定位：整棵容器树的文件清单（相对路径→大小-
+    /// 修改时间），不设 5MB 门槛——多大都记，只排除 tmp、
+    /// 桥文件、符号链接。容器内直接用相对路径，宿主组容器
+    /// 记 AppGroup/<组ID>/相对路径，多容器时再加容器文件夹
+    /// 名前缀区分
+    static func loginTreeInventory(in container: URL, fm: FileManager, prefix: String = "") -> [String: String] {
+        var inv: [String: String] = [:]
+        let base = container.path + "/"
+        let bridgeFiles: Set<String> = ["CZFKeychainDump.plist", "CZFKeychainImport.plist", "CZFKeychainBridgeStatus.txt"]
+        if let e = fm.enumerator(at: container, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey], options: []) {
+            for case let file as URL in e {
+                guard let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]),
+                      v.isRegularFile == true, v.isSymbolicLink != true else { continue }
+                let rel = file.path.replacingOccurrences(of: base, with: "")
+                let top = rel.split(separator: "/").first.map(String.init) ?? ""
+                if top == "tmp" { continue }
+                if !rel.contains("/") && bridgeFiles.contains(rel) { continue }
+                inv[prefix + rel] = "\(v.fileSize ?? 0)-\(v.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+            }
+        }
+        return inv
+    }
+
+    /// 一个 App 当前的登录树清单：各数据容器 + 非隔离时的宿
+    /// 主组容器（登录文件可能在任一边）
+    func currentLoginInventory(for app: LCAppModel, fm: FileManager) -> [String: String] {
+        var inv: [String: String] = [:]
+        for container in app.uiContainers {
+            if fm.fileExists(atPath: container.containerURL.path) {
+                inv.merge(Self.loginTreeInventory(in: container.containerURL, fm: fm, prefix: container.folderName + "/")) { _, new in new }
+            }
+        }
+        if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
+            for gid in Self.appGroupIDs(for: app) {
+                let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(gid)
+                if fm.fileExists(atPath: src.path) {
+                    inv.merge(Self.loginTreeInventory(in: src, fm: fm, prefix: "AppGroup/\(gid)/")) { _, new in new }
+                }
+            }
+        }
+        return inv
+    }
+
+    static func loginSnapshotURL() -> URL? {
+        guard let doc = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        return doc.appendingPathComponent("CZFLoginDiff/snapshot.json")
+    }
+
+    /// ① 记录快照：所有 App 当前的登录树清单写进快照文件
+    func recordLoginSnapshot() {
+        let fm = FileManager.default
+        guard let url = Self.loginSnapshotURL() else { return }
+        var snap: [String: [String: String]] = [:]
+        for app in sharedModel.apps + sharedModel.hiddenApps {
+            guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { continue }
+            snap[bid] = currentLoginInventory(for: app, fm: fm)
+        }
+        do {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: snap, options: .prettyPrinted)
+            try data.write(to: url)
+            successInfo = "快照已记录：\(snap.count) 个 App（登出状态）"
+            successShow = true
+        } catch {
+            errorInfo = "快照记录失败：\(LCUtils.czfFriendlyError(error))"
+            errorShow = true
+        }
+    }
+
+    /// ② 对比快照：登录后重扫，与快照比新增/变化的文件
+    /// 就是登录文件（按 App 分组列出，单 App 最多列 60 条）
+    func diffLoginSnapshot() {
+        let fm = FileManager.default
+        guard let url = Self.loginSnapshotURL(),
+              let data = try? Data(contentsOf: url),
+              let snap = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
+            errorInfo = "还没有快照：先在登出状态点“记录快照”"
+            errorShow = true
+            return
+        }
+        var lines: [String] = []
+        for app in sharedModel.apps + sharedModel.hiddenApps {
+            guard let bid = app.appInfo.bundleIdentifier(), let old = snap[bid] else { continue }
+            let cur = currentLoginInventory(for: app, fm: fm)
+            var added: [String] = []
+            var changed: [String] = []
+            for (k, v) in cur {
+                if old[k] == nil { added.append(k) }
+                else if old[k] != v { changed.append(k) }
+            }
+            if added.isEmpty && changed.isEmpty { continue }
+            let name = app.appInfo.displayName() ?? bid
+            lines.append("【\(name)】新增 \(added.count) 个，变化 \(changed.count) 个")
+            let all = (added + changed).sorted()
+            for k in all.prefix(60) { lines.append("  " + k) }
+            if all.count > 60 { lines.append("  ……等共 \(all.count) 个") }
+        }
+        loginDiffText = lines.isEmpty ? "对比完成：没有 App 在登录前后新增/变化文件（快照与现在一致）" : lines.joined(separator: "\n")
+        showLoginDiffSheet = true
     }
 
     /// 登录态文件的相对路径清单：整棵容器树里 ≤5MB 的小
