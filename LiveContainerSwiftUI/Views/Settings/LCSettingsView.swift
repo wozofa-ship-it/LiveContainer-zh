@@ -156,19 +156,19 @@ struct LCSettingsView: View {
                 }
                 Section {
                     Button {
-                        // 一键调用 Side 🅥 续签全部：跳它的
+                        // 一键调用 SideInstaller 🅥 续签全部：跳它的
                         // refresh-all 入口，它自己拉隧道续签
                         if let url = URL(string: "sideinstaller://refresh-all") {
                             UIApplication.shared.open(url, options: [:]) { success in
                                 if !success {
-                                    errorInfo = "没能打开 Side 🅥，请确认它已安装"
+                                    errorInfo = "没能打开 SideInstaller 🅥，请确认它已安装"
                                     errorShow = true
                                 }
                             }
                         }
                     } label: {
                         HStack {
-                            Text("一键续签（调用 Side 🅥）")
+                            Text("一键续签（调用 SideInstaller 🅥）")
                             Spacer()
                             Image(systemName: "arrow.clockwise.circle")
                                 .foregroundStyle(.blue)
@@ -199,14 +199,14 @@ struct LCSettingsView: View {
                     }
                     .disabled(!autoRenewEnabled)
                     if autoRenewTriggeredToday {
-                        Text("今天已自动拉起过一次 Side 续签")
+                        Text("今天已自动拉起过一次 SideInstaller 🅥 续签")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 } header: {
                     Text("续签")
                 } footer: {
-                    Text("点一下跳到 Side 🅥，自动续签全部个人 ID 签名的 App（包括 LiveContainer 自己，赶在签名到期前续上）。前提：LiveContainer 的安装包已放进 Side 的文件里、签名团队一致；若 Side 里没有它的安装包，会被跳过续不到。开着“到期自动续签”时，LiveContainer 回到前台发现有 App 在提前天数内到期，会自动跳去 Side 续全部，一天最多一次。")
+                    Text("点一下跳到 SideInstaller 🅥，自动续签全部个人 ID 签名的 App（包括 LiveContainer 自己，赶在签名到期前续上）。前提：LiveContainer 的安装包已放进 SideInstaller 🅥 的文件里、签名团队一致；若 SideInstaller 🅥 里没有它的安装包，会被跳过续不到。开着“到期自动续签”时，LiveContainer 回到前台发现有 App 在提前天数内到期，会自动跳去 SideInstaller 🅥 续全部，一天最多一次。")
                 }
                 .onAppear { refreshSignatureExpiries() }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
