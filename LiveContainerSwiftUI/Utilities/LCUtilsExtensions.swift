@@ -79,30 +79,55 @@ extension LCUtils {
         
         // check if re-sign is needed
         // if signature is invalid, we need to re-sign. dylib and framework's main binary are supported
-        let fileURLs = try fm.contentsOfDirectory(at: tweakFolderUrl, includingPropertiesForKeys: nil)
+        // 递归枚举：加载侧（TweakLoader）会递归进模块夹，签名侧以前只扫顶层，
+        // 嵌套 .dylib 从没签过、加载必弹 Failed to load tweaks。顶层保持原语义
+        // （签失败即 throw）；嵌套尽力签（失败也不拦启动，顶多还是以前的弹窗，
+        // 不比现在差）。框架包只签主可执行文件、不往里钻；已停用的子夹不进。
+        let baseDepth = tweakFolderUrl.pathComponents.count
+        guard let enumerator = fm.enumerator(at: tweakFolderUrl, includingPropertiesForKeys: nil) else {
+            return
+        }
+        var topFiles: [URL] = []
+        var nestedFiles: [URL] = []
 
-        var filesToSign: [URL] = []
-        
-        for fileURL in fileURLs {
-            var fileURL = fileURL
-            let attributes = try fm.attributesOfItem(atPath: fileURL.path)
+        for case let entryURL as URL in enumerator {
+            let isTopLevel = entryURL.pathComponents.count - baseDepth == 1
+            let attributes: [FileAttributeKey: Any]
+            if isTopLevel {
+                attributes = try fm.attributesOfItem(atPath: entryURL.path)
+            } else {
+                // 嵌套项读不到属性就跳过，不拦启动
+                guard let a = try? fm.attributesOfItem(atPath: entryURL.path) else { continue }
+                attributes = a
+            }
             let fileType = attributes[.type] as? FileAttributeType
             if(fileType != FileAttributeType.typeDirectory && fileType != FileAttributeType.typeRegular) {
                 continue
             }
-            let name = fileURL.lastPathComponent
+            let name = entryURL.lastPathComponent
             let baseName = name.hasSuffix(".disabled") ? String(name.dropLast(".disabled".count)) : name
+            var candidate: URL? = nil
             if(fileType == FileAttributeType.typeDirectory) {
-                if(!baseName.hasSuffix(".framework")) {
+                if(baseName.hasSuffix(".framework")) {
+                    guard let frameworkBundle = Bundle(url: entryURL), let executableURL = frameworkBundle.executableURL else {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    candidate = executableURL
+                    enumerator.skipDescendants()
+                } else if(name.hasSuffix(".disabled")) {
+                    enumerator.skipDescendants()
+                    continue
+                } else {
+                    // 普通子夹：往里走，不签夹子本身
                     continue
                 }
-                guard let frameworkBundle = Bundle(url: fileURL), let executableURL = frameworkBundle.executableURL else {
-                    continue
-                }
-                fileURL = executableURL
-            } else if (fileType == FileAttributeType.typeRegular && !baseName.hasSuffix(".dylib")) {
+            } else if (fileType == FileAttributeType.typeRegular && baseName.hasSuffix(".dylib")) {
+                candidate = entryURL
+            } else {
                 continue
             }
+            guard let fileURL = candidate else { continue }
 
             if !force {
                 // 指纹按最终要验的文件现取属性：框架类插件上文把
@@ -114,53 +139,75 @@ extension LCUtils {
                 }
                 // 没指纹的一律实签（见上文注释）。Team 取不到时
                 // fingerprintKey 为 nil、没有任何指纹可比对，同样
-                // 落到 filesToSign 实签——绝不许再用通用验签兜底
+                // 落到待签实签——绝不许再用通用验签兜底
                 // 跳过（通用验签不认团队，旧团队签的文件也能通过）。
             }
 
-            filesToSign.append(fileURL)
-        }
-        
-        if filesToSign.isEmpty {
-            if fingerprintsChanged, let fingerprintKey {
-                appGroupUserDefault.set(fingerprints, forKey: fingerprintKey)
+            if isTopLevel {
+                topFiles.append(fileURL)
+            } else {
+                nestedFiles.append(fileURL)
             }
-            markTweakFolderVerified(tweakFolderUrl)
-            return
         }
-        
-        for fileURL in filesToSign {
-            LCPatchAppBundleFixupARM64eSlice(fileURL)
-        }
-        
-        try await withUnsafeThrowingContinuation({ c in
-            let progress = signFilesWithZSign(with: filesToSign) { success, error in
-                if(success) {
-                    c.resume()
-                    return
+
+        if !topFiles.isEmpty {
+            for fileURL in topFiles {
+                LCPatchAppBundleFixupARM64eSlice(fileURL)
+            }
+
+            try await withUnsafeThrowingContinuation({ c in
+                let progress = signFilesWithZSign(with: topFiles) { success, error in
+                    if(success) {
+                        c.resume()
+                        return
+                    }
+
+                    guard let error else {
+                        c.resume()
+                        return
+                    }
+                    c.resume(throwing: error)
                 }
-                
-                guard let error else {
-                    c.resume()
-                    return
+                if let progress {
+                    progressHandler?(progress)
                 }
-                c.resume(throwing: error)
-            }
-            if let progress {
-                progressHandler?(progress)
-            }
-        })
-        // 刚签完的文件把指纹刷新成签后状态，下次冷启动直接跳过校验
-        if let fingerprintKey {
-            for fileURL in filesToSign {
-                if let attributes = try? fm.attributesOfItem(atPath: fileURL.path) {
-                    fingerprints[fileURL.path] = tweakFingerprint(of: attributes)
-                    fingerprintsChanged = true
+            })
+            // 刚签完的文件把指纹刷新成签后状态，下次冷启动直接跳过校验
+            if let fingerprintKey {
+                for fileURL in topFiles {
+                    if let attributes = try? fm.attributesOfItem(atPath: fileURL.path) {
+                        fingerprints[fileURL.path] = tweakFingerprint(of: attributes)
+                        fingerprintsChanged = true
+                    }
                 }
             }
-            if fingerprintsChanged {
-                appGroupUserDefault.set(fingerprints, forKey: fingerprintKey)
+        }
+
+        if !nestedFiles.isEmpty {
+            for fileURL in nestedFiles {
+                LCPatchAppBundleFixupARM64eSlice(fileURL)
             }
+
+            let nestedOK = await withUnsafeContinuation({ c in
+                let progress = signFilesWithZSign(with: nestedFiles) { success, _ in
+                    c.resume(returning: success)
+                }
+                if let progress {
+                    progressHandler?(progress)
+                }
+            })
+            if nestedOK, let fingerprintKey {
+                for fileURL in nestedFiles {
+                    if let attributes = try? fm.attributesOfItem(atPath: fileURL.path) {
+                        fingerprints[fileURL.path] = tweakFingerprint(of: attributes)
+                        fingerprintsChanged = true
+                    }
+                }
+            }
+        }
+
+        if fingerprintsChanged, let fingerprintKey {
+            appGroupUserDefault.set(fingerprints, forKey: fingerprintKey)
         }
         markTweakFolderVerified(tweakFolderUrl)
     }

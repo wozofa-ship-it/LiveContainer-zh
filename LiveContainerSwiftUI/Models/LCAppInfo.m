@@ -368,29 +368,44 @@
 
     // check if iOS think this app's signature is valid, if so, we can skip any further signature check
     NSString* executablePath = [appPath stringByAppendingPathComponent:infoPlist[@"CFBundleExecutable"]];
+    // 当前证书团队：验签缓存必须同时认团队（见下文），重签完也要记它。
+    // 证书读不出时为 nil，缓存退回只认大小+时间的旧行为，不让启动变慢。
+    NSString *currentTeam = nil;
+    if (LCUtils.certificateData && LCSharedUtils.certificatePassword) {
+        currentTeam = [LCUtils getCertTeamIdWithKeyData:LCUtils.certificateData password:LCSharedUtils.certificatePassword];
+    }
     if(!forceSign) {
-        // 验签缓存：可执行文件大小+修改时间未变则跳过全量验签（大 App 逐页验签耗时）
+        // 验签缓存：可执行文件大小+修改时间未变则跳过全量验签（大 App 逐页验签耗时）。
+        // 但大小+时间不认团队：游客被别的团队重签过（比如换了证书），缓存照样命中、
+        // 跳过重签，插件（本证书签的）进游客就报团队不一致弹窗。所以缓存必须同时认
+        // 团队：存下来的团队 ≠ 当前证书团队时，一律重签对齐；旧记录没存团队时也视为
+        // 不命中，升级后第一次启动重签一次自愈。
         NSDictionary *execAttrs = [fm attributesOfItemAtPath:executablePath error:nil];
         NSNumber *execSize = execAttrs[NSFileSize];
         NSDate *execMtime = execAttrs[NSFileModificationDate];
         if (execSize && execMtime
             && [info[@"LCLastVerifiedExecSize"] isEqual:execSize]
-            && [info[@"LCLastVerifiedExecMtime"] isEqual:execMtime]) {
+            && [info[@"LCLastVerifiedExecMtime"] isEqual:execMtime]
+            && (currentTeam == nil || [info[@"LCLastVerifiedExecTeam"] isEqualToString:currentTeam])) {
             [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
             completetionHandler(YES, nil);
             return;
         }
-        bool signatureValid = checkCodeSignature(executablePath.UTF8String);
-        
-        if(signatureValid) {
-            if (execSize && execMtime) {
-                info[@"LCLastVerifiedExecSize"] = execSize;
-                info[@"LCLastVerifiedExecMtime"] = execMtime;
-                [self save];
+        // 缓存没命中时不再用“通用验签通过”当跳过理由：通用验签只认签名有效、
+        // 不认团队，旧团队签的游客也能通过，跳过就永远不对齐。能重签时一律走重签；
+        // 没证书重签不了时，才退回通用验签（保住没证书游客的旧启动行为）。
+        if (!LCUtils.certificateData) {
+            bool signatureValid = checkCodeSignature(executablePath.UTF8String);
+            if(signatureValid) {
+                if (execSize && execMtime) {
+                    info[@"LCLastVerifiedExecSize"] = execSize;
+                    info[@"LCLastVerifiedExecMtime"] = execMtime;
+                    [self save];
+                }
+                [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
+                completetionHandler(YES, nil);
+                return;
             }
-            [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
-            completetionHandler(YES, nil);
-            return;
         }
     }
     
@@ -410,6 +425,19 @@
                     } else {
                         bool signatureValid = checkCodeSignature(executablePath.UTF8String);
                         if(signatureValid) {
+                            // 重签完把指纹记下来：大小+时间+当前团队，下次启动直接命中缓存、
+                            // 不再重复重签；团队对不上时缓存不命中、自动再对齐。
+                            NSDictionary *newAttrs = [fm attributesOfItemAtPath:executablePath error:nil];
+                            NSNumber *newSize = newAttrs[NSFileSize];
+                            NSDate *newMtime = newAttrs[NSFileModificationDate];
+                            if (newSize && newMtime) {
+                                info[@"LCLastVerifiedExecSize"] = newSize;
+                                info[@"LCLastVerifiedExecMtime"] = newMtime;
+                                if (currentTeam) {
+                                    info[@"LCLastVerifiedExecTeam"] = currentTeam;
+                                }
+                                [self save];
+                            }
                             completetionHandler(YES, [error localizedDescription]);
                         } else {
                             completetionHandler(NO, @"lc.signer.latestCertificateInvalidErr");
