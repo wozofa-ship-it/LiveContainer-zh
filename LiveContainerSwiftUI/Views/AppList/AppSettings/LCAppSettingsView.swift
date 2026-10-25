@@ -401,6 +401,11 @@ struct LCAppSettingsView: View {
                     Text(stats)
                         .font(.caption)
                         .foregroundStyle(.gray)
+                    if CZFVPNManager.proxySelfTestFailed(for: model.appInfo) {
+                        Text("自检 0：代理钩子没装上，流量没走节点，重开 App 再看。")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
             } header: {
                 Text("单App VPN（验证版）")

@@ -633,25 +633,36 @@ public final class CZFVPNManager {
         }
     }
 
-    public static func proxyStatsText(for appInfo: LCAppInfo) -> String? {
-        // 统计文件在插件自己的目录（CZFVPN）里：多选时先找它，
-        // 没有再退第一个文件夹（旧单选行为），都没有才看开关默认
+    /// 读按包名统计文件并解析成 k=v 表；文件没有/读不出返回 nil。
+    /// 统计文件在插件自己的目录（CZFVPN）里：多选时先找它，
+    /// 没有再退第一个文件夹（旧单选行为），都没有才看开关默认
+    private static func proxyStatsDict(for appInfo: LCAppInfo) -> [String: String]? {
         let czfFolders = LCAppModel.czfSplitTweakFolders(appInfo.tweakFolder)
         guard let folderName = czfFolders.first(where: { $0 == "CZFVPN" }) ?? czfFolders.first ?? (isEnabled(for: appInfo) ? "CZFVPN" : nil) else { return nil }
         let base = appInfo.isShared ? LCPath.lcGroupTweakPath : LCPath.tweakPath
         let folder = base.appendingPathComponent(folderName)
-        // 统计按 App 分文件（插件按包名命名）；老版的共用文件兜底
+        // 统计按 App 分文件（插件按包名命名）；按包名文件没有就不显示，
+        // 不再退读老版共用文件——那是各 App 混在一起的老数，显示成当前
+        // App 的就是错数
         let bid = appInfo.bundleIdentifier() ?? ""
-        var url = folder.appendingPathComponent("CZFProxyStats-\(bid).txt")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            url = folder.appendingPathComponent("CZFProxyStats.txt")
-        }
+        let url = folder.appendingPathComponent("CZFProxyStats-\(bid).txt")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         var dict: [String: String] = [:]
         for part in raw.split(separator: " ") {
             let kv = part.split(separator: "=", maxSplits: 1)
             if kv.count == 2 { dict[String(kv[0])] = String(kv[1]) }
         }
+        return dict
+    }
+
+    /// 自检 0 = 钩子没装上、代理没生效；只有统计文件里明确写 0 才报，
+    /// 没文件时不报（那时统计行本身也不显示）
+    public static func proxySelfTestFailed(for appInfo: LCAppInfo) -> Bool {
+        proxyStatsDict(for: appInfo)?["selftest"] == "0"
+    }
+
+    public static func proxyStatsText(for appInfo: LCAppInfo) -> String? {
+        guard let dict = proxyStatsDict(for: appInfo) else { return nil }
         guard let load = dict["load"] else { return nil }
         return "插件统计（加载 \(load) · 自检 \(dict["selftest"] ?? "?")）：解析共 \(dict["gaiPass"] ?? "0") 次（假IP \(dict["gaiFake"] ?? "0")）· 代理连接 \(dict["proxied"] ?? "0") · 失败 \(dict["failed"] ?? "0") · 直连 \(dict["direct"] ?? "0") · 放行 \(dict["pass"] ?? "0") · connectx \(dict["connectx"] ?? "0") · 会话改写 \(dict["swizzled"] ?? "0") · 配置改写 \(dict["cfg"] ?? "0") · 拦QUIC \(dict["quic"] ?? "0")"
     }

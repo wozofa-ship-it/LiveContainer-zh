@@ -427,22 +427,39 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Text(installPreviewText)
         }
         .overlay(alignment: .top) {
-            // 批量安装进行时，App 页顶部的小进度条：装到第几个、
-            // 正在装哪个，一眼能看到（单个安装不显示）
-            if installQueueRunning && installQueueTotal > 1 {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text("队列安装中 \(installQueueDone + 1)/\(installQueueTotal)：\(installQueueCurrent)")
-                        .font(.caption.bold())
-                        .lineLimit(1)
+            VStack(spacing: 6) {
+                // 批量安装进行时，App 页顶部的小进度条：装到第几个、
+                // 正在装哪个，一眼能看到（单个安装不显示）
+                if installQueueRunning && installQueueTotal > 1 {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("队列安装中 \(installQueueDone + 1)/\(installQueueTotal)：\(installQueueCurrent)")
+                            .font(.caption.bold())
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .shadow(radius: 4)
+                    .padding(.top, 6)
+                    .onTapGesture {
+                        queueSheetShow = true
+                    }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial, in: Capsule())
-                .shadow(radius: 4)
-                .padding(.top, 6)
-                .onTapGesture {
-                    queueSheetShow = true
+                // 单个安装进行中又点了安装：排进 pendingInstalls，之前是
+                // 静默的，点完看不出排上了；给一条小提示，当前装完接着装
+                if !pendingInstalls.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("排队中（\(pendingInstalls.count)）：当前装完接着装")
+                            .font(.caption.bold())
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .shadow(radius: 4)
+                    .padding(.top, 6)
                 }
             }
         }

@@ -1071,7 +1071,8 @@ private struct AltStoreSourceSectionView: View {
     let isBatchMode: Bool
     let selectedIDs: Set<String>
     let onToggleSelect: (AltStoreSourceApp) -> Void
-    
+    @State private var showAllApps = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 12) {
@@ -1133,7 +1134,7 @@ private struct AltStoreSourceSectionView: View {
                 )
             } else if let source = item.source, isExpanded || isFiltering {
                 VStack(spacing: 12) {
-                    ForEach(filteredApps[0..<min(50, filteredApps.count)]) { app in
+                    ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))]) { app in
                         LCSourceAppBanner(app: app, source: source, installAction: onInstall, downloadAction: onDownload, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
                     }
                     if filteredApps.isEmpty {
@@ -1143,11 +1144,16 @@ private struct AltStoreSourceSectionView: View {
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                    } else if filteredApps.count > 50 {
+                    } else if filteredApps.count > 50 && !showAllApps {
                         Text("lc.sources.section.tooManyApps".loc)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("展开全部（共 \(filteredApps.count) 个）") {
+                            showAllApps = true
+                        }
+                        .font(.footnote)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             } else if item.isLoading {

@@ -8,6 +8,9 @@
 //          （一行一个 bundle id）时，只给名单里的 App 保活；其他 App
 //          里完全休眠（不注册通知、不碰音频、零损耗）。没这个文件时
 //          维持原行为（所有 App 都保活）。
+// v1.3 优化（减发热）：看门狗加 10 秒容差 —— 系统可把本次唤醒
+//          与其他系统活动合并，少唤醒 CPU；间隔仍 30 秒，恢复
+//          延迟不变（打断恢复走通知快路径，看门狗只是兜底）。
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -79,6 +82,8 @@ static void CZFStartKeepAlive(void) {
                     }
                 } @catch (__unused NSException *e) {}
             }];
+            // v1.3 减发热：容差 10 秒，系统可合并唤醒
+            gWatchdog.tolerance = 10.0;
         }
     } @catch (__unused NSException *e) {}
 }
