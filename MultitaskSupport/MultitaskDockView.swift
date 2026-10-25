@@ -323,6 +323,14 @@ class AppInfoProvider {
             name: UIDevice.orientationDidChangeNotification,
             object: nil
         )
+        // 宿主主界面（App 页）手势不灵的根因：全局滑动识别器只在
+        // updateDockFrame 里装，而宿主主界面从不显示快捷栏，那条
+        // 路一次都不跑，识别器从没装上（LCTabView 注释称 init 里
+        // 装配是错的，init 里只有 Darwin 监听）。init 里直接装：
+        // 当前窗口立刻装上，窗口/场景监听也随之建立，后来的窗口
+        // 自动补装；游客进程里 updateDockFrame 本来就会装，本处
+        // 按窗口去重，不会重复装。
+        setupGlobalSwipeRecognizer()
     }
     
     /// 把窗口宿主视图挂到根视图的第一个子视图上（挂载目标与
@@ -415,6 +423,9 @@ class AppInfoProvider {
         let newFrame = CGRect(x: targetX, y: targetY, width: currentDockWidth, height: dockHeight)
         
         applyNewFrame(newFrame, for: hostingController, animated: animated)
+        // 隐藏折叠 Dock 开着且栏已折叠：整个宿主视图藏掉
+        // （isHidden 才真不挡边缘手势，光透明还占着触摸区）
+        hostingController.view.isHidden = LCUtils.appGroupUserDefault.bool(forKey: "LCHideCollapsedDock") && isCollapsed
     }
 
     // MARK: - Frame Calculation Helpers

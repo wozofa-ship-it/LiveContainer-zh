@@ -1212,7 +1212,9 @@ struct LCDataManagementView : View {
             // 备份范围：login = 登录态档（钥匙串快照 + 会话文件，
             // 没有 .app 本体和整套数据）；full = 整套都备。恢复
             // 列表据此打标；旧备份的 keychain（纯钥匙串）照旧认
-            "scope": loginOnly ? "login" : "full"
+            "scope": loginOnly ? "login" : "full",
+            // 模块选择：删后恢复时写回，免得手动选的模块夹丢了重选
+            "tweakFolder": app.appInfo.tweakFolder ?? ""
         ]
         if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
             try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
@@ -1659,12 +1661,14 @@ struct LCDataManagementView : View {
         // 组号记着备份时的钥匙串组，恢复补容器时照它建
         var manifestDataUUID = ""
         var manifestKeychainGroupId: Int? = nil
+        var manifestTweakFolder = ""
         if let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
             manifestDataUUID = json["dataUUID"] ?? ""
             if let g = json["keychainGroupId"], let gv = Int(g) {
                 manifestKeychainGroupId = gv
             }
+            manifestTweakFolder = json["tweakFolder"] ?? ""
         }
         var restoredContainers = 0
         var newDefaultContainer: LCContainer?
@@ -1724,6 +1728,11 @@ struct LCDataManagementView : View {
             app.uiSelectedContainer = newDefaultContainer
             app.uiDefaultDataFolder = newDefaultContainer.folderName
             app.appInfo.dataUUID = newDefaultContainer.folderName
+        }
+        // 恢复模块选择：manifest 记着备份时的模块夹，写回；
+        // 老备份没有这字段就不动（保持新装默认）
+        if !manifestTweakFolder.isEmpty {
+            app.appInfo.tweakFolder = manifestTweakFolder
         }
         var restoredExtras = false
         // 组容器数据写回：和容器、钥匙串是同一时刻的快照，

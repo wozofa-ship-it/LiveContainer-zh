@@ -99,7 +99,6 @@ struct LCSettingsView: View {
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
     @State var vpnPinging = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
-    @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -584,9 +583,6 @@ struct LCSettingsView: View {
                         }
                         Toggle(isOn: $sharePrivateDataWithLiveProcess) {
                             Text("lc.settings.allowPrivateDataAccess".loc)
-                        }
-                        Toggle(isOn: $disableLiveProcessWatchdog) {
-                            Text("lc.settings.disableWatchdogTermination".loc)
                         }
                         Button {
                             export()
