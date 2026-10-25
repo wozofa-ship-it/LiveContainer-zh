@@ -32,6 +32,23 @@ enum JITEnablerType : Int, CaseIterable, Identifiable {
     }
 }
 
+/// 设置行图标（参考 Minis 设置页语言）：白 glyph + 彩色圆底 30pt，
+/// 跟行高走，Form 里图标列自然对齐。只加在单行简单行上
+/// （按钮/链接/开关/选择器），多行自定义布局（节点列表、签名
+/// 到期行、订阅行）不动，免得挤坏原有排版。
+private struct LCSettingsIcon: View {
+    let systemName: String
+    let color: Color
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundColor(.white)
+            .frame(width: 30, height: 30)
+            .background(color)
+            .clipShape(Circle())
+    }
+}
+
 struct LCSettingsView: View {
     @State var errorShow = false
     @State var errorInfo = ""
@@ -120,23 +137,32 @@ struct LCSettingsView: View {
                             Button {
                                 Task{ await importCertificate() }
                             } label: {
-                                Text("lc.settings.importCertificate".loc)
+                                HStack {
+                                    LCSettingsIcon(systemName: "square.and.arrow.down", color: .blue)
+                                    Text("lc.settings.importCertificate".loc)
+                                }
                             }
                         } else {
                             Button {
                                 Task{ await removeCertificate() }
                             } label: {
-                                Text("lc.settings.removeCertificate".loc)
+                                HStack {
+                                    LCSettingsIcon(systemName: "trash", color: .red)
+                                    Text("lc.settings.removeCertificate".loc)
+                                }
                             }
                         }
                         if store == .AltStore || store == .SideStore {
                             Button {
                                 Task{ await importCertificateFromSideStore() }
                             } label: {
-                                if certificateDataFound {
-                                    Text("lc.settings.refreshCertificateFromStore %@".localizeWithFormat(storeName))
-                                } else {
-                                    Text("lc.settings.importCertificateFromStore %@".localizeWithFormat(storeName))
+                                HStack {
+                                    LCSettingsIcon(systemName: "arrow.clockwise", color: .blue)
+                                    if certificateDataFound {
+                                        Text("lc.settings.refreshCertificateFromStore %@".localizeWithFormat(storeName))
+                                    } else {
+                                        Text("lc.settings.importCertificateFromStore %@".localizeWithFormat(storeName))
+                                    }
                                 }
                             }
                         }
@@ -144,7 +170,10 @@ struct LCSettingsView: View {
                         NavigationLink {
                             LCJITLessDiagnoseView()
                         } label: {
-                            Text("lc.settings.jitlessDiagnose".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "wrench.and.screwdriver", color: .gray)
+                                Text("lc.settings.jitlessDiagnose".loc)
+                            }
                         }
 
                     } header: {
@@ -204,12 +233,14 @@ struct LCSettingsView: View {
                         NavigationLink {
                             LCMultiLCManagementView()
                         } label: {
-                            if sharedModel.multiLCStatus == 0 {
-                                Text("lc.settings.multiLC".loc)
-                            } else if sharedModel.multiLCStatus == 2 {
-                                Text("lc.settings.multiLCIsSecond".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "apps.iphone", color: .blue)
+                                if sharedModel.multiLCStatus == 0 {
+                                    Text("lc.settings.multiLC".loc)
+                                } else if sharedModel.multiLCStatus == 2 {
+                                    Text("lc.settings.multiLCIsSecond".loc)
+                                }
                             }
-                            
                         }
                         .disabled(sharedModel.multiLCStatus == 2)
                         
@@ -217,7 +248,10 @@ struct LCSettingsView: View {
                             NavigationLink {
                                 LCJITLessDiagnoseView()
                             } label: {
-                                Text("lc.settings.jitlessDiagnose".loc)
+                                HStack {
+                                    LCSettingsIcon(systemName: "wrench.and.screwdriver", color: .gray)
+                                    Text("lc.settings.jitlessDiagnose".loc)
+                                }
                             }
                         }
                     } footer: {
@@ -230,7 +264,10 @@ struct LCSettingsView: View {
                         NavigationLink {
                             LCMultitaskSettingView()
                         } label: {
-                            Text("lc.appBanner.multitask".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "rectangle.stack", color: .purple)
+                                Text("lc.appBanner.multitask".loc)
+                            }
                         }
                     } footer: {
                         Text("lc.settings.multitaskDesc".loc)
@@ -240,6 +277,7 @@ struct LCSettingsView: View {
                 Section {
                     if JITEnabler == .SideJITServer || JITEnabler == .JITStreamerEBLegacy {
                         HStack {
+                            LCSettingsIcon(systemName: "globe", color: .blue)
                             Text("lc.settings.JitAddress".loc)
                             Spacer()
                             TextField(JITEnabler == .SideJITServer ? "http://x.x.x.x:8080" : "http://[fd00::]:9172", text: $sideJITServerAddress)
@@ -248,6 +286,7 @@ struct LCSettingsView: View {
                     }
                     if JITEnabler == .SideJITServer {
                         HStack {
+                            LCSettingsIcon(systemName: "iphone", color: .gray)
                             Text("lc.settings.JitUDID".loc)
                             Spacer()
                             TextField("", text: $deviceUDID)
@@ -259,7 +298,10 @@ struct LCSettingsView: View {
                             Text(enablerType.displayName).tag(enablerType)
                         }
                     } label: {
-                        Text("lc.settings.jitEnabler".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "bolt.fill", color: .orange)
+                            Text("lc.settings.jitEnabler".loc)
+                        }
                     }
 
                 } header: {
@@ -275,17 +317,26 @@ struct LCSettingsView: View {
                             Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath!)
                         }
                     } label: {
-                        Text("lc.settings.selected32BitEmulator".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "cpu", color: .purple)
+                            Text("lc.settings.selected32BitEmulator".loc)
+                        }
                     }
                 }
                 
                 Section{
                     Toggle(isOn: $dynamicColors) {
-                        Text("lc.settings.dynamicColors".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "paintpalette.fill", color: .purple)
+                            Text("lc.settings.dynamicColors".loc)
+                        }
                     }
                     if #available(iOS 18.0, *) {
                         Toggle(isOn: $darkModeIcon) {
-                            Text("lc.settings.darkModeIcon".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "moon.fill", color: .indigo)
+                                Text("lc.settings.darkModeIcon".loc)
+                            }
                         }
                     }
                     
@@ -296,7 +347,10 @@ struct LCSettingsView: View {
                 }
                 Section{
                     Toggle(isOn: $frameShortIcon) {
-                        Text("lc.settings.FrameIcon".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "plus.app", color: .green)
+                            Text("lc.settings.FrameIcon".loc)
+                        }
                     }
                 } header: {
                     Text("lc.common.miscellaneous".loc)
@@ -306,7 +360,10 @@ struct LCSettingsView: View {
                 
                 Section {
                     Toggle(isOn: $silentSwitchApp) {
-                        Text("lc.settings.silentSwitchApp".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "eye.slash", color: .gray)
+                            Text("lc.settings.silentSwitchApp".loc)
+                        }
                     }
                 } footer: {
                     Text("lc.settings.silentSwitchAppDesc".loc)
@@ -314,7 +371,10 @@ struct LCSettingsView: View {
                 
                 Section {
                     Toggle(isOn: $silentOpenWebPage) {
-                        Text("lc.settings.silentOpenWebPage".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "globe", color: .teal)
+                            Text("lc.settings.silentOpenWebPage".loc)
+                        }
                     }
                 } footer: {
                     Text("lc.settings.silentOpenWebPageDesc".loc)
@@ -323,7 +383,10 @@ struct LCSettingsView: View {
                 if sharedModel.isHiddenAppUnlocked {
                     Section {
                         Toggle(isOn: $strictHiding) {
-                            Text("lc.settings.strictHiding".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "hand.raised.fill", color: .red)
+                                Text("lc.settings.strictHiding".loc)
+                            }
                         }
                     } footer: {
                         Text("lc.settings.strictHidingDesc".loc)
@@ -332,7 +395,10 @@ struct LCSettingsView: View {
                 
                 Section {
                     Toggle(isOn: $dontSignApp) {
-                        Text("lc.settings.dontSign".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "signature", color: .orange)
+                            Text("lc.settings.dontSign".loc)
+                        }
                     }
                 } footer: {
                     Text("lc.settings.dontSignDesc".loc)
@@ -342,7 +408,10 @@ struct LCSettingsView: View {
                     Button {
                         clearNotifications()
                     } label: {
-                        Text("lc.settings.clearNotifications".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "bell.slash.fill", color: .red)
+                            Text("lc.settings.clearNotifications".loc)
+                        }
                     }
                 }
 
@@ -351,19 +420,28 @@ struct LCSettingsView: View {
                         NavigationLink {
                             LCStorageManagementView()
                         } label: {
-                            Text("lc.settings.storageManagement".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "externaldrive.fill", color: .blue)
+                                Text("lc.settings.storageManagement".loc)
+                            }
                         }
                     }
                     NavigationLink {
                         LCDataManagementView()
                     } label: {
-                        Text("lc.settings.dataManagement".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "folder.fill", color: .green)
+                            Text("lc.settings.dataManagement".loc)
+                        }
                     }
                 }
                 
                 Section(header: Text("后台保活")) {
                     Toggle(isOn: $keepAliveEnabled) {
-                        Text("保活（无声音频）")
+                        HStack {
+                            LCSettingsIcon(systemName: "heart.fill", color: .red)
+                            Text("保活（无声音频）")
+                        }
                     }
                     .onChange(of: keepAliveEnabled) { newValue in
                         syncKeepAliveTweak(enabled: newValue)
@@ -518,8 +596,18 @@ struct LCSettingsView: View {
                     .onAppear {
                         refreshVPNState()
                     }
-                    Toggle("打开时预热节点核心", isOn: $vpnPrewarm)
-                    Toggle("源和下载也走内置节点", isOn: $vpnHostProxy)
+                    Toggle(isOn: $vpnPrewarm) {
+                        HStack {
+                            LCSettingsIcon(systemName: "flame.fill", color: .orange)
+                            Text("打开时预热节点核心")
+                        }
+                    }
+                    Toggle(isOn: $vpnHostProxy) {
+                        HStack {
+                            LCSettingsIcon(systemName: "arrow.down.circle", color: .green)
+                            Text("源和下载也走内置节点")
+                        }
+                    }
                         .onChange(of: vpnHostProxy) { newValue in
                             CZFVPNManager.isHostProxyEnabled = newValue
                             if newValue {
@@ -572,49 +660,82 @@ struct LCSettingsView: View {
                 if sharedModel.developerMode {
                     Section {
                         Toggle(isOn: $injectToLCItelf) {
-                            Text("lc.settings.injectLCItself".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "wrench.and.screwdriver", color: .gray)
+                                Text("lc.settings.injectLCItself".loc)
+                            }
                         }
                         Toggle(isOn: $ignoreJITOnLaunch) {
-                            Text("lc.settings.ignoreJITOnLaunch".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "bolt.slash.fill", color: .orange)
+                                Text("lc.settings.ignoreJITOnLaunch".loc)
+                            }
                         }
                         Toggle(isOn: $keepSelectedWhenQuit) {
-                            Text("lc.settings.keepSelectedAppOnQuit".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "pin.fill", color: .blue)
+                                Text("lc.settings.keepSelectedAppOnQuit".loc)
+                            }
                         }
                         Toggle(isOn: $waitForDebugger) {
-                            Text("lc.settings.waitForDebugger".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "eye.fill", color: .gray)
+                                Text("lc.settings.waitForDebugger".loc)
+                            }
                         }
                         Toggle(isOn: $sharePrivateDataWithLiveProcess) {
-                            Text("lc.settings.allowPrivateDataAccess".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "lock.fill", color: .red)
+                                Text("lc.settings.allowPrivateDataAccess".loc)
+                            }
                         }
                         Button {
                             export()
                         } label: {
-                            Text("lc.settings.exportCert".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "key.fill", color: .blue)
+                                Text("lc.settings.exportCert".loc)
+                            }
                         }
                         Button {
                             exportDyld()
                         } label: {
-                            Text("lc.settings.exportDyld".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "doc.fill", color: .gray)
+                                Text("lc.settings.exportDyld".loc)
+                            }
                         }
                         Button {
                             Task { await nukeSideStore() }
                         } label: {
-                            Text("lc.settings.nukeSideStore".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "trash", color: .red)
+                                Text("lc.settings.nukeSideStore".loc)
+                            }
                         }
                         Button {
                             exportMainBundle()
                         } label: {
-                            Text("lc.settings.exportMainBundle".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "doc.on.doc", color: .blue)
+                                Text("lc.settings.exportMainBundle".loc)
+                            }
                         }
                         Button {
                             resetSymbolOffsets()
                         } label: {
-                            Text("lc.settings.resetSymbolOffsets".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "arrow.clockwise", color: .orange)
+                                Text("lc.settings.resetSymbolOffsets".loc)
+                            }
                         }
                         Button {
                             presentFLEXOverlay()
                         } label: {
-                            Text("lc.settings.showFlexOverlay".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "magnifyingglass", color: .purple)
+                                Text("lc.settings.showFlexOverlay".loc)
+                            }
                         }
                         .disabled(NSClassFromString("FLEXManager") == nil)
                     } header: {
