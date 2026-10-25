@@ -62,7 +62,7 @@ final class CZFHostKeepAlive {
     private func start() {
         if let player = player, player.isPlaying { return }
         do {
-            let session = AVAudioSession.sharedInstance
+            let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, options: .mixWithOthers)
             try session.setActive(true)
             if player == nil {
@@ -91,7 +91,7 @@ final class CZFHostKeepAlive {
         watchdog?.invalidate()
         watchdog = nil
         player?.pause()
-        try? AVAudioSession.sharedInstance.setActive(false, options: .notifyOthersOnDeactivation)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     /// 1 秒静音 WAV（8000Hz 单声道 16bit PCM），与游客侧 CZFKeepAlive.m 同配方。
