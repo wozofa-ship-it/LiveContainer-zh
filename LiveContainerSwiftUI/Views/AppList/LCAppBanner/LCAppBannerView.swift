@@ -132,29 +132,36 @@ final class LCAppBannerRootView: UIView {
         traitCollection: UITraitCollection
     ) {
         let icon = appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage()
-        let mainColor = Self.extractMainHueColor(appInfo: appInfo, icon: icon, darkModeIcon: darkModeIcon)
+        // 无用计算：动态取色关着时 mainColor 根本不用（下面两处都走
+        // 非动态分支），还白算一次；关着就不算
+        let mainColor = dynamicColors ? Self.extractMainHueColor(appInfo: appInfo, icon: icon, darkModeIcon: darkModeIcon) : .clear
         let accentColor = dynamicColors ? mainColor : (UIColor(named: "FontColor") ?? .systemBlue)
         let textColor = Self.readableTextColor(for: accentColor, traitCollection: traitCollection)
 
         iconImageView.image = icon
         nameLabel.text = model.displayName
         nameLabel.textColor = .label
-        versionLabel.text = "\(model.version) - \(model.bundleIdentifier)"
+        // 简约：版本行只留版本（包名收进详情），容器行隐藏
+        // （容器在 App 设置里看和改）；备注是用户自己写的内容，保留
+        versionLabel.text = "\(model.version)"
         versionLabel.textColor = textColor
         remarkLabel.text = model.uiRemark
         remarkLabel.textColor = textColor.withAlphaComponent(0.8)
         remarkLabel.isHidden = model.uiRemark.isEmpty
         containerLabel.text = model.uiSelectedContainer?.name ?? "lc.appBanner.noDataFolder".loc
         containerLabel.textColor = textColor
+        containerLabel.isHidden = true
 
+        // 角标统一中性灰（原来橙/紫/蓝糖果色太花，跟面板胶囊同一思路，
+        // 只留文字区分）；是否显示的逻辑不动
         sharedBadge.isHidden = !model.uiIsShared
-        sharedBadge.backgroundColor = UIColor(named: "BadgeColor") ?? .systemOrange
+        sharedBadge.backgroundColor = .systemGray
         jitBadge.isHidden = !model.uiIsJITNeeded || model.uiIs32bit
-        jitBadge.backgroundColor = UIColor(named: "JITBadgeColor") ?? .systemPurple
+        jitBadge.backgroundColor = .systemGray
         lockBadge.isHidden = !model.uiIsLocked || model.uiIsHidden
-        lockBadge.backgroundColor = UIColor(named: "BadgeColor") ?? .systemOrange
+        lockBadge.backgroundColor = .systemGray
         bit32Badge.isHidden = !model.uiIs32bit
-        bit32Badge.backgroundColor = UIColor(named: "32BitBadgeColor") ?? .systemBlue
+        bit32Badge.backgroundColor = .systemGray
 
         visualBackgroundView.backgroundColor = dynamicColors
             ? mainColor.withAlphaComponent(0.5)

@@ -36,6 +36,8 @@ struct LCAppSettingsView: View {
     
     @State private var errorShow = false
     @State private var errorInfo = ""
+    // 修复区默认折叠（平时不常用，页面先短一截）
+    @State private var fixesExpanded = false
     @State private var selectUnusedContainerSheetShow = false
     @State private var schedMinEnabled = false
     @State private var schedMinTime = Date()
@@ -433,19 +435,22 @@ struct LCAppSettingsView: View {
             }
 
             Section {
-                Toggle(isOn: $model.uiFixFilePickerNew) {
-                    Text("lc.appSettings.fixFilePickerNew".loc)
+                DisclosureGroup(isExpanded: $fixesExpanded) {
+                    Toggle(isOn: $model.uiFixFilePickerNew) {
+                        Text("lc.appSettings.fixFilePickerNew".loc)
+                    }
+                    Toggle(isOn: $model.uiFixLocalNotification) {
+                        Text("lc.appSettings.fixLocalNotification".loc)
+                    }
+                    Toggle(isOn: $model.uiUseLCBundleId) {
+                        Text("lc.appSettings.useLCBundleId".loc)
+                    }
+                    Text("lc.appSettings.useLCBundleIdDesc".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } label: {
+                    Text("lc.appSettings.fixes".loc)
                 }
-                Toggle(isOn: $model.uiFixLocalNotification) {
-                    Text("lc.appSettings.fixLocalNotification".loc)
-                }
-                Toggle(isOn: $model.uiUseLCBundleId) {
-                    Text("lc.appSettings.useLCBundleId".loc)
-                }
-            } header: {
-                Text("lc.appSettings.fixes".loc)
-            } footer: {
-                Text("lc.appSettings.useLCBundleIdDesc".loc)
             }
             
             if SharedModel.isPhone {
