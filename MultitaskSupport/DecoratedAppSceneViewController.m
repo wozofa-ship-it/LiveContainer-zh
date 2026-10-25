@@ -282,6 +282,17 @@
     self.resizeHandle.alpha = _isMaximized ? 0.0 : 1.0;
     [self.resizeHandle addGestureRecognizer:resizeGesture];
     [self.view addSubview:self.resizeHandle];
+
+    // 点按置顶（用户定 2026-10-25）：几个小窗口叠在一起时，点哪个
+    // 窗口露出的边角就把哪个顶到最上、不被压住。原来 touchesBegan
+    // 那条路收不到游客内容（passthrough view）的触摸——触摸直接
+    // 进了游客场景；改走手势识别器：识别器挂在容器视图上，游客
+    // 内容的触摸也会经过它；只观察不拦截（cancelsTouchesInView=NO），
+    // 不改窗口大小和状态，只调层级。标题栏双击最大化不受影响
+    // （单击置顶是空操作级，不等双击判定）。
+    UITapGestureRecognizer *raiseTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(czfRaiseWindowOnTap)];
+    raiseTap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:raiseTap];
     
     self.view.layer.borderWidth = _isMaximized ? 0.0 : 1.0;
     self.view.layer.borderColor = UIColor.secondarySystemBackgroundColor.CGColor;
@@ -669,8 +680,19 @@
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesBegan:touches withEvent:event];
-    // FIXME: how to bring view to front when touching the passthrough view?
+    // 标题栏等非游客内容区域：按下就置顶。游客内容（passthrough
+    // view）的触摸到不了这里，改走 czfRaiseWindowOnTap 手势识别器。
     [self.view.superview bringSubviewToFront:self.view];
+}
+
+// 点按置顶：只调层级（与宿主 bringViewToFront 同款：本视图 + 所在
+// 窗口），不改大小、不改最大化状态；已在最上时就是空操作
+- (void)czfRaiseWindowOnTap {
+    [self.view.superview bringSubviewToFront:self.view];
+    UIWindow *window = self.view.window;
+    if (window.superview) {
+        [window.superview bringSubviewToFront:window];
+    }
 }
 
 - (void)updateVerticalConstraints {
