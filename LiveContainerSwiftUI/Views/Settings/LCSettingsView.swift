@@ -367,9 +367,11 @@ struct LCSettingsView: View {
                     }
                     .onChange(of: keepAliveEnabled) { newValue in
                         syncKeepAliveTweak(enabled: newValue)
+                        CZFHostKeepAlive.shared.refresh()
                     }
                     .onAppear {
                         syncKeepAliveTweak(enabled: keepAliveEnabled)
+                        CZFHostKeepAlive.shared.refresh()
                     }
                 }
 

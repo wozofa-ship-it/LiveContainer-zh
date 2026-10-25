@@ -40,6 +40,9 @@ import Intents
         // Tweaks 并签名，同样赶在任何游客 App 启动前
         LCDataManagementView.deployKeychainBridgeTweak()
 
+        // 宿主侧保活：装后台/前台观察者；真正播放只在切后台且有游客时
+        CZFHostKeepAlive.shared.install()
+
         return true
     }
 

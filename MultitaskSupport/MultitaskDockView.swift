@@ -523,6 +523,7 @@ class AppInfoProvider {
                 return CZFVPNManager.isEnabled(for: info)
             }
             CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: stillHasFlagged)
+            CZFHostKeepAlive.shared.refresh()
         }
     }
     
@@ -812,6 +813,7 @@ class AppInfoProvider {
             } else if self.isVisible {
                 self.updateDockFrame()
             }
+            CZFHostKeepAlive.shared.refresh()
         }
     }
     
