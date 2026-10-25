@@ -310,8 +310,8 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     NSString *notificationName = nil;
     NSString *selectorName = nil;
     if (gCZFStartEdge == 2) {
-        // 起手在右边缘：往左=当前 App 全屏（门槛24），往右=当前 App
-        // 小窗口（往外滑手指很快出屏，门槛6）；宿主侧改派，原显/隐栏已去掉
+        // 起手在右边缘：往左=上一个已打开 App，往右=下一个已打开
+        // App（门槛往左24、往右6，往外滑手指很快出屏）；宿主侧改派
         if (draggingRight) {
             if (absX <= 6) return;
             notificationName = @"czf.dock.rightOutward";

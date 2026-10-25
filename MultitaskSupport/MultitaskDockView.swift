@@ -1145,9 +1145,8 @@ class AppInfoProvider {
         guard abs(translation.x) > (isOutward ? 0.9 : 1.5) * abs(translation.y) else { return false }
         let s = Self.czfThresholdScale
         if startEdge == 2 {
-            // 右边缘改派：往左（门槛24）/往右（门槛10，往外滑手指
-            // 很快出屏）；动作分场景在入口判定（App 内全屏/小窗口，
-            // 主界面状态栏调度）。门槛乘灵敏度系数（设置页三档）
+            // 右边缘改派：往左/往右的动作在入口判定（切换已打开
+            // App：往左上一个、往右下一个）；门槛乘灵敏度系数（设置页三档）
             if draggingRight {
                 guard translation.x > 6 * s else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
@@ -1233,37 +1232,41 @@ class AppInfoProvider {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
-    // 右边缘手势改派（用户定）：分场景——在 App 界面内（有 App
-    // 在台前）：往左滑=当前 App 全屏（最大化，状态栏随全屏隐藏），
-    // 往右滑=还原小窗口；不在 App 界面内（主界面）：走状态栏调度，
-    // 往左滑开关 App 面板、往右滑关掉面板。原先右边缘的显/隐快捷
-    // 栏去掉；左边缘手势（App 面板/源面板开关）不动。宿主窗口手势
-    // 与游客插件的 Darwin 通知都汇到这两个入口，场景在此判定。
+    // 右边缘手势改派（用户定 2026-10-25）：不再是小窗口/最大化，
+    // 改成切换已打开的 App——往左滑=上一个，往右滑=下一个，按
+    // 运行中列表（启动顺序）循环；只切前台，不改窗口状态（不强
+    // 制最大化也不强制小窗口）。面板开着时不抢：面板自己的边缘
+    // 互切（App↔源）处理。左边缘手势（App 面板/源面板开关）不
+    // 动。宿主窗口手势与游客插件的 Darwin 通知都汇到这两个入
+    // 口，动作在此判定。
     @objc public func czfEdgeRightInward() {
         guard Self.czfEdgeGesturesEnabled else { return }
-        guard let app = czfFrontmostApp() else {
-            czfOpenAppPanel()
-            return
-        }
-        guard let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
-              !vc.isMaximized else { return }
-        edgeCallbackBuzz()
-        maximizeWindow(uuid: app.appUUID)
+        czfSwitchRunningApp(step: -1)
     }
 
     @objc public func czfEdgeRightOutward() {
         guard Self.czfEdgeGesturesEnabled else { return }
-        guard let app = czfFrontmostApp() else {
-            if isAppPanelOpen {
-                edgeCallbackBuzz()
-                dismissPanelOverlay()
-            }
-            return
+        czfSwitchRunningApp(step: +1)
+    }
+
+    // 已打开 App 循环切换：以台前 App 为基准（czfFrontmostApp），
+    // 上一个/下一个按运行中列表顺序、首尾相接；主界面（没有台
+    // 前 App）时往右=列表第一个、往左=列表最后一个。没运行 App
+    // 或面板开着时不动。
+    private func czfSwitchRunningApp(step: Int) {
+        guard !apps.isEmpty, !isAppPanelOpen, !isSourcesPanelOpen else { return }
+        let currentIndex = czfFrontmostApp().flatMap { front in
+            apps.firstIndex(where: { $0.appUUID == front.appUUID })
         }
-        guard let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
-              vc.isMaximized else { return }
+        let targetIndex: Int
+        if let i = currentIndex {
+            targetIndex = (i + step + apps.count) % apps.count
+        } else {
+            targetIndex = step > 0 ? 0 : apps.count - 1
+        }
+        let target = apps[targetIndex]
+        guard bringMultitaskViewToFront(uuid: target.appUUID, from: nil) else { return }
         edgeCallbackBuzz()
-        restoreSmallWindow(uuid: app.appUUID)
     }
 
     // 当前 App：已最大化的那个优先（全屏时台前只有一个）；否则取
