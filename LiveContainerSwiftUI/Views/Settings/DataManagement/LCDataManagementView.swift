@@ -1860,6 +1860,14 @@ struct LCDataManagementView : View {
             }
         }
         outcome.ok = restoredContainers > 0 || restoredExtras
+        // 恢复免登录修正（2026-10-25）：钥匙串恢复只是把快照排队成
+        // CZFKeychainImport.plist，真正写回在游客下次全新启动时由桥
+        // 完成；恢复本身不杀已运行的游客，用户直接切回看到的还是未
+        // 登录。恢复成功后若该 App 正在运行就关掉它（真终止进程，
+        // 下次打开即全新启动、桥构造器抢导排队文件）；没在运行就是
+        // 空操作。安装后自动恢复也走这里，刚装的 App 没在运行，
+        // 同样是空操作。
+        MultitaskDockManager.shared.closeAppWindow(uuid: app.appInfo.dataUUID)
         return outcome
     }
 

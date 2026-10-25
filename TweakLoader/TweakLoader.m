@@ -380,6 +380,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
 
 // ===== 左边缘触摸漏斗（根因修复，见文件头注释）=====
 static NSMutableDictionary *gCZFTouchStates = nil;
+static NSMutableDictionary *gCZFTapStarts = nil;  // 点按起点（手势误触修正：只有真点按才发置顶信号）
 static NSTimeInterval gCZFLastFunnelFire = 0;
 
 static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
@@ -392,15 +393,18 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
         CGPoint loc = [touch locationInView:window];
         switch (touch.phase) {
             case UITouchPhaseBegan: {
-                // 点按置顶（用户定 2026-10-25）：游客里任何位置点按都要把本窗口顶到最上。
-                // 宿主侧容器识别器收不到游客内容（passthrough view）的触摸——触摸直达游客场景，
-                // 故游客侧在每次触摸按下时发 Darwin 信号（名里带本 App bundleId），宿主按名找到
-                // 窗口静默置顶（只调层级、不动画，点按不闪）。纯观察，不改事件、不碰漏斗状态。
-                NSString *touchBid = [[NSBundle mainBundle] bundleIdentifier];
-                if (touchBid.length > 0) {
-                    NSString *touchName = [NSString stringWithFormat:@"czf.window.touch.%@", touchBid];
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)touchName, NULL, NULL, YES);
+                // 点按置顶（用户定 2026-10-25；2026-10-25 手势误触修正）：
+                // 游客里任何位置点按都要把本窗口顶到最上，但只有真点按
+                // 才操作——手势起手不能当点击。宿主侧容器识别器收不到
+                // 游客内容（passthrough view）的触摸——触摸直达游客场景，
+                // 故游客侧在点按抬手时发 Darwin 信号（名里带本 App bundleId），
+                // 宿主按名找到窗口静默置顶（只调层级、不动画，点按不闪）。
+                // 判定在 Ended 做（见下）：按下只记起点，位移超 12pt
+                // 或取消的一律不发。纯观察，不改事件、不碰漏斗状态。
+                if (!gCZFTapStarts) {
+                    gCZFTapStarts = [[NSMutableDictionary alloc] init];
                 }
+                gCZFTapStarts[key] = @[ @(loc.x), @(loc.y) ];
                 // 记录带放宽到 96：抬手兜底规则需要它；移动中的提前
                 // 触发仍只认 64 带内起手（见 Moved 分支）。另加启用
                 // 带（与宿主中档同值）：带外起手不记录，手势只认
@@ -471,6 +475,31 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                             gCZFLastFunnelFire = now;
                             [[CZFDockGestureHandler shared] czfPostNotification:fireName selectorName:fireSelector];
                         }
+                    }
+                }
+                // 点按判定（与漏斗无关，独立记）：Moved 位移超 12pt
+                // = 拖动/滚动/手势，不再是点按，直接丢弃；Ended 时
+                // 还在 = 真点按，才发置顶信号；Cancelled 不发
+                // （手势识别器接管、系统没收的触摸都不是点按）。
+                NSArray *tapStart = gCZFTapStarts[key];
+                if (tapStart) {
+                    CGFloat tapDx = loc.x - [tapStart[0] doubleValue];
+                    CGFloat tapDy = loc.y - [tapStart[1] doubleValue];
+                    if (touch.phase == UITouchPhaseMoved) {
+                        if (fabs(tapDx) > 12 || fabs(tapDy) > 12) {
+                            [gCZFTapStarts removeObjectForKey:key];
+                        }
+                    } else if (touch.phase == UITouchPhaseEnded) {
+                        if (fabs(tapDx) <= 12 && fabs(tapDy) <= 12) {
+                            NSString *touchBid = [[NSBundle mainBundle] bundleIdentifier];
+                            if (touchBid.length > 0) {
+                                NSString *touchName = [NSString stringWithFormat:@"czf.window.touch.%@", touchBid];
+                                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)touchName, NULL, NULL, YES);
+                            }
+                        }
+                        [gCZFTapStarts removeObjectForKey:key];
+                    } else {
+                        [gCZFTapStarts removeObjectForKey:key];
                     }
                 }
                 if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {

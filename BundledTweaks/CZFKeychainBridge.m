@@ -379,4 +379,19 @@ __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
             CZFKBRun();
         });
     }];
+    // 前台触发（恢复免登录修正 2026-10-25）：恢复只把快照排队成
+    // CZFKeychainImport.plist，真正写回在游客下次全新启动时；但
+    // 恢复不杀已运行的游客，用户直接前台切回时构造器不重跑、
+    // 启动通知不重发，排队文件原地不动、App 仍显示未登录。
+    // 回前台时就地抢导一次（无排队文件时只是文件存在性检查，
+    // 不跑全量导出）。token 必须留住，不留会被系统当场注销。
+    static id czfkbActiveObserver;
+    czfkbActiveObserver = [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidBecomeActiveNotification"
+                                                      object:nil
+                                                       queue:nil
+                                                  usingBlock:^(NSNotification *note) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            CZFKBTryImportEarly();
+        });
+    }];
 }
