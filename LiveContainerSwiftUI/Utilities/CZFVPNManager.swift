@@ -505,11 +505,22 @@ public final class CZFVPNManager {
     // 格式（uuid@地址:端口 写在明处），先把老格式翻译成标准
     // 格式再交给它；认不出的一律原样返回。
     private static func normalizedShareLink(_ link: String) -> String {
-        guard link.hasPrefix("vless://") else { return link }
-        let rest = String(link.dropFirst("vless://".count))
+        let scheme: String
+        if link.hasPrefix("vless://") {
+            scheme = "vless://"
+        } else if link.hasPrefix("trojan://") {
+            scheme = "trojan://"
+        } else {
+            return link
+        }
+        let rest = String(link.dropFirst(scheme.count))
         let authEnd = rest.firstIndex(where: { $0 == "?" || $0 == "#" }) ?? rest.endIndex
         let authority = String(rest[..<authEnd])
-        if authority.contains("@") { return link } // 已是标准格式
+        if authority.contains("@") {
+            // 标准格式：只翻译小火箭参数，其余原样。
+            return rewriteShadowrocketParams(link)
+        }
+        guard scheme == "vless://" else { return link } // trojan 老格式不动
 
         var b64 = authority
             .replacingOccurrences(of: "-", with: "+")
@@ -567,10 +578,11 @@ public final class CZFVPNManager {
         if let fp = query["fingerprint"] ?? query["fp"], !fp.isEmpty {
             out.append(("fp", fp))
         }
-        let type = query["type"] ?? query["net"] ?? "tcp"
+        // 小火箭写法：obfs=websocket 即 ws，obfsParam 即 WS host；标准参数优先。
+        let type = query["type"] ?? query["net"] ?? (query["obfs"] == "websocket" ? "ws" : nil) ?? "tcp"
         out.append(("type", type))
         if type == "ws" {
-            if let h = query["host"], !h.isEmpty { out.append(("host", h)) }
+            if let h = query["host"] ?? query["obfsParam"], !h.isEmpty { out.append(("host", h)) }
             if let p = query["path"], !p.isEmpty { out.append(("path", p)) }
         }
 
@@ -581,6 +593,44 @@ public final class CZFVPNManager {
             result += "#" + (name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name)
         }
         return result
+    }
+
+    // 标准格式链接里的小火箭参数翻译：只在查询串后追加标准参数，
+    // authority 与片段、原有参数串一律原样不动。
+    // obfs=websocket → type=ws（仅当没写 type/net 时）；
+    // obfsParam → host（仅当没写 host 且最终是 ws 时）；
+    // peer → sni（仅当没写 sni 时）。三个参数一个都没有时原样返回。
+    private static func rewriteShadowrocketParams(_ link: String) -> String {
+        guard let qStart = link.firstIndex(of: "?") else { return link }
+        let afterQ = link[link.index(after: qStart)...]
+        let hashIdx = afterQ.firstIndex(of: "#")
+        let qStr = hashIdx.map { String(afterQ[..<$0]) } ?? String(afterQ)
+        let fragment = hashIdx.map { String(afterQ[$0...]) } ?? ""
+        // 只读键与解码后的值做判断，原有参数串不重编码。
+        var keys = Set<String>()
+        var values: [String: String] = [:]
+        for pair in qStr.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 {
+                keys.insert(String(parts[0]))
+                values[String(parts[0])] = String(parts[1]).removingPercentEncoding ?? String(parts[1])
+            }
+        }
+        var add: [String] = []
+        if !keys.contains("type"), !keys.contains("net"), values["obfs"] == "websocket" {
+            add.append("type=ws")
+        }
+        let finalIsWS = values["type"] == "ws" || values["net"] == "ws" || add.contains("type=ws")
+        if finalIsWS, !keys.contains("host"), let h = values["obfsParam"], !h.isEmpty {
+            add.append("host=" + (h.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? h))
+        }
+        if !keys.contains("sni"), let s = values["peer"], !s.isEmpty {
+            add.append("sni=" + (s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? s))
+        }
+        guard !add.isEmpty else { return link }
+        let base = String(link[..<qStart])
+        let sep = qStr.isEmpty ? "" : "&"
+        return base + "?" + qStr + sep + add.joined(separator: "&") + fragment
     }
 
     // 读游客插件写的运行统计（插件同目录的 CZFProxyStats.txt），
