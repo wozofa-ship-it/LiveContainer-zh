@@ -1269,16 +1269,18 @@ class AppInfoProvider {
         edgeCallbackBuzz()
     }
 
-    // 当前 App：已最大化的那个优先（全屏时台前只有一个）；否则取
-    // 宿主视图里层级最靠前、可见的运行中 App。最小化中的（视图
-    // 已隐藏）不算。
+    // 当前 App：层级最靠前、可见的运行中 App，纯按 z 序算，不以
+    // “已最大化”优先——最大化不等于在最上：小窗口切到前台后会
+    // 盖在最大化 App 上面。原来“见最大化就返回”会让台前判定卡
+    // 在先启动的那个最大化 App 上，轮流切换时每次都算出同一个
+    // 目标、看着像没切（v164 上报的 bug）。最小化中的（视图已
+    // 隐藏）不算。
     private func czfFrontmostApp() -> DockAppModel? {
         var frontmost: DockAppModel?
         var frontmostZ = -1
         for app in apps {
             guard let view = app.view, !view.isHidden, view.alpha >= 0.1,
-                  let vc = view._viewDelegate() as? DecoratedAppSceneViewController else { continue }
-            if vc.isMaximized { return app }
+                  view._viewDelegate() is DecoratedAppSceneViewController else { continue }
             let z = view.superview?.subviews.firstIndex(where: { $0 === view }) ?? 0
             if z > frontmostZ {
                 frontmostZ = z

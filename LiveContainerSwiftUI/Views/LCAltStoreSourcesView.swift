@@ -511,6 +511,11 @@ struct LCSourcesView: View {
     @State private var selectedIDs = Set<String>()
     // 可更新数量写到这里，底部「源」标签上显示红点数字
     @AppStorage("CZFUpdatableAppCount") private var updatableCountBadge = 0
+    // 可更新名单缓存：原来 updatableApps 是计算属性，body 每次
+    // 渲染（搜字、展开、加载状态变）都把全部源 × 全部 App 比一
+    // 遍版本、还逐个读忽略记录；改成算一次存起来，只在源/已装/
+    // 忽略变时重算（见 refreshUpdatableCache 调用点）
+    @State private var cachedUpdatableApps: [AltStoreSourceApp] = []
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
 
@@ -602,9 +607,9 @@ struct LCSourcesView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     // 有已装 App 能更新时才出现：一键全走批量队列
                     // （串行装、已装直接覆盖、覆盖前自动备份）
-                    if !updatableApps.isEmpty {
-                        Button("全部更新(\(updatableApps.count))") {
-                            installBatch(updatableApps)
+                    if !cachedUpdatableApps.isEmpty {
+                        Button("全部更新(\(cachedUpdatableApps.count))") {
+                            installBatch(cachedUpdatableApps)
                         }
                     }
                 }
@@ -681,7 +686,7 @@ struct LCSourcesView: View {
         .searchable(text: $searchContext.query, placement: .navigationBarDrawer(displayMode: .always))
 
         .onAppear {
-            updatableCountBadge = updatableApps.count
+            refreshUpdatableCache()
             autoRefreshSourcesIfNeeded()
             // 默认自动展开所有源
             expandedSources = Set(viewModel.sources.map { $0.id })
@@ -693,10 +698,16 @@ struct LCSourcesView: View {
             }
         }
         .onChange(of: viewModel.sources) { newSources in
-            updatableCountBadge = updatableApps.count
+            refreshUpdatableCache()
             let newSet = Set(newSources.map { $0.id })
             // 新加入的源自动展开，保留已有的展开状态
             expandedSources = expandedSources.intersection(newSet).union(newSet)
+        }
+        .onChange(of: sharedModel.apps) { _ in
+            refreshUpdatableCache()
+        }
+        .onChange(of: sharedModel.hiddenApps) { _ in
+            refreshUpdatableCache()
         }
         .onChange(of: sharedModel.deepLink) { link in
             guard sharedModel.selectedTab == .sources, let link else { return }
@@ -705,8 +716,10 @@ struct LCSourcesView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFRefreshSourcesRequest"))) { _ in
             // App 每次打开时主框架发一次：源页在的话顺手刷新，
-            // 红点不用等用户点进源页才准
+            // 红点不用等用户点进源页才准；忽略/取消忽略也走这个
+            // 通知，顺带重算可更新名单
             autoRefreshSourcesIfNeeded()
+            refreshUpdatableCache()
         }
     }
     
@@ -796,7 +809,7 @@ struct LCSourcesView: View {
 
     /// 已装且源里有更高版本的 App（「全部更新」的名单）：
     /// 版本号按数字段比较（1.10 > 1.9），同名只算一次
-    private var updatableApps: [AltStoreSourceApp] {
+    private func computeUpdatableApps() -> [AltStoreSourceApp] {
         let installed = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
             ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.version() ?? "")
         }, uniquingKeysWith: { first, _ in first })
@@ -817,7 +830,15 @@ struct LCSourcesView: View {
         }
         return result
     }
-    
+
+    // 可更新名单缓存刷新：算一次、同时写红点。调用点=全部输入
+    // 变化处：进页、源变、已装/隐藏变、忽略与 App 打开刷新请求
+    private func refreshUpdatableCache() {
+        let list = computeUpdatableApps()
+        cachedUpdatableApps = list
+        updatableCountBadge = list.count
+    }
+
     @MainActor
     private func install(app: AltStoreSourceApp) {
         guard let downloadURL = app.latestVersion?.downloadURL else {
