@@ -1729,7 +1729,7 @@ class AppInfoProvider {
         guard czfTouchRaiseRegisteredBids.remove(bundleId) != nil else { return }
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
-        CFNotificationCenterRemoveObserver(center, observer, "czf.window.touch.\(bundleId)" as CFString, nil)
+        CFNotificationCenterRemoveObserver(center, observer, CFNotificationName(rawValue: "czf.window.touch.\(bundleId)"), nil)
     }
 
     // 边缘手势信号观察者：游客边缘手势的 Darwin 信号（czf.dock.*）送达这里
