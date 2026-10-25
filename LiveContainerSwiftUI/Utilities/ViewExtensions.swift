@@ -387,13 +387,3 @@ extension UIViewController {
         }
     }
 }
-
-// 列表顶部滚动探针：内容顶部在滚动坐标系里的 minY。
-// App 页与源页共用：顶栏默认隐藏，列表顶部往下拉过阈值
-// 才展开标题+搜索+工具按钮，往下滚过阈值再收起（精简）。
-struct CZFScrollTopKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}

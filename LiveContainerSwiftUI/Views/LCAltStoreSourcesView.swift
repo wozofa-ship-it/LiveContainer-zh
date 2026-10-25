@@ -533,10 +533,6 @@ struct LCSourcesView: View {
     @EnvironmentObject private var sharedModel : SharedModel
     
     @State private var isViewAppeared = false
-
-    // 顶栏下拉才显示：默认隐藏标题+搜索+工具按钮，只剩卡片；
-    // 列表顶部往下拉过阈值展开，往下滚过阈值收起（源页与 App 页同款精简）。
-    @State private var czfShowTopBar = false
     
     var body: some View {
         NavigationView {
@@ -554,11 +550,6 @@ struct LCSourcesView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 } else {
                     ScrollView {
-                        // 顶栏下拉探针：内容顶部的 minY（坐标系 czfSourcesScroll）
-                        GeometryReader { geo in
-                            Color.clear.preference(key: CZFScrollTopKey.self, value: geo.frame(in: .named("czfSourcesScroll")).minY)
-                        }
-                        .frame(height: 0)
                         LazyVStack(spacing: 16) {
                             ForEach(viewModel.sources, id: \.id) { item in
                                 let apps = filteredApps(for: item)
@@ -599,15 +590,6 @@ struct LCSourcesView: View {
                             }
                         }
                         .padding(.vertical)
-                    }
-                    .coordinateSpace(name: "czfSourcesScroll")
-                    .onPreferenceChange(CZFScrollTopKey.self) { minY in
-                        // 迟滞阈值防抖：顶部下拉 60 展开，往下滚 100 收起
-                        if minY > 60, !czfShowTopBar {
-                            withAnimation(.easeInOut) { czfShowTopBar = true }
-                        } else if minY < -100, czfShowTopBar {
-                            withAnimation(.easeInOut) { czfShowTopBar = false }
-                        }
                     }
                 }
             }
@@ -653,7 +635,6 @@ struct LCSourcesView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
-        .toolbar(czfShowTopBar ? .visible : .hidden, for: .navigationBar)
         .alert("lc.common.error".loc, isPresented: Binding<Bool>(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } })
