@@ -468,9 +468,23 @@ struct LCTweakFolderView : View {
 }
 
 struct LCTweaksView: View {
+    // 模块分两处放：本机（Documents/Tweaks）和共享（App Group），
+    // 转共享后文件夹搬去了共享处，不切过去就永远看不到、也开不回来。
+    @State private var showShared = false
+
     var body: some View {
         NavigationView {
-            LCTweakFolderView(baseUrl: LCPath.tweakPath, isRoot: true)
+            VStack(spacing: 0) {
+                Picker("", selection: $showShared) {
+                    Text("本机").tag(false)
+                    Text("共享").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                LCTweakFolderView(baseUrl: showShared ? LCPath.lcGroupTweakPath : LCPath.tweakPath, isRoot: true)
+                    .id(showShared)
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
 

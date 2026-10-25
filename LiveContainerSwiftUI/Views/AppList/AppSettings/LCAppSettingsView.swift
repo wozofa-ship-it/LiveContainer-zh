@@ -952,11 +952,19 @@ struct LCAppSettingsView: View {
                     LCPath.lcGroupDataPath.appendingPathComponent(container.folderName)
                 ))
             }
+            // 模块文件夹是 | 拼的多选：必须逐个搬，整串当一个路径搬
+            // 必然撞上 sourceDoesNotExist，整个转换直接失败。
+            // 磁盘上没有的目录（比如还没落盘的 CZFVPN）直接跳过，
+            // 有东西的才搬，不丢、不报错；.disabled 的停用态也一起搬。
             if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
-                moves.append((
-                    LCPath.tweakPath.appendingPathComponent(tweakFolder),
-                    LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolder)
-                ))
+                for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
+                    for candidate in [name, name + ".disabled"] {
+                        let src = LCPath.tweakPath.appendingPathComponent(candidate)
+                        if FileManager.default.fileExists(atPath: src.path) {
+                            moves.append((src, LCPath.lcGroupTweakPath.appendingPathComponent(candidate)))
+                        }
+                    }
+                }
             }
             
             try LCUtils.moveFilesAtomicallyAfterPreflight(moves)
@@ -972,9 +980,10 @@ struct LCAppSettingsView: View {
             }
             
             if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
-                sharedModel.tweakFolderNames.removeAll(where: { s in
-                    return s == tweakFolder
-                })
+                // 注册表里存的是拆分后的单名，拿整串比永远删不掉。
+                for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
+                    sharedModel.tweakFolderNames.removeAll(where: { $0 == name })
+                }
             }
             
             appInfo.setBundlePath(LCPath.lcGroupBundlePath.appendingPathComponent(appInfo.relativeBundlePath).path)
@@ -1015,11 +1024,16 @@ struct LCAppSettingsView: View {
                     LCPath.dataPath.appendingPathComponent(container.folderName)
                 ))
             }
+            // 回搬同样逐个搬，磁盘上没有的目录跳过，.disabled 停用态一起搬。
             if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
-                moves.append((
-                    LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolder),
-                    LCPath.tweakPath.appendingPathComponent(tweakFolder)
-                ))
+                for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
+                    for candidate in [name, name + ".disabled"] {
+                        let src = LCPath.lcGroupTweakPath.appendingPathComponent(candidate)
+                        if FileManager.default.fileExists(atPath: src.path) {
+                            moves.append((src, LCPath.tweakPath.appendingPathComponent(candidate)))
+                        }
+                    }
+                }
             }
             
             try LCUtils.moveFilesAtomicallyAfterPreflight(moves)

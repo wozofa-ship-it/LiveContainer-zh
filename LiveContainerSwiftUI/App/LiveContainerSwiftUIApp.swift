@@ -86,6 +86,24 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
                 let folderName = tweakDir.hasSuffix(".disabled") ? String(tweakDir.dropLast(".disabled".count)) : tweakDir
                 tempTweakFolderNames.append(folderName)
             }
+
+            // 共享（App Group）里的模块文件夹也要进注册表，否则转共享后
+            // 模块页和选择器里永远看不到它们，重新开也恢复不了。
+            // Group 还没建出来时这里抛错是正常的，静默跳过。
+            do {
+                let groupTweakDirs = try fm.contentsOfDirectory(atPath: LCPath.lcGroupTweakPath.path)
+                for tweakDir in groupTweakDirs {
+                    let tweakDirUrl = LCPath.lcGroupTweakPath.appendingPathComponent(tweakDir)
+                    if !tweakDirUrl.hasDirectoryPath {
+                        continue
+                    }
+                    let folderName = tweakDir.hasSuffix(".disabled") ? String(tweakDir.dropLast(".disabled".count)) : tweakDir
+                    if !tempTweakFolderNames.contains(folderName) {
+                        tempTweakFolderNames.append(folderName)
+                    }
+                }
+            } catch {
+            }
         } catch {
             NSLog("[LC] error:\(error)")
         }

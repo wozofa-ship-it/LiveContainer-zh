@@ -452,7 +452,7 @@
 }
 
 + (NSString *)getVersionInfo {
-    return [NSString stringWithFormat:@"Version %@-%@",
+    return [NSString stringWithFormat:@"Version %@-%@ 解剖自我 🅥修改版",
             NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"],
             NSBundle.mainBundle.infoDictionary[@"LCVersionInfo"]];
 }

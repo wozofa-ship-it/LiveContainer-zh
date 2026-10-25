@@ -525,6 +525,17 @@ class LCAppModel: ObservableObject, Hashable {
             } else {
                 tweakFolderUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
             }
+            // 自愈：转共享时没搬过来的旧文件夹（以前整串当一个路径搬，
+            // 多选时直接失败），重开 App 时顺手搬过去，不然共享 App
+            // 永远读不到它，重新开也没用。目标已存在时不动，不覆盖。
+            if appInfo.isShared {
+                let privateUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
+                let fm = FileManager.default
+                if !fm.fileExists(atPath: tweakFolderUrl.path),
+                   fm.fileExists(atPath: privateUrl.path) {
+                    try? fm.moveItem(at: privateUrl, to: tweakFolderUrl)
+                }
+            }
             // 单 App VPN（验证版）：签名之前按标记同步重定向插件。
             // 刚换上的新插件单独补一签（照手势插件的部署法）：批量
             // 签名带指纹缓存，新文件有被误判"已验过"跳过的先例
