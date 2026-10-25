@@ -43,6 +43,11 @@ struct LCAppSettingsView: View {
     @State private var schedMinTime = Date()
     /// 单 App VPN 指定节点改动后自增，逼设置页重读一遍节点行。
     @State private var vpnNodeTick = 0
+
+    /// 每 App 保活开关：白名单文件不存在 = 全保，开关显示开；
+    /// 文件存在 = 只有名单里的 App 保活。改完需重开该 App 生效
+    /// （白名单在游客启动时构造器里读一次）。
+    @State private var keepAliveOn = true
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -71,6 +76,79 @@ struct LCAppSettingsView: View {
         comps.hour = minutes / 60
         comps.minute = minutes % 60
         schedMinTime = Calendar.current.date(from: comps) ?? Date()
+    }
+
+    /// 保活总开关（没存过 = 默认开，跟启动同步同一读法）
+    private var globalKeepAliveOn: Bool {
+        UserDefaults.standard.object(forKey: "LCKeepAliveEnabled") as? Bool ?? true
+    }
+
+    // 每 App 保活：白名单文件 CZFKeepAliveApps.txt 跟 dylib 同目录，
+    // dylib 拷在两个全局夹，写两份保持一致（构造器用 dladdr 读自己那份）。
+    private func keepAliveListURLs() -> [URL] {
+        [LCPath.tweakPath, LCPath.lcGroupTweakPath].map { $0.appendingPathComponent("CZFKeepAliveApps.txt") }
+    }
+
+    /// 白名单：nil = 两夹文件都不存在（全保）；否则为名单内容
+    private func readKeepAliveList() -> [String]? {
+        for url in keepAliveListURLs() {
+            if let content = try? String(contentsOf: url, encoding: .utf8) {
+                return content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            }
+        }
+        return nil
+    }
+
+    private func writeKeepAliveList(_ list: [String]) throws {
+        let content = list.isEmpty ? "" : list.joined(separator: "\n") + "\n"
+        let fm = FileManager()
+        for url in keepAliveListURLs() {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func loadKeepAliveSetting() {
+        let bid = appInfo.bundleIdentifier() ?? ""
+        if let list = readKeepAliveList() {
+            keepAliveOn = list.contains(bid)
+        } else {
+            keepAliveOn = true
+        }
+    }
+
+    private func setKeepAlive(_ on: Bool) {
+        let bid = appInfo.bundleIdentifier() ?? ""
+        guard !bid.isEmpty else { return }
+        do {
+            if on {
+                if var list = readKeepAliveList() {
+                    if !list.contains(bid) {
+                        list.append(bid)
+                        try writeKeepAliveList(list)
+                    }
+                }
+                // 文件不存在 = 本来就全保，不用写
+            } else {
+                if var list = readKeepAliveList() {
+                    list.removeAll { $0 == bid }
+                    try writeKeepAliveList(list)
+                } else {
+                    // 首次关：用全部 App 名单种子，只去掉这个 App
+                    let all = (sharedModel.apps + sharedModel.hiddenApps).compactMap { $0.appInfo.bundleIdentifier() }.filter { !$0.isEmpty && $0 != bid }
+                    guard !all.isEmpty else {
+                        errorShow = true
+                        errorInfo = "应用列表为空，无法建立保活名单"
+                        return
+                    }
+                    try writeKeepAliveList(all)
+                }
+            }
+            keepAliveOn = on
+        } catch {
+            errorShow = true
+            errorInfo = error.localizedDescription
+        }
     }
 
     /// 单 App VPN 的节点行：跟随全局或给这个 App 单独指定一个
@@ -416,6 +494,20 @@ struct LCAppSettingsView: View {
             }
 
             Section {
+                Toggle(isOn: Binding(
+                    get: { keepAliveOn },
+                    set: { setKeepAlive($0) }
+                )) {
+                    Text("保活（仅这个 App）")
+                }
+                .disabled(!globalKeepAliveOn)
+            } header: {
+                Text("后台保活")
+            } footer: {
+                Text("需先在设置里打开保活总开关，否则这里不可选。开着时这个 App 切后台进音频保活档位；关掉后它不再保活，且名单一旦建立、没勾的 App 也不保活。改完需重开该 App 生效。")
+            }
+
+            Section {
                 Toggle(isOn: $schedMinEnabled) {
                     Text("定时最小化打开")
                 }
@@ -540,7 +632,7 @@ struct LCAppSettingsView: View {
         }
         .navigationTitle(appInfo.displayName())
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { loadSchedMinSettings() }
+        .onAppear { loadSchedMinSettings(); loadKeepAliveSetting() }
         .alert("lc.common.error".loc, isPresented: $errorShow) {
             Button("lc.common.ok".loc, action: {
             })

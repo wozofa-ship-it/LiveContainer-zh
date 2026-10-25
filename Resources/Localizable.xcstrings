@@ -10827,6 +10827,23 @@
         }
       }
     },
+    "lc.common.export": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出"
+          }
+        }
+      }
+    },
     "lc.common.disabled": {
       "extractionState": "manual",
       "localizations": {
@@ -31917,6 +31934,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "新增文件夾"
+          }
+        }
+      }
+    },
+    "lc.tweakView.noDylibToExport": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No .dylib found in this tweak"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个模块里没有 .dylib"
           }
         }
       }

@@ -44,6 +44,10 @@ struct LCTweakFolderView : View {
     // 导入插件进行中：点完导入没反馈就是缺这个（签名的转圈
     // 是现成的，导入照抄一套）
     @State private var isTweakInstalling = false
+
+    // 导出分享表：长按菜单“导出”点开后要分享的文件
+    @State private var exportItems: [URL] = []
+    @State private var showExportSheet = false
     
     init(baseUrl: URL, isRoot: Bool = false) {
         _baseUrl = State(initialValue: baseUrl)
@@ -128,6 +132,12 @@ struct LCTweakFolderView : View {
                             Label("lc.common.rename".loc, systemImage: "pencil")
                         }
 
+                        Button {
+                            exportTweakItem(tweakItem: tweakItem)
+                        } label: {
+                            Label("lc.common.export".loc, systemImage: "square.and.arrow.up")
+                        }
+
                         Button(role: .destructive) {
                             deleteTweakItem(tweakItem: tweakItem)
                         } label: {
@@ -197,6 +207,11 @@ struct LCTweakFolderView : View {
             })
         } message: {
             Text(errorInfo)
+        }
+        .sheet(isPresented: $showExportSheet) {
+            if !exportItems.isEmpty {
+                ActivityViewController(activityItems: exportItems)
+            }
         }
         .textFieldAlert(
             isPresented: $newFolderInput.show,
@@ -299,6 +314,54 @@ struct LCTweakFolderView : View {
                 return s == tweakItem.displayName
             })
         }
+    }
+
+    // 导出：长按菜单的备份口。dylib 行直接给文件；文件夹行递归收里面的
+    // .dylib（加载器同样递归、同样跳过 .disabled）；.framework 行给整个包。
+    // 已停用的 .dylib 文件名带 .disabled 后缀，分享表存出去要恢复成 .dylib
+    // 才能再导入，所以先拷一份去临时目录再分享（临时目录系统会清）。
+    func exportTweakItem(tweakItem: LCTweakItem) {
+        let fm = FileManager()
+        var urls: [URL] = []
+        if tweakItem.isTweak {
+            if tweakItem.isEnabled {
+                urls = [tweakItem.fileUrl]
+            } else {
+                do {
+                    let tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                    try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+                    let cleanUrl = tmpDir.appendingPathComponent(tweakItem.displayName)
+                    try fm.copyItem(at: tweakItem.fileUrl, to: cleanUrl)
+                    urls = [cleanUrl]
+                } catch {
+                    errorShow = true
+                    errorInfo = error.localizedDescription
+                    return
+                }
+            }
+        } else if tweakItem.isFramework {
+            urls = [tweakItem.fileUrl]
+        } else if tweakItem.isFolder {
+            guard let enumerator = fm.enumerator(at: tweakItem.fileUrl, includingPropertiesForKeys: nil) else {
+                errorShow = true
+                errorInfo = "lc.tweakView.noDylibToExport".loc
+                return
+            }
+            for case let entryURL as URL in enumerator {
+                if entryURL.lastPathComponent.hasSuffix(".dylib") {
+                    urls.append(entryURL)
+                }
+            }
+            if urls.isEmpty {
+                errorShow = true
+                errorInfo = "lc.tweakView.noDylibToExport".loc
+                return
+            }
+        } else {
+            return
+        }
+        exportItems = urls
+        showExportSheet = true
     }
     
     func renameTweakItem(tweakItem: LCTweakItem) async {
