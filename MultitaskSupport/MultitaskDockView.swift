@@ -2824,6 +2824,12 @@ private struct RunningAppsStripView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
+        // 两态同高：没运行 App 是均分 HStack、有运行 App
+        // 是横滑 ScrollView，量出来都是 46 图标+4 间距+
+        // caption2 一行+上下各 6 ≈ 75；下限钉 78，两态
+        // 一分不差，列表不跟着伸缩；只钉下限，大字号
+        // 下内容长高仍能撑开，不裁字
+        .frame(minHeight: 78)
         .background(Color(UIColor.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20))
     }

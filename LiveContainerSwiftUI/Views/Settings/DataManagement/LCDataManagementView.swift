@@ -1176,7 +1176,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1287,6 +1287,7 @@ struct LCDataManagementView : View {
         let keychainRoot = appBackupURL.appendingPathComponent("Keychain")
         var keychainCount = 0
         var keychainHasSnapshot = false
+        var newestDumpDate: Date? = nil
         // 钥匙串快照改读游客进程内钥匙串桥（CZFKeychainBridge）
         // 写在容器根目录的文件：宿主侧 SecItem 查询在这台机上
         // 恒为空（按组/按别名/整表捞五版实测全是 0 条且无错误
@@ -1303,6 +1304,15 @@ struct LCDataManagementView : View {
             let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
             guard let data = try? Data(contentsOf: dumpURL),
                   let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
+            // 快照新鲜度：桥每次在游客启动/切后台时重写这
+            // 个文件，mtime 就是快照时间；备份弹窗报出来，
+            // 登录后没切后台就备份、dump 还是旧值时用户
+            // 能一眼看出来（取各容器里最新的）
+            if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
+               let mdate = attrs[.modificationDate] as? Date,
+               (newestDumpDate == nil || mdate > newestDumpDate!) {
+                newestDumpDate = mdate
+            }
             keychainHasSnapshot = true
             if !items.isEmpty {
                 try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
@@ -1316,7 +1326,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkipped)
+        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkipped, newestDumpDate)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1353,7 +1363,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String]) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1366,6 +1376,9 @@ struct LCDataManagementView : View {
                     var loginSkippedTotal = 0
                     var snapshotMissing = false
                     var bridgeStatuses: [String] = []
+                    var snapshotDates: [String] = []
+                    let dateFmt = DateFormatter()
+                    dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
                     for (index, app) in apps.enumerated() {
                         let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                         // 进度回主线程刷新：备到第几个、当前哪个
@@ -1383,6 +1396,9 @@ struct LCDataManagementView : View {
                         if let s = one.bridgeStatus {
                             bridgeStatuses.append("\(name)：\(s)")
                         }
+                        if one.keychainCount > 0, let d = one.keychainSnapshotDate {
+                            snapshotDates.append("\(name)：\(dateFmt.string(from: d))")
+                        }
                         count += 1
                         backedUpNames.append(name)
                     }
@@ -1393,9 +1409,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0))
+                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, []))
                 }
             }
         }
@@ -1428,6 +1444,10 @@ struct LCDataManagementView : View {
             }
             if !bridgeStatuses.isEmpty {
                 successInfo += "\n—— 桥回执 ——\n" + bridgeStatuses.joined(separator: "\n")
+            }
+            if !snapshotDates.isEmpty {
+                successInfo += "\n—— 钥匙串快照时间 ——\n" + snapshotDates.joined(separator: "\n")
+                successInfo += "\n（快照是 App 打开/切后台时由桥写的；若之后登录过，先打开 App 切一次后台再备份）"
             }
             successInfo += "\n" + backupRoot.path
             successShow = true
@@ -1487,6 +1507,7 @@ struct LCDataManagementView : View {
             var keychainFoundTotal = 0
             var keychainQueuedTotal = 0
             var keychainImportedTotal = 0
+            var keychainUnwritableTotal = 0
             var missing: [(folder: URL, name: String, bundleID: String)] = []
             var noDataApps: [String] = []
             var versionMismatchApps: [String] = []
@@ -1520,6 +1541,7 @@ struct LCDataManagementView : View {
                 keychainFoundTotal += outcome.keychainFound
                 keychainQueuedTotal += outcome.keychainQueued
                 keychainImportedTotal += outcome.keychainImported
+                keychainUnwritableTotal += outcome.keychainUnwritable
                 if outcome.ok {
                     restoredCount += 1
                     if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
@@ -1572,6 +1594,7 @@ struct LCDataManagementView : View {
                 keychainFoundTotal += outcome2.keychainFound
                 keychainQueuedTotal += outcome2.keychainQueued
                 keychainImportedTotal += outcome2.keychainImported
+                keychainUnwritableTotal += outcome2.keychainUnwritable
                 if outcome2.ok {
                     installRestoredCount += 1
                     if Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
@@ -1584,6 +1607,9 @@ struct LCDataManagementView : View {
             var msg = String(format: "lc.settings.restoreComplete".loc, restoredCount + installRestoredCount)
             if keychainFoundTotal > 0 {
                 msg += "\n\n钥匙串：备份含 \(keychainFoundTotal) 条，已排队 \(keychainQueuedTotal) 条（打开 App 时由桥写回），宿主直写 \(keychainImportedTotal) 条"
+                if keychainUnwritableTotal > 0 {
+                    msg += "\n其中 \(keychainUnwritableTotal) 条所属 App 不注入插件（桥不加载），排队文件不会被写回"
+                }
             }
             if installRestoredCount > 0 {
                 msg += "\n\n其中 \(installRestoredCount) 个是先安装再恢复的"
@@ -1636,6 +1662,7 @@ struct LCDataManagementView : View {
         var keychainFound = 0
         var keychainImported = 0
         var keychainQueued = 0
+        var keychainUnwritable = 0
         var keychainStatus: OSStatus = errSecSuccess
     }
 
@@ -1854,7 +1881,13 @@ struct LCDataManagementView : View {
                     }
                 }
                 if queuedAny {
-                    outcome.keychainQueued += items.count
+                    // 不注入插件的 App 桥不加载，排队文件永远没
+                    // 人消费：别混进"已排队"骗人，单列无法写回
+                    if app.appInfo.dontInjectTweakLoader {
+                        outcome.keychainUnwritable += items.count
+                    } else {
+                        outcome.keychainQueued += items.count
+                    }
                     restoredExtras = true
                 }
             }
