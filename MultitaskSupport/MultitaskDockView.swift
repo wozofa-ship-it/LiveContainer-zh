@@ -363,7 +363,15 @@ class AppInfoProvider {
     @objc private func userDefaultsDidChange() {
         DispatchQueue.main.async {
             self.settingsChanged.toggle()
-            if self.isVisible {
+            // 刚打开隐藏快捷栏：正在显示的栏立刻收掉（不是只拦下次弹出）；
+            // 再关掉开关：有在跑的 App 就立刻把栏请回来（不然开关看着像坏了）
+            if LCUtils.appGroupUserDefault.bool(forKey: "LCHideDock") {
+                if self.isVisible {
+                    self.hideDock()
+                }
+            } else if !self.apps.isEmpty && !self.isVisible {
+                self.showDock()
+            } else if self.isVisible {
                 self.updateDockFrame()
             }
         }
@@ -506,6 +514,9 @@ class AppInfoProvider {
     
     @objc public func showDock() {
         guard isDockEnabled() else { return }
+        // 隐藏快捷栏开着：栏不弹出（只拦显形，不拦 App 追踪，
+        // 面板里的条子还要读运行中列表）
+        guard !LCUtils.appGroupUserDefault.bool(forKey: "LCHideDock") else { return }
         guard !isVisible, let hostingController = hostingController else { return }
         
         guard let keyWindow = self.keyWindow else { return }
@@ -955,6 +966,8 @@ class AppInfoProvider {
     }
     
     @objc public func showDockFromHidden() {
+        // 隐藏快捷栏开着：右缘划出也不唤回栏（左缘开面板不受影响）
+        guard !LCUtils.appGroupUserDefault.bool(forKey: "LCHideDock") else { return }
         DispatchQueue.main.async {
             self.isDockHidden = false
             self.updateDockFrame()

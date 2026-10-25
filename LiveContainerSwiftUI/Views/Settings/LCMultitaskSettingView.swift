@@ -18,6 +18,9 @@ struct LCMultitaskSettingView: View {
     @AppStorage("LCMaxOneAppOnStage", store: LCUtils.appGroupUserDefault) var onlyOneAppOnStage = false
     @AppStorage("LCDockWidth", store: LCUtils.appGroupUserDefault) var dockWidth: Double = 80
     @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
+    // 隐藏快捷栏（CZF）：整条竖栏都不显示，有手势就够了；
+    // 默认关（保持现有行为），开后快捷栏不再弹出
+    @AppStorage("LCHideDock", store: LCUtils.appGroupUserDefault) var hideDock: Bool = false
     @AppStorage("LCRedirectURLToHost", store: LCUtils.appGroupUserDefault) var redirectURLToHost = false
     // 窗口状态还原（CZF）：关窗时记下窗口大小/位置/全屏状态，
     // 下次打开自动还原（DecoratedAppSceneViewController 读写，
@@ -90,6 +93,9 @@ struct LCMultitaskSettingView: View {
                 .padding(.vertical, 4)
                 Toggle(isOn: $hideCollapsedDock) {
                     Text("lc.settings.hideCollapsedDock".loc)
+                }
+                Toggle(isOn: $hideDock) {
+                    Text("隐藏快捷栏")
                 }
             }
 
