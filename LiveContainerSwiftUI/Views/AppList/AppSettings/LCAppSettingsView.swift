@@ -184,6 +184,7 @@ struct LCAppSettingsView: View {
             }
         } label: {
             HStack {
+                LCSettingsIcon(systemName: "server.rack", color: .blue)
                 Text("使用节点")
                 Spacer()
                 Text(current.map { CZFVPNManager.nodeDisplay(for: $0).name } ?? "跟随全局")
@@ -241,6 +242,7 @@ struct LCAppSettingsView: View {
                         }
                     } label: {
                         HStack {
+                            LCSettingsIcon(systemName: "folder.fill", color: .blue)
                             Text("lc.appSettings.tweakFolder".loc)
                                 .foregroundColor(.primary)
                             Spacer()
@@ -263,13 +265,23 @@ struct LCAppSettingsView: View {
                 
                 if !model.uiIsShared {
                     if LCUtils.isAppGroupAltStoreLike() || LCUtils.store() == .ADP {
-                        Button("lc.appSettings.toSharedApp".loc) {
+                        Button {
                             Task { await moveToAppGroup()}
+                        } label: {
+                            HStack {
+                                LCSettingsIcon(systemName: "person.2.fill", color: .blue)
+                                Text("lc.appSettings.toSharedApp".loc)
+                            }
                         }
                     }
                 } else if sharedModel.multiLCStatus != 2 {
-                    Button("lc.appSettings.toPrivateApp".loc) {
+                    Button {
                         Task { await movePrivateDoc() }
+                    } label: {
+                        HStack {
+                            LCSettingsIcon(systemName: "person.fill", color: .gray)
+                            Text("lc.appSettings.toPrivateApp".loc)
+                        }
                     }
                 }
             } header: {
@@ -290,18 +302,27 @@ struct LCAppSettingsView: View {
                     Button {
                         Task{ await createFolder() }
                     } label: {
-                        Text("lc.appSettings.newDataFolder".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "folder.badge.plus", color: .blue)
+                            Text("lc.appSettings.newDataFolder".loc)
+                        }
                     }
                     Button {
                         choosingStorage = true
                     } label: {
-                        Text("lc.appSettings.selectExternalStorage".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "externaldrive.fill", color: .gray)
+                            Text("lc.appSettings.selectExternalStorage".loc)
+                        }
                     }
                     if(!model.uiIsShared) {
                         Button {
                             selectUnusedContainerSheetShow = true
                         } label: {
-                            Text("lc.container.selectUnused".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "archivebox.fill", color: .gray)
+                                Text("lc.container.selectUnused".loc)
+                            }
                         }
                     }
                 }
@@ -313,7 +334,10 @@ struct LCAppSettingsView: View {
             
             Section {
                 Toggle(isOn: $model.uiIsJITNeeded) {
-                    Text("lc.appSettings.launchWithJit".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "bolt.fill", color: .orange)
+                        Text("lc.appSettings.launchWithJit".loc)
+                    }
                 }
                 .disabled(model.uiIs32bit)
                 if #available(iOS 26.0, *), model.uiIsJITNeeded, !model.uiIs32bit {
@@ -370,7 +394,10 @@ struct LCAppSettingsView: View {
                             Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath!)
                         }
                     } label: {
-                        Text("lc.appSettings.selected32BitEmulator".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "cpu.fill", color: .gray)
+                            Text("lc.appSettings.selected32BitEmulator".loc)
+                        }
                     }
                 }
             } footer: {
@@ -386,7 +413,10 @@ struct LCAppSettingsView: View {
 
             Section {
                 Toggle(isOn: $model.uiIsLocked) {
-                    Text("lc.appSettings.lockApp".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "lock.fill", color: .red)
+                        Text("lc.appSettings.lockApp".loc)
+                    }
                 }
                 .onChange(of: model.uiIsLocked, perform: { newValue in
                     Task { await model.setLocked(newLockState: newValue) }
@@ -394,7 +424,10 @@ struct LCAppSettingsView: View {
 
                 if model.uiIsLocked {
                     Toggle(isOn: $model.uiIsHidden) {
-                        Text("lc.appSettings.hideApp".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "eye.slash.fill", color: .gray)
+                            Text("lc.appSettings.hideApp".loc)
+                        }
                     }
                     .onChange(of: model.uiIsHidden, perform: { _ in
                         Task { await toggleHidden() }
@@ -415,7 +448,10 @@ struct LCAppSettingsView: View {
                         Text("lc.common.no".loc).tag(MultitaskSpecified.no)
                         Text("lc.common.yes".loc).tag(MultitaskSpecified.yes)
                     } label: {
-                        Text("lc.appBanner.multitask".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "rectangle.stack", color: .purple)
+                            Text("lc.appBanner.multitask".loc)
+                        }
                     }
                 }
             }
@@ -453,6 +489,7 @@ struct LCAppSettingsView: View {
                     }
                 } label: {
                     HStack {
+                        LCSettingsIcon(systemName: "globe", color: .blue)
                         Text("lc.common.language".loc)
                         Spacer()
                         if model.uiSelectedLanguage == "" {
@@ -472,7 +509,10 @@ struct LCAppSettingsView: View {
                     get: { CZFVPNManager.isEnabled(for: model.appInfo) },
                     set: { CZFVPNManager.setEnabled($0, for: model.appInfo) }
                 )) {
-                    Text("VPN 打开（内置节点）")
+                    HStack {
+                        LCSettingsIcon(systemName: "shield.fill", color: .green)
+                        Text("VPN 打开（内置节点）")
+                    }
                 }
                 if CZFVPNManager.isEnabled(for: model.appInfo) {
                     vpnNodeRow
@@ -498,7 +538,10 @@ struct LCAppSettingsView: View {
                     get: { keepAliveOn },
                     set: { setKeepAlive($0) }
                 )) {
-                    Text("保活（仅这个 App）")
+                    HStack {
+                        LCSettingsIcon(systemName: "heart.fill", color: .red)
+                        Text("保活（仅这个 App）")
+                    }
                 }
                 .disabled(!globalKeepAliveOn)
             } header: {
@@ -509,13 +552,21 @@ struct LCAppSettingsView: View {
 
             Section {
                 Toggle(isOn: $schedMinEnabled) {
-                    Text("定时最小化打开")
+                    HStack {
+                        LCSettingsIcon(systemName: "clock.fill", color: .orange)
+                        Text("定时最小化打开")
+                    }
                 }
                 .onChange(of: schedMinEnabled) { _ in
                     saveSchedMinSettings()
                 }
                 if schedMinEnabled {
-                    DatePicker("打开时间", selection: $schedMinTime, displayedComponents: .hourAndMinute)
+                    DatePicker(selection: $schedMinTime, displayedComponents: .hourAndMinute) {
+                        HStack {
+                            LCSettingsIcon(systemName: "alarm.fill", color: .orange)
+                            Text("打开时间")
+                        }
+                    }
                         .onChange(of: schedMinTime) { _ in
                             saveSchedMinSettings()
                         }
@@ -529,19 +580,31 @@ struct LCAppSettingsView: View {
             Section {
                 DisclosureGroup(isExpanded: $fixesExpanded) {
                     Toggle(isOn: $model.uiFixFilePickerNew) {
-                        Text("lc.appSettings.fixFilePickerNew".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "folder.fill", color: .blue)
+                            Text("lc.appSettings.fixFilePickerNew".loc)
+                        }
                     }
                     Toggle(isOn: $model.uiFixLocalNotification) {
-                        Text("lc.appSettings.fixLocalNotification".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "bell.fill", color: .orange)
+                            Text("lc.appSettings.fixLocalNotification".loc)
+                        }
                     }
                     Toggle(isOn: $model.uiUseLCBundleId) {
-                        Text("lc.appSettings.useLCBundleId".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "app.badge", color: .blue)
+                            Text("lc.appSettings.useLCBundleId".loc)
+                        }
                     }
                     Text("lc.appSettings.useLCBundleIdDesc".loc)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } label: {
-                    Text("lc.appSettings.fixes".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "wrench.and.screwdriver.fill", color: .gray)
+                        Text("lc.appSettings.fixes".loc)
+                    }
                 }
             }
             
@@ -552,23 +615,35 @@ struct LCAppSettingsView: View {
                         Text("lc.apppSettings.orientationLock.landscape".loc).tag(LCOrientationLock.Landscape)
                         Text("lc.apppSettings.orientationLock.portrait".loc).tag(LCOrientationLock.Portrait)
                     } label: {
-                        Text("lc.apppSettings.orientationLock".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "iphone", color: .gray)
+                            Text("lc.apppSettings.orientationLock".loc)
+                        }
                     }
                 }
             }
             
             Section {
                 Toggle(isOn: $model.uiHideLiveContainer) {
-                    Text("lc.appSettings.hideLiveContainer".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "eye.slash", color: .gray)
+                        Text("lc.appSettings.hideLiveContainer".loc)
+                    }
                 }
 
                 Toggle(isOn: $model.uiDontInjectTweakLoader) {
-                    Text("lc.appSettings.dontInjectTweakLoader".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "nosign", color: .red)
+                        Text("lc.appSettings.dontInjectTweakLoader".loc)
+                    }
                 }.disabled(model.uiTweakLoaderInjectFailed)
                 
                 if model.uiDontInjectTweakLoader {
                     Toggle(isOn: $model.uiDontLoadTweakLoader) {
-                        Text("lc.appSettings.dontLoadTweakLoader".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "square.slash.fill", color: .gray)
+                            Text("lc.appSettings.dontLoadTweakLoader".loc)
+                        }
                     }
                 }
                 
@@ -579,7 +654,10 @@ struct LCAppSettingsView: View {
             if #available(iOS 16.0, *) {
                 Section {
                     Toggle(isOn: $model.uiClassicMode) {
-                        Text("lc.appSettings.classicMode".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "rectangle.on.rectangle", color: .gray)
+                            Text("lc.appSettings.classicMode".loc)
+                        }
                     }
                 } footer: {
                     Text("lc.appSettings.classicModeDesc".loc)
@@ -588,7 +666,10 @@ struct LCAppSettingsView: View {
             
             Section {
                 Toggle(isOn: $model.uiSpoofSDKVersion) {
-                    Text("lc.appSettings.spoofSDKVersion".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "hammer.fill", color: .gray)
+                        Text("lc.appSettings.spoofSDKVersion".loc)
+                    }
                 }
             } footer: {
                 Text("lc.appSettings.fspoofSDKVersionDesc".loc)
@@ -597,15 +678,23 @@ struct LCAppSettingsView: View {
             
             Section {
                 Toggle(isOn: $model.uiDoSymlinkInbox) {
-                    Text("lc.appSettings.fixFilePicker".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "link", color: .blue)
+                        Text("lc.appSettings.fixFilePicker".loc)
+                    }
                 }
             } footer: {
                 Text("lc.appSettings.fixFilePickerDesc".loc)
             }
             
             Section {
-                Button("lc.appSettings.forceSign".loc) {
+                Button {
                     Task { await forceResign() }
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "signature", color: .blue)
+                        Text("lc.appSettings.forceSign".loc)
+                    }
                 }
                 .disabled(model.isAppRunning)
             } footer: {

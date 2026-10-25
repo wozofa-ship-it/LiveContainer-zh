@@ -1276,6 +1276,20 @@ class AppInfoProvider {
     // 或面板开着时不动。
     private func czfSwitchRunningApp(step: Int) {
         guard !apps.isEmpty, !isAppPanelOpen, !isSourcesPanelOpen else { return }
+        // 单个 App：右缘轮换改成隐藏/显示切换（用户定 2026-10-25）。
+        // 只有一个在跑时轮换目标永远是自己、看着像没反应；改成：
+        // 可见时滑一下最小化（回宿主），已最小化时滑一下叫回来。
+        // 多个 App 仍按原路循环切换。
+        if apps.count == 1 {
+            let only = apps[0]
+            if czfFrontmostApp()?.appUUID == only.appUUID {
+                minimizeWindow(uuid: only.appUUID)
+            } else {
+                guard bringMultitaskViewToFront(uuid: only.appUUID, from: nil) else { return }
+            }
+            edgeCallbackBuzz()
+            return
+        }
         let currentIndex = czfFrontmostApp().flatMap { front in
             apps.firstIndex(where: { $0.appUUID == front.appUUID })
         }
@@ -1290,9 +1304,13 @@ class AppInfoProvider {
         // 通用带脉冲动画的路径在 1 大 1 小时盖不住小窗口（实测）；
         // 大窗口不走缩放脉冲（全屏窗脉冲多余），改走静默直提 + 重申最大化状态，
         // 并保留 LCMaxOneAppOnStage 的最小化他人行为；切到小窗口走原路径不变。
+        // 但已最小化的大窗口不走静默直提：静默分支只调 z 序、不取消
+        // 隐藏，滑了也出不来（最小化过的 App 右缘叫不回来的根因）；
+        // 隐藏的目标改走带取消隐藏的通用路径（面板「打开」同款）。
         if let targetView = target.view,
            let targetVC = targetView._viewDelegate() as? DecoratedAppSceneViewController,
            targetVC.isMaximized,
+           !targetView.isHidden, targetView.alpha >= 0.1,
            let targetWindow = targetView.window ?? targetView.superview?.window {
             passURLSchemeToView(targetView)
             if UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") {
