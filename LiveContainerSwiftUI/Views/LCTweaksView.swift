@@ -40,6 +40,10 @@ struct LCTweakFolderView : View {
     @State private var choosingTweak = false
     
     @State private var isTweakSigning = false
+
+    // 导入插件进行中：点完导入没反馈就是缺这个（签名的转圈
+    // 是现成的，导入照抄一套）
+    @State private var isTweakInstalling = false
     
     init(baseUrl: URL, isRoot: Bool = false) {
         _baseUrl = State(initialValue: baseUrl)
@@ -56,6 +60,13 @@ struct LCTweakFolderView : View {
                 let baseName = isEnabled ? fileName : String(fileName.dropLast(LCTweakItem.disabledSuffix.count))
                 let isFramework = isFolder.boolValue && baseName.hasSuffix(".framework")
                 let isTweak = !isFolder.boolValue && baseName.hasSuffix(".dylib")
+                // 插件列表只显示能注入的东西（文件夹/.framework/.dylib）：
+                // 散文件（VPN 统计 .txt 等）只是插件写的数据，开关
+                // 对它们没意义，还把列表撑得像一堆插件（用户点名）；
+                // 文件本身留着，宿主设置页还在读统计，不删
+                if !isFolder.boolValue && !isTweak {
+                    continue
+                }
                 tmpTweakItems.append(LCTweakItem(fileUrl: fileUrl, isFolder: isFolder.boolValue, isFramework: isFramework, isTweak: isTweak, isEnabled: isEnabled))
             }
             _tweakItems = State(initialValue: tmpTweakItems)
@@ -142,7 +153,7 @@ struct LCTweakFolderView : View {
         .navigationTitle(isRoot ? "lc.tabView.tweaks".loc : baseUrl.lastPathComponent)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                if !isTweakSigning && LCSharedUtils.certificatePassword() != nil {
+                if !isTweakSigning && !isTweakInstalling && LCSharedUtils.certificatePassword() != nil {
                     Button {
                         Task { await signAllTweaks() }
                     } label: {
@@ -152,7 +163,7 @@ struct LCTweakFolderView : View {
 
             }
             ToolbarItem(placement: .topBarTrailing) {
-                if !isTweakSigning {
+                if !isTweakSigning && !isTweakInstalling {
                     Menu {
                         Button {
                             if choosingTweak {
@@ -364,6 +375,8 @@ struct LCTweakFolderView : View {
     }
     
     func startInstallTweak(_ urls: [URL]) async {
+        isTweakInstalling = true
+        defer { isTweakInstalling = false }
         do {
             let fm = FileManager()
             // we will sign later before app launch

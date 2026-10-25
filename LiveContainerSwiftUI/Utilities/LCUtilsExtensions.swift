@@ -13,6 +13,37 @@ extension LCUtils {
     // 本次运行内已验签通过的插件文件夹，避免每次打开 App 重复扫描全局插件（force=true 的安装/管理流程不受影响）
     private static var verifiedTweakFolders: Set<String> = []
     private static let verifiedTweakFoldersLock = NSLock()
+
+    // 串行化所有 tweak 签名：宿主启动部署桥（后台 Task 单签）
+    // 与游客启动整夹签名曾同时改写同一文件，签名写坏/指纹
+    // 错乱；所有签名入口都走这里排队，一次只跑一个任务。
+    // 已在串行队列上时直接跑（防嵌套调用死锁）。
+    private static let tweakSignQueueKey = DispatchSpecificKey<Void>()
+    private static let tweakSignQueue: DispatchQueue = {
+        let q = DispatchQueue(label: "czf.tweak.sign.serial")
+        q.setSpecific(key: tweakSignQueueKey, value: ())
+        return q
+    }()
+    private static func withSerializedTweakSign<T>(_ work: @escaping () async throws -> T) async throws -> T {
+        if DispatchQueue.getSpecific(key: tweakSignQueueKey) != nil {
+            return try await work()
+        }
+        return try await withCheckedThrowingContinuation { cont in
+            tweakSignQueue.async {
+                let sema = DispatchSemaphore(value: 0)
+                Task {
+                    do {
+                        let result = try await work()
+                        cont.resume(returning: result)
+                    } catch {
+                        cont.resume(throwing: error)
+                    }
+                    sema.signal()
+                }
+                sema.wait()
+            }
+        }
+    }
     
     private static func isTweakFolderVerified(_ url: URL) -> Bool {
         verifiedTweakFoldersLock.lock()
@@ -33,7 +64,15 @@ extension LCUtils {
         return "\(size)|\(mtime)"
     }
     
+    // 签名唯一入口（串行）：部署 Task 与启动签名曾同时改写
+    // 同一文件；包一层串行锁再跑实现，一次只签一批
     public static func signTweaks(tweakFolderUrl: URL, force : Bool = false, progressHandler : ((Progress) -> Void)? = nil) async throws {
+        try await withSerializedTweakSign {
+            try await signTweaksImpl(tweakFolderUrl: tweakFolderUrl, force: force, progressHandler: progressHandler)
+        }
+    }
+
+    private static func signTweaksImpl(tweakFolderUrl: URL, force : Bool = false, progressHandler : ((Progress) -> Void)? = nil) async throws {
         guard LCSharedUtils.certificatePassword() != nil else {
             return
         }
@@ -217,6 +256,12 @@ extension LCUtils {
     // 过，没必要陪着重签。处理与 signTweaks 对单文件一致（先做 arm64e
     // 切片修补再签）。
     public static func signSingleTweakFile(_ fileURL: URL) async throws {
+        try await withSerializedTweakSign {
+            try await signSingleTweakFileImpl(fileURL)
+        }
+    }
+
+    private static func signSingleTweakFileImpl(_ fileURL: URL) async throws {
         guard LCSharedUtils.certificatePassword() != nil else {
             return
         }
