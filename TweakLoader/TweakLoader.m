@@ -392,6 +392,15 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
         CGPoint loc = [touch locationInView:window];
         switch (touch.phase) {
             case UITouchPhaseBegan: {
+                // 点按置顶（用户定 2026-10-25）：游客里任何位置点按都要把本窗口顶到最上。
+                // 宿主侧容器识别器收不到游客内容（passthrough view）的触摸——触摸直达游客场景，
+                // 故游客侧在每次触摸按下时发 Darwin 信号（名里带本 App bundleId），宿主按名找到
+                // 窗口静默置顶（只调层级、不动画，点按不闪）。纯观察，不改事件、不碰漏斗状态。
+                NSString *touchBid = [[NSBundle mainBundle] bundleIdentifier];
+                if (touchBid.length > 0) {
+                    NSString *touchName = [NSString stringWithFormat:@"czf.window.touch.%@", touchBid];
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)touchName, NULL, NULL, YES);
+                }
                 // 记录带放宽到 96：抬手兜底规则需要它；移动中的提前
                 // 触发仍只认 64 带内起手（见 Moved 分支）。另加启用
                 // 带（与宿主中档同值）：带外起手不记录，手势只认

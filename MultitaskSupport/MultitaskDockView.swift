@@ -505,6 +505,9 @@ class AppInfoProvider {
         guard isDockEnabled() else { return }
         
         DispatchQueue.main.async {
+            if let bid = self.apps.first(where: { $0.appUUID == appUUID })?.appInfo?.bundleIdentifier() {
+                self.czfUnregisterTouchRaiseObserver(bundleId: bid)
+            }
             self.apps.removeAll { $0.appUUID == appUUID }
 
             if self.apps.isEmpty {
@@ -676,12 +679,25 @@ class AppInfoProvider {
         for window in windowScene.windows {
             if let targetView = findMultitaskView(in: window, withUUID: uuid) {
                 passURLSchemeToView(targetView)
-                animateViewAppearance(targetView, from: center, in: window)
+                // 用视图实际所在的窗口做置顶：findMultitaskView 不看 window 参数，
+                // 循环第一个窗口未必是视图的窗口，窗口级置顶会抬错窗口。
+                animateViewAppearance(targetView, from: center, in: targetView.window ?? window)
                 return true
             }
         }
         
         return false
+    }
+
+    // 游客点按信号到达：按 bundleId 找到窗口，只调层级、不做脉冲动画。
+    // 游客里每次点按都会发信号，带动画会点一下闪一下，故必须静默。
+    @objc public func czfRaiseWindowForTouch(bundleId: String) {
+        DispatchQueue.main.async {
+            guard let app = self.apps.first(where: { $0.appInfo?.bundleIdentifier() == bundleId }),
+                  let view = app.view,
+                  let window = view.window ?? view.superview?.window else { return }
+            self.bringViewToFront(view, in: window)
+        }
     }
 
     private func passURLSchemeToView(_ view: UIView) {
@@ -787,6 +803,9 @@ class AppInfoProvider {
         
         DispatchQueue.main.async {
             self.apps.append(appModel)
+            if let bid = appInfo?.bundleIdentifier() {
+                self.czfRegisterTouchRaiseObserver(bundleId: bid)
+            }
             
             if self.apps.count == 1 {
                 self.showDock()
@@ -1265,8 +1284,25 @@ class AppInfoProvider {
             targetIndex = step > 0 ? 0 : apps.count - 1
         }
         let target = apps[targetIndex]
-        guard bringMultitaskViewToFront(uuid: target.appUUID, from: nil) else { return }
-        edgeCallbackBuzz()
+        // 切到大窗口：直接全屏调出来（用户定 2026-10-25）。
+        // 通用带脉冲动画的路径在 1 大 1 小时盖不住小窗口（实测）；
+        // 大窗口不走缩放脉冲（全屏窗脉冲多余），改走静默直提 + 重申最大化状态，
+        // 并保留 LCMaxOneAppOnStage 的最小化他人行为；切到小窗口走原路径不变。
+        if let targetView = target.view,
+           let targetVC = targetView._viewDelegate() as? DecoratedAppSceneViewController,
+           targetVC.isMaximized,
+           let targetWindow = targetView.window ?? targetView.superview?.window {
+            passURLSchemeToView(targetView)
+            if UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") {
+                minimizeAllWindows(except: targetVC)
+            }
+            bringViewToFront(targetView, in: targetWindow)
+            maximizeWindow(uuid: target.appUUID)
+            edgeCallbackBuzz()
+        } else {
+            guard bringMultitaskViewToFront(uuid: target.appUUID, from: nil) else { return }
+            edgeCallbackBuzz()
+        }
     }
 
     // 当前 App：层级最靠前、可见的运行中 App，纯按 z 序算，不以
@@ -1668,6 +1704,35 @@ class AppInfoProvider {
     // 静态方法：宿主一启动（AppDelegate）就调，赶在任何游客 App 启动之前。
     // 管理器初始化时也会再调一次（幂等）。
     // 游客 App 是独立进程，插件的手势信号通过 Darwin 跨进程通知送达这里
+    // 游客点按置顶的宿主侧观察者：游客每次触摸按下发 czf.window.touch.<bid>，
+    // 宿主按名找到窗口静默置顶。注册记账防重复（同 bid 重装不重复注册；
+    // 残留观察者也无害：触发时按 bid 现查，找不到就空操作）。
+    private var czfTouchRaiseRegisteredBids: Set<String> = []
+    private func czfRegisterTouchRaiseObserver(bundleId: String) {
+        guard !czfTouchRaiseRegisteredBids.contains(bundleId) else { return }
+        czfTouchRaiseRegisteredBids.insert(bundleId)
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        let name = "czf.window.touch.\(bundleId)"
+        CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
+            guard let observerPtr = observerPtr, let cfName = cfName else { return }
+            let manager = Unmanaged<MultitaskDockManager>.fromOpaque(observerPtr).takeUnretainedValue()
+            let notificationName = cfName.rawValue as String
+            guard notificationName.hasPrefix("czf.window.touch.") else { return }
+            let bid = String(notificationName.dropFirst("czf.window.touch.".count))
+            DispatchQueue.main.async {
+                manager.czfRaiseWindowForTouch(bundleId: bid)
+            }
+        }, name as CFString, nil, .deliverImmediately)
+    }
+    private func czfUnregisterTouchRaiseObserver(bundleId: String) {
+        guard czfTouchRaiseRegisteredBids.remove(bundleId) != nil else { return }
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterRemoveObserver(center, observer, "czf.window.touch.\(bundleId)" as CFString, nil)
+    }
+
+    // 边缘手势信号观察者：游客边缘手势的 Darwin 信号（czf.dock.*）送达这里
     private func registerDockEdgeDarwinObservers() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
