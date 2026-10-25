@@ -38,38 +38,65 @@ struct LCMultitaskSettingView: View {
                         Text("lc.settings.multitaskMode.virtualWindow".loc).tag(MultitaskMode.virtualWindow)
                         Text("lc.settings.multitaskMode.nativeWindow".loc).tag(MultitaskMode.nativeWindow)
                     } label: {
-                        Text("lc.settings.multitaskMode".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "rectangle.stack", color: .purple)
+                            Text("lc.settings.multitaskMode".loc)
+                        }
                     }
                 }
                 Toggle(isOn: $launchInMultitaskMode) {
-                    Text("lc.settings.autoLaunchInMultitaskMode".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "play.fill", color: .green)
+                        Text("lc.settings.autoLaunchInMultitaskMode".loc)
+                    }
                 }
                 
                 if multitaskMode == .virtualWindow {
                     Toggle(isOn: $launchMultitaskMaximized) {
-                        Text("lc.settings.launchMultitaskMaximized".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "arrow.up.left.and.arrow.down.right", color: .blue)
+                            Text("lc.settings.launchMultitaskMaximized".loc)
+                        }
                     }
                     if launchMultitaskMaximized {
                         Toggle(isOn: $onlyOneAppOnStage) {
-                            Text("lc.settings.onlyOneAppOnStage".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "square.stack", color: .purple)
+                                Text("lc.settings.onlyOneAppOnStage".loc)
+                            }
                         }
                     }
                     Toggle(isOn: $autoEndPiP) {
-                        Text("lc.settings.autoEndPiP".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "pip", color: .gray)
+                            Text("lc.settings.autoEndPiP".loc)
+                        }
                     }
                     Toggle(isOn: $skipTerminatedScreen) {
-                        Text("lc.settings.skipTerminatedScreen".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "forward.fill", color: .gray)
+                            Text("lc.settings.skipTerminatedScreen".loc)
+                        }
                     }
                     if skipTerminatedScreen {
                         Toggle(isOn: $restartTerminatedApp) {
-                            Text("lc.settings.restartTerminatedApp".loc)
+                            HStack {
+                                LCSettingsIcon(systemName: "arrow.clockwise", color: .green)
+                                Text("lc.settings.restartTerminatedApp".loc)
+                            }
                         }
                     }
                     Toggle(isOn: $bottomWindowBar) {
-                        Text("lc.settings.bottomWindowBar".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "menubar.rectangle", color: .gray)
+                            Text("lc.settings.bottomWindowBar".loc)
+                        }
                     }
                     Toggle(isOn: $redirectURLToHost) {
-                        Text("lc.settings.redirectURLToHost".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "link", color: .blue)
+                            Text("lc.settings.redirectURLToHost".loc)
+                        }
                     }
 
                 }
@@ -78,6 +105,7 @@ struct LCMultitaskSettingView: View {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
+                        LCSettingsIcon(systemName: "rectangle.expand.horizontal", color: .blue)
                         Text("lc.settings.dockWidth".loc)
                             .foregroundColor(.primary)
                         Spacer()
@@ -92,19 +120,31 @@ struct LCMultitaskSettingView: View {
                 }
                 .padding(.vertical, 4)
                 Toggle(isOn: $hideCollapsedDock) {
-                    Text("lc.settings.hideCollapsedDock".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "eye.slash", color: .gray)
+                        Text("lc.settings.hideCollapsedDock".loc)
+                    }
                 }
                 Toggle(isOn: $hideDock) {
-                    Text("隐藏快捷栏")
+                    HStack {
+                        LCSettingsIcon(systemName: "eye.slash.fill", color: .red)
+                        Text("隐藏快捷栏")
+                    }
                 }
             }
 
             Section {
                 Toggle(isOn: $restoreWindowState) {
-                    Text("记住窗口位置")
+                    HStack {
+                        LCSettingsIcon(systemName: "clock.fill", color: .orange)
+                        Text("记住窗口位置")
+                    }
                 }
                 Toggle(isOn: $edgeGesturesEnabled) {
-                    Text("边缘手势")
+                    HStack {
+                        LCSettingsIcon(systemName: "hand.draw.fill", color: .blue)
+                        Text("边缘手势")
+                    }
                 }
                 if edgeGesturesEnabled {
                     Picker(selection: $edgeSensitivity) {
@@ -112,7 +152,10 @@ struct LCMultitaskSettingView: View {
                         Text("中").tag(1)
                         Text("高").tag(2)
                     } label: {
-                        Text("手势灵敏度")
+                        HStack {
+                            LCSettingsIcon(systemName: "slider.horizontal.3", color: .purple)
+                            Text("手势灵敏度")
+                        }
                     }
                 }
             } header: {

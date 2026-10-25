@@ -98,12 +98,18 @@ struct LCDataManagementView : View {
                 Button {
                     exportCZFSettings()
                 } label: {
-                    Text("导出设置")
+                    HStack {
+                        LCSettingsIcon(systemName: "square.and.arrow.up", color: .blue)
+                        Text("导出设置")
+                    }
                 }
                 Button {
                     showSettingsImporter = true
                 } label: {
-                    Text("导入设置")
+                    HStack {
+                        LCSettingsIcon(systemName: "square.and.arrow.down", color: .green)
+                        Text("导入设置")
+                    }
                 }
             } header: {
                 Text("设置备份")
@@ -130,42 +136,63 @@ struct LCDataManagementView : View {
                     Button {
                         moveAppGroupFolderFromPrivateToAppGroup()
                     } label: {
-                        Text("lc.settings.appGroupPrivateToShare".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "tray.and.arrow.up.fill", color: .blue)
+                            Text("lc.settings.appGroupPrivateToShare".loc)
+                        }
                     }
                     Button {
                         moveAppGroupFolderFromAppGroupToPrivate()
                     } label: {
-                        Text("lc.settings.appGroupShareToPrivate".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "tray.and.arrow.down.fill", color: .green)
+                            Text("lc.settings.appGroupShareToPrivate".loc)
+                        }
                     }
 
                     Button {
                         Task { await moveDanglingFolders() }
                     } label: {
-                        Text("lc.settings.moveDanglingFolderOut".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "folder.fill", color: .orange)
+                            Text("lc.settings.moveDanglingFolderOut".loc)
+                        }
                     }
                     Button(role:.destructive) {
                         Task { await cleanUpUnusedFolders() }
                     } label: {
-                        Text("lc.settings.cleanDataFolder".loc)
+                        HStack {
+                            LCSettingsIcon(systemName: "trash", color: .red)
+                            Text("lc.settings.cleanDataFolder".loc)
+                        }
                     }
                 }
 
                 Button(role:.destructive) {
                     Task { await removeKeyChain() }
                 } label: {
-                    Text("lc.settings.cleanKeychain".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "key.fill", color: .orange)
+                        Text("lc.settings.cleanKeychain".loc)
+                    }
                 }
 
                 Button(role:.destructive) {
                     Task { await clearTemporaryFiles() }
                 } label: {
-                    Text("lc.settings.cleanTmp".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "doc.fill", color: .gray)
+                        Text("lc.settings.cleanTmp".loc)
+                    }
                 }
                 
                 Button(role:.destructive) {
                     Task { await clearCacheFiles() }
                 } label: {
-                    Text("lc.settings.cleanCaches".loc) 
+                    HStack {
+                        LCSettingsIcon(systemName: "externaldrive.fill", color: .blue)
+                        Text("lc.settings.cleanCaches".loc) 
+                    }
                 }
 
             }
@@ -184,18 +211,25 @@ struct LCDataManagementView : View {
                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
                     showBackupScopeDialog = true
                 } label: {
-                    Text("lc.settings.backupAll".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "doc.on.doc", color: .blue)
+                        Text("lc.settings.backupAll".loc)
+                    }
                 }
                 Button {
                     showBackupSelect = true
                 } label: {
-                    Text("lc.settings.backupSelected".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "checkmark.circle.fill", color: .green)
+                        Text("lc.settings.backupSelected".loc)
+                    }
                 }
                 Button {
                     loadScheduleSettings()
                     showScheduleBackup = true
                 } label: {
                     HStack {
+                        LCSettingsIcon(systemName: "clock.fill", color: .orange)
                         Text("定时备份")
                         Spacer()
                         if scheduleEnabled {
@@ -210,12 +244,16 @@ struct LCDataManagementView : View {
                     // 不再先弹“选哪个文件夹”
                     showRestoreSelect = true
                 } label: {
-                    Text("lc.settings.restoreBackup".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "arrow.clockwise", color: .green)
+                        Text("lc.settings.restoreBackup".loc)
+                    }
                 }
                 Button {
                     showFolderPicker = true
                 } label: {
                     HStack {
+                        LCSettingsIcon(systemName: "icloud.fill", color: .blue)
                         Text("iCloud 备份文件夹")
                         Spacer()
                         Text(externalFolderName ?? "未选择")
@@ -230,7 +268,10 @@ struct LCDataManagementView : View {
                 Button {
                     Task { await clearIconCache() }
                 } label: {
-                    Text("lc.settings.clearIconCache".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "photo.fill", color: .purple)
+                        Text("lc.settings.clearIconCache".loc)
+                    }
                 }
                 Button {
                     cacheScheduleEnabled = UserDefaults.standard.bool(forKey: "LCScheduleCacheEnabled")
@@ -243,6 +284,7 @@ struct LCDataManagementView : View {
                     showScheduleCache = true
                 } label: {
                     HStack {
+                        LCSettingsIcon(systemName: "clock.fill", color: .orange)
                         Text("定时清理缓存")
                         Spacer()
                         if cacheScheduleEnabled {

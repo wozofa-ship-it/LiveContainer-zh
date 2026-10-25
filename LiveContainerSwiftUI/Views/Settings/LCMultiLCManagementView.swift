@@ -42,6 +42,7 @@ struct InstallAnotherLCButton : View {
             Task { await delegate.installAnotherLC(name: lcName)}
         } label: {
             HStack {
+                LCSettingsIcon(systemName: "plus.app", color: .green)
                 Text(lcName)
                 Spacer()
                 if detected {
@@ -103,10 +104,16 @@ struct LCMultiLCManagementView : View, InstallAnotherLCButtonDelegate {
             }
             Section {
                 Toggle(isOn: $useGameCategory) {
-                    Text("lc.settings.multiLCInstall.useGameCategory".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "gamecontroller.fill", color: .purple)
+                        Text("lc.settings.multiLCInstall.useGameCategory".loc)
+                    }
                 }
                 Toggle(isOn: $allowGameMode) {
-                    Text("lc.settings.multiLCInstall.allowGameMode".loc)
+                    HStack {
+                        LCSettingsIcon(systemName: "gamecontroller", color: .green)
+                        Text("lc.settings.multiLCInstall.allowGameMode".loc)
+                    }
                 }
             } header: {
                 Text("lc.common.miscellaneous".loc)

@@ -35,8 +35,8 @@ enum JITEnablerType : Int, CaseIterable, Identifiable {
 /// 设置行图标（参考 Minis 设置页语言）：白 glyph + 彩色圆底 30pt，
 /// 跟行高走，Form 里图标列自然对齐。只加在单行简单行上
 /// （按钮/链接/开关/选择器），多行自定义布局（节点列表、签名
-/// 到期行、订阅行）不动，免得挤坏原有排版。
-private struct LCSettingsIcon: View {
+/// 到期行、订阅行）不动，免得挤坏原有排版。二级页面共用此组件。
+struct LCSettingsIcon: View {
     let systemName: String
     let color: Color
     var body: some View {

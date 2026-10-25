@@ -114,6 +114,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     
     @State private var isViewAppeared = false
+
+    // 顶栏下拉才显示：默认隐藏标题+搜索+工具按钮，只剩卡片；
+    // 列表顶部往下拉过阈值展开，往下滚过阈值收起（App 页精简）。
+    @State private var czfShowTopBar = false
     
     @ObservedObject var searchContext: SearchContext = SearchContext()
     var sortedApps: [LCAppModel] {
@@ -189,6 +193,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     var body: some View {
         NavigationView {
             ScrollView {
+                // 顶栏下拉探针：内容顶部的 minY（坐标系 scroll 已存在）
+                GeometryReader { geo in
+                    Color.clear.preference(key: CZFScrollTopKey.self, value: geo.frame(in: .named("scroll")).minY)
+                }
+                .frame(height: 0)
                 NavigationLink(
                     destination: navigateTo,
                     isActive: $isNavigationActive,
@@ -318,6 +327,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
             .coordinateSpace(name: "scroll")
+            .onPreferenceChange(CZFScrollTopKey.self) { minY in
+                // 迟滞阈值防抖：顶部下拉 60 展开，往下滚 100 收起
+                if minY > 60, !czfShowTopBar {
+                    withAnimation(.easeInOut) { czfShowTopBar = true }
+                } else if minY < -100, czfShowTopBar {
+                    withAnimation(.easeInOut) { czfShowTopBar = false }
+                }
+            }
             .onAppear {
                 if !didAppear {
                     onAppear()
@@ -399,6 +416,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .toolbar(czfShowTopBar ? .visible : .hidden, for: .navigationBar)
         .alert("lc.common.error".loc, isPresented: $errorShow){
             Button("lc.common.ok".loc, action: {
             })
