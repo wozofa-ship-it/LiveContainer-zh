@@ -31,9 +31,12 @@ public final class CZFVPNManager {
     public private(set) var lastError: String?
     // 核心自动停：被标记 App 全部关掉后延迟停核心（见
     // noteRunningAppsChanged）；防抖靠"最近一次被标记 App
-    // 启动时间"+ 60 秒延迟双保险，避免 App 重启时反复启停
+    // 启动时间"+ 30 分钟延迟双保险，避免 App 重启时反复启停
     private var pendingStopWork: DispatchWorkItem?
     private var lastFlaggedLaunchAt = Date.distantPast
+    // 核心闲置自动停时长：小火箭式常驻取舍——30 分钟内重开
+    // 免冷启动；真闲置才停（宿主被系统挂起时本就不耗电）
+    private static let autoStopDelay: TimeInterval = 1800
 
     private init() {}
 
@@ -152,7 +155,7 @@ public final class CZFVPNManager {
     /// 预热：有 App 标了 VPN 且预热开关没关时，提前把核心
     /// 拉起来（用全局当前节点），第一个 VPN App 点开就不
     /// 用等冷启动。核心已经在跑就直接返回，不打扰正在用
-    /// 的连接；起了没人用时原有的 60 秒自动停不覆盖这种
+    /// 的连接；起了没人用时原有的 30 分钟自动停不覆盖这种
     /// 情况（没 App 启动过），核心随宿主进程被系统挂起，
     /// 不额外耗电
     public func prewarmIfNeeded() {
@@ -310,7 +313,7 @@ public final class CZFVPNManager {
     }
 
     // 多任务列表变化后由 MultitaskDockManager 调用：还在跑的
-    // App 里已经没有被标记的了，就排一个 60 秒后的停核心；
+    // App 里已经没有被标记的了，就排一个 30 分钟后的停核心；
     // 期间有被标记 App 起来（ensureRunning 会取消）就不停
     public func noteRunningAppsChanged(stillHasFlagged: Bool) {
         // 宿主自身走节点的开关开着时，核心同样算"还在被用"
@@ -324,11 +327,11 @@ public final class CZFVPNManager {
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isRunning else { return }
             if Self.isHostProxyEnabled { return }
-            if Date().timeIntervalSince(self.lastFlaggedLaunchAt) < 60 { return }
+            if Date().timeIntervalSince(self.lastFlaggedLaunchAt) < Self.autoStopDelay { return }
             self.stop()
         }
         pendingStopWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoStopDelay, execute: work)
     }
 
     @discardableResult

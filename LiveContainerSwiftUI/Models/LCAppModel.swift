@@ -341,14 +341,19 @@ class LCAppModel: ObservableObject, Hashable {
                 isAppRunning = false
             }}
         }
+        // 单 App VPN 快开（小火箭式）：核心启动与签名并行——
+        // 两者无依赖（签名动插件文件、核心只碰 libXray），串
+        // 行等是白白加起来的秒数。核心启动是同步阻塞的
+        // CGoInvoke，放 detached 后台线程跑，不冻主线程；
+        // 游客仍等核心就绪才起（免得头几秒走直连），只是
+        // 不再串行等签名。签名失败时核心照常起着（等同预
+        // 热），闲置后自动停；核心起失败也不拦启动（游客侧
+        // fail-open 兜底，直连）。
+        let vpnCoreTask: Task<Void, Never>? = CZFVPNManager.isEnabled(for: appInfo)
+            ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: appInfo) }
+            : nil
         try await signApp(force: false)
-
-        // 单 App VPN（验证版）：被标记的 App 启动前确保内置核心
-        // 在跑（同步等它起来，免得游客先跑、头几秒走了直连）。
-        // 失败不拦启动——游客侧插件有 fail-open，核心不在时直连。
-        if CZFVPNManager.isEnabled(for: appInfo) {
-            CZFVPNManager.shared.ensureRunning(for: appInfo)
-        }
+        await vpnCoreTask?.value
 
         if let bundleIdOverride {
             UserDefaults.standard.set(bundleIdOverride, forKey: "selected")
