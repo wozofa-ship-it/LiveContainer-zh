@@ -2711,9 +2711,13 @@ private struct RunningAppsStripView: View {
                             dockManager.closeAllWindows()
                             onSwitch()
                         }
-                        // 分隔线不写死高度，随条子内容撑满（原来
-                        // 50 写死了，比图标+文字矮一截，看着断开）
+                        // 分隔线定死 64 高（46 图标+4 间距+约
+                        // 14 文字行高）：原来 50 比图标+文字矮
+                        // 一截看着断开；改随内容撑满后高度成环
+                        // 形依赖，横滑条把整条撑到约 200 高
+                        // （用户点名“这么大”的根因），定死即破环
                         Divider()
+                            .frame(height: 64)
                         ForEach(dockManager.apps) { runningApp in
                             runningAppItem(runningApp)
                         }
@@ -2721,6 +2725,9 @@ private struct RunningAppsStripView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                 }
+                // 横滑条锁死内容高：不锁的话高度一含糊就
+                // 跟着面板往上撑（与分隔线是同一类毛病）
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .background(Color(UIColor.secondarySystemBackground))
