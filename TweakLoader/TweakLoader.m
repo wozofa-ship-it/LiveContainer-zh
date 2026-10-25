@@ -176,7 +176,67 @@ static BOOL gCZFStartInBand = YES;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;
 
-@interface CZFDockGestureHandler : NSObject <UIGestureRecognizerDelegate>
+// 边缘带拦截识别器（手势双触发修正）：只负责一件事——起手
+// 在边缘带（44pt 内 + 高度 70%–90%，见 shouldReceiveTouch
+// 分支）且约 6pt 内横向占优时，立刻认是手势并取消 App 那路
+// 触摸（cancelsTouchesInView=YES）。6pt 是刻意卡在系统 pan
+// 门槛（约 10pt）之前：拦截先认，App 的滚动/返回识别器才
+// 会失败；竖滑、点按、中部起手一律不认（竖向占优即失败，
+// 无位移则到抬手失败），App 完全不受影响。认了之后本识别
+// 器即结束（离散型），面板信号仍由观察 pan 按严门槛发，
+// 不双份触发；观察 pan 靠与本识别器同时识别存活，继续
+// 按严门槛追踪（见 shouldRecognizeSimultaneously 分支）。
+@interface CZFEdgeCancelRecognizer : UIGestureRecognizer
+@end
+
+@implementation CZFEdgeCancelRecognizer {
+    UITouch *_czfTouch;
+    CGPoint _czfStart;
+}
+
+- (void)reset {
+    [super reset];
+    _czfTouch = nil;
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    if (!_czfTouch) {
+        _czfTouch = touches.anyObject;
+        _czfStart = [_czfTouch locationInView:self.view];
+    }
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesMoved:touches withEvent:event];
+    if (self.state == UIGestureRecognizerStateFailed || self.state == UIGestureRecognizerStateRecognized) return;
+    if (!_czfTouch || ![touches containsObject:_czfTouch]) return;
+    CGPoint loc = [_czfTouch locationInView:self.view];
+    CGFloat adx = fabs(loc.x - _czfStart.x);
+    CGFloat ady = fabs(loc.y - _czfStart.y);
+    if (adx >= 6 && adx > ady) {
+        self.state = UIGestureRecognizerStateRecognized;
+    } else if (ady >= 6 && ady >= adx) {
+        self.state = UIGestureRecognizerStateFailed;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    if (self.state == UIGestureRecognizerStatePossible) self.state = UIGestureRecognizerStateFailed;
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+    if (self.state == UIGestureRecognizerStatePossible) self.state = UIGestureRecognizerStateFailed;
+}
+
+@end
+
+@interface CZFDockGestureHandler : NSObject <UIGestureRecognizerDelegate> {
+    UIPanGestureRecognizer *_observerPan;
+    CZFEdgeCancelRecognizer *_cancelPan;
+}
 + (instancetype)shared;
 - (void)installOnWindow:(UIWindow *)window;
 - (void)czfPostNotification:(NSString *)notificationName selectorName:(NSString *)selectorName;
@@ -235,7 +295,19 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(czfHandlePan:)];
     pan.cancelsTouchesInView = NO;
     pan.delegate = self;
+    _observerPan = pan;
     [window addGestureRecognizer:pan];
+    // 拦截识别器与观察 pan 同窗共存：只接边缘带起手，认了即
+    // 取消 App 触摸；面板信号仍由观察 pan 按严门槛发
+    CZFEdgeCancelRecognizer *cancel = [[CZFEdgeCancelRecognizer alloc] initWithTarget:self action:@selector(czfCancelPanFired:)];
+    cancel.cancelsTouchesInView = YES;
+    cancel.delegate = self;
+    _cancelPan = cancel;
+    [window addGestureRecognizer:cancel];
+}
+
+// 拦截识别器动作：只负责取消 App 触摸，不发信号
+- (void)czfCancelPanFired:(UIGestureRecognizer *)gesture {
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
@@ -244,6 +316,13 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     CGPoint loc = [touch locationInView:window];
     CGFloat width = window.bounds.size.width;
     CGFloat height = window.bounds.size.height;
+    if (gestureRecognizer == _cancelPan) {
+        // 拦截器只接边缘带起手：边缘 44pt 内 + 高度 70%–90%
+        // （与观察 pan 的边缘/启用带同值）；其余一律不接，
+        // App 完全不受影响；全局变量只归观察 pan 写，不碰
+        BOOL inBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
+        return inBand && (loc.x <= 44 || loc.x >= width - 44);
+    }
     gCZFStartInBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
     // 全部接收、只记录起手位置；是否触发在 handler 按起手+位移判定
     if (loc.x >= width - 44) {
@@ -257,6 +336,13 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    // 拦截器只跟观察 pan 共存：共存观察 pan 才能在拦截认了
+    // 之后继续按严门槛追踪发面板信号；对 App 的识别器一律
+    // 不同时，拦截一认 App 那路就失败（滚动/返回停住）。
+    // 观察 pan 维持原样全放行。
+    if (gestureRecognizer == _cancelPan) {
+        return otherGestureRecognizer == _observerPan;
+    }
     return YES;
 }
 
