@@ -348,9 +348,11 @@ class LCAppModel: ObservableObject, Hashable {
         // 游客仍等核心就绪才起（免得头几秒走直连），只是
         // 不再串行等签名。签名失败时核心照常起着（等同预
         // 热），闲置后自动停；核心起失败也不拦启动（游客侧
-        // fail-open 兜底，直连）。
-        let vpnCoreTask: Task<Void, Never>? = CZFVPNManager.isEnabled(for: appInfo)
-            ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: appInfo) }
+        // fail-open 兜底，直连）。appInfo 先提成本地常量：
+        // detached 闭包是 escaping，不能隐式抓 self 的属性。
+        let vpnAppInfo = appInfo
+        let vpnCoreTask: Task<Void, Never>? = CZFVPNManager.isEnabled(for: vpnAppInfo)
+            ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: vpnAppInfo) }
             : nil
         try await signApp(force: false)
         await vpnCoreTask?.value
