@@ -1866,8 +1866,12 @@ struct LCDataManagementView : View {
         // 登录。恢复成功后若该 App 正在运行就关掉它（真终止进程，
         // 下次打开即全新启动、桥构造器抢导排队文件）；没在运行就是
         // 空操作。安装后自动恢复也走这里，刚装的 App 没在运行，
-        // 同样是空操作。
-        MultitaskDockManager.shared.closeAppWindow(uuid: app.appInfo.dataUUID)
+        // 同样是空操作。MultitaskDockManager 是 iOS 16+ 才有的类，
+        // 必须用 #available 包住（2026-10-25 构建 #186 红字教训：
+        // 不包就报 'only available in iOS 16.0 or newer'）。
+        if #available(iOS 16.0, *) {
+            MultitaskDockManager.shared.closeAppWindow(uuid: app.appInfo.dataUUID)
+        }
         return outcome
     }
 
