@@ -1807,9 +1807,14 @@ class AppInfoProvider {
             czfEdgeSwipeLatched = true
             // 左边缘（屏幕边缘手势只能往里拖）= App 面板
             // （2026-10-23 对调后，与全局甩手判定一致）；
-            // 右边缘照旧唤出快捷栏
+            // 右边缘：App 页（没有台前 App）且有运行中 App
+            // 时切到 App（最近一个）；否则照旧唤出快捷栏。
+            // 游客里台前有 App 时不动，免得和游客侧切换
+            // 重复触发。
             if gesture.edges == .left {
                 czfOpenAppPanel()
+            } else if czfFrontmostApp() == nil, !apps.isEmpty {
+                czfEdgeRightInward()
             } else {
                 showDockFromHidden()
             }
