@@ -156,7 +156,37 @@ public final class CZFVPNManager {
     /// （解开后一行一条链接），也有直接一行一条的明文格式，
     /// 两种都认；只保留带 :// 的行（vless/vmess/trojan/ss 等）
     public static func fetchSubscriptionLinks(urlString: String, completion: @escaping (Result<[String], Error>) -> Void) {
-        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        var trimmedInput = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        // sub:// 订阅链接：机场/客户端常发的格式，冒号后是真实订
+        // 阅地址的 base64（URL 安全变体、可能缺 padding）。旧代码
+        // 直接拿 sub:// 去拉，URLSession 不认这个 scheme，当场
+        // 报「不支持的 URL」——正是用户 2026-10-26 截图里那条错。
+        // 先解开：解出来是单条 http(s) 地址就按它拉；解出来已
+        // 经是一批节点链接就直接返回，不用再发请求。
+        if trimmedInput.lowercased().hasPrefix("sub://") {
+            let payload = String(trimmedInput.dropFirst("sub://".count))
+                .components(separatedBy: .whitespacesAndNewlines).joined()
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let padded = payload + String(repeating: "=", count: (4 - payload.count % 4) % 4)
+            if let decoded = Data(base64Encoded: padded),
+               let decodedText = String(data: decoded, encoding: .utf8),
+               !decodedText.isEmpty {
+                let decodedTrimmed = decodedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let nodeLines = decodedTrimmed.components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { $0.contains("://") && !$0.lowercased().hasPrefix("http") }
+                if !nodeLines.isEmpty {
+                    completion(.success(nodeLines))
+                    return
+                }
+                trimmedInput = decodedTrimmed
+            } else {
+                completion(.failure(NSError(domain: "CZFVPN", code: -1, userInfo: [NSLocalizedDescriptionKey: "sub:// 订阅链接解不出来"])))
+                return
+            }
+        }
+        guard let url = URL(string: trimmedInput) else {
             completion(.failure(NSError(domain: "CZFVPN", code: -1, userInfo: [NSLocalizedDescriptionKey: "订阅地址不对"])))
             return
         }
