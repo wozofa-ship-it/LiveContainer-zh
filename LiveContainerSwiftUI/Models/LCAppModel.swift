@@ -239,24 +239,94 @@ class LCAppModel: ObservableObject, Hashable {
         hasher.combine(ObjectIdentifier(self))
     }
     
+    // 多开数据隔离：同包名有多个 App 条目（不同名字、不同包
+    // 文件夹）时，各实例必须各用各的数据。LiveContainer 默认
+    // 有两条共享通道：App Group 默认不隔离（所有容器走同一
+    // 个 AppGroup 文件夹）、钥匙串组是 0..<128 随机（多实例
+    // 时会撞组，撞上就共用登录态）。新容器、已有容器都在启
+    // 动时一次性隔离：App Group 隔离 + 厂商标识伪装 + 钥匙串
+    // 组改成同包名下没人用的组。隔离只做一次（打标记），之
+    // 后用户在容器设置里亲手改的开关不再被自动翻回去。
+    private func czfOtherSameBundleApps() -> [LCAppModel] {
+        let myPath = appInfo.relativeBundlePath
+        return (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).filter {
+            $0 !== self && $0.bundleIdentifier == bundleIdentifier && $0.appInfo.relativeBundlePath != myPath
+        }
+    }
+    private func czfFreeKeychainGroup(excluding container: LCContainer) -> Int {
+        var used = Set<Int>()
+        for app in DataManager.shared.model.apps + DataManager.shared.model.hiddenApps {
+            for c in app.uiContainers where c !== container {
+                let g = c.keychainGroupId
+                if g >= 0 { used.insert(g) }
+            }
+        }
+        for c in uiContainers where c !== container {
+            let g = c.keychainGroupId
+            if g >= 0 { used.insert(g) }
+        }
+        let free = (0..<SharedModel.keychainAccessGroupCount).filter { !used.contains($0) }
+        return free.randomElement() ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
+    }
+    private func czfIsolateMultiOpenContainersIfNeeded() {
+        guard !czfOtherSameBundleApps().isEmpty else { return }
+        let markerKey = "CZFMultiOpenIsolated-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")"
+        if UserDefaults.standard.bool(forKey: markerKey) { return }
+        var otherGroups = Set<Int>()
+        for app in czfOtherSameBundleApps() {
+            for c in app.uiContainers {
+                let g = c.keychainGroupId
+                if g >= 0 { otherGroups.insert(g) }
+            }
+        }
+        for container in uiContainers {
+            var newGroup = container.keychainGroupId
+            if newGroup < 0 || otherGroups.contains(newGroup) {
+                newGroup = czfFreeKeychainGroup(excluding: container)
+            }
+            if !container.isolateAppGroup || !container.spoofIdentifierForVendor || container.keychainGroupId != newGroup {
+                container.isolateAppGroup = true
+                container.spoofIdentifierForVendor = true
+                container.makeLCContainerInfoPlist(appIdentifier: bundleIdentifier, keychainGroupId: newGroup)
+            }
+            if newGroup >= 0 { otherGroups.insert(newGroup) }
+        }
+        if !uiContainers.isEmpty {
+            UserDefaults.standard.set(true, forKey: markerKey)
+        }
+    }
+
     // You should let LCAppModel.runApp to decide whether to run in multitask mode, but you may override the multitask parameter if necessary
     func runApp(multitask: Bool? = nil, containerFolderName : String? = nil, bundleIdOverride : String? = nil, urlStr : String? = nil, forceJIT: Bool? = nil) async throws{
         if isAppRunning {
             return
         }
-        
+
         if uiContainers.isEmpty {
             let newName = NSUUID().uuidString
             let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
+            let isMultiOpen = !czfOtherSameBundleApps().isEmpty
+            let group: Int
+            if isMultiOpen {
+                newContainer.isolateAppGroup = true
+                newContainer.spoofIdentifierForVendor = true
+                group = czfFreeKeychainGroup(excluding: newContainer)
+            } else {
+                group = Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
+            }
             uiContainers.append(newContainer)
             if uiSelectedContainer == nil {
                 uiSelectedContainer = newContainer;
             }
             appInfo.containers = uiContainers;
-            newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
+            newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: group)
             appInfo.dataUUID = newName
             uiDefaultDataFolder = newName
+            if isMultiOpen {
+                UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolated-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
+            }
         }
+        czfIsolateMultiOpenContainersIfNeeded()
         if let containerFolderName {
             uiSelectedContainer = uiContainers.first { $0.folderName == containerFolderName } ?? uiSelectedContainer
         }
