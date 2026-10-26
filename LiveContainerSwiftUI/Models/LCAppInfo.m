@@ -98,6 +98,13 @@
 }
 
 - (NSString*)displayName {
+    // 多开自定义名：优先于包内原名。列表、备份文件夹、恢复匹配
+    // 全走 displayName，所以一个自定义名就同时分清了 App 和备份，
+    // 不用各处另起一套名字；没设时原样走包内名，老 App 不变。
+    NSString* custom = _info[@"LCCustomDisplayName"];
+    if (custom && ![custom isEqualToString:@""]) {
+        return custom;
+    }
     if (_infoPlist[@"CFBundleDisplayName"]) {
         return _infoPlist[@"CFBundleDisplayName"];
     } else if (_infoPlist[@"CFBundleName"]) {
@@ -825,6 +832,19 @@
 
 - (void)setInstallationDate:(NSDate*)installationDate {
     _info[@"installationDate"] = installationDate;
+    [self save];
+}
+
+- (NSString*)customDisplayName {
+    return _info[@"LCCustomDisplayName"];
+}
+
+- (void)setCustomDisplayName:(NSString *)customDisplayName {
+    if (!customDisplayName || [customDisplayName isEqualToString:@""]) {
+        _info[@"LCCustomDisplayName"] = nil;
+    } else {
+        _info[@"LCCustomDisplayName"] = customDisplayName;
+    }
     [self save];
 }
 

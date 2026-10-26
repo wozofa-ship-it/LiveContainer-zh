@@ -1561,10 +1561,23 @@ struct LCDataManagementView : View {
                     backupRestoreProgress = "正在恢复 \(folderName)（\(index + 1)/\(appFolders.count)）"
                 }
                 // 先按显示名匹配，再按 Bundle ID 匹配
-                guard let app = allApps.first(where: {
+                var app = allApps.first(where: {
                     ($0.appInfo.displayName() ?? "") == folderName ||
                     ($0.appInfo.bundleIdentifier() ?? "") == folderName
-                }) else {
+                })
+                // 改名后旧备份兜底：显示名对不上了，看 manifest 的
+                // Bundle ID；同款只装了一个时才能唯一认出，多开装
+                // 了两个时不猜（猜错会把数据还给错的那个）。
+                if app == nil,
+                   let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let bid = json["bundleIdentifier"], !bid.isEmpty {
+                    let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
+                    if matches.count == 1 {
+                        app = matches[0]
+                    }
+                }
+                guard let app else {
                     // App 未安装：记下它的备份文件夹和身份，后面先装再恢复
                     let manifestURL = appFolder.appendingPathComponent("manifest.json")
                     var appName = folderName

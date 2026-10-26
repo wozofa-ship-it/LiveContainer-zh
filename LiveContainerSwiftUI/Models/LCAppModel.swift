@@ -140,6 +140,14 @@ class LCAppModel: ObservableObject, Hashable {
             appInfo.remark = uiRemark
         }
     }
+
+    // 多开自定义名：改这里就改列表名和之后备份的文件夹名，
+    // 清空 = 回到包内原名。
+    @Published var uiCustomDisplayName : String {
+        didSet {
+            appInfo.customDisplayName = uiCustomDisplayName
+        }
+    }
     
     @Published var uiIsMultitaskModeSpecificed : MultitaskSpecified {
         didSet {
@@ -212,6 +220,7 @@ class LCAppModel: ObservableObject, Hashable {
         self.uiSelected32BitEmulator = appInfo.selected32BitEmulator ?? ""
         self.uiSpoofSDKVersion = appInfo.spoofSDKVersion
         self.uiRemark = appInfo.remark ?? ""
+        self.uiCustomDisplayName = appInfo.customDisplayName ?? ""
         self.uiIs32bit = appInfo.is32bit
         self.uiIs32bitEmulator = appInfo.is32bitEmulator
         for container in uiContainers {

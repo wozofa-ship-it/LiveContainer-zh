@@ -226,6 +226,15 @@ struct LCAppSettingsView: View {
                         .foregroundColor(.gray)
                         .multilineTextAlignment(.trailing)
                 }
+                // 多开分清用：已装的同款 App 在这里也能改名，
+                // 列表和之后备份的文件夹名跟着变，清空回到原名。
+                HStack {
+                    Text("显示名")
+                    Spacer()
+                    TextField("留空用原名", text: $model.uiCustomDisplayName)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.trailing)
+                }
                 if !model.uiIsShared {
                     Menu {
                         Button {

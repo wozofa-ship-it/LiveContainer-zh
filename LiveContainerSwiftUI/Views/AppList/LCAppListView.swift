@@ -82,6 +82,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     @State var installOptions: [AppReplaceOption]
     @StateObject var installReplaceAlert = AlertHelper<AppReplaceOption>()
+    // 多开安装时输新名字（分清两个同款 App 用）
+    @StateObject private var installAsNewNameInput = InputHelper()
     
     @State var webViewOpened = false
     @State var webViewURL : URL = URL(string: "about:blank")!
@@ -574,6 +576,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         )
         .textFieldAlert(
+            isPresented: $installAsNewNameInput.show,
+            title: "给新 App 起个名字",
+            text: $installAsNewNameInput.initVal,
+            placeholder: "",
+            action: { newText in
+                installAsNewNameInput.close(result: newText)
+            },
+            actionCancel: {_ in
+                installAsNewNameInput.close(result: nil)
+            }
+        )
+        .textFieldAlert(
             isPresented: $installUrlInput.show,
             title:  "lc.appList.installUrlInputTip".loc,
             text: $installUrlInput.initVal,
@@ -923,6 +937,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 try fm.removeItem(at: payloadPath)
                 return
             }
+
+            // 多开（安装为新 App）：先让用户输个新名字，再往下装。
+            // 空着或跟原名一样 = 不自定义；取消 = 放弃这次安装。
+            // 批量自动覆盖不走这里，不弹框挡队列。
+            var czfCustomDisplayName: String? = nil
+            if !installOptionChosen.isReplace && !sameBundleIdApp.isEmpty {
+                let originalName = newAppInfo.displayName() ?? ""
+                let inputName = await installAsNewNameInput.open(initVal: originalName)
+                guard let inputName else {
+                    self.installprogressVisible = false
+                    try fm.removeItem(at: payloadPath)
+                    return
+                }
+                let trimmed = inputName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && trimmed != originalName {
+                    czfCustomDisplayName = trimmed
+                }
+            }
             
             if let appToReplace = installOptionChosen.appToReplace, appToReplace.uiIsShared {
                 outputFolder = LCPath.lcGroupBundlePath.appendingPathComponent(installOptionChosen.nameOfFolderToInstall)
@@ -950,6 +982,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             errorInfo = "lc.appList.appInfoInitError".loc
             errorShow = true
             return
+        }
+
+        // 自定义名在签名之前落盘（LCAppInfo.plist），签名后不再动它。
+        // 备份、列表、恢复全走 displayName，所以备份文件夹自动就叫
+        // 这个新名字，两个同款 App 的备份不再同名互盖。
+        if let czfCustomDisplayName {
+            finalNewApp.customDisplayName = czfCustomDisplayName
         }
         
         // patch and sign it
@@ -981,6 +1020,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         if let appToReplace {
             // copy previous configration to new app
             finalNewApp.autoSaveDisabled = true
+            // 覆盖更新保留被替换那个实例的自定义名（多开改名后更新
+            // 不丢名）；本分支只在覆盖时走，多开新实例不走这里。
+            finalNewApp.customDisplayName = appToReplace.appInfo.customDisplayName
             finalNewApp.isLocked = appToReplace.appInfo.isLocked
             finalNewApp.isHidden = appToReplace.appInfo.isHidden
             finalNewApp.isJITNeeded = appToReplace.appInfo.isJITNeeded
