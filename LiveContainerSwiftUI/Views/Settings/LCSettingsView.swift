@@ -584,6 +584,20 @@ struct LCSettingsView: View {
                                 refreshVPNState()
                             }
                         }
+                        // 测完后一键清理不通的节点：只删明确测
+                        // 出不通的、且不是当前在用节点的——在用
+                        // 节点即使某次测速失败也不删（核心在跑且
+                        // 实际能上网是更强的证据，见上面「在用」
+                        // 的例外）。用 replaceAllNodes 一次替换，
+                        // 活动节点按内容跟随、不重启核心。
+                        if vpnPingResults.contains(where: { !$0.value.success && $0.key != vpnActiveIndex }) {
+                            Button("清理不通") {
+                                let failed = Set(vpnPingResults.filter { !$0.value.success && $0.key != vpnActiveIndex }.map { $0.key })
+                                let kept = CZFVPNManager.shared.nodeLinks.enumerated().filter { !failed.contains($0.offset) }.map { $0.element }
+                                CZFVPNManager.shared.replaceAllNodes(kept)
+                                refreshVPNState()
+                            }
+                        }
                         // 测完后按延迟从低到高重排节点列表（不通
                         // 的沉底、没测到的最后），活动节点按内容
                         // 跟随、不重启核心
