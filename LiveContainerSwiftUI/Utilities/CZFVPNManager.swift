@@ -77,15 +77,18 @@ public final class CZFVPNManager {
     // 校验只认同一代次，新一轮测速开始就作废旧校验，免得
     // 旧校验去 undo 新一轮测速的收尾。
     private var pingGeneration = 0
-    // 测速收尾刚恢复成的状态与时间：只在收尾真正按测速前
-    // 状态恢复时写（测速窗口内有用户动作、收尾跳过恢复时
-    // 不写）。预热用它判断：刚被测速恢复成“没在跑”的几
-    // 秒内，切回前台也不预热起核心——否则用户点完测速、
-    // 切走切回，预热立刻又把核心起回来，看起来就是“测
-    // 速把核心启动了”。新进程里这两个值是初始值，预热
-    // 不受影响。
-    private var lastPingRestoredRunning: Bool?
-    private var lastPingRestoreAt = Date.distantPast
+    // 测速恢复成“没在跑”后对预热的持久抑制：v186 只压
+    // 10 秒，超过窗口、切走再进 App，预热又把核心起回来，
+    // 用户认定的就是“测速改了核心”。本标志只在测速收尾
+    // 真正恢复成没在跑时置真，且落盘（UserDefaults），宿
+    // 主进程重启也不丢；只由三类手动动作清掉：亲手起核心、
+    // 打开标了 VPN 的 App、亲手拨一次预热开关。预热开关值
+    // 本身不动，开关关着时 prewarmIfNeeded 本来就返回，
+    // 本标志不影响它。恢复成在跑时清掉，不留旧抑制。
+    private var prewarmSuppressedAfterPing: Bool {
+        get { UserDefaults.standard.bool(forKey: "CZFVPNPrewarmSuppressedAfterPing") }
+        set { UserDefaults.standard.set(newValue, forKey: "CZFVPNPrewarmSuppressedAfterPing") }
+    }
     // 测速窗口内被挡下的源下载开关起核心请求：与
     // deferredEnsureApp 同理，测速收尾再补跑一次。
     private var deferredHostEnsure = false
@@ -219,14 +222,15 @@ public final class CZFVPNManager {
         // 判断；预热本就是 opportunistic，下次进前台还会再跑
         vpnCoreLock.lock()
         let pinging = isPinging
-        // 刚被测速恢复成“没在跑”时不预热：见字段注释。
-        // 恢复成“在跑”时下面 guard !isRunning 本来就返回，
-        // 这里只挡恢复成没在跑的那 10 秒窗口。
-        let restoredOff = lastPingRestoredRunning == false
-        let restoredAt = lastPingRestoreAt
+        // 测速恢复成“没在跑”后一直不预热：见字段注释，
+        // 与时间无关、切走再进、进程重启都不放行，直到
+        // 亲手起核心、打开标了 VPN 的 App、亲手拨一次
+        // 预热开关三者之一出现。恢复成“在跑”时下面
+        // guard !isRunning 本来就返回，不需要这层。
+        let suppressed = prewarmSuppressedAfterPing
         vpnCoreLock.unlock()
         if pinging { return }
-        if restoredOff, Date().timeIntervalSince(restoredAt) < 10 { return }
+        if suppressed { return }
         if UserDefaults.standard.object(forKey: "CZFVPNPrewarm") != nil, !UserDefaults.standard.bool(forKey: "CZFVPNPrewarm") {
             return
         }
@@ -416,9 +420,22 @@ public final class CZFVPNManager {
     // 动过核心——收尾就不再按测速前状态把用户的决定 undo
     // 回去（测速中亲手停核心，测完又被收尾起回来，正是
     // “测速把核心启动了”的一种真实路径）。
-    public func noteManualCoreToggle() {
+    public func noteManualCoreToggle(started: Bool) {
         vpnCoreLock.lock()
         coreActionEpoch += 1
+        // 亲手起核心才清掉测速后的预热抑制：亲手停核心不
+        // 清——停完切回前台又被预热起回来，和测速后翻盘是
+        // 同一类毛病；想恢复预热，拨一次预热开关即可。
+        if started { prewarmSuppressedAfterPing = false }
+        vpnCoreLock.unlock()
+    }
+
+    // 设置页亲手拨预热开关时调：只清掉测速后的预热抑制，
+    // 不记进 coreActionEpoch——拨开关本身不动核心状态，
+    // 不应让测速收尾因此跳过恢复。
+    public func notePrewarmSwitchToggled() {
+        vpnCoreLock.lock()
+        prewarmSuppressedAfterPing = false
         vpnCoreLock.unlock()
     }
 
@@ -459,6 +476,15 @@ public final class CZFVPNManager {
         }
         vpnCoreLock.unlock()
         if pinging { return }
+        // 打开标了 VPN 的 App 是手动动作：清掉测速后的预热
+        // 抑制，之后预热/自动启动照常工作。测速窗口内被挡
+        // 下的请求走收尾补跑，补跑时 pinging 已是 false，
+        // 同样在这里清掉；测速窗口内只记不启动，抑制不动。
+        if appInfo != nil {
+            vpnCoreLock.lock()
+            prewarmSuppressedAfterPing = false
+            vpnCoreLock.unlock()
+        }
         // 用这个 App 自己的节点（钉死过就用钉死的，没钉死跟随
         // 全局）
         let link = effectiveLink(for: appInfo).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -631,6 +657,13 @@ public final class CZFVPNManager {
     public func pingAllNodes(completion: @escaping ([CZFNodePingResult]) -> Void) {
         let links = nodeLinks
         guard !links.isEmpty else { completion([]); return }
+        // 先在调用线程把测速标志立起来再派后台队列：原来标
+        // 志只在后台块里立，调用与后台执行之间的窗口里预
+        // 热可能抢跑起核心，测速中就先变在跑；立标志本身
+        // 不抓状态，状态快照仍在后台块里同一把锁下抓。
+        vpnCoreLock.lock()
+        isPinging = true
+        vpnCoreLock.unlock()
         DispatchQueue.global(qos: .userInitiated).async {
             // 抓状态必须和 start/stop 同一把锁：否则抓到的
             // wasRunning/runningLink 可能是另一路 stop/start
@@ -725,9 +758,11 @@ public final class CZFVPNManager {
             // 源下载开关）：有，收尾就不再按测速前状态恢复，
             // 否则会把用户在测速窗口内亲手做的决定 undo 回去
             // （测速中亲手停核心，测完又被起回来；或反过来）。
-            // 没动作时才按测速前状态恢复，并把恢复结果记下来
-            // 供预热抑制和收尾后校验用；有动作时清掉旧的恢复
-            // 记录，免得上一轮的恢复状态继续抑制预热。
+            // 没动作时才按测速前状态恢复，并把恢复结果记成
+            // 预热抑制：恢复成没在跑就置抑制、恢复成在跑就
+            // 清掉，与时间无关；有动作时不碰抑制——亲手起核
+            // 心、开 App 的路径自己会清，亲手停核心则有意
+            // 不清（见 noteManualCoreToggle）。
             self.vpnCoreLock.lock()
             let epochChanged = self.coreActionEpoch != epochAtPingStart
             if !epochChanged {
@@ -752,13 +787,12 @@ public final class CZFVPNManager {
                 } else if self.isRunning {
                     self.stop()
                 }
-                self.lastPingRestoredRunning = self.isRunning
-                self.lastPingRestoreAt = Date()
+                self.prewarmSuppressedAfterPing = !self.isRunning
             } else {
                 // 用户动作优先：延迟重试也不再跑，免得它在用
-                // 户亲手停核心后又把核心起回来。
+                // 户亲手停核心后又把核心起回来；抑制不碰，
+                // 见上面注释。
                 self.pingRetryLink = nil
-                self.lastPingRestoredRunning = nil
             }
             postPingActiveLink = self.nodeLink
             deferredApp = self.deferredEnsureApp
@@ -779,8 +813,14 @@ public final class CZFVPNManager {
                     self.pingRetryLink = nil
                     let needRetry = stillPending && !self.isRunning
                     self.vpnCoreLock.unlock()
-                    if needRetry {
-                        _ = self.start(withLink: retryLink)
+                    if needRetry, self.start(withLink: retryLink) {
+                        // 延迟重试起回来了：最近一次测速的最终
+                        // 结果是在跑，之前恢复失败时置的抑制要
+                        // 清掉，否则下次切回前台预热会被旧抑制
+                        // 挡住。
+                        self.vpnCoreLock.lock()
+                        self.prewarmSuppressedAfterPing = false
+                        self.vpnCoreLock.unlock()
                     }
                 }
             }
@@ -1074,6 +1114,12 @@ public final class CZFVPNManager {
         }
         vpnCoreLock.unlock()
         if pinging { return }
+        // 源下载开关是手动动作：和开 App 一样清掉测速后的
+        // 预热抑制；测速窗口内被挡下的请求走收尾补跑，补
+        // 跑时 pinging 已是 false，同样在这里清掉。
+        vpnCoreLock.lock()
+        prewarmSuppressedAfterPing = false
+        vpnCoreLock.unlock()
         pendingStopWork?.cancel()
         pendingStopWork = nil
         if !isRunning {

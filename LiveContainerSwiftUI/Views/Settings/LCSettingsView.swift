@@ -555,7 +555,7 @@ struct LCSettingsView: View {
                             // 亲手起停先记动作：测速窗口内亲手停核心，
                             // 测速收尾不再按测速前状态把它起回来（反
                             // 之亦然），见 CZFVPNManager 的 epoch 注释。
-                            CZFVPNManager.shared.noteManualCoreToggle()
+                            CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
                             if vpnCoreRunning {
                                 CZFVPNManager.shared.stop()
                             } else {
@@ -617,6 +617,11 @@ struct LCSettingsView: View {
                             LCSettingsIcon(systemName: "flame.fill", color: .orange.opacity(0.85))
                             Text("打开时预热节点核心")
                         }
+                    }
+                    .onChange(of: vpnPrewarm) { _ in
+                        // 亲手拨一次预热开关：清掉测速后的预热抑制，
+                        // 之后预热照常工作；拨开关本身不动核心状态。
+                        CZFVPNManager.shared.notePrewarmSwitchToggled()
                     }
                     Toggle(isOn: $vpnHostProxy) {
                         HStack {
