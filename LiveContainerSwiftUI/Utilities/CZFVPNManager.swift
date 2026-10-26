@@ -65,6 +65,30 @@ public final class CZFVPNManager {
     // 写、stop() 清、延迟重试闭包一次性消费；用户测速后亲
     // 手停核心时 stop() 会清掉它，延迟重试不再把核心起回来。
     private var pingRetryLink: String?
+    // 用户/ App 动作计数：测速收尾要不要按测速前状态恢复，
+    // 就看测速窗口内有没有这类动作。开 App（ensureRunning，
+    // 含测速收尾补跑）、源下载开关（ensureRunningForHost）、
+    // 设置页亲手起停核心（noteManualCoreToggle）都会 +1；
+    // 预热、延迟重试、测速自身不 +1——它们是自动触发，
+    // 不能反过来推翻用户/ App 在测速窗口内做的决定，也
+    // 不能让收尾后的校验把它们当成用户动作放过。
+    private var coreActionEpoch = 0
+    // 测速代次：每轮 pingAllNodes 开始时 +1。收尾后 3 秒的
+    // 校验只认同一代次，新一轮测速开始就作废旧校验，免得
+    // 旧校验去 undo 新一轮测速的收尾。
+    private var pingGeneration = 0
+    // 测速收尾刚恢复成的状态与时间：只在收尾真正按测速前
+    // 状态恢复时写（测速窗口内有用户动作、收尾跳过恢复时
+    // 不写）。预热用它判断：刚被测速恢复成“没在跑”的几
+    // 秒内，切回前台也不预热起核心——否则用户点完测速、
+    // 切走切回，预热立刻又把核心起回来，看起来就是“测
+    // 速把核心启动了”。新进程里这两个值是初始值，预热
+    // 不受影响。
+    private var lastPingRestoredRunning: Bool?
+    private var lastPingRestoreAt = Date.distantPast
+    // 测速窗口内被挡下的源下载开关起核心请求：与
+    // deferredEnsureApp 同理，测速收尾再补跑一次。
+    private var deferredHostEnsure = false
     // 核心闲置自动停时长：小火箭式常驻取舍——30 分钟内重开
     // 免冷启动；真闲置才停（宿主被系统挂起时本就不耗电）
     private static let autoStopDelay: TimeInterval = 1800
@@ -195,8 +219,14 @@ public final class CZFVPNManager {
         // 判断；预热本就是 opportunistic，下次进前台还会再跑
         vpnCoreLock.lock()
         let pinging = isPinging
+        // 刚被测速恢复成“没在跑”时不预热：见字段注释。
+        // 恢复成“在跑”时下面 guard !isRunning 本来就返回，
+        // 这里只挡恢复成没在跑的那 10 秒窗口。
+        let restoredOff = lastPingRestoredRunning == false
+        let restoredAt = lastPingRestoreAt
         vpnCoreLock.unlock()
         if pinging { return }
+        if restoredOff, Date().timeIntervalSince(restoredAt) < 10 { return }
         if UserDefaults.standard.object(forKey: "CZFVPNPrewarm") != nil, !UserDefaults.standard.bool(forKey: "CZFVPNPrewarm") {
             return
         }
@@ -381,7 +411,25 @@ public final class CZFVPNManager {
     // 失败只记 lastError 不抛——游客侧插件有 fail-open，核心不
     // 在时 App 直连不断网（钉死节点 App 的插件读到严格标记
     // 后改成断网不直连，见 syncProxyTweak）。
+    // 设置页亲手起停核心时调：把这次手动动作记进
+    // coreActionEpoch，让测速收尾知道测速窗口内用户亲手
+    // 动过核心——收尾就不再按测速前状态把用户的决定 undo
+    // 回去（测速中亲手停核心，测完又被收尾起回来，正是
+    // “测速把核心启动了”的一种真实路径）。
+    public func noteManualCoreToggle() {
+        vpnCoreLock.lock()
+        coreActionEpoch += 1
+        vpnCoreLock.unlock()
+    }
+
     public func ensureRunning(for appInfo: LCAppInfo? = nil) {
+        // 开 App 是用户/ App 动作：记进 epoch，测速收尾的
+        // 校验不会把它当成自动触发 undo 掉。
+        if appInfo != nil {
+            vpnCoreLock.lock()
+            coreActionEpoch += 1
+            vpnCoreLock.unlock()
+        }
         // 有被标记 App 在启动：取消待执行的自动停，并记下时间
         pendingStopWork?.cancel()
         pendingStopWork = nil
@@ -591,13 +639,24 @@ public final class CZFVPNManager {
             self.vpnCoreLock.lock()
             self.isPinging = true
             self.pingRetryLink = nil
+            self.pingGeneration += 1
+            let pingGen = self.pingGeneration
+            let epochAtPingStart = self.coreActionEpoch
             let wasRunning = self.isRunning
             let originalRunningLink = self.runningLink
             let originalOwner = self.coreOwnerBundleId
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
             var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/")
-            if wasRunning && outcome.batchRejected {
+            // 测速窗口内已有用户/ App 动作时，停核心重测分支
+            // 也不立即起回：亲手停核心后这一步起回来，等于
+            // 在收尾之前就把用户的决定 undo 了；收尾同样会
+            // 因 epoch 变化跳过恢复，补跑的开 App 请求会按
+            // 自己的节点把核心起回来（那是 App 的动作）。
+            self.vpnCoreLock.lock()
+            let epochChangedMidPing = self.coreActionEpoch != epochAtPingStart
+            self.vpnCoreLock.unlock()
+            if wasRunning && outcome.batchRejected && !epochChangedMidPing {
                 self.stop()
                 outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/")
                 // 测速停核心再起回来，必须按原来在跑的那条链接起，
@@ -659,33 +718,53 @@ public final class CZFVPNManager {
             //    一次 ensureRunning（若它带钉死节点，优先于
             //    第 3 步的全局切换，故有补跑时跳过第 3 步）。
             var deferredApp: LCAppInfo?
+            var deferredHost = false
             var postPingActiveLink = prePingActiveLink
             var retryLink: String?
+            // 测速窗口内有没有用户/ App 动作（亲手起停、开 App、
+            // 源下载开关）：有，收尾就不再按测速前状态恢复，
+            // 否则会把用户在测速窗口内亲手做的决定 undo 回去
+            // （测速中亲手停核心，测完又被起回来；或反过来）。
+            // 没动作时才按测速前状态恢复，并把恢复结果记下来
+            // 供预热抑制和收尾后校验用；有动作时清掉旧的恢复
+            // 记录，免得上一轮的恢复状态继续抑制预热。
             self.vpnCoreLock.lock()
-            if wasRunning {
-                if !self.isRunning {
-                    if let orig = originalRunningLink, !orig.isEmpty {
-                        let ok = self.start(withLink: orig)
-                        if ok {
-                            self.coreOwnerBundleId = originalOwner
+            let epochChanged = self.coreActionEpoch != epochAtPingStart
+            if !epochChanged {
+                if wasRunning {
+                    if !self.isRunning {
+                        if let orig = originalRunningLink, !orig.isEmpty {
+                            let ok = self.start(withLink: orig)
+                            if ok {
+                                self.coreOwnerBundleId = originalOwner
+                            } else {
+                                retryLink = orig
+                                self.pingRetryLink = orig
+                            }
                         } else {
-                            retryLink = orig
-                            self.pingRetryLink = orig
-                        }
-                    } else {
-                        let ok = self.start()
-                        if !ok, !self.nodeLink.isEmpty {
-                            retryLink = self.nodeLink
-                            self.pingRetryLink = self.nodeLink
+                            let ok = self.start()
+                            if !ok, !self.nodeLink.isEmpty {
+                                retryLink = self.nodeLink
+                                self.pingRetryLink = self.nodeLink
+                            }
                         }
                     }
+                } else if self.isRunning {
+                    self.stop()
                 }
-            } else if self.isRunning {
-                self.stop()
+                self.lastPingRestoredRunning = self.isRunning
+                self.lastPingRestoreAt = Date()
+            } else {
+                // 用户动作优先：延迟重试也不再跑，免得它在用
+                // 户亲手停核心后又把核心起回来。
+                self.pingRetryLink = nil
+                self.lastPingRestoredRunning = nil
             }
             postPingActiveLink = self.nodeLink
             deferredApp = self.deferredEnsureApp
             self.deferredEnsureApp = nil
+            deferredHost = self.deferredHostEnsure
+            self.deferredHostEnsure = false
             self.isPinging = false
             self.vpnCoreLock.unlock()
             if let retryLink {
@@ -709,6 +788,49 @@ public final class CZFVPNManager {
                 self.ensureRunning(for: deferredApp)
             } else if postPingActiveLink != prePingActiveLink {
                 self.applyActiveNodeChange()
+            }
+            if deferredHost {
+                self.ensureRunningForHost()
+            }
+            // 收尾后校验（只认同一代次、且收尾后没有新的用户/
+            // App 动作）：收尾把状态恢复对了，之后几秒内若被
+            // 自动触发（切回前台的预热等）悄悄翻回去，这里一
+            // 次性把它按回恢复成的状态。用户亲手起停、开 App、
+            // 源下载开关都会让 epoch 变化，校验直接作废，不会
+            // undo 用户的决定；新一轮测速开始也会让代次变化，
+            // 旧校验同样作废。只校验一次，不循环。
+            self.vpnCoreLock.lock()
+            let verifiedRunning = self.isRunning
+            let verifiedLink = self.runningLink
+            let verifiedOwner = self.coreOwnerBundleId
+            let verifiedEpoch = self.coreActionEpoch
+            self.vpnCoreLock.unlock()
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self else { return }
+                self.vpnCoreLock.lock()
+                let stillSamePing = self.pingGeneration == pingGen && !self.isPinging
+                let noNewAction = self.coreActionEpoch == verifiedEpoch
+                let flipped = self.isRunning != verifiedRunning
+                self.vpnCoreLock.unlock()
+                guard stillSamePing, noNewAction, flipped else { return }
+                if verifiedRunning {
+                    // 起回后把归属也还原：start(withLink:) 不写
+                    // 归属，stop() 又把它清掉了，不还原的话下
+                    // 一个 App 启动就能抢走这条钉死节点的核心。
+                    let ok: Bool
+                    if let link = verifiedLink, !link.isEmpty {
+                        ok = self.start(withLink: link)
+                    } else {
+                        ok = self.start()
+                    }
+                    if ok {
+                        self.vpnCoreLock.lock()
+                        self.coreOwnerBundleId = verifiedOwner
+                        self.vpnCoreLock.unlock()
+                    }
+                } else {
+                    self.stop()
+                }
             }
             let items = outcome.items
             DispatchQueue.main.async { completion(items) }
@@ -941,9 +1063,23 @@ public final class CZFVPNManager {
     /// 宿主开关打开时把核心拉起来（源/下载要用），顺带取消待执行的自动停
     public func ensureRunningForHost() {
         guard Self.isHostProxyEnabled else { return }
+        // 源下载开关在测速窗口内打开时也不直接起核心：它
+        // 和开 App 一样是用户动作，测速收尾再补跑，免得测
+        // 速窗口内起核心跟测速的停/起插队、测完状态翻掉。
+        vpnCoreLock.lock()
+        let pinging = isPinging
+        if pinging {
+            deferredHostEnsure = true
+            coreActionEpoch += 1
+        }
+        vpnCoreLock.unlock()
+        if pinging { return }
         pendingStopWork?.cancel()
         pendingStopWork = nil
         if !isRunning {
+            vpnCoreLock.lock()
+            coreActionEpoch += 1
+            vpnCoreLock.unlock()
             _ = start()
         }
     }

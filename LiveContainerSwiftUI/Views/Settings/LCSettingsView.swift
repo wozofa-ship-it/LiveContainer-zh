@@ -552,6 +552,10 @@ struct LCSettingsView: View {
                     }
                     HStack {
                         Button(vpnCoreRunning ? "停止核心" : "启动核心") {
+                            // 亲手起停先记动作：测速窗口内亲手停核心，
+                            // 测速收尾不再按测速前状态把它起回来（反
+                            // 之亦然），见 CZFVPNManager 的 epoch 注释。
+                            CZFVPNManager.shared.noteManualCoreToggle()
                             if vpnCoreRunning {
                                 CZFVPNManager.shared.stop()
                             } else {
