@@ -606,13 +606,21 @@ struct LCSettingsView: View {
                     }
                     Toggle(isOn: $vpnPrewarm) {
                         HStack {
-                            LCSettingsIcon(systemName: "flame.fill", color: .orange)
+                            // 只动这两处图标观感：底色统一降到 0.85 不透明度，
+                            // 橙/绿区分保留但不再刺眼；LCSettingsIcon 本体不动，
+                            // 其他行的图标不受影响。尺寸 30pt、圆角、15pt
+                            // semibold 白字仍走共用组件，不改布局。
+                            LCSettingsIcon(systemName: "flame.fill", color: .orange.opacity(0.85))
                             Text("打开时预热节点核心")
                         }
                     }
                     Toggle(isOn: $vpnHostProxy) {
                         HStack {
-                            LCSettingsIcon(systemName: "arrow.down.circle", color: .green)
+                            // 原来是 arrow.down.circle：带圈轮廓的符号在实心
+                            // 圆底上显得又小又淡，跟 flame.fill 的实心符号
+                            // 不是一套。换成无圈的 arrow.down，同样 15pt
+                            // 白字实心圆底，两行符号粗细、视觉分量一致。
+                            LCSettingsIcon(systemName: "arrow.down", color: .green.opacity(0.85))
                             Text("源和下载也走内置节点")
                         }
                     }

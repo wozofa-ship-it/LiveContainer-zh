@@ -564,6 +564,25 @@ public final class CZFVPNManager {
                     failedIndices = stillFailed
                 }
             }
+            // 测速收尾：无条件按测速前状态恢复——测速本身绝不改
+            // 核心启用状态。测速前没在跑：测速窗口里若有别的
+            // 触发（预热、切回前台等）把核心拉起来了，这里停
+            // 掉，测完仍是不启动；测速前在跑：停核心重测分支
+            // 已起回来的不再重复起，别的触发停掉的按原链接起
+            // 回来、归属一并还原。只认测速开始时抓的那份状态，
+            // 不认测速中被改过的状态。
+            if wasRunning {
+                if !self.isRunning {
+                    if let orig = originalRunningLink, !orig.isEmpty {
+                        _ = self.start(withLink: orig)
+                        self.coreOwnerBundleId = originalOwner
+                    } else {
+                        _ = self.start()
+                    }
+                }
+            } else if self.isRunning {
+                self.stop()
+            }
             let items = outcome.items
             DispatchQueue.main.async { completion(items) }
         }

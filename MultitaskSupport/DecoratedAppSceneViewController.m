@@ -389,6 +389,18 @@
 
 - (void)minimizeWindow {
     if (self.view.hidden) return;
+    // 最小化先收键盘：只藏窗口视图收不掉键盘——键盘在独立的
+    // 键盘窗口里，不随本视图隐藏而消失，游客切最小化后键盘
+    // 会继续盖在宿主界面上。宿主侧先让本视图 resign；游客
+    // 进程内的第一响应者（键盘真正归属的进程）由下面这条
+    // 按 bundleId 发的 Darwin 信号通知 TweakLoader 去收，
+    // 只收这一个 App，不动其他在跑 App 的键盘。动画开始前
+    // 就发，键盘边收边淡出，不用等 0.3 秒动画跑完。
+    [self.view endEditing:YES];
+    if (self.bundleId.length > 0) {
+        NSString *minimizeName = [NSString stringWithFormat:@"czf.window.minimize.%@", self.bundleId];
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)minimizeName, NULL, NULL, YES);
+    }
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.alpha = 0;
         self.view.transform = CGAffineTransformMakeScale(0.1, 0.1);

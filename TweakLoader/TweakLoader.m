@@ -631,12 +631,40 @@ static void CZFDockGestureTryInstall(void) {
     }
 }
 
+// 最小化收键盘（游客进程内）：宿主最小化窗口时只藏了宿主侧
+// 的视图，游客进程的第一响应者没变，键盘窗口不随视图隐藏
+// 而消失，才会盖在宿主界面上。宿主按 bundleId 发 Darwin 信号
+// （czf.window.minimize.<bid>，见 DecoratedAppSceneViewController
+// 的 minimizeWindow），这里只认自己 bid 的信号，收到就在主
+// 线程让本进程所有窗口 endEditing——键盘归属本进程，只有
+// 在这里收才收得掉；不碰其他 App 的键盘，之后再点输入框
+// 仍能正常弹出（resign 不破坏输入框本身）。
+static void CZFKeyboardDismissOnMinimizeCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+            [window endEditing:YES];
+        }
+    });
+}
+
+static void CZFKeyboardDismissOnMinimizeInstall(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+        if (bid.length == 0) return;
+        NSString *signalName = [NSString stringWithFormat:@"czf.window.minimize.%@", bid];
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, CZFKeyboardDismissOnMinimizeCallback, (__bridge CFStringRef)signalName, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    });
+}
+
 // 由 TweakLoaderConstructor 调用（不是自己的 constructor）：
 // 这样禁注入的 App（dontInjectTweakLoader）不会装手势；且没选
 // 任何插件的游客也能用手势——手势是启动器自带功能，不是插件。
 static void CZFDockGestureInstall(void) {
     @autoreleasepool {
         CZFInstallSendEventHook();
+        CZFKeyboardDismissOnMinimizeInstall();
         [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeKeyNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             if ([note.object isKindOfClass:[UIWindow class]]) {
                 [[CZFDockGestureHandler shared] installOnWindow:(UIWindow *)note.object];
