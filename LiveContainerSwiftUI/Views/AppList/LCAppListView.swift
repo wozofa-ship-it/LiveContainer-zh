@@ -909,6 +909,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             
         }
         
+        // 多开自定义名必须在 if 块外声明：签名之前那处在块外用它，
+        // 块内 var 会出不了作用域（构建 #209 唯一红字就是这个）。
+        var czfCustomDisplayName: String? = nil
         if fm.fileExists(atPath: outputFolder.path) || sameBundleIdApp.count > 0 {
             appRelativePath = "\(newAppInfo.bundleIdentifier()!)_\(Int(CFAbsoluteTimeGetCurrent())).app"
             
@@ -941,7 +944,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 多开（安装为新 App）：先让用户输个新名字，再往下装。
             // 空着或跟原名一样 = 不自定义；取消 = 放弃这次安装。
             // 批量自动覆盖不走这里，不弹框挡队列。
-            var czfCustomDisplayName: String? = nil
             if !installOptionChosen.isReplace && !sameBundleIdApp.isEmpty {
                 let originalName = newAppInfo.displayName() ?? ""
                 let inputName = await installAsNewNameInput.open(initVal: originalName)
