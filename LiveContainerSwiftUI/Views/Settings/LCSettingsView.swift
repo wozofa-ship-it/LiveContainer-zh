@@ -512,8 +512,16 @@ struct LCSettingsView: View {
                                 Spacer()
                                 // 延迟测试结果（点下面的「测延迟」
                                 // 后显示）：绿 <300ms、橙 <800ms、
-                                // 红 ≥800ms；失败显示 超时/不通
-                                if vpnPinging && vpnPingResults[index] == nil {
+                                // 红 ≥800ms；失败显示 超时/不通。
+                                // 例外：在用节点且核心在跑时，测速失败
+                                // 不显示不通——核心在跑且实际能上网
+                                // 是比一次测速样本更强的证据，显示
+                                // 不通只会逼用户误换 IP（养号大忌）
+                                if let ping = vpnPingResults[index], !ping.success, index == vpnActiveIndex, vpnCoreRunning {
+                                    Text("在用")
+                                        .font(.caption)
+                                        .foregroundStyle(.green)
+                                } else if vpnPinging && vpnPingResults[index] == nil {
                                     Text("测速中")
                                         .font(.caption)
                                         .foregroundStyle(.gray)

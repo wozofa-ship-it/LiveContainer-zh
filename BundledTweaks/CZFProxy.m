@@ -71,6 +71,11 @@ static volatile int64_t gStatSelfTest = 0;
 static volatile int64_t gStatSwizzled = 0;
 static volatile int64_t gStatQuicBlocked = 0;
 static volatile int64_t gStatCfg = 0;
+// 养号严格模式：宿主在钉死节点的 App 的插件目录里留一个
+// CZFProxyStrict 空文件，插件启动时读到它就改成 fail-closed
+// （核心不在时断网不直连）；没这个文件的 App 维持原来的
+// fail-open。标记在插件同目录，宿主每次签 App 时同步
+static BOOL gStrictMode = NO;
 static double gLastStatWrite = 0;
 static pthread_mutex_t gStatLock = PTHREAD_MUTEX_INITIALIZER;
 // 统计按 App 分文件（CZFProxyStats-<包名>.txt）：所有开了
@@ -302,7 +307,14 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         return orig_connect(sockfd, addr, addrlen);
     }
     if (!CZFCoreAlive()) {
-        // 核心不在：fail-open 直连，App 不断网
+        // 严格模式：核心不在就断网不直连，绝不漏真实 IP；
+        // 非严格模式维持原来的 fail-open 直连，App 不断网
+        if (gStrictMode) {
+            __sync_add_and_fetch(&gStatConnFailed, 1);
+            CZFWriteStats(NO);
+            errno = ECONNREFUSED;
+            return -1;
+        }
         __sync_add_and_fetch(&gStatConnDirect, 1);
         CZFWriteStats(NO);
         return orig_connect(sockfd, addr, addrlen);
@@ -429,10 +441,14 @@ static NSDictionary *CZFProxyDict(void) {
     };
 }
 
-// 给一份会话配置盖上代理字典（核心不在时不动）。isFactory 区分
-// 统计口径：YES=配置出厂时盖的，NO=建会话时盖的。
+// 给一份会话配置盖上代理字典。非严格模式下核心不在时不
+// 动配置（会话直连）；严格模式下核心不在也照盖代理字典，
+// 让会话走死掉的代理口失败、而不是直连漏真实 IP，等核心
+// 起来后同一份配置又能直接走代理。isFactory 区分统计口径：
+// YES=配置出厂时盖的，NO=建会话时盖的。
 static NSURLSessionConfiguration *CZFStampConfig(NSURLSessionConfiguration *config, BOOL isFactory) {
-    if (!config || !CZFCoreAlive()) return config;
+    if (!config) return config;
+    if (!CZFCoreAlive() && !gStrictMode) return config;
     NSMutableDictionary *merged = [config.connectionProxyDictionary mutableCopy] ?: [NSMutableDictionary dictionary];
     [merged addEntriesFromDictionary:CZFProxyDict()];
     config.connectionProxyDictionary = merged;
@@ -586,6 +602,8 @@ static void CZFProxyInit(void) {
         NSString *dir = [[NSString stringWithUTF8String:selfInfo.dli_fname] stringByDeletingLastPathComponent];
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown";
         gStatsPath = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"CZFProxyStats-%@.txt", bid]];
+        NSString *strictPath = [dir stringByAppendingPathComponent:@"CZFProxyStrict"];
+        gStrictMode = [[NSFileManager defaultManager] fileExistsAtPath:strictPath];
     }
     orig_connect = (int (*)(int, const struct sockaddr *, socklen_t))dlsym(RTLD_DEFAULT, "connect");
     orig_getaddrinfo = (int (*)(const char *, const char *, const struct addrinfo *, struct addrinfo **))dlsym(RTLD_DEFAULT, "getaddrinfo");

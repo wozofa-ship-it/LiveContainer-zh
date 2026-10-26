@@ -25,9 +25,16 @@ public final class CZFVPNManager {
     private static let activeNodeKey = "CZFVPNActiveNodeIndex"
     private static let enabledKeyPrefix = "CZFVPNEnabled-"
     private static let nodeOverrideKeyPrefix = "CZFVPNNodeOverride-"
+    // 用户在 App 设置里亲手选过"跟随全局"时才为 true；缺省为 false，
+    // 表示这个 App 还没选过，养号锁定逻辑可以替它钉死当前节点
+    private static let followGlobalKeyPrefix = "CZFVPNFollowGlobal-"
 
     public private(set) var isRunning = false
     private var runningLink: String?
+    // 核心当前归哪个 App 所有（ensureRunning 起核心时记下）：
+    // 养号 App 在跑时，别的 App 自动启动不准抢核心换节点，
+    // 手动在设置里切节点、停核心时会清掉这个归属
+    private var coreOwnerBundleId: String?
     public private(set) var lastError: String?
     // 核心自动停：被标记 App 全部关掉后延迟停核心（见
     // noteRunningAppsChanged）；防抖靠"最近一次被标记 App
@@ -233,11 +240,31 @@ public final class CZFVPNManager {
     public static func setEnabled(_ enabled: Bool, for appInfo: LCAppInfo) {
         guard let bundleId = appInfo.bundleIdentifier() else { return }
         UserDefaults.standard.set(enabled, forKey: enabledKeyPrefix + bundleId)
+        // 养号锁定（1）：刚打开 VPN 且还没钉过节点、也没亲手选
+        // 过跟随全局时，立刻把当前全局节点钉成这个 App 的专属
+        // 节点；以后全局怎么换都不动它。已经钉过的、亲手选过
+        // 跟随全局的，都不动
+        if enabled,
+           nodeOverride(for: appInfo) == nil,
+           !isFollowGlobalExplicit(for: appInfo) {
+            let current = shared.nodeLink
+            if !current.isEmpty {
+                setNodeOverride(current, for: appInfo)
+            }
+        }
+    }
+
+    // 用户是否在 App 设置里亲手选过"跟随全局"（缺省 false）
+    public static func isFollowGlobalExplicit(for appInfo: LCAppInfo) -> Bool {
+        guard let bundleId = appInfo.bundleIdentifier() else { return false }
+        return UserDefaults.standard.bool(forKey: followGlobalKeyPrefix + bundleId)
     }
 
     // 按 App 指定节点：存链接本身而不是下标，节点列表增删、
-    // 排序变化都不会让指定关系错位。没指定、或指定的节点已
-    // 被从列表删除时，effectiveLink 回落全局活动节点
+    // 排序、订阅替换都不会让指定关系错位。钉死后即使这条链
+    // 接不在列表里了也照用——列表只是选节点的菜单，不是
+    // App 的 IP 归属；删了菜单项就悄悄换 IP，正是养号最忌
+    // 讳的。亲手选跟随全局时才回落全局
     public static func nodeOverride(for appInfo: LCAppInfo) -> String? {
         guard let bundleId = appInfo.bundleIdentifier() else { return nil }
         let saved = UserDefaults.standard.string(forKey: nodeOverrideKeyPrefix + bundleId)
@@ -248,17 +275,18 @@ public final class CZFVPNManager {
         guard let bundleId = appInfo.bundleIdentifier() else { return }
         if let link, !link.isEmpty {
             UserDefaults.standard.set(link, forKey: nodeOverrideKeyPrefix + bundleId)
+            UserDefaults.standard.removeObject(forKey: followGlobalKeyPrefix + bundleId)
         } else {
             UserDefaults.standard.removeObject(forKey: nodeOverrideKeyPrefix + bundleId)
+            UserDefaults.standard.set(true, forKey: followGlobalKeyPrefix + bundleId)
         }
     }
 
-    // 这个 App 实际用的节点链接：有指定且指定还在列表里就用
-    // 指定，否则用全局活动节点
+    // 这个 App 实际用的节点链接：钉死过就用钉死的，不管它还
+    // 在不在列表里；没钉死才用全局活动节点
     public func effectiveLink(for appInfo: LCAppInfo?) -> String {
         if let appInfo,
-           let override = Self.nodeOverride(for: appInfo),
-           nodeLinks.contains(override) {
+           let override = Self.nodeOverride(for: appInfo) {
             return override
         }
         return nodeLink
@@ -279,7 +307,20 @@ public final class CZFVPNManager {
         // 先建出来——不建的话随后 signTweaks 枚举目录会直接报错，
         // 整个 App 都打不开（真机实测）
         try? fm.createDirectory(at: tweakFolderUrl, withIntermediateDirectories: true)
+        // 养号严格模式标记（3）：钉死节点的 App 在插件目录里留
+        // 一个 CZFProxyStrict 空文件，插件启动时读到它就改成
+        // fail-closed（核心不在时断网不直连）；跟随全局的 App
+        // 不留标记，维持原来的 fail-open。标记不是 dylib，
+        // 不影响返回值（返回值只表示 dylib 有没有换上）
+        let strictMarker = tweakFolderUrl.appendingPathComponent("CZFProxyStrict")
         if isEnabled(for: appInfo) {
+            if nodeOverride(for: appInfo) != nil {
+                if !fm.fileExists(atPath: strictMarker.path) {
+                    try? Data().write(to: strictMarker)
+                }
+            } else {
+                try? fm.removeItem(at: strictMarker)
+            }
             guard let src = Bundle.main.url(forResource: "CZFProxy", withExtension: "dylib") else { return false }
             let srcData = try? Data(contentsOf: src)
             let destData = try? Data(contentsOf: dest)
@@ -290,6 +331,7 @@ public final class CZFVPNManager {
             }
         } else {
             try? fm.removeItem(at: dest)
+            try? fm.removeItem(at: strictMarker)
         }
         return false
     }
@@ -298,18 +340,52 @@ public final class CZFVPNManager {
 
     // 被标记 App 启动前调用：核心已在跑且节点没换就直接返回；
     // 失败只记 lastError 不抛——游客侧插件有 fail-open，核心不
-    // 在时 App 直连不断网。
+    // 在时 App 直连不断网（钉死节点 App 的插件读到严格标记
+    // 后改成断网不直连，见 syncProxyTweak）。
     public func ensureRunning(for appInfo: LCAppInfo? = nil) {
         // 有被标记 App 在启动：取消待执行的自动停，并记下时间
         pendingStopWork?.cancel()
         pendingStopWork = nil
         lastFlaggedLaunchAt = Date()
-        // 用这个 App 自己的节点（指定过就用指定，没指定跟随
-        // 全局）：核心在跑但节点不是它要的，按它的节点重启
+        // 养号锁定（1）补钉：已经开了 VPN、还没钉过节点、也没
+        // 亲手选过跟随全局的旧 App，第一次启动时就把当前全局
+        // 节点钉死，之后不再跟全局走
+        if let appInfo,
+           Self.isEnabled(for: appInfo),
+           Self.nodeOverride(for: appInfo) == nil,
+           !Self.isFollowGlobalExplicit(for: appInfo) {
+            let current = nodeLink
+            if !current.isEmpty {
+                Self.setNodeOverride(current, for: appInfo)
+            }
+        }
+        // 用这个 App 自己的节点（钉死过就用钉死的，没钉死跟随
+        // 全局）
         let link = effectiveLink(for: appInfo).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !link.isEmpty else { return }
-        if isRunning && runningLink == link { return }
-        _ = start(withLink: link)
+        if isRunning && runningLink == link {
+            if let bid = appInfo?.bundleIdentifier() {
+                coreOwnerBundleId = bid
+            }
+            return
+        }
+        // 养号保护（2）：核心已经归另一个 App 所有（那个 App
+        // 钉死了节点、核心正跑在它的节点上），这个 App 自动
+        // 启动不准抢核心换节点——换 IP 正是养号最忌讳的。
+        // 手动在设置里切节点（applyActiveNodeChange / start()）
+        // 会清掉归属，那时才换；自动启动只保证核心在跑
+        if isRunning,
+           let owner = coreOwnerBundleId,
+           let bid = appInfo?.bundleIdentifier(),
+           owner != bid {
+            lastError = "核心正被另一个已钉死节点的 App 占用，暂不切换（手动在设置里切节点可强制切换）"
+            return
+        }
+        if start(withLink: link) {
+            if let bid = appInfo?.bundleIdentifier() {
+                coreOwnerBundleId = bid
+            }
+        }
     }
 
     // 多任务列表变化后由 MultitaskDockManager 调用：还在跑的
@@ -336,7 +412,10 @@ public final class CZFVPNManager {
 
     @discardableResult
     public func start() -> Bool {
-        start(withLink: nodeLink)
+        // 手动 / 宿主 / 预热起核心：不归某个 App 所有，清掉
+        // 养号归属，之后 App 自动启动才可以重新抢核心
+        coreOwnerBundleId = nil
+        return start(withLink: nodeLink)
     }
 
     // 用指定链接起核心：已在跑且正是这条链接就直接成功；
@@ -419,6 +498,7 @@ public final class CZFVPNManager {
         _ = invoke(method: "stopXray", payload: [:])
         isRunning = false
         runningLink = nil
+        coreOwnerBundleId = nil
     }
 
     // MARK: - 节点延迟测试
@@ -442,11 +522,39 @@ public final class CZFVPNManager {
         guard !links.isEmpty else { completion([]); return }
         DispatchQueue.global(qos: .userInitiated).async {
             let wasRunning = self.isRunning
-            var outcome = self.runPingBatches(links: links)
+            let originalRunningLink = self.runningLink
+            let originalOwner = self.coreOwnerBundleId
+            var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/")
             if wasRunning && outcome.batchRejected {
                 self.stop()
-                outcome = self.runPingBatches(links: links)
-                _ = self.start()
+                outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/")
+                // 测速停核心再起回来，必须按原来在跑的那条链接起，
+                // 不能按全局活动节点起——否则钉死 App 的 IP 会被
+                // 一次测速悄悄换掉；原来没在跑就按全局起
+                if let orig = originalRunningLink, !orig.isEmpty {
+                    _ = self.start(withLink: orig)
+                    self.coreOwnerBundleId = originalOwner
+                } else {
+                    _ = self.start()
+                }
+            } else {
+                // 假不通修法：第一地址（Cloudflare）个别失败时，
+                // 再用第二个地址单独重测一次，只认重测通的——
+                // 有些 REALITY 节点对 Cloudflare 那一路不通，但
+                // 实际经节点上网是通的（小火箭同节点 183ms），
+                // 一次失败就永久标不通、逼用户换 IP 是错的。
+                // 整批被拒时不走这一步（那是核心占用问题，
+                // 上面停核心重测的分支已经处理）
+                let failedIndices = outcome.items.enumerated().filter { !$0.element.success }.map { $0.offset }
+                if !failedIndices.isEmpty {
+                    let failedLinks = failedIndices.map { links[$0] }
+                    let retry = self.runPingBatches(links: failedLinks, url: "https://www.gstatic.com/generate_204")
+                    for (j, idx) in failedIndices.enumerated() {
+                        if retry.items[j].success {
+                            outcome.items[idx] = retry.items[j]
+                        }
+                    }
+                }
             }
             let items = outcome.items
             DispatchQueue.main.async { completion(items) }
@@ -454,7 +562,7 @@ public final class CZFVPNManager {
     }
 
     /// 逐批调 pingBatch（同步阻塞，必须在后台线程调）
-    private func runPingBatches(links: [String]) -> (items: [CZFNodePingResult], batchRejected: Bool) {
+    private func runPingBatches(links: [String], url: String) -> (items: [CZFNodePingResult], batchRejected: Bool) {
         var items = [CZFNodePingResult?](repeating: nil, count: links.count)
         var batchRejected = false
         // 先把每个链接转成出站 JSON，转不动的直接记失败
@@ -477,7 +585,7 @@ public final class CZFVPNManager {
             let resp = invoke(method: "pingBatch", payload: [
                 "configs": batch.map { ["xrayJson": $0.xrayJson] },
                 "timeout": 5,
-                "url": "https://cp.cloudflare.com/",
+                "url": url,
             ])
             if let resp, resp["success"] as? Bool == true,
                let data = resp["data"] as? [String: Any],
