@@ -376,8 +376,50 @@
     }];
 }
 
+// 收键盘（宿主侧，三个层次缺一不可，上一轮只做了其中
+// 半层才没生效）：
+// 1) 本视图 + 游客场景视图 endEditing：宿主侧能摸到的
+//    响应者链就这两处，单做本视图没用——游客内容不在本
+//    视图的响应者链里；
+// 2) sendAction resignFirstResponder：键盘焦点在 iOS 18+
+//    托管场景下由宿主的事件转交组件（见 AppSceneViewController
+//    的事件转交注释）代理，第一响应者实际挂在宿主进程，
+//    向空目标发 resign 才能摸到它；只靠游客进程内 endEditing
+//    摸不到这一层；
+// 3) Darwin 信号：新游客（TweakLoader 含全局信号观察者）
+//    收到后在自己进程内 endEditing；老游客（v184 前启动、
+//    TweakLoader 里没新观察者）和禁注入 App（TweakLoader
+//    的 constructor 直接 return，见 TweakLoader.m）收不到
+//    信号，只能靠上面两层宿主侧收——所以信号只是补刀，
+//    不能是唯一手段。
+// 信号名改发全局 czf.window.minimize，不再只发按 bid 的：
+// 上一轮按 self.bundleId 发，但这个 bundleId 来自启动时
+// UserDefaults 的 selected，实际是相对包路径（如 Muse.app
+// 这类文件夹名，见 LCUtils 的 launchMultitaskGuestApp 与
+// LCAppModel 的 selected 赋值），而游客观察者按
+// mainBundle.bundleIdentifier（真实 CFBundleIdentifier）
+// 订阅，两边名字永远对不上，信号发了等于没发。全局名不
+// 依赖 bid：每个游客只收自己窗口的键盘，没键盘的游客
+// endEditing 是空操作，不会误伤别的 App；旧按 bid 的名
+// 字也一并发出，兼容其它可能在听它的旧实现。
+// 调用方都在主线程（按钮动作、Dock 的 main async），不
+// 在这里再切线程。
+- (void)czfDismissKeyboard {
+    [self.view endEditing:YES];
+    if (self.appSceneVC.view) {
+        [self.appSceneVC.view endEditing:YES];
+    }
+    [[UIApplication sharedApplication] sendAction:@selector(resignFirstResponder) to:nil from:nil forEvent:nil];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)@"czf.window.minimize", NULL, NULL, YES);
+    if (self.bundleId.length > 0) {
+        NSString *minimizeName = [NSString stringWithFormat:@"czf.window.minimize.%@", self.bundleId];
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)minimizeName, NULL, NULL, YES);
+    }
+}
+
 - (void)closeWindow {
     // 关窗前记下窗口状态，下次打开还原（用户要的核心点）
+    [self czfDismissKeyboard];
     [self czfSaveWindowState];
     _isAppTerminationRequested = true;
     if([_appSceneVC isAppRunning]) {
@@ -389,18 +431,18 @@
 
 - (void)minimizeWindow {
     if (self.view.hidden) return;
-    // 最小化先收键盘：只藏窗口视图收不掉键盘——键盘在独立的
-    // 键盘窗口里，不随本视图隐藏而消失，游客切最小化后键盘
-    // 会继续盖在宿主界面上。宿主侧先让本视图 resign；游客
-    // 进程内的第一响应者（键盘真正归属的进程）由下面这条
-    // 按 bundleId 发的 Darwin 信号通知 TweakLoader 去收，
-    // 只收这一个 App，不动其他在跑 App 的键盘。动画开始前
-    // 就发，键盘边收边淡出，不用等 0.3 秒动画跑完。
-    [self.view endEditing:YES];
-    if (self.bundleId.length > 0) {
-        NSString *minimizeName = [NSString stringWithFormat:@"czf.window.minimize.%@", self.bundleId];
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)minimizeName, NULL, NULL, YES);
-    }
+    // 最小化先收键盘：只藏窗口视图收不掉键盘——键盘窗口
+    // 不随本视图隐藏而消失，游客切最小化后键盘会继续盖在
+    // 宿主界面上。动画开始前就收，键盘边收边淡出，不用等
+    // 0.3 秒动画跑完；具体分层见 czfDismissKeyboard 注释。
+    // 注意：本函数是所有“窗口消失、宿主界面露出来”的必经
+    // 之路——快捷栏最小化全部（MultitaskDockManager 的
+    // minimizeAllWindows）、面板的最小化打开、LCMaxOneAppOnStage
+    // 的自动最小化都调它；视频里从全屏游客回宿主 App 页
+    // 也是点标题栏的最小化按钮走这里，没有别的路能把宿
+    // 主页顶到全屏游客前面（顶层切换只会把游客窗口带到
+    // 前面，见 MultitaskDockManager 的 bringMultitaskViewToFront）。
+    [self czfDismissKeyboard];
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.alpha = 0;
         self.view.transform = CGAffineTransformMakeScale(0.1, 0.1);
@@ -413,6 +455,10 @@
 }
 
 - (void)minimizeWindowPiP {
+    // PiP 也一样收键盘：上一轮这条路完全没动，画中画
+    // 起来后键盘同样会盖在宿主界面上；PiP 视频本身不受
+    // resign 影响（只收第一响应者，不改场景前后台）。
+    [self czfDismissKeyboard];
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.alpha = 0;
     } completion:^(BOOL finished) {

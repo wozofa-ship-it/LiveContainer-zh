@@ -631,14 +631,20 @@ static void CZFDockGestureTryInstall(void) {
     }
 }
 
-// 最小化收键盘（游客进程内）：宿主最小化窗口时只藏了宿主侧
-// 的视图，游客进程的第一响应者没变，键盘窗口不随视图隐藏
-// 而消失，才会盖在宿主界面上。宿主按 bundleId 发 Darwin 信号
-// （czf.window.minimize.<bid>，见 DecoratedAppSceneViewController
-// 的 minimizeWindow），这里只认自己 bid 的信号，收到就在主
-// 线程让本进程所有窗口 endEditing——键盘归属本进程，只有
-// 在这里收才收得掉；不碰其他 App 的键盘，之后再点输入框
-// 仍能正常弹出（resign 不破坏输入框本身）。
+// 最小化收键盘（游客进程内，宿主信号的第二层，见
+// DecoratedAppSceneViewController 的 czfDismissKeyboard）：
+// 宿主最小化窗口时只藏了宿主侧的视图，游客进程的第一
+// 响应者没变，键盘窗口不随视图隐藏而消失，才会盖在宿
+// 主界面上。收到信号就在主线程让本进程所有窗口
+// endEditing——之后再点输入框仍能正常弹出（resign 不破
+// 坏输入框本身）。
+// 订阅两个名字：全局 czf.window.minimize 是本轮主信号，
+// 不依赖 bid——上一轮只订阅按 bid 的名字，但宿主发的
+// bid 实际是相对包路径文件夹名（见 Decorated 注释），
+// 和这里的 mainBundle.bundleIdentifier 永远对不上，信
+// 号发了等于没发；全局名下每个游客只收自己窗口的键
+// 盘，没键盘的游客 endEditing 是空操作，不误伤别的 App。
+// 按 bid 的旧名字也留着，兼容其它可能按 bid 发信号的宿主。
 static void CZFKeyboardDismissOnMinimizeCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -651,6 +657,7 @@ static void CZFKeyboardDismissOnMinimizeCallback(CFNotificationCenterRef center,
 static void CZFKeyboardDismissOnMinimizeInstall(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, CZFKeyboardDismissOnMinimizeCallback, (__bridge CFStringRef)@"czf.window.minimize", NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
         if (bid.length == 0) return;
         NSString *signalName = [NSString stringWithFormat:@"czf.window.minimize.%@", bid];
