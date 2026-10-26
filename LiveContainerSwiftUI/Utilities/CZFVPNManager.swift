@@ -539,21 +539,29 @@ public final class CZFVPNManager {
                 }
             } else {
                 // 假不通修法：第一地址（Cloudflare）个别失败时，
-                // 再用第二个地址单独重测一次，只认重测通的——
+                // 按顺序用另外两个地址单独重测，只认重测通的——
                 // 有些 REALITY 节点对 Cloudflare 那一路不通，但
                 // 实际经节点上网是通的（小火箭同节点 183ms），
                 // 一次失败就永久标不通、逼用户换 IP 是错的。
+                // 只用一个重试地址还不够：测速库对 204 空回应
+                // 的判定未必算成功，所以第二重试用返回 200 的
+                // 苹果连通性检测页兜底；三个地址都失败才标不通。
                 // 整批被拒时不走这一步（那是核心占用问题，
                 // 上面停核心重测的分支已经处理）
-                let failedIndices = outcome.items.enumerated().filter { !$0.element.success }.map { $0.offset }
-                if !failedIndices.isEmpty {
+                var failedIndices = outcome.items.enumerated().filter { !$0.element.success }.map { $0.offset }
+                for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
+                    if failedIndices.isEmpty { break }
                     let failedLinks = failedIndices.map { links[$0] }
-                    let retry = self.runPingBatches(links: failedLinks, url: "https://www.gstatic.com/generate_204")
+                    let retry = self.runPingBatches(links: failedLinks, url: retryURL)
+                    var stillFailed: [Int] = []
                     for (j, idx) in failedIndices.enumerated() {
                         if retry.items[j].success {
                             outcome.items[idx] = retry.items[j]
+                        } else {
+                            stillFailed.append(idx)
                         }
                     }
+                    failedIndices = stillFailed
                 }
             }
             let items = outcome.items

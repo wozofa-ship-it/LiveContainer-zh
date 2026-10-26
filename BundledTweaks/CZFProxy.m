@@ -376,8 +376,23 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
 // connectx 只观察不拦截：新式网络栈（Network.framework）发
 // 起连接走的是这个接口而不是 connect，先数它到底来不来、
 // 来多少，确认后再决定要不要代理它。
+// 唯一例外是严格模式：钉死节点的 App 承诺过核心不在时断网
+// 不直连，connect 走这个承诺，connectx 不能留个直连后门——
+// 核心不在时，公网 connectx 直接拒绝；核心在时仍先放行
+// （完整代理 connectx 要处理多路复用和首包，面大、逐 App
+// 真机测过才能上，这次不盲上，只先把严格模式的死角补上）
 static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, const void *iov, unsigned int iovcnt, size_t *len, uint32_t *cid) {
     __sync_add_and_fetch(&gStatConnx, 1);
+    if (gStrictMode && ep != NULL && ((const struct sockaddr *)ep)->sa_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)ep;
+        uint32_t ip = ntohl(sin->sin_addr.s_addr);
+        if (!CZFIsPrivateOrLoopback(ip) && !CZFCoreAlive()) {
+            __sync_add_and_fetch(&gStatConnFailed, 1);
+            CZFWriteStats(NO);
+            errno = ECONNREFUSED;
+            return -1;
+        }
+    }
     CZFWriteStats(NO);
     return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
 }
