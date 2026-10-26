@@ -11,6 +11,13 @@
 // v1.3 优化（减发热）：看门狗加 10 秒容差 —— 系统可把本次唤醒
 //          与其他系统活动合并，少唤醒 CPU；间隔仍 30 秒，恢复
 //          延迟不变（打断恢复走通知快路径，看门狗只是兜底）。
+// v1.4 优化（防 1 分钟内被掐）：提前启动 + 宿主通知 ——
+//          原先只在 DidEnterBackground 后才播静音，游客进程在宿主切后台
+//          的空档里就可能被系统先掐掉（视频 App 没被掐，正因为它切后台
+//          前音频已经在播）。现 WillResignActive 就提前播，切后台时音频
+//          会话已经是激活态；同时补宿主后台通知（NSExtensionHost*，
+//          Dead10ccFix 同款信号），游客的 UIApplication 后台通知在扩展
+//          里不一定到，宿主通知才是可靠的那路。
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -131,6 +138,39 @@ static void CZFKeepAliveInit(void) {
                     }];
 
         [nc addObserverForName:UIApplicationWillEnterForegroundNotification
+                        object:nil queue:mainQ
+                    usingBlock:^(NSNotification *note) {
+                        gInBackground = NO;
+                        CZFStopKeepAlive();
+                    }];
+
+        // 宿主切后台的通知：扩展里 UIApplication 后台通知不一定到，
+        // 宿主通知是可靠的那路（Dead10ccFix 同款信号）。
+        [nc addObserverForName:NSExtensionHostDidEnterBackgroundNotification
+                        object:nil queue:mainQ
+                    usingBlock:^(NSNotification *note) {
+                        gInBackground = YES;
+                        CZFStartKeepAlive();
+                    }];
+
+        [nc addObserverForName:NSExtensionHostWillEnterForegroundNotification
+                        object:nil queue:mainQ
+                    usingBlock:^(NSNotification *note) {
+                        gInBackground = NO;
+                        CZFStopKeepAlive();
+                    }];
+
+        // 提前启动：切后台前（上滑切 App、来电弹框等）就先播，切后台时
+        // 音频会话已经是激活态，不留“先被掐、后才开始播”的空档。
+        // 回前台时 DidBecomeActive 停掉，短暂误触发成本只有几秒静音。
+        [nc addObserverForName:UIApplicationWillResignActiveNotification
+                        object:nil queue:mainQ
+                    usingBlock:^(NSNotification *note) {
+                        gInBackground = YES;
+                        CZFStartKeepAlive();
+                    }];
+
+        [nc addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         gInBackground = NO;

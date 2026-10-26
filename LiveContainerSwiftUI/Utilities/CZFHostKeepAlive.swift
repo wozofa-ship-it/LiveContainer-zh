@@ -6,8 +6,12 @@
 // 开关与游客侧保活共用 LCKeepAliveEnabled（设置页“保活（无声音频）”，默认开）。
 // 只在“开关开 + 有游客在跑 + 宿主已切后台”三者同时满足时播放；
 // 宿主回前台、最后一个游客退出、开关关闭时立即停，不额外耗电。
-// 注意：游客计数取 MultitaskDockManager.shared.apps（虚拟窗口模式，默认开）；
-// 原生窗口模式下 dock 未启用、计数恒为 0，宿主保活不启动（与 dock 本身同限）。
+// v1.1 优化（防 1 分钟内被掐）：①提前启动 —— WillResignActive 就先播，
+// 切后台时音频会话已经是激活态，不留“先被掐、后才开始播”的空档；
+// ②游客计数补原生模式 —— 虚拟模式数 dock，原生模式数系统已连接的场景
+// （主场景 + 游客场景 > 1 即有游客），原来只数 dock 时原生模式下计数恒为 0、
+// 宿主保活从不启动；③后台任务第二通道 —— 音频被打断时，后台任务先顶住，
+// 过期时重开音频并续一个新任务，音频单通道断了不再直接等于被掐。
 
 import AVFoundation
 import UIKit
@@ -17,6 +21,7 @@ final class CZFHostKeepAlive {
 
     private var player: AVAudioPlayer?
     private var watchdog: Timer?
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var isBackgrounded = false
     private var installed = false
 
@@ -36,6 +41,16 @@ final class CZFHostKeepAlive {
             self?.isBackgrounded = false
             self?.refresh()
         }
+        // 提前启动：上滑切 App 时 WillResignActive 先于 DidEnterBackground，
+        // 这里就先播，切后台时音频会话已经是激活态。
+        center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.isBackgrounded = true
+            self?.refresh()
+        }
+        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.isBackgrounded = false
+            self?.refresh()
+        }
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
             guard let self = self else { return }
             guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -52,6 +67,11 @@ final class CZFHostKeepAlive {
         if #available(iOS 16.0, *) {
             guestsRunning = !MultitaskDockManager.shared.apps.isEmpty
         }
+        // 原生模式下 dock 不启用：游客是系统场景，主场景之外多一个即有游客。
+        // connectedScenes 由系统维护、场景断开即掉，比只加不删的窗口字典可靠。
+        if !guestsRunning {
+            guestsRunning = UIApplication.shared.connectedScenes.count > 1
+        }
         if enabled && guestsRunning && isBackgrounded {
             start()
         } else {
@@ -59,7 +79,25 @@ final class CZFHostKeepAlive {
         }
     }
 
+    /// 后台任务第二通道：音频被打断时先顶住，过期时重开音频并续一个新任务。
+    private func beginBackgroundTask() {
+        guard backgroundTask == .invalid else { return }
+        backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
+            guard let self else { return }
+            UIApplication.shared.endBackgroundTask(self.backgroundTask)
+            self.backgroundTask = .invalid
+            if self.isBackgrounded { self.start() }
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
     private func start() {
+        beginBackgroundTask()
         if let player = player, player.isPlaying { return }
         do {
             let session = AVAudioSession.sharedInstance()
@@ -92,6 +130,7 @@ final class CZFHostKeepAlive {
         watchdog = nil
         player?.pause()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        endBackgroundTask()
     }
 
     /// 1 秒静音 WAV（8000Hz 单声道 16bit PCM），与游客侧 CZFKeepAlive.m 同配方。
