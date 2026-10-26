@@ -39,11 +39,11 @@ struct AppReplaceOption : Hashable {
 
 // 待安装队列项：url 安装与 plist 安装共用一个队
 private enum CZFPendingInstall {
-    case url(String, Bool, Bool)
+    case url(String, Bool, Bool, Bool)
     case plist(String)
     var urlStr: String {
         switch self {
-        case .url(let s, _, _): return s
+        case .url(let s, _, _, _): return s
         case .plist(let s): return s
         }
     }
@@ -59,7 +59,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var installInfoShow = false
     @State var installInfo = ""
     // 安装请求队列（源页批量安装用）：串行下+装，已装的直接覆盖
-    @State var installQueue: [(url: URL, autoReplace: Bool, preview: Bool)] = []
+    @State var installQueue: [(url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool)] = []
     // 安装前预览（源里单个安装时，下完先弹信息卡确认再装）
     @State var installPreviewShow = false
     @State var installPreviewText = ""
@@ -656,7 +656,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if let obj2 = obj.object as? [String: Any], let installUrl = obj2["url"] as? URL {
                 // 全部走队列串行执行：以前忙着装别的时新请求会被
                 // 直接丢掉，批量安装实际只装得上第一个
-                enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false, preview: (obj2["preview"] as? Bool) ?? false)
+                enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false, preview: (obj2["preview"] as? Bool) ?? false, forceAsNew: (obj2["forceAsNew"] as? Bool) ?? false)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.LaunchAppNotification)) { obj in
@@ -825,7 +825,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         extract(path, destination, progress)
     }
     
-    func installIpaFile(_ url:URL, autoReplace: Bool = false) async throws {
+    func installIpaFile(_ url:URL, autoReplace: Bool = false, forceAsNew: Bool = false) async throws {
         let fm = FileManager()
 
         // 装之前先看空间：解包 + 落盘 + 签名大约要 IPA 体积
@@ -922,7 +922,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
 
             let installOptionChosen: AppReplaceOption?
-            if autoReplace, let existing = sameBundleIdApp.first {
+            if forceAsNew, !sameBundleIdApp.isEmpty {
+                // 源页「新建」直达：不弹替换/新建选择框，直接按
+                // 安装为新 App 走，后面照常弹新名字输入框。
+                installOptionChosen = self.installOptions.first
+            } else if autoReplace, let existing = sameBundleIdApp.first {
                 // 批量安装指定：已装同款直接覆盖，不弹选择框
                 installOptionChosen = self.installOptions.first { $0.appToReplace == existing }
             } else if autoReplace {
@@ -1225,8 +1229,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 别的时新请求会被直接丢掉、批量只装得上第一个。单个
     /// 安装请求也走这里（队列空闲时立即执行，和以前一样）；
     /// autoReplace 的请求遇到已装同款直接覆盖、不弹选择框
-    func enqueueInstall(url: URL, autoReplace: Bool, preview: Bool = false) {
-        installQueue.append((url: url, autoReplace: autoReplace, preview: preview))
+    func enqueueInstall(url: URL, autoReplace: Bool, preview: Bool = false, forceAsNew: Bool = false) {
+        installQueue.append((url: url, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew))
         guard !installQueueRunning else {
             return
         }
@@ -1280,7 +1284,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                     }
                 }
-                let installOK = await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview)
+                let installOK = await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew)
                 if installOK {
                     succeeded += 1
                 } else {
@@ -1381,18 +1385,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let next = pendingInstalls.removeFirst()
         Task {
             switch next {
-            case .url(let s, let r, let p):
-                await installFromUrl(urlStr: s, autoReplace: r, preview: p)
+            case .url(let s, let r, let p, let f):
+                await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f)
             case .plist(let s):
                 await installFromPlist(urlStr: s)
             }
         }
     }
 
-    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false) async -> Bool {
+    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false, forceAsNew: Bool = false) async -> Bool {
         // 进行中再点安装：排进队、当前装完接着装，不再静默丢掉
         if self.installprogressVisible {
-            let item = CZFPendingInstall.url(urlStr, autoReplace, preview)
+            let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew)
             if !pendingInstalls.contains(where: { $0.urlStr == urlStr }) {
                 pendingInstalls.append(item)
             }
@@ -1465,7 +1469,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             
             var installOK = true
             do {
-                try await installIpaFile(installUrl, autoReplace: autoReplace)
+                try await installIpaFile(installUrl, autoReplace: autoReplace, forceAsNew: forceAsNew)
             } catch {
                 installOK = false
                 errorInfo = LCUtils.czfFriendlyError(error)
@@ -1513,7 +1517,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     return false
                 }
             }
-            try await installIpaFile(destinationURL, autoReplace: autoReplace)
+            try await installIpaFile(destinationURL, autoReplace: autoReplace, forceAsNew: forceAsNew)
             try fileManager.removeItem(at: destinationURL)
         } catch {
             errorInfo = LCUtils.czfFriendlyError(error)

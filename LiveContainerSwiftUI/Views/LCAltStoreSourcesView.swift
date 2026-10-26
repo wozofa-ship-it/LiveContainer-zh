@@ -560,6 +560,7 @@ struct LCSourcesView: View {
                                     isExpanded: expandedSources.contains(item.id),
                                     onRefresh: { Task { await viewModel.refreshSource(item) } },
                                     onInstall: install(app:),
+                                    onInstallAsNew: installAsNew(app:),
                                     onDownload: download(app:),
                                     onRemove: { sourcePendingRemoval = item },
                                     toggleExpanded: { toggleExpansion(for: item.id) },
@@ -859,6 +860,27 @@ struct LCSourcesView: View {
 
     }
 
+    // 源页已装 App 的「新建」：不弹替换/新建选择框，直接按
+    // 多开走，App 页照常弹新名字输入框；插件 dylib 没有多开
+    // 一说，照旧走插件安装。
+    @MainActor
+    private func installAsNew(app: AltStoreSourceApp) {
+        guard let downloadURL = app.latestVersion?.downloadURL else {
+            errorMessage = "lc.sources.error.missingDownload".loc
+            return
+        }
+        if downloadURL.pathExtension.lowercased() == "dylib" {
+            Task { await installTweak(from: downloadURL, name: app.name) }
+            return
+        }
+        withAnimation {
+            DataManager.shared.model.selectedTab = .apps
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL, "preview": true, "forceAsNew": true])
+        }
+    }
+
     @MainActor
     private func installTweak(from url: URL, name: String) async {
         do {
@@ -1086,6 +1108,7 @@ private struct AltStoreSourceSectionView: View {
     let isExpanded: Bool
     let onRefresh: () -> Void
     let onInstall: (AltStoreSourceApp) -> Void
+    let onInstallAsNew: (AltStoreSourceApp) -> Void
     let onDownload: (AltStoreSourceApp) -> Void
     let onRemove: () -> Void
     let toggleExpanded: () -> Void
@@ -1156,7 +1179,7 @@ private struct AltStoreSourceSectionView: View {
             } else if let source = item.source, isExpanded || isFiltering {
                 VStack(spacing: 12) {
                     ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))]) { app in
-                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, downloadAction: onDownload, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
+                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
                     }
                     if filteredApps.isEmpty {
                         if source.apps.isEmpty || isFiltering {
@@ -1189,6 +1212,7 @@ private struct LCSourceAppBanner: View {
     let app: AltStoreSourceApp
     let source: AltStoreSource
     let installAction: (AltStoreSourceApp) -> Void
+    let installAsNewAction: (AltStoreSourceApp) -> Void
     let downloadAction: (AltStoreSourceApp) -> Void
     let isBatchMode: Bool
     let isSelected: Bool
@@ -1367,47 +1391,81 @@ private struct LCSourceAppBanner: View {
                         .background(Capsule().fill(Color.green))
                         .clipShape(Capsule())
                 } else if !isDylib && isInstalled && hasUpdate {
-                    Button {
-                        installAction(app)
-                    } label: {
-                        Text("更新")
-                            .bold()
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                            .frame(height: 32)
-                            .minimumScaleFactor(0.1)
-                    }
-                    .buttonStyle(BasicButtonStyle())
-                    .padding()
-                    .frame(idealWidth: 70)
-                    .frame(height: 32)
-                    .fixedSize()
-                    .background(
-                        Capsule().fill(Color.orange)
-                    )
-                    .clipShape(Capsule())
-                } else if !isDylib && isInstalled {
-                    Button {
-                        if let installedApp = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) {
-                            Task { try? await installedApp.runApp() }
+                    HStack(spacing: 6) {
+                        Button {
+                            installAction(app)
+                        } label: {
+                            Text("更新")
+                                .bold()
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                                .frame(height: 32)
+                                .minimumScaleFactor(0.1)
                         }
-                    } label: {
-                        Text("lc.common.open".loc)
-                            .bold()
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                            .frame(height: 32)
-                            .minimumScaleFactor(0.1)
+                        .buttonStyle(BasicButtonStyle())
+                        .padding()
+                        .frame(idealWidth: 70)
+                        .frame(height: 32)
+                        .fixedSize()
+                        .background(
+                            Capsule().fill(Color.orange)
+                        )
+                        .clipShape(Capsule())
+                        Button {
+                            installAsNewAction(app)
+                        } label: {
+                            Text("新建")
+                                .bold()
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                                .frame(height: 32)
+                                .minimumScaleFactor(0.1)
+                        }
+                        .buttonStyle(BasicButtonStyle())
+                        .padding(.horizontal, 10)
+                        .frame(height: 32)
+                        .background(Capsule().fill(Color.purple))
+                        .clipShape(Capsule())
                     }
-                    .buttonStyle(BasicButtonStyle())
-                    .padding()
-                    .frame(idealWidth: 70)
-                    .frame(height: 32)
-                    .fixedSize()
-                    .background(
-                        Capsule().fill(Color.green)
-                    )
-                    .clipShape(Capsule())
+                } else if !isDylib && isInstalled {
+                    HStack(spacing: 6) {
+                        Button {
+                            if let installedApp = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) {
+                                Task { try? await installedApp.runApp() }
+                            }
+                        } label: {
+                            Text("lc.common.open".loc)
+                                .bold()
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                                .frame(height: 32)
+                                .minimumScaleFactor(0.1)
+                        }
+                        .buttonStyle(BasicButtonStyle())
+                        .padding()
+                        .frame(idealWidth: 70)
+                        .frame(height: 32)
+                        .fixedSize()
+                        .background(
+                            Capsule().fill(Color.green)
+                        )
+                        .clipShape(Capsule())
+                        Button {
+                            installAsNewAction(app)
+                        } label: {
+                            Text("新建")
+                                .bold()
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                                .frame(height: 32)
+                                .minimumScaleFactor(0.1)
+                        }
+                        .buttonStyle(BasicButtonStyle())
+                        .padding(.horizontal, 10)
+                        .frame(height: 32)
+                        .background(Capsule().fill(Color.purple))
+                        .clipShape(Capsule())
+                    }
                 } else {
                     Button {
                         installAction(app)
