@@ -114,6 +114,11 @@ struct LCSettingsView: View {
     @AppStorage("CZFVPNPrewarm") var vpnPrewarm = true
     @State var vpnActiveIndex = 0
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    @State var vpnPingStaleIndices: Set<Int> = []
+    @State var vpnSinglePinging = false
+    @State var vpnSinglePingIndex: Int?
+    @State var showDeleteActiveConfirm = false
+    @State var pendingDeleteIndices: [Int] = []
     @State var vpnPinging = false
     @State var vpnPingRejected = false
     @State var vpnPingDone = 0
@@ -463,12 +468,18 @@ struct LCSettingsView: View {
                         TextField("粘贴节点链接（vless://…）", text: $vpnNewNodeText)
                             .textInputAutocapitalization(.never)
                         Button("添加") {
-                            CZFVPNManager.shared.addNode(vpnNewNodeText)
-                            vpnNewNodeText = ""
-                            vpnPingResults = [:]
-                            refreshVPNState()
+                            // 重复添加不再静默：addNode 返回 false
+                            // 时提示已存在，输入框留着、不清结果。
+                            if CZFVPNManager.shared.addNode(vpnNewNodeText) {
+                                vpnNewNodeText = ""
+                                vpnPingResults = [:]
+                                refreshVPNState()
+                            } else {
+                                errorInfo = "节点已存在，未重复添加"
+                                errorShow = true
+                            }
                         }
-                        .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging)
+                        .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging || vpnSinglePinging)
                     }
                     HStack {
                         TextField("粘贴订阅地址（https://…）", text: $vpnSubURL)
@@ -497,7 +508,7 @@ struct LCSettingsView: View {
                                 }
                             }
                         }
-                        .disabled(vpnSubBusy || vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging)
+                        .disabled(vpnSubBusy || vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging || vpnSinglePinging)
                     }
                     ForEach(Array(vpnNodes.enumerated()), id: \.offset) { index, link in
                         Button {
@@ -526,19 +537,26 @@ struct LCSettingsView: View {
                                     Text("在用")
                                         .font(.caption)
                                         .foregroundStyle(.green)
-                                } else if vpnPinging && vpnPingResults[index] == nil {
+                                } else if (vpnPinging || vpnSinglePingIndex == index) && vpnPingResults[index] == nil {
+                                    Text("测速中")
+                                        .font(.caption)
+                                        .foregroundStyle(.gray)
+                                } else if vpnSinglePingIndex == index {
                                     Text("测速中")
                                         .font(.caption)
                                         .foregroundStyle(.gray)
                                 } else if let ping = vpnPingResults[index] {
+                                    // 超 24 小时的缓存结果：灰色加“·旧”，
+                                    // 别按新鲜延迟的颜色误导切节点。
+                                    let isStale = vpnPingStaleIndices.contains(index)
                                     if ping.success {
-                                        Text("\(ping.delay)ms")
+                                        Text(isStale ? "\(ping.delay)ms·旧" : "\(ping.delay)ms")
                                             .font(.caption)
-                                            .foregroundStyle(ping.delay < 300 ? .green : (ping.delay < 800 ? .orange : .red))
+                                            .foregroundStyle(isStale ? .gray : (ping.delay < 300 ? .green : (ping.delay < 800 ? .orange : .red)))
                                     } else {
-                                        Text(ping.delay == 11000 ? "超时" : "不通")
+                                        Text((ping.delay == 11000 ? "超时" : "不通") + (isStale ? "·旧" : ""))
                                             .font(.caption)
-                                            .foregroundStyle(.red)
+                                            .foregroundStyle(isStale ? .gray : .red)
                                     }
                                 }
                                 if index == vpnActiveIndex {
@@ -547,23 +565,40 @@ struct LCSettingsView: View {
                                 }
                             }
                         }
+                        // 单节点复测：长按行出菜单，只测这一条，
+                        // 不清整表、不测全部。行内再嵌 Button 会
+                        // 和整行切换按钮抢点击，用菜单最稳。
+                        .contextMenu {
+                            Button("复测这个节点") {
+                                startSinglePing(index)
+                            }
+                            .disabled(vpnPinging || vpnSinglePinging)
+                        }
                     }
                     .onDelete { offsets in
                         // 测速中左滑也禁删：.disabled 不一定挡得住
                         // List 的左滑删除，动作里再守一次，免得
                         // 测速中列表变了、结果下标错位。
-                        guard !vpnPinging else { return }
-                        for i in offsets.sorted(by: >) {
-                            CZFVPNManager.shared.removeNode(at: i)
+                        guard !vpnPinging && !vpnSinglePinging else { return }
+                        // 删在用节点先弹确认：manager 侧删在用
+                        // 节点已改成停核心不自动切，界面再确认
+                        // 一次，免得左滑手误把在用节点删了。
+                        if offsets.contains(vpnActiveIndex) {
+                            pendingDeleteIndices = offsets.sorted()
+                            showDeleteActiveConfirm = true
+                        } else {
+                            for i in offsets.sorted(by: >) {
+                                CZFVPNManager.shared.removeNode(at: i)
+                            }
+                            vpnPingResults = [:]
+                            refreshVPNState()
                         }
-                        vpnPingResults = [:]
-                        refreshVPNState()
                     }
                     // 测速中节点行置灰：测速中点节点行只会把勾
                     // 先动、核心切换被挡下测完才补跑，看起来
                     // 像切了其实还没切；置灰后测速中点不动，
-                    // 测完再点才是真切。
-                    .disabled(vpnPinging)
+                    // 测完再点才是真切。单节点复测同理。
+                    .disabled(vpnPinging || vpnSinglePinging)
                     HStack {
                         Button(vpnCoreRunning ? "停止核心" : "启动核心") {
                             CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
@@ -578,12 +613,12 @@ struct LCSettingsView: View {
                         // 的 deferred 逻辑插队，状态容易翻；测速
                         // 本身又不切核心，测速中起停没有意义，
                         // 测完再点。
-                        .disabled(vpnPinging)
+                        .disabled(vpnPinging || vpnSinglePinging)
                         .buttonStyle(.borderless)
                         Button(vpnPinging ? (vpnPingTotal > 0 ? "\(vpnPingPhase) \(vpnPingDone)/\(vpnPingTotal)" : "测速中…") : "测延迟") {
                             startVPNPing()
                         }
-                        .disabled(vpnPinging || vpnNodes.isEmpty)
+                        .disabled(vpnPinging || vpnSinglePinging || vpnNodes.isEmpty)
                         .buttonStyle(.borderless)
                         // 测完后一键切到最快的（只认测通的节点；
                         // 已经是最快时不显示，省得误会）
@@ -592,7 +627,7 @@ struct LCSettingsView: View {
                                 CZFVPNManager.shared.setActiveNode(at: fastest.key)
                                 refreshVPNState()
                             }
-                            .disabled(vpnPinging)
+                            .disabled(vpnPinging || vpnSinglePinging)
                             .buttonStyle(.borderless)
                         }
                         // 测完后一键清理不通的节点：只删明确测
@@ -620,7 +655,7 @@ struct LCSettingsView: View {
                             // 界面和缓存，清理按上次真测结果走；
                             // 测速中仍禁，免得按还没重试完的临时
                             // 失败删节点。
-                            .disabled(vpnPinging)
+                            .disabled(vpnPinging || vpnSinglePinging)
                             .buttonStyle(.borderless)
                         }
                         // 测完后按延迟从低到高重排节点列表（不通
@@ -647,7 +682,7 @@ struct LCSettingsView: View {
                                 vpnPingResults = [:]
                                 refreshVPNState()
                             }
-                            .disabled(vpnPinging)
+                            .disabled(vpnPinging || vpnSinglePinging)
                             .buttonStyle(.borderless)
                         }
                         // 核心占用被拒时的提示：结果不是节点不通，
@@ -861,11 +896,30 @@ struct LCSettingsView: View {
                     applySubscriptionLinks(pendingSubLinks)
                     pendingSubLinks = []
                 }
+                Button("合并导入（只加新的）") {
+                    mergeSubscriptionLinks(pendingSubLinks)
+                    pendingSubLinks = []
+                }
                 Button("lc.common.cancel".loc, role: .cancel) {
                     pendingSubLinks = []
                 }
             } message: {
-                Text("当前 \(vpnNodes.count) 个节点（包括手动添加的）会被订阅内容整体替换，此操作不可恢复")
+                Text("替换会把当前 \(vpnNodes.count) 个节点（包括手动添加的）整体换掉，此操作不可恢复；合并只追加订阅里没有的节点，保留手填节点")
+            }
+            .alert("删除在用节点？", isPresented: $showDeleteActiveConfirm) {
+                Button("删除并停核心", role: .destructive) {
+                    for i in pendingDeleteIndices.sorted(by: >) {
+                        CZFVPNManager.shared.removeNode(at: i)
+                    }
+                    pendingDeleteIndices = []
+                    vpnPingResults = [:]
+                    refreshVPNState()
+                }
+                Button("lc.common.cancel".loc, role: .cancel) {
+                    pendingDeleteIndices = []
+                }
+            } message: {
+                Text("删掉在用节点后核心会停掉，不会自动切到别的节点继续跑")
             }
             .alert("lc.settings.importCertificate".loc, isPresented: $certificateImportAlert.show) {
                 Button {
@@ -1003,12 +1057,35 @@ struct LCSettingsView: View {
         // 被替换掉的节点还留在缓存里，下次存结果时才剪；
         // 先按新列表剪掉，再刷新、再从缓存恢复，恢复的
         // 只会是新列表里还留着的节点。
-        let prunedCache = (UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) as? [String: Int] ?? [:])
-            .filter { links.contains($0.key) }
-        UserDefaults.standard.set(prunedCache, forKey: Self.pingCacheKey)
+        writePingCache(readPingCache().filter { links.contains($0.key) })
         vpnPingResults = [:]
         refreshVPNState()
         successInfo = "订阅导入完成：共 \(links.count) 个节点（节点列表已替换为订阅内容）"
+        successShow = true
+    }
+
+    /// 订阅合并导入：只追加订阅里没有的节点，保留手填
+    /// 节点和活动节点（追加在末尾不移位，活动节点不变，
+    /// 核心在跑也不重启）。没有新节点时列表不动。
+    func mergeSubscriptionLinks(_ links: [String]) {
+        let cleaned = links
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let existing = CZFVPNManager.shared.nodeLinks
+        let fresh = cleaned.filter { !existing.contains($0) }
+        UserDefaults.standard.set(vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "CZFVPNSubscriptionURL")
+        if fresh.isEmpty {
+            successInfo = "订阅里没有新节点，列表未变"
+            successShow = true
+            return
+        }
+        // 走清理同款只换列表不碰核心：活动节点按内容找回，
+        // 追加在末尾不移位，核心在跑也不重启。
+        CZFVPNManager.shared.replaceNodesWithoutCoreChange(existing + fresh)
+        writePingCache(readPingCache().filter { (existing + fresh).contains($0.key) })
+        vpnPingResults = [:]
+        refreshVPNState()
+        successInfo = "合并导入完成：新增 \(fresh.count) 个节点，共 \(existing.count + fresh.count) 个"
         successShow = true
     }
 
@@ -1048,12 +1125,36 @@ struct LCSettingsView: View {
                 var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (i, r) in results.enumerated() { map[i] = r }
                 vpnPingResults = map
+                vpnPingStaleIndices = []
                 vpnPingRejected = false
                 savePingResults()
             }
             vpnPinging = false
             vpnPingDone = 0
             vpnPingTotal = 0
+            refreshVPNState()
+        }
+    }
+
+    // 单节点复测（长按行菜单）：只测这一条，不清整表。
+    // 被拒时不覆写旧结果、只出警告；成功时只更新该节点
+    // 的结果与缓存时间戳，其余节点结果不动。按链接内容
+    // 对回下标，测速中列表变了也不错位。
+    func startSinglePing(_ index: Int) {
+        guard vpnNodes.indices.contains(index) else { return }
+        let link = vpnNodes[index]
+        vpnSinglePingIndex = index
+        vpnSinglePinging = true
+        CZFVPNManager.shared.pingSingleNode(at: index) { result, rejected in
+            vpnSinglePinging = false
+            vpnSinglePingIndex = nil
+            if rejected {
+                vpnPingRejected = true
+            } else if let result, let currentIndex = vpnNodes.firstIndex(of: link) {
+                vpnPingResults[currentIndex] = result
+                vpnPingStaleIndices.remove(currentIndex)
+                savePingResults()
+            }
             refreshVPNState()
         }
     }
@@ -1081,25 +1182,55 @@ struct LCSettingsView: View {
     // 节点就整表清零、重启也没了，而测速要停一次核心，代价不小。
     // 按节点链接内容存：增删别的节点不影响已有结果，重排后按
     // 内容对回新下标。编码：≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时）
+    // 新格式每条带时间戳（v = 延迟码，t = 测于何时的秒时间戳）：
+    // 超 24 小时的结果界面灰色显示“·旧”，别按旧延迟误切节点。
+    // 旧格式（直接存 Int）兼容读，时间戳按 0 计、即直接算旧。
     private static let pingCacheKey = "CZFVPNPingCache"
+    private static let pingCacheStaleAfter: TimeInterval = 86400
+
+    private func readPingCache() -> [String: (code: Int, time: TimeInterval)] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) else { return [:] }
+        var out: [String: (code: Int, time: TimeInterval)] = [:]
+        for (link, value) in raw {
+            if let dict = value as? [String: Any] {
+                let code = (dict["v"] as? NSNumber)?.intValue ?? 0
+                let time = (dict["t"] as? NSNumber)?.doubleValue ?? 0
+                out[link] = (code: code, time: time)
+            } else if let num = value as? NSNumber {
+                out[link] = (code: num.intValue, time: 0)
+            }
+        }
+        return out
+    }
+
+    private func writePingCache(_ cache: [String: (code: Int, time: TimeInterval)]) {
+        var out: [String: [String: Any]] = [:]
+        for (link, entry) in cache {
+            out[link] = ["v": entry.code, "t": entry.time]
+        }
+        UserDefaults.standard.set(out, forKey: Self.pingCacheKey)
+    }
 
     private func savePingResults() {
         // 先剪掉已不在列表里的节点，缓存不无限长
-        var merged = (UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) as? [String: Int] ?? [:])
-            .filter { vpnNodes.contains($0.key) }
+        var merged = readPingCache().filter { vpnNodes.contains($0.key) }
+        let now = Date().timeIntervalSince1970
         for (index, result) in vpnPingResults {
             guard vpnNodes.indices.contains(index) else { continue }
-            merged[vpnNodes[index]] = result.success ? result.delay : (result.delay == 11000 ? -2 : -1)
+            merged[vpnNodes[index]] = (code: result.success ? result.delay : (result.delay == 11000 ? -2 : -1), time: now)
         }
-        UserDefaults.standard.set(merged, forKey: Self.pingCacheKey)
+        writePingCache(merged)
     }
 
     private func restorePingResults() {
-        let cache = UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) as? [String: Int] ?? [:]
+        let cache = readPingCache()
         guard !cache.isEmpty else { return }
         var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+        var stale: Set<Int> = []
+        let now = Date().timeIntervalSince1970
         for (index, link) in vpnNodes.enumerated() {
-            guard let v = cache[link] else { continue }
+            guard let entry = cache[link] else { continue }
+            let v = entry.code
             if v >= 0 {
                 map[index] = CZFVPNManager.CZFNodePingResult(success: true, delay: v)
             } else if v == -2 {
@@ -1107,9 +1238,13 @@ struct LCSettingsView: View {
             } else {
                 map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 10000)
             }
+            if entry.time == 0 || now - entry.time > Self.pingCacheStaleAfter {
+                stale.insert(index)
+            }
         }
         if !map.isEmpty {
             vpnPingResults = map
+            vpnPingStaleIndices = stale
         }
     }
 

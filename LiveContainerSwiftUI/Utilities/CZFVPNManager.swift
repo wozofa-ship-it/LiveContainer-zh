@@ -129,13 +129,18 @@ public final class CZFVPNManager {
         return links[activeNodeIndex]
     }
 
-    public func addNode(_ link: String) {
+    // 返回 true 表示真的加进去了；空链接或已存在返回 false，
+    // 界面据此提示“已存在”，不再静默失败（以前直接 return，
+    // 界面还把输入框清空，看起来像加上了）。
+    @discardableResult
+    public func addNode(_ link: String) -> Bool {
         let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return false }
         var links = nodeLinks
-        if links.contains(trimmed) { return }
+        if links.contains(trimmed) { return false }
         links.append(trimmed)
         UserDefaults.standard.set(links, forKey: Self.nodeListKey)
+        return true
     }
 
     // 清理专用：只换节点列表、不碰核心。清理只是删节点，
@@ -296,17 +301,28 @@ public final class CZFVPNManager {
     public func removeNode(at index: Int) {
         var links = nodeLinks
         guard links.indices.contains(index) else { return }
-        // 先记住当前活动节点是哪条：删掉它前面的节点会让后面的
-        // 往前挪，按下标存的选中项会悄悄换人，删完要按内容找回
+        // 删在用节点：以前 previousActive 找不回来就落到最后
+        // 一个，applyActiveNodeChange 还会在核心在跑时直接按
+        // 新节点重启——用户删在用节点本意是停掉，结果被静默
+        // 切到别的节点继续跑。现在删在用节点就停核心，不自
+        // 动切；选中项落到第一个（核心停着，不会立刻生效）。
+        // 删非在用节点仍按内容找回，不动核心归属。
+        let wasActive = index == activeNodeIndex
         let previousActive = nodeLink
         links.remove(at: index)
         UserDefaults.standard.set(links, forKey: Self.nodeListKey)
         if let newIdx = links.firstIndex(of: previousActive) {
             UserDefaults.standard.set(newIdx, forKey: Self.activeNodeKey)
+        } else if wasActive {
+            UserDefaults.standard.set(0, forKey: Self.activeNodeKey)
         } else {
             UserDefaults.standard.set(max(links.count - 1, 0), forKey: Self.activeNodeKey)
         }
-        applyActiveNodeChange()
+        if wasActive {
+            stop()
+        } else {
+            applyActiveNodeChange()
+        }
     }
 
     public func setActiveNode(at index: Int) {
@@ -813,6 +829,71 @@ public final class CZFVPNManager {
             }
             let items = outcome.items
             DispatchQueue.main.async { completion(items, pingRejected) }
+        }
+    }
+
+    /// 只测一个节点：复用 runPingBatches 的单链接子集与三地址
+    /// 重试（Cloudflare → gstatic → Apple），不测整表。测速只读
+    /// 规则与全量测速一致：立 isPinging 挡预热/切节点/开 App，
+    /// 收尾只做预热抑制与被挡请求的补跑，绝不动核心启停；
+    /// 核心在跑且整批被拒时 rejected 为真，界面不覆写旧结果。
+    /// completion 回主线程，result 为 nil 表示下标已失效。
+    public func pingSingleNode(at index: Int, completion: @escaping (CZFNodePingResult?, Bool) -> Void) {
+        let links = nodeLinks
+        guard links.indices.contains(index) else { completion(nil, false); return }
+        let link = links[index]
+        vpnCoreLock.lock()
+        isPinging = true
+        vpnCoreLock.unlock()
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.vpnCoreLock.lock()
+            self.isPinging = true
+            self.pingRetryLink = nil
+            self.pingGeneration += 1
+            let epochAtPingStart = self.coreActionEpoch
+            let coreRunningAtStart = self.isRunning
+            let prePingActiveLink = self.nodeLink
+            self.vpnCoreLock.unlock()
+            var outcome = self.runPingBatches(links: [link], url: "https://cp.cloudflare.com/", phase: "测速", onProgress: nil)
+            let pingRejected = coreRunningAtStart && outcome.batchRejected
+            if !pingRejected {
+                var failed = outcome.items.first?.success == true ? [] : [0]
+                for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
+                    if failed.isEmpty { break }
+                    let retry = self.runPingBatches(links: [link], url: retryURL, phase: "重试", onProgress: nil)
+                    if retry.items.first?.success == true {
+                        outcome.items[0] = retry.items[0]
+                        failed = []
+                    }
+                }
+            }
+            var deferredApp: LCAppInfo?
+            var deferredHost = false
+            var postPingActiveLink = prePingActiveLink
+            self.vpnCoreLock.lock()
+            let epochChanged = self.coreActionEpoch != epochAtPingStart
+            if !epochChanged {
+                self.prewarmSuppressedAfterPing = !self.isRunning
+            } else {
+                self.pingRetryLink = nil
+            }
+            postPingActiveLink = self.nodeLink
+            deferredApp = self.deferredEnsureApp
+            self.deferredEnsureApp = nil
+            deferredHost = self.deferredHostEnsure
+            self.deferredHostEnsure = false
+            self.isPinging = false
+            self.vpnCoreLock.unlock()
+            if let deferredApp {
+                self.ensureRunning(for: deferredApp)
+            } else if postPingActiveLink != prePingActiveLink {
+                self.applyActiveNodeChange()
+            }
+            if deferredHost {
+                self.ensureRunningForHost()
+            }
+            let item = outcome.items.first
+            DispatchQueue.main.async { completion(item, pingRejected) }
         }
     }
 
