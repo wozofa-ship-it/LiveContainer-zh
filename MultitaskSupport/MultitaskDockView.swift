@@ -146,6 +146,12 @@ class AppInfoProvider {
     // 开/关只切可见性和位置；开没开以面板视图的 isHidden 为准，不以引用为准
     // 定时最小化打开的轮询定时器（30 秒一轮，只在宿主活着时跑）
     private var czfSchedMinTimer: Timer?
+    // 最小化超 30 分钟自动关（CZF）：60 秒一轮，只在宿主活着时跑；
+    // 宿主被彻底关掉时不跑，下次打开时运行中列表是空的，无需补查。
+    // 键为 appUUID（多开同 App 不同容器各算各的），值是首次看到
+    // 它已最小化的时间；恢复可见、关窗、画中画、开关关时清掉。
+    private var czfMinAutoCloseTimer: Timer?
+    private var czfMinimizedSince: [String: Date] = [:]
     private var czfPanelOverlayBackdrop: UIView?
     private var czfPanelOverlayHost: UIHostingController<AnyView>?
     // 源面板覆盖层：与 App 面板同构，各自一套遮罩+宿主，互开时先关对方
@@ -309,6 +315,7 @@ class AppInfoProvider {
         Self.deployDockGestureTweak()
         registerDockEdgeDarwinObservers()
         startScheduledMinimizeOpenTimer()
+        startMinAutoCloseTimer()
         attachWindowHostingViewWhenReady()
         setupDockView()
         NotificationCenter.default.addObserver(
@@ -721,6 +728,10 @@ class AppInfoProvider {
         }
         
         if isHidden {
+            // 最小化省电恢复：藏着的窗口被叫回台前时清最小化标记、
+            // 恢复前台。只走这条带取消隐藏的路，不走单纯调层级的
+            // bringViewToFront（后者不取消隐藏，恢复了会藏着也变前台）。
+            decoratedVC?.czfRestoreFromMinimize()
             view.layer.removeAllAnimations()
             view.isHidden = true
             view.transform = .identity
@@ -931,6 +942,65 @@ class AppInfoProvider {
             } else if attempts >= 40 {
                 timer.invalidate()
             }
+        }
+    }
+
+    // MARK: - 最小化超 30 分钟自动关（CZF）
+    // 开关在多任务设置页，键 CZFMinAutoCloseEnabled，键不存在 = 开。
+    // 只关“已最小化满 30 分钟”的窗口：可见的、画中画的、已关的都不动；
+    // 恢复可见后计时清零，重最小化重新计 30 分钟。60 秒一轮，误差
+    // 不超过一轮；宿主被彻底关掉时定时器不跑，不存在补关误伤。
+    private func startMinAutoCloseTimer() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.czfMinAutoCloseTimer?.invalidate()
+            self.czfMinAutoCloseTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                self?.checkMinAutoClose()
+            }
+            self.checkMinAutoClose()
+        }
+    }
+
+    private func checkMinAutoClose() {
+        let defaults = LCUtils.appGroupUserDefault
+        let enabled = defaults.object(forKey: "CZFMinAutoCloseEnabled") == nil || defaults.bool(forKey: "CZFMinAutoCloseEnabled")
+        guard enabled else {
+            czfMinimizedSince.removeAll()
+            return
+        }
+        let now = Date()
+        var toClose: [String] = []
+        for app in apps {
+            guard let view = app.view,
+                  let vc = view._viewDelegate() as? DecoratedAppSceneViewController else {
+                czfMinimizedSince.removeValue(forKey: app.appUUID)
+                continue
+            }
+            // 画中画在播视频：豁免，不计也不关。
+            if PiPManager.shared?.isPiP(withDecoratedVC: vc) == true {
+                czfMinimizedSince.removeValue(forKey: app.appUUID)
+                continue
+            }
+            // 只认真正藏起来的：动画中途 alpha 为 0 但 hidden 还没置位
+            // 时不算，避免 0.3 秒动画就开始计时。
+            if view.isHidden {
+                if let since = czfMinimizedSince[app.appUUID] {
+                    if now.timeIntervalSince(since) >= 1800 {
+                        toClose.append(app.appUUID)
+                    }
+                } else {
+                    czfMinimizedSince[app.appUUID] = now
+                }
+            } else {
+                czfMinimizedSince.removeValue(forKey: app.appUUID)
+            }
+        }
+        // 已不在运行列表里的计时一并清掉，防 uuid 复用后误关新窗。
+        let liveUUIDs = Set(apps.map { $0.appUUID })
+        czfMinimizedSince = czfMinimizedSince.filter { liveUUIDs.contains($0.key) }
+        for uuid in toClose {
+            czfMinimizedSince.removeValue(forKey: uuid)
+            closeAppWindow(uuid: uuid)
         }
     }
 

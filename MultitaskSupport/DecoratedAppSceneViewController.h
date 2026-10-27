@@ -18,6 +18,9 @@ API_AVAILABLE(ios(16.0))
 - (void)minimizeWindowPiP;
 - (void)unminimizeWindowPiP;
 - (void)closeWindow;
+// 最小化省电（CZF）：窗口被叫回台前时清最小化标记、恢复前台。
+// Swift 侧 animateViewAppearance（带取消隐藏的通用恢复路）调用。
+- (void)czfRestoreFromMinimize;
 - (void)updateVerticalConstraints;
 @property(nonatomic, copy) void (^pidAvailableHandler)(NSNumber *pid, NSError *error);
 @end

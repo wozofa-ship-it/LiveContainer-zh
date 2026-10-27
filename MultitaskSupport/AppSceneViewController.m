@@ -386,6 +386,19 @@
     }
 }
 
+// 最小化省电（CZF）：直接改真实 scene 的 foreground。
+// 注意：上面 updateSettingsWithBlock 在 iOS 18+ 宿主控制器路径只取
+// frame、不把 foreground 写回真实 scene，所以不能走它；这里直写
+// presenter.scene，legacy 路径和宿主路径都走同一条。PiP 时
+// shouldIgnoreSceneUpdates 为 YES，直接跳过（画中画视频要继续播）。
+- (void)czfSetSceneForeground:(BOOL)foreground {
+    if (self.shouldIgnoreSceneUpdates) return;
+    if (!self.presenter || !self.presenter.scene) return;
+    [self.presenter.scene updateSettingsWithBlock:^(UIMutableApplicationSceneSettings *settings) {
+        settings.foreground = foreground;
+    }];
+}
+
 - (void)viewDidMoveToWindow:(UIWindow *)newWindow shouldAppearOrDisappear:(BOOL)appear {
     [super viewDidMoveToWindow:newWindow shouldAppearOrDisappear:appear];
     if(!newWindow) {

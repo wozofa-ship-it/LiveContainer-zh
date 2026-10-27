@@ -17,6 +17,9 @@
 @property(nonatomic) UIBarButtonItem *maximizeButton;
 @property(nonatomic) bool isAppTerminationRequested;
 @property(nonatomic) BOOL czfRestoreApplied;
+// 最小化省电（CZF）：YES = 本窗口已最小化，场景应为后台；
+// 恢复时清掉。只做标记，真正的 foreground 写在下面三个方法里。
+@property(nonatomic) BOOL czfMinimized;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -417,7 +420,29 @@
     }
 }
 
+// 最小化省电（CZF）：开关在多任务设置页，键 CZFMinPowerSavingEnabled，
+// 键不存在 = 开（跟 CZFRestoreWindowState 同款读法）。关了 = 保持旧行为，
+// 最小化只藏视图、场景仍是前台。
+- (BOOL)czfMinPowerSavingEnabled {
+    NSUserDefaults *d = NSUserDefaults.lcSharedDefaults;
+    return [d objectForKey:@"CZFMinPowerSavingEnabled"] == nil || [d boolForKey:@"CZFMinPowerSavingEnabled"];
+}
+
+- (void)czfApplyMinimizedForeground {
+    BOOL background = self.czfMinimized && [self czfMinPowerSavingEnabled];
+    [self.appSceneVC czfSetSceneForeground:!background];
+}
+
+// 窗口被叫回台前时调：清最小化标记、恢复前台。只由 Swift 侧
+// animateViewAppearance（带取消隐藏的恢复路）调，不由单纯调层级的
+// bringViewToFront 调——后者不取消隐藏，调了会让藏着的窗口也变前台。
+- (void)czfRestoreFromMinimize {
+    self.czfMinimized = NO;
+    [self czfApplyMinimizedForeground];
+}
+
 - (void)closeWindow {
+    self.czfMinimized = NO;
     // 关窗前记下窗口状态，下次打开还原（用户要的核心点）
     [self czfDismissKeyboard];
     [self czfSaveWindowState];
@@ -451,6 +476,10 @@
         self.view.hidden = YES;
         self.view.transform = CGAffineTransformIdentity;
         [self.view.superview sendSubviewToBack:self.view];
+        // 最小化完成才进后台：动画中途改会跟动画抢场景状态。
+        // PiP 不走这里（minimizeWindowPiP 另有路），画中画不受影响。
+        self.czfMinimized = YES;
+        [self czfApplyMinimizedForeground];
     }];
 }
 
@@ -591,7 +620,11 @@
         settings.userInterfaceStyle = baseSettings.userInterfaceStyle;
         settings.interfaceOrientation = baseSettings.interfaceOrientation;
         settings.deviceOrientation = baseSettings.deviceOrientation;
-        settings.foreground = YES;
+        // 最小化省电：已最小化且开关开时，场景更新也不能把 foreground
+        // 刷回 YES，否则下次转屏/改 frame 就失效。宿主路径下这行
+        // 本来就被 helper 丢掉，真正生效的是 czfApplyMinimizedForeground
+        // 直写的 presenter.scene；这里留着是给 legacy 路径兜底。
+        settings.foreground = (self.czfMinimized && [self czfMinPowerSavingEnabled]) ? NO : YES;
         
         if(self.isMaximized) {
             [self updateMaximizedFrameWithSettings:settings];

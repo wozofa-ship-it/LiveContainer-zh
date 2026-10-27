@@ -29,6 +29,11 @@ struct LCMultitaskSettingView: View {
     // 边缘手势（CZF）：总开关 + 灵敏度三档，宿主判定侧读取
     @AppStorage("CZFEdgeGesturesEnabled") var edgeGesturesEnabled = true
     @AppStorage("CZFEdgeSensitivity") var edgeSensitivity = 1
+    // 最小化省电（CZF）：两条都有开关，默认都开，关了即回旧行为。
+    // 键在 appGroup，ObjC 侧（Decorated）和 Swift 侧（DockManager）
+    // 按“键不存在 = 开”同款读法，@AppStorage 初始值 true 与之对齐。
+    @AppStorage("CZFMinPowerSavingEnabled", store: LCUtils.appGroupUserDefault) var minPowerSavingEnabled = true
+    @AppStorage("CZFMinAutoCloseEnabled", store: LCUtils.appGroupUserDefault) var minAutoCloseEnabled = true
 
     var body: some View {
         List {
@@ -131,6 +136,25 @@ struct LCMultitaskSettingView: View {
                         Text("隐藏快捷栏")
                     }
                 }
+            }
+
+            Section {
+                Toggle(isOn: $minPowerSavingEnabled) {
+                    HStack {
+                        LCSettingsIcon(systemName: "moon.fill", color: .indigo)
+                        Text("最小化进后台省电")
+                    }
+                }
+                Toggle(isOn: $minAutoCloseEnabled) {
+                    HStack {
+                        LCSettingsIcon(systemName: "timer", color: .red)
+                        Text("最小化超 30 分钟自动关")
+                    }
+                }
+            } header: {
+                Text("最小化省电")
+            } footer: {
+                Text("最小化进后台：窗口最小化后把它的场景置为后台，让它自己停渲染、停视频、停定时器，叫回台前自动恢复前台；画中画不受影响。超 30 分钟自动关：最小化满 30 分钟还没叫回来就直接关窗，彻底停掉；恢复可见后重新计 30 分钟，画中画豁免。两条关了都回旧行为：最小化只藏视图、一直以前台跑。")
             }
 
             Section {
