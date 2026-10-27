@@ -145,6 +145,11 @@ struct LCAppSettingsView: View {
                 }
             }
             keepAliveOn = on
+            // 宿主保活按白名单（CZF）：白名单文件一改，宿主侧立即重算，
+            // 在跑游客全都不在名单里时宿主音频立刻停，不用等下次切后台。
+            // 游客侧自己的保活仍需重开该 App 才生效（构造器里只读一次，
+            // 见本文件顶部注释），宿主侧立即生效不等于游客侧也立即停。
+            CZFHostKeepAlive.shared.refresh()
         } catch {
             errorShow = true
             errorInfo = error.localizedDescription

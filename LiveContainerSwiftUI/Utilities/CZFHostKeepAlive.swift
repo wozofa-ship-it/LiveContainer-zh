@@ -6,6 +6,11 @@
 // 开关与游客侧保活共用 LCKeepAliveEnabled（设置页“保活（无声音频）”，默认开）。
 // 只在“开关开 + 有游客在跑 + 宿主已切后台”三者同时满足时播放；
 // 宿主回前台、最后一个游客退出、开关关闭时立即停，不额外耗电。
+// 宿主保活按白名单（CZF）：与游客侧共用 CZFKeepAliveApps.txt，文件不存在
+// = 全保，文件存在 = 只有名单里的游客才触发宿主保活。宿主音频是整进程
+// 一份、没法按 App 切分，所以只要有一个在跑游客在名单里，宿主照常保；
+// 只有在跑游客全都不在名单里时，宿主才停。原生模式下 dock 无记录、
+// 场景无法对应 bid，维持旧行为全保，避免误停。
 // v1.1 优化（防 1 分钟内被掐）：①提前启动 —— WillResignActive 就先播，
 // 切后台时音频会话已经是激活态，不留“先被掐、后才开始播”的空档；
 // ②游客计数补原生模式 —— 虚拟模式数 dock，原生模式数系统已连接的场景
@@ -60,19 +65,44 @@ final class CZFHostKeepAlive {
         }
     }
 
-    /// 开关/游客数/前后台任一变化时调：重算该不该播（主队列）。
+    /// 白名单读法与 LCAppSettingsView.readKeepAliveList 同款：先读
+    /// tweakPath，读到即算；两夹文件都不存在 = 全保。空文件读出空名单，
+    /// 不是“不存在”，这时名单外的游客一律不保。
+    private static func keepAliveNeeded(for bid: String) -> Bool {
+        for url in [LCPath.tweakPath, LCPath.lcGroupTweakPath].map({ $0.appendingPathComponent("CZFKeepAliveApps.txt") }) {
+            if let content = try? String(contentsOf: url, encoding: .utf8) {
+                let list = content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                return list.contains(bid)
+            }
+        }
+        return true
+    }
+
+    /// 开关/游客数/前后台/白名单任一变化时调：重算该不该播（主队列）。
     func refresh() {
         let enabled = UserDefaults.standard.object(forKey: "LCKeepAliveEnabled") as? Bool ?? true
-        var guestsRunning = false
+        var guestsNeedKeepAlive = false
         if #available(iOS 16.0, *) {
-            guestsRunning = !MultitaskDockManager.shared.apps.isEmpty
+            let dockApps = MultitaskDockManager.shared.apps
+            if !dockApps.isEmpty {
+                // 虚拟模式：按 dock 记录逐个对白名单，bid 未知时保守全保，
+                // 避免把拿不到 bid 的游客误停。注意不能在这里再 fallback
+                // 到 scenes：dock 有记录却全被排除时，scenes 仍可能 > 1，
+                // fallback 会把白名单排除又拉回全保。
+                guestsNeedKeepAlive = dockApps.contains { app in
+                    guard let bid = app.appInfo?.bundleIdentifier(), !bid.isEmpty else { return true }
+                    return Self.keepAliveNeeded(for: bid)
+                }
+            } else {
+                // 原生模式下 dock 不启用：游客是系统场景，主场景之外多一个
+                // 即有游客。connectedScenes 由系统维护、场景断开即掉，
+                // 比只加不删的窗口字典可靠；但场景无法对应 bid，只能全保。
+                guestsNeedKeepAlive = UIApplication.shared.connectedScenes.count > 1
+            }
+        } else {
+            guestsNeedKeepAlive = UIApplication.shared.connectedScenes.count > 1
         }
-        // 原生模式下 dock 不启用：游客是系统场景，主场景之外多一个即有游客。
-        // connectedScenes 由系统维护、场景断开即掉，比只加不删的窗口字典可靠。
-        if !guestsRunning {
-            guestsRunning = UIApplication.shared.connectedScenes.count > 1
-        }
-        if enabled && guestsRunning && isBackgrounded {
+        if enabled && guestsNeedKeepAlive && isBackgrounded {
             start()
         } else {
             stop()
