@@ -576,6 +576,7 @@ struct LCSettingsView: View {
                         // 本身又不切核心，测速中起停没有意义，
                         // 测完再点。
                         .disabled(vpnPinging)
+                        .buttonStyle(.borderless)
                         Button(vpnPinging ? "测速中…" : "测延迟") {
                             vpnPingResults = [:]
                             vpnPinging = true
@@ -609,6 +610,7 @@ struct LCSettingsView: View {
                             }
                         }
                         .disabled(vpnPinging || vpnNodes.isEmpty)
+                        .buttonStyle(.borderless)
                         // 测完后一键切到最快的（只认测通的节点；
                         // 已经是最快时不显示，省得误会）
                         if let fastest = vpnPingResults.filter({ $0.value.success }).min(by: { $0.value.delay < $1.value.delay }), fastest.key != vpnActiveIndex {
@@ -617,6 +619,7 @@ struct LCSettingsView: View {
                                 refreshVPNState()
                             }
                             .disabled(vpnPinging)
+                            .buttonStyle(.borderless)
                         }
                         // 测完后一键清理不通的节点：只删明确测
                         // 出不通的、且不是当前在用节点的——在用
@@ -628,7 +631,15 @@ struct LCSettingsView: View {
                             Button("清理不通") {
                                 let failed = Set(vpnPingResults.filter { !$0.value.success && $0.key != vpnActiveIndex }.map { $0.key })
                                 let kept = CZFVPNManager.shared.nodeLinks.enumerated().filter { !failed.contains($0.offset) }.map { $0.element }
-                                CZFVPNManager.shared.replaceAllNodes(kept)
+                                // 清理不碰核心：只换列表，核心在跑继续用
+                                // 在用节点、停着继续停着；再清掉内存结果、
+                                // 按新列表剪掉已删节点的落盘缓存，最后刷新，
+                                // 否则旧失败结果还在、清理按钮永远不消失，
+                                // 看起来像没清理。
+                                CZFVPNManager.shared.replaceNodesWithoutCoreChange(kept)
+                                vpnNodes = CZFVPNManager.shared.nodeLinks
+                                vpnPingResults = [:]
+                                savePingResults()
                                 refreshVPNState()
                             }
                             // 被拒时不再禁清理：被拒结果已不再覆写
@@ -636,6 +647,7 @@ struct LCSettingsView: View {
                             // 测速中仍禁，免得按还没重试完的临时
                             // 失败删节点。
                             .disabled(vpnPinging)
+                            .buttonStyle(.borderless)
                         }
                         // 测完后按延迟从低到高重排节点列表（不通
                         // 的沉底、没测到的最后），活动节点按内容
@@ -653,6 +665,7 @@ struct LCSettingsView: View {
                                 refreshVPNState()
                             }
                             .disabled(vpnPinging)
+                            .buttonStyle(.borderless)
                         }
                         // 核心占用被拒时的提示：结果不是节点不通，
                         // 是测速被在跑的核心挡了，先停核心再测。

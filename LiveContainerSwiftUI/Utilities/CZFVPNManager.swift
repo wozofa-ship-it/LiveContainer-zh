@@ -138,6 +138,24 @@ public final class CZFVPNManager {
         UserDefaults.standard.set(links, forKey: Self.nodeListKey)
     }
 
+    // 清理专用：只换节点列表、不碰核心。清理只是删节点，
+    // 核心在跑就继续用在用节点，停着就继续停着，绝不因清理
+    // 启停核心；replaceAllNodes 会调 applyActiveNodeChange，
+    // 清理不能走它。
+    public func replaceNodesWithoutCoreChange(_ newLinks: [String]) {
+        let cleaned = newLinks
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return }
+        let previousActive = nodeLink
+        UserDefaults.standard.set(cleaned, forKey: Self.nodeListKey)
+        if let idx = cleaned.firstIndex(of: previousActive) {
+            UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+        } else {
+            UserDefaults.standard.set(0, forKey: Self.activeNodeKey)
+        }
+    }
+
     // 用一批新链接整体替换节点列表（订阅刷新用）：尽量保留
     // 当前活动节点（按内容找回），找不到就落到第一个
     public func replaceAllNodes(_ newLinks: [String]) {
