@@ -268,18 +268,69 @@ class LCAppModel: ObservableObject, Hashable {
         let free = (0..<SharedModel.keychainAccessGroupCount).filter { !used.contains($0) }
         return free.randomElement() ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
     }
+    // 多开容器拆分（视频实证）：同包名两个 App 条目若指到
+    // 同一个容器文件夹，启动时按容器找窗口、按容器查占用都会
+    // 把第一个的窗口顶回来，第二个永远起不来，数据、登录态
+    // 也天然同一份。v189 只改了钥匙串组/App Group/厂商标识，
+    // 没动这条按容器找窗口的路由，盖不住它。启动前若选中
+    // 的容器被同包名别的条目也在用，就给本条目新建一个空
+    // 容器并切过去：旧容器留在列表里不删，旧数据归原来那
+    // 个条目，新条目从空数据起，之后各用各的。只拆选中
+    // 的那一个，不动别的容器。
+    private func czfSplitSharedContainerIfNeeded() {
+        guard !czfOtherSameBundleApps().isEmpty else { return }
+        guard let selected = uiSelectedContainer else { return }
+        let sharedFolder = selected.folderName
+        let isSharedWithOther = czfOtherSameBundleApps().contains { other in
+            other.uiContainers.contains { $0.folderName == sharedFolder }
+        }
+        guard isSharedWithOther else { return }
+        // 旧数据归先装的那一个：先装的条目不拆、继续用旧容器，
+        // 后装的条目才拆到新容器，不然先启动的那个反而丢了
+        // 旧数据、后启动的那个却捡了旧数据，完全反了。先按
+        // installationDate 判，缺失时按包文件夹名判：克隆的
+        // 文件夹是 包名_时间戳.app，原装的是 包名.app。
+        for other in czfOtherSameBundleApps() where other.uiContainers.contains(where: { $0.folderName == sharedFolder }) {
+            if let myDate = appInfo.installationDate, let otherDate = other.appInfo.installationDate {
+                if myDate < otherDate { return }
+            } else {
+                let myPath = appInfo.relativeBundlePath ?? ""
+                let otherPath = other.appInfo.relativeBundlePath ?? ""
+                let myStamped = myPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
+                let otherStamped = otherPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
+                if !myStamped && otherStamped { return }
+            }
+        }
+        let newName = NSUUID().uuidString
+        let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
+        newContainer.isolateAppGroup = true
+        newContainer.spoofIdentifierForVendor = true
+        let group = czfFreeKeychainGroup(excluding: newContainer)
+        uiContainers.append(newContainer)
+        uiSelectedContainer = newContainer
+        appInfo.containers = uiContainers
+        newContainer.makeLCContainerInfoPlist(appIdentifier: bundleIdentifier, keychainGroupId: group)
+        appInfo.dataUUID = newName
+        uiDefaultDataFolder = newName
+    }
     private func czfIsolateMultiOpenContainersIfNeeded() {
         guard !czfOtherSameBundleApps().isEmpty else { return }
         let markerKey = "CZFMultiOpenIsolated-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")"
         if UserDefaults.standard.bool(forKey: markerKey) { return }
         var otherGroups = Set<Int>()
+        var otherFolders = Set<String>()
         for app in czfOtherSameBundleApps() {
             for c in app.uiContainers {
+                otherFolders.insert(c.folderName)
                 let g = c.keychainGroupId
                 if g >= 0 { otherGroups.insert(g) }
             }
         }
         for container in uiContainers {
+            // 共享容器不碰：它的 plist 是两个条目共用的文件，改它
+            // 会把另一个条目的组也翻掉，来回 ping-pong；拆分后
+            // 选中的已是新容器，旧共享容器只留给原来那个条目。
+            if otherFolders.contains(container.folderName) { continue }
             var newGroup = container.keychainGroupId
             if newGroup < 0 || otherGroups.contains(newGroup) {
                 newGroup = czfFreeKeychainGroup(excluding: container)
@@ -326,11 +377,17 @@ class LCAppModel: ObservableObject, Hashable {
                 UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolated-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
             }
         }
+        czfSplitSharedContainerIfNeeded()
         czfIsolateMultiOpenContainersIfNeeded()
         if let containerFolderName {
             uiSelectedContainer = uiContainers.first { $0.folderName == containerFolderName } ?? uiSelectedContainer
         }
-        let currentDataFolder = containerFolderName ?? uiSelectedContainer?.folderName
+        // 显式指定容器后也要再拆一次：指定那个若是共享容器，
+        // 不拆的话下面按容器找窗口仍会把别人的窗口顶回来。
+        // 拆完选中已是新容器，当前文件夹就以选中为准，不再
+        // 用旧的 containerFolderName，否则拆了也白拆。
+        czfSplitSharedContainerIfNeeded()
+        let currentDataFolder = uiSelectedContainer?.folderName
         
         let classicMode = appInfo.defaultClassicMode
         let multitask = classicMode == 0 ? (multitask ?? shouldLaunchInMultitaskMode) : false
@@ -696,6 +753,15 @@ class LCAppModel: ObservableObject, Hashable {
     private func bringExistingMultitaskWindowIfNeeded(dataUUID: String, urlScheme: String?) async -> Bool {
         guard #available(iOS 16.0, *) else { return false }
         return await MainActor.run {
+            // 已有窗口必须属于本条目：同包名别的条目若共用容器，
+            // 按 dataUUID 找会把别人的窗口顶回来；归属对不上
+            // 就不顶，交给 runApp 去拆容器、起新窗口。
+            if let dockApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == dataUUID }),
+               let dockPath = dockApp.appInfo?.relativeBundlePath,
+               !dockPath.isEmpty,
+               dockPath != appInfo.relativeBundlePath {
+                return false
+            }
             if let urlScheme {
                 UserDefaults.standard.setValue(urlScheme, forKey: "launchAppUrlScheme")
             }

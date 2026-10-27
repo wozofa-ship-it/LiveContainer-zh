@@ -2356,9 +2356,15 @@ struct AllAppsListView: View {
     private func launchApp(_ app: LCAppModel) {
         let bundleId = app.appInfo.relativeBundlePath ?? ""
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == app.appInfo.dataUUID }) {
-            let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-            closePanel()
-            return
+            // 窗口必须属于本条目：同包名别的条目若共用容器，
+            // 按 dataUUID 找会把别人的窗口顶回来；归属对不上
+            // 就不顶，走下面 URL 启动，runApp 里会拆共享容器。
+            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? false
+            if !belongsToOther {
+                let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                closePanel()
+                return
+            }
         }
         if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
             #if !os(visionOS)
@@ -2372,9 +2378,12 @@ struct AllAppsListView: View {
         guard let dataUUID = app.appInfo.dataUUID else { return }
         // 如果已在运行，直接最小化它的窗口
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-            dockManager.minimizeWindow(uuid: runningApp.appUUID)
-            closePanel()
-            return
+            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? false
+            if !belongsToOther {
+                dockManager.minimizeWindow(uuid: runningApp.appUUID)
+                closePanel()
+                return
+            }
         }        // 未运行：先启动，延迟后最小化窗口
         closePanel()
         let bundleId = app.appInfo.relativeBundlePath ?? ""
@@ -2401,10 +2410,13 @@ struct AllAppsListView: View {
         guard let dataUUID = app.appInfo.dataUUID else { return }
         // 已在运行：把它的窗口带到前面，并还原为小窗口
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-            let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-            unmaximizeWindow(uuid: dataUUID)
-            closePanel()
-            return
+            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? false
+            if !belongsToOther {
+                let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                unmaximizeWindow(uuid: dataUUID)
+                closePanel()
+                return
+            }
         }
         closePanel()
         Task {

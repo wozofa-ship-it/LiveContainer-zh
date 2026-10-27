@@ -95,15 +95,30 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         if #available(iOS 16.0, *),
            let currentDataFolder = configuration.model.uiSelectedContainer?.folderName,
            MultitaskManager.isUsing(container: currentDataFolder) {
-            var found = false
-            if #available(iOS 16.1, *) {
-                found = MultitaskWindowManager.openExistingAppWindow(dataUUID: currentDataFolder)
+            // 已有窗口必须属于本条目：同包名别的条目若共用容器，
+            // 这里按容器找会把别人的窗口顶回来；归属对不上就
+            // 不顶，直接走 runApp，runApp 里会拆共享容器、起新窗口。
+            let dockApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == currentDataFolder })
+            let dockBelongsToOther = dockApp.flatMap { $0.appInfo?.relativeBundlePath }.map { !$0.isEmpty && $0 != configuration.model.appInfo.relativeBundlePath } ?? false
+            // 原生窗口模式下 dock 里可能没有这条记录，再按容器
+            // 本身判一次：选中容器若被同包名别的条目也在用，
+            // 这里按容器找同样会把别人的窗口顶回来，一律不顶。
+            let model = configuration.model
+            let sharedWithOther = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).contains { other in
+                other !== model && other.bundleIdentifier == model.bundleIdentifier && other.appInfo.relativeBundlePath != model.appInfo.relativeBundlePath && other.uiContainers.contains { $0.folderName == currentDataFolder }
             }
-            if !found {
-                found = MultitaskDockManager.shared.bringMultitaskViewToFront(uuid: currentDataFolder)
-            }
-            if found {
-                return
+            let belongsToOther = dockBelongsToOther || sharedWithOther
+            if !belongsToOther {
+                var found = false
+                if #available(iOS 16.1, *) {
+                    found = MultitaskWindowManager.openExistingAppWindow(dataUUID: currentDataFolder)
+                }
+                if !found {
+                    found = MultitaskDockManager.shared.bringMultitaskViewToFront(uuid: currentDataFolder)
+                }
+                if found {
+                    return
+                }
             }
         }
 
