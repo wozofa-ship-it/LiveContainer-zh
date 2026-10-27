@@ -703,7 +703,6 @@ public final class CZFVPNManager {
             self.isPinging = true
             self.pingRetryLink = nil
             self.pingGeneration += 1
-            let pingGen = self.pingGeneration
             let epochAtPingStart = self.coreActionEpoch
             let wasRunning = self.isRunning
             let originalRunningLink = self.runningLink
@@ -804,13 +803,11 @@ public final class CZFVPNManager {
                                 self.coreOwnerBundleId = originalOwner
                             } else {
                                 retryLink = orig
-                                self.pingRetryLink = orig
                             }
                         } else {
                             let ok = self.start()
                             if !ok, !self.nodeLink.isEmpty {
                                 retryLink = self.nodeLink
-                                self.pingRetryLink = self.nodeLink
                             }
                         }
                     }
@@ -819,9 +816,8 @@ public final class CZFVPNManager {
                 }
                 self.prewarmSuppressedAfterPing = !self.isRunning
             } else {
-                // 用户动作优先：延迟重试也不再跑，免得它在用
-                // 户亲手停核心后又把核心起回来；抑制不碰，
-                // 见上面注释。
+                // 用户动作优先：不再恢复，免得把用户在测速
+                // 窗口内亲手做的决定 undo 回去；抑制不碰。
                 self.pingRetryLink = nil
             }
             postPingActiveLink = self.nodeLink
@@ -829,31 +825,49 @@ public final class CZFVPNManager {
             self.deferredEnsureApp = nil
             deferredHost = self.deferredHostEnsure
             self.deferredHostEnsure = false
+            // isPinging 先不放：同步重试期间仍挡预热/开 App，
+            // 免得重试和自动触发插队；重试完、放标志前，
+            // 核心状态已经是最终状态。
+            self.vpnCoreLock.unlock()
+            if let retryLink, !epochChanged {
+                // 同步重试（修 1 号问题：测速后核心状态翻了）：
+                // 旧逻辑是收尾起回失败就留一个 2 秒后的延迟
+                // 重试、再加一个 3 秒后的校验，completion 却
+                // 立刻回主线程刷新 UI——用户在 UI 上看到的
+                // 是“已翻”的中间态，2/3 秒后核心又悄悄翻
+                // 回来，UI 还不刷新，看起来就是测速改了核心。
+                // 现改为在 completion 之前、后台线程里同步
+                // 重试：最多 4 次、每次隔 0.5 秒（等 stopXray
+                // 异步落定），起回来就清抑制、还原归属；
+                // 4 次都失败就认栽、不再在 completion 之后
+                // 悄悄起回来，UI 看到的就是最终状态。
+                var restored = false
+                for _ in 0..<4 {
+                    self.vpnCoreLock.lock()
+                    let epochNow = self.coreActionEpoch
+                    let runningNow = self.isRunning
+                    self.vpnCoreLock.unlock()
+                    // 重试窗口内用户亲手动过核心就停手，不把
+                    // 他的决定 undo 回去；已在跑也不是重试
+                    // 的功劳，不碰归属和抑制。
+                    if epochNow != epochAtPingStart { break }
+                    if runningNow { break }
+                    Thread.sleep(forTimeInterval: 0.5)
+                    if self.start(withLink: retryLink) { restored = true; break }
+                }
+                if restored {
+                    self.vpnCoreLock.lock()
+                    self.coreOwnerBundleId = originalOwner
+                    self.prewarmSuppressedAfterPing = false
+                    self.vpnCoreLock.unlock()
+                }
+                self.vpnCoreLock.lock()
+                self.pingRetryLink = nil
+                self.vpnCoreLock.unlock()
+            }
+            self.vpnCoreLock.lock()
             self.isPinging = false
             self.vpnCoreLock.unlock()
-            if let retryLink {
-                // 延迟重试一次性消费：用户此后亲手停核心会
-                // 经 stop() 清掉 pingRetryLink，闭包里再判一
-                // 次，绝不在用户停核心后又把它起回来；新一
-                // 轮测速开始时 isPinging 为真，旧重试直接作废。
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) { [weak self] in
-                    guard let self else { return }
-                    self.vpnCoreLock.lock()
-                    let stillPending = self.pingRetryLink == retryLink && !self.isPinging
-                    self.pingRetryLink = nil
-                    let needRetry = stillPending && !self.isRunning
-                    self.vpnCoreLock.unlock()
-                    if needRetry, self.start(withLink: retryLink) {
-                        // 延迟重试起回来了：最近一次测速的最终
-                        // 结果是在跑，之前恢复失败时置的抑制要
-                        // 清掉，否则下次切回前台预热会被旧抑制
-                        // 挡住。
-                        self.vpnCoreLock.lock()
-                        self.prewarmSuppressedAfterPing = false
-                        self.vpnCoreLock.unlock()
-                    }
-                }
-            }
             if let deferredApp {
                 self.ensureRunning(for: deferredApp)
             } else if postPingActiveLink != prePingActiveLink {
@@ -861,46 +875,6 @@ public final class CZFVPNManager {
             }
             if deferredHost {
                 self.ensureRunningForHost()
-            }
-            // 收尾后校验（只认同一代次、且收尾后没有新的用户/
-            // App 动作）：收尾把状态恢复对了，之后几秒内若被
-            // 自动触发（切回前台的预热等）悄悄翻回去，这里一
-            // 次性把它按回恢复成的状态。用户亲手起停、开 App、
-            // 源下载开关都会让 epoch 变化，校验直接作废，不会
-            // undo 用户的决定；新一轮测速开始也会让代次变化，
-            // 旧校验同样作废。只校验一次，不循环。
-            self.vpnCoreLock.lock()
-            let verifiedRunning = self.isRunning
-            let verifiedLink = self.runningLink
-            let verifiedOwner = self.coreOwnerBundleId
-            let verifiedEpoch = self.coreActionEpoch
-            self.vpnCoreLock.unlock()
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self else { return }
-                self.vpnCoreLock.lock()
-                let stillSamePing = self.pingGeneration == pingGen && !self.isPinging
-                let noNewAction = self.coreActionEpoch == verifiedEpoch
-                let flipped = self.isRunning != verifiedRunning
-                self.vpnCoreLock.unlock()
-                guard stillSamePing, noNewAction, flipped else { return }
-                if verifiedRunning {
-                    // 起回后把归属也还原：start(withLink:) 不写
-                    // 归属，stop() 又把它清掉了，不还原的话下
-                    // 一个 App 启动就能抢走这条钉死节点的核心。
-                    let ok: Bool
-                    if let link = verifiedLink, !link.isEmpty {
-                        ok = self.start(withLink: link)
-                    } else {
-                        ok = self.start()
-                    }
-                    if ok {
-                        self.vpnCoreLock.lock()
-                        self.coreOwnerBundleId = verifiedOwner
-                        self.vpnCoreLock.unlock()
-                    }
-                } else {
-                    self.stop()
-                }
             }
             let items = outcome.items
             DispatchQueue.main.async { completion(items) }
