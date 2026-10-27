@@ -560,6 +560,13 @@ public final class CZFVPNManager {
             guard let self, self.isRunning else { return }
             if Self.isHostProxyEnabled { return }
             if Date().timeIntervalSince(self.lastFlaggedLaunchAt) < Self.autoStopDelay { return }
+            // 测速窗口内不自动停：到点停核心、下一按钮刷新
+            // 翻出已变状态，看起来就是“点测速/排序切了核心”；
+            // 测速中到点就跳过这次自动停，下次 App 变化再排。
+            self.vpnCoreLock.lock()
+            let pinging = self.isPinging
+            self.vpnCoreLock.unlock()
+            if pinging { return }
             self.stop()
         }
         pendingStopWork = work

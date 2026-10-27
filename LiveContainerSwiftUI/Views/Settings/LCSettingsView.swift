@@ -584,11 +584,22 @@ struct LCSettingsView: View {
                                     vpnPingResults[i] = r
                                 }
                             }) { results, rejected in
-                                var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
-                                for (i, r) in results.enumerated() { map[i] = r }
-                                vpnPingResults = map
-                                vpnPingRejected = rejected
-                                savePingResults()
+                                if rejected {
+                                    // 被拒那批全是失败，不是节点真不通：
+                                    // 不覆写界面结果、不落盘，免得污染上次
+                                    // 真测结果、清理/排序按假不通走；只出警告，
+                                    // 清理/排序继续用上次真测结果。先清掉测速
+                                    // 开始时已清空、测速中只合了零星成功项的
+                                    // 表，刷新时从缓存恢复完整上次真结果。
+                                    vpnPingResults = [:]
+                                    vpnPingRejected = true
+                                } else {
+                                    var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+                                    for (i, r) in results.enumerated() { map[i] = r }
+                                    vpnPingResults = map
+                                    vpnPingRejected = false
+                                    savePingResults()
+                                }
                                 vpnPinging = false
                                 refreshVPNState()
                             }
@@ -616,10 +627,11 @@ struct LCSettingsView: View {
                                 CZFVPNManager.shared.replaceAllNodes(kept)
                                 refreshVPNState()
                             }
-                            // 核心占用被拒时结果不可靠，禁清理，
-                            // 免得把好节点当不通删掉；测速中也禁，
-                            // 免得按还没重试完的临时失败删节点。
-                            .disabled(vpnPinging || vpnPingRejected)
+                            // 被拒时不再禁清理：被拒结果已不再覆写
+                            // 界面和缓存，清理按上次真测结果走；
+                            // 测速中仍禁，免得按还没重试完的临时
+                            // 失败删节点。
+                            .disabled(vpnPinging)
                         }
                         // 测完后按延迟从低到高重排节点列表（不通
                         // 的沉底、没测到的最后），活动节点按内容
@@ -641,7 +653,7 @@ struct LCSettingsView: View {
                         // 核心占用被拒时的提示：结果不是节点不通，
                         // 是测速被在跑的核心挡了，先停核心再测。
                         if vpnPingRejected && !vpnPinging {
-                            Text("测速被在跑的核心占用，结果不准：先停核心再测，勿按这批结果清理节点")
+                            Text("上次测速被在跑的核心占用，结果没更新：先停核心再测更准，清理/排序按上次真测结果")
                                 .font(.footnote)
                                 .foregroundStyle(.orange)
                         }
@@ -977,7 +989,12 @@ struct LCSettingsView: View {
     func refreshVPNState() {
         vpnNodes = CZFVPNManager.shared.nodeLinks
         vpnActiveIndex = CZFVPNManager.shared.activeNodeIndex
-        vpnCoreRunning = CZFVPNManager.shared.isRunning
+        // 测速中不翻核心按钮：测速期间任何 onAppear/刷新
+        // 都不该把按钮从停止翻成启动，核心状态以测速前为准，
+        // 测完由 completion 一次性刷新。
+        if !vpnPinging {
+            vpnCoreRunning = CZFVPNManager.shared.isRunning
+        }
         vpnStatusMessage = CZFVPNManager.shared.lastError
         vpnHostProxy = CZFVPNManager.isHostProxyEnabled
         vpnPrewarmSuppressed = CZFVPNManager.shared.isPrewarmSuppressedAfterPing
