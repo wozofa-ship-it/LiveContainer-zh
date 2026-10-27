@@ -31,6 +31,9 @@
 #import <sys/types.h>
 #import <unistd.h>
 #import <fcntl.h>
+#import <sys/uio.h>
+#import <poll.h>
+#import <sys/select.h>
 #import <errno.h>
 #import <string.h>
 #import <stdlib.h>
@@ -67,9 +70,11 @@ static volatile int64_t gStatConnDirect = 0;
 static volatile int64_t gStatConnFailed = 0;
 static volatile int64_t gStatConnPass = 0;
 static volatile int64_t gStatConnx = 0;
+static volatile int64_t gStatConnxProxied = 0;
 static volatile int64_t gStatSelfTest = 0;
 static volatile int64_t gStatSwizzled = 0;
 static volatile int64_t gStatQuicBlocked = 0;
+static volatile int64_t gStatQuicProxied = 0;
 static volatile int64_t gStatCfg = 0;
 // 养号严格模式：宿主在钉死节点的 App 的插件目录里留一个
 // CZFProxyStrict 空文件，插件启动时读到它就改成 fail-closed
@@ -93,8 +98,8 @@ static void CZFWriteStats(BOOL force) {
     }
     gLastStatWrite = now;
     pthread_mutex_unlock(&gStatLock);
-    NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld selftest=%lld swizzled=%lld quic=%lld cfg=%lld",
-        gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx, gStatSelfTest, gStatSwizzled, gStatQuicBlocked, gStatCfg];
+    NSString *text = [NSString stringWithFormat:@"load=%lld gaiFake=%lld gaiPass=%lld proxied=%lld direct=%lld failed=%lld pass=%lld connectx=%lld connectxProxied=%lld selftest=%lld swizzled=%lld quic=%lld quicProxied=%lld cfg=%lld",
+        gStatLoads, gStatGaiFake, gStatGaiPass, gStatConnProxied, gStatConnDirect, gStatConnFailed, gStatConnPass, gStatConnx, gStatConnxProxied, gStatSelfTest, gStatSwizzled, gStatQuicBlocked, gStatQuicProxied, gStatCfg];
     [text writeToFile:gStatsPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
 }
 
@@ -144,6 +149,40 @@ static BOOL CZFIsPrivateOrLoopback(uint32_t h) {
     if (h == 0) return YES;                              // 0.0.0.0
     return NO;
 }
+
+// 公网 IPv6：排除 ::1、::、fe80::/10、fc00::/7 后都算公网
+// （含 2000::/3 全球单播与 2001:db8 文档段，严格模式下
+// 宁可错杀也不漏真实 IP）。IPv6 套接字连不到只在
+// 127.0.0.1 监听的 SOCKS 口，所以 IPv6 不走 SOCKS 代理，
+// 严格模式下直接拒绝、非严格模式下维持原来的直连。
+static BOOL CZFIsPublicIPv6(const struct sockaddr_in6 *sin6) {
+    if (!sin6) return NO;
+    const unsigned char *a = sin6->sin6_addr.s6_addr;
+    BOOL allZero = YES;
+    BOOL isLoopback = YES;
+    for (int i = 0; i < 16; i++) {
+        if (a[i] != 0) allZero = NO;
+        if (i < 15 && a[i] != 0) isLoopback = NO;
+    }
+    if (allZero) return NO;
+    if (isLoopback && a[15] == 1) return NO;
+    if (a[0] == 0xfe && (a[1] & 0xc0) == 0x80) return NO;
+    if ((a[0] & 0xfe) == 0xfc) return NO;
+    return YES;
+}
+
+// sa_endpoints_t 的真实布局（Apple <sys/socket.h>）：
+// sae_srcif、sae_srcaddr、sae_srcaddrlen、sae_dstaddr、
+// sae_dstaddrlen，顺序固定。connectx 的第二个参数就是
+// 指向这一个结构的指针，不是 sockaddr 数组，旧代码把它
+// 当 sockaddr 读 sa_family 是错的（读到的是接口号）。
+struct CZFSaeEndpoints {
+    unsigned int sae_srcif;
+    const struct sockaddr *sae_srcaddr;
+    socklen_t sae_srcaddrlen;
+    const struct sockaddr *sae_dstaddr;
+    socklen_t sae_dstaddrlen;
+};
 
 // MARK: - SOCKS5 握手
 
@@ -276,10 +315,60 @@ static BOOL CZFSocksRequest(int fd, NSString *hostOrNil, uint32_t ipHostOrder, u
     return YES;
 }
 
+
+// SOCKS TCP 握手（connect 与 connectx 共用）：把已给的 socket
+// 连到本地 SOCKS 口、发连接请求，成功后该 socket 就是到目标
+// 的代理流，App 之后读写都走节点。临时转阻塞、10 秒封顶、
+// 做完恢复原 flags 与超时；失败时 fd 已连到 SOCKS 口、没法
+// 再改作直连，调用方必须如实返回失败（与原来 CZFConnect
+// 的语义完全一致，这里只是把原来内联的那段抽出来）。
+static int CZFDoSocksTCPConnect(int sockfd, NSString *host, uint32_t ipHostOrder, uint16_t portNetworkOrder, int *savedErrnoOut) {
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    BOOL wasNonBlocking = (flags >= 0) && (flags & O_NONBLOCK);
+    struct timeval oldRcv, oldSnd;
+    socklen_t optLen = sizeof(struct timeval);
+    BOOL hasOldRcv = getsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &oldRcv, &optLen) == 0;
+    optLen = sizeof(struct timeval);
+    BOOL hasOldSnd = getsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &oldSnd, &optLen) == 0;
+    if (wasNonBlocking) fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
+    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    int result = -1;
+    int savedErrno = ECONNREFUSED;
+    struct sockaddr_in socksAddr;
+    memset(&socksAddr, 0, sizeof(socksAddr));
+    socksAddr.sin_family = AF_INET;
+    socksAddr.sin_port = htons(CZF_SOCKS_PORT);
+    socksAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (orig_connect(sockfd, (struct sockaddr *)&socksAddr, sizeof(socksAddr)) == 0) {
+        if (CZFSocksRequest(sockfd, host, ipHostOrder, portNetworkOrder)) {
+            result = 0;
+        }
+    } else {
+        savedErrno = errno;
+    }
+    if (hasOldRcv) setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &oldRcv, sizeof(oldRcv));
+    if (hasOldSnd) setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &oldSnd, sizeof(oldSnd));
+    if (wasNonBlocking) fcntl(sockfd, F_SETFL, flags);
+    if (savedErrnoOut) *savedErrnoOut = savedErrno;
+    return result;
+}
+
 // MARK: - connect 钩子
 
 static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-    if (!addr || addr->sa_family != AF_INET) {
+    if (!addr) {
+        __sync_add_and_fetch(&gStatConnPass, 1);
+        return orig_connect(sockfd, addr, addrlen);
+    }
+    if (addr->sa_family == AF_INET6 && gStrictMode && CZFIsPublicIPv6((const struct sockaddr_in6 *)addr)) {
+        __sync_add_and_fetch(&gStatConnFailed, 1);
+        CZFWriteStats(NO);
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    if (addr->sa_family != AF_INET) {
         __sync_add_and_fetch(&gStatConnPass, 1);
         return orig_connect(sockfd, addr, addrlen);
     }
@@ -328,39 +417,8 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         // 映射丢失（极少数情况）时退化为按 IP 请求
     }
 
-    // 非阻塞 socket 临时转阻塞做握手，做完恢复；握手超时 10 秒封顶，
-    // 不让 connect 无限期挂住 App 的网络线程。
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    BOOL wasNonBlocking = (flags >= 0) && (flags & O_NONBLOCK);
-    struct timeval oldRcv, oldSnd;
-    socklen_t optLen = sizeof(struct timeval);
-    BOOL hasOldRcv = getsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &oldRcv, &optLen) == 0;
-    optLen = sizeof(struct timeval);
-    BOOL hasOldSnd = getsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &oldSnd, &optLen) == 0;
-    if (wasNonBlocking) fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
-    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    int result = -1;
     int savedErrno = ECONNREFUSED;
-    struct sockaddr_in socksAddr;
-    memset(&socksAddr, 0, sizeof(socksAddr));
-    socksAddr.sin_family = AF_INET;
-    socksAddr.sin_port = htons(CZF_SOCKS_PORT);
-    socksAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (orig_connect(sockfd, (struct sockaddr *)&socksAddr, sizeof(socksAddr)) == 0) {
-        if (CZFSocksRequest(sockfd, host, ip, sin->sin_port)) {
-            result = 0;
-        }
-    } else {
-        savedErrno = errno;
-    }
-
-    if (hasOldRcv) setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &oldRcv, sizeof(oldRcv));
-    if (hasOldSnd) setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &oldSnd, sizeof(oldSnd));
-    if (wasNonBlocking) fcntl(sockfd, F_SETFL, flags);
-
+    int result = CZFDoSocksTCPConnect(sockfd, host, ip, sin->sin_port, &savedErrno);
     if (result != 0) {
         // fd 已连到 SOCKS 口但请求失败时，这个 fd 没法再改作直连，
         // 如实返回失败（语义=经 VPN 不可达，与普通连接失败无异）。
@@ -373,28 +431,357 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
     return result;
 }
 
-// connectx 只观察不拦截：新式网络栈（Network.framework）发
-// 起连接走的是这个接口而不是 connect，先数它到底来不来、
-// 来多少，确认后再决定要不要代理它。
-// 唯一例外是严格模式：钉死节点的 App 承诺过核心不在时断网
-// 不直连，connect 走这个承诺，connectx 不能留个直连后门——
-// 核心不在时，公网 connectx 直接拒绝；核心在时仍先放行
-// （完整代理 connectx 要处理多路复用和首包，面大、逐 App
-// 真机测过才能上，这次不盲上，只先把严格模式的死角补上）
+// connectx 完整代理（TCP/IPv4）：新式网络栈（Network.framework）
+// 发起连接走的是这个接口而不是 connect，旧版只计数、不拦截，
+// 核心在时仍直连，是最大的一处绕代理口子（Muse44 登录类
+// App 的嫌疑点）。现在按下面安全门逐项放行，其余一律
+// 原样交给原函数，绝不盲代理：
+// - 第二个参数是 sa_endpoints_t 结构指针（不是 sockaddr），
+//   目标地址在 sae_dstaddr 里，旧版把它当 sockaddr 读
+//   sa_family 是错的（读到的是接口号），这里按真实布局解析。
+// - 只代理 TCP 流套接字、AF_INET、flags==0、associd==0
+//   （多路复用、TCP Fast Open 以外的 flags、UDP 一律原样
+//   放行；UDP 443 照 connect 的老规矩当场拒掉、促 TCP 回退）。
+// - 回环/局域网原样放行；核心不在时严格模式拒绝、非严格
+//   模式原样直连（fail-open 不变）；核心在时走 SOCKS，与
+//   connect 共用同一握手 helper，握手失败如实返回失败。
+// - 首包 iov：握手后在临时阻塞下按段写完，*len 写已写字节，
+//   *cid 写 0（非多路复用）；iov 写不出去时返回失败，
+//   因为该 fd 已连到 SOCKS 口、没法再改作直连。
+// - IPv6 不走 SOCKS（口只在 127.0.0.1 监听），严格模式下
+//   公网 IPv6 直接拒绝、非严格模式下原样放行。
 static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, const void *iov, unsigned int iovcnt, size_t *len, uint32_t *cid) {
     __sync_add_and_fetch(&gStatConnx, 1);
-    if (gStrictMode && ep != NULL && ((const struct sockaddr *)ep)->sa_family == AF_INET) {
-        const struct sockaddr_in *sin = (const struct sockaddr_in *)ep;
-        uint32_t ip = ntohl(sin->sin_addr.s_addr);
-        if (!CZFIsPrivateOrLoopback(ip) && !CZFCoreAlive()) {
+    if (!ep) {
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    }
+    const struct CZFSaeEndpoints *eps = (const struct CZFSaeEndpoints *)ep;
+    const struct sockaddr *dst = eps->sae_dstaddr;
+    if (!dst) {
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    }
+    if (dst->sa_family == AF_INET6) {
+        if (gStrictMode && CZFIsPublicIPv6((const struct sockaddr_in6 *)dst)) {
             __sync_add_and_fetch(&gStatConnFailed, 1);
             CZFWriteStats(NO);
             errno = ECONNREFUSED;
             return -1;
         }
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
     }
+    if (dst->sa_family != AF_INET) {
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    }
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)dst;
+    uint32_t ip = ntohl(sin->sin_addr.s_addr);
+    if (CZFIsPrivateOrLoopback(ip)) {
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    }
+    int sockType = 0;
+    socklen_t sockTypeLen = sizeof(sockType);
+    if (getsockopt(s, SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen) != 0 || sockType != SOCK_STREAM) {
+        if (sockType == SOCK_DGRAM && ntohs(sin->sin_port) == 443) {
+            __sync_add_and_fetch(&gStatQuicBlocked, 1);
+            CZFWriteStats(NO);
+            errno = ECONNREFUSED;
+            return -1;
+        }
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    }
+    if (aid != 0 || flags != 0) {
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    }
+    if (!CZFCoreAlive()) {
+        if (gStrictMode) {
+            __sync_add_and_fetch(&gStatConnFailed, 1);
+            CZFWriteStats(NO);
+            errno = ECONNREFUSED;
+            return -1;
+        }
+        CZFWriteStats(NO);
+        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    }
+    NSString *host = nil;
+    if (CZFIsFakeIP(ip)) {
+        char buf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
+        host = CZFHostForFakeIP([NSString stringWithUTF8String:buf]);
+    }
+    int savedErrno = ECONNREFUSED;
+    int result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno);
+    if (result != 0) {
+        errno = savedErrno;
+        __sync_add_and_fetch(&gStatConnFailed, 1);
+        CZFWriteStats(NO);
+        return -1;
+    }
+    __sync_add_and_fetch(&gStatConnProxied, 1);
+    __sync_add_and_fetch(&gStatConnxProxied, 1);
+    if (iov && iovcnt > 0) {
+        int flags2 = fcntl(s, F_GETFL, 0);
+        BOOL wasNB2 = (flags2 >= 0) && (flags2 & O_NONBLOCK);
+        if (wasNB2) fcntl(s, F_SETFL, flags2 & ~O_NONBLOCK);
+        struct timeval tv2 = { .tv_sec = 10, .tv_usec = 0 };
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv2, sizeof(tv2));
+        size_t written = 0;
+        int writeErrno = 0;
+        const struct iovec *vec = (const struct iovec *)iov;
+        for (unsigned int i = 0; i < iovcnt; i++) {
+            const char *base = (const char *)vec[i].iov_base;
+            size_t left = vec[i].iov_len;
+            size_t off = 0;
+            while (left > 0) {
+                ssize_t n = write(s, base + off, left);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    writeErrno = errno;
+                    break;
+                }
+                off += (size_t)n;
+                left -= (size_t)n;
+                written += (size_t)n;
+            }
+            if (writeErrno != 0) break;
+        }
+        if (wasNB2) fcntl(s, F_SETFL, flags2);
+        if (len) *len = written;
+        if (written == 0) {
+            errno = writeErrno ? writeErrno : ECONNREFUSED;
+            CZFWriteStats(NO);
+            return -1;
+        }
+    } else {
+        if (len) *len = 0;
+    }
+    if (cid) *cid = 0;
     CZFWriteStats(NO);
-    return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+    return 0;
+}
+
+
+// MARK: - QUIC UDP 中继（SOCKS5 UDP ASSOCIATE）
+// QUIC 走 UDP 443，connect 拦不住、sendto 直接发包也拦不住，
+// 旧版只能当场拒掉、促 TCP 回退（不漏 IP，但 QUIC 本身走不了
+// 节点）。现在对公网 IPv4:443 的 UDP 做 SOCKS UDP 中继，
+// 只认这一路：DNS 53 与其它 UDP 一概不碰（非严格模式下直连
+// 不变，严格模式下公网 UDP 直接拒绝，见下面 Sendto/Sendmsg）。
+// 中继模型：每条 App UDP socket 配一个中继（TCP 关联 + UDP
+// 中继 socket），发包时按 SOCKS UDP 头封装后经中继发往目标，
+// 收包时从中继读回、拆头、按原目标地址还给 App。关联失败
+// 时退回旧的快拒（ECONNREFUSED），绝不直连、不挂住 App。
+// 已知限制：App 若用 kqueue/dispatch 源监听原 socket（不是
+// poll/select/recv），中继回来的包不会触发原 fd 的可读事件，
+// 那类 App 仍会超时后走 TCP 回退——与旧版快拒的最终结果
+// 一致，只是回退变慢；poll/select 已挂钩，覆盖常见的 QUIC
+// 事件循环。recvmsg 的 MSG_PEEK 按常规语义处理（peek 不消费中继包）；截断时返回值即截断长度，MSG_TRUNC 标志本次不置（UDP 长度语义以返回值为准）。
+typedef struct CZFUDPRelay {
+    int appFd;
+    int tcpFd;
+    int udpFd;
+    struct sockaddr_in relayAddr;
+    struct sockaddr_in dstAddr;
+} CZFUDPRelay;
+static CZFUDPRelay gUDPRelays[32];
+static pthread_mutex_t gUDPRelayLock = PTHREAD_MUTEX_INITIALIZER;
+static ssize_t (*orig_recvfrom)(int, void *, size_t, int, struct sockaddr *, socklen_t *);
+static ssize_t (*orig_recvmsg)(int, struct msghdr *, int);
+static int (*orig_poll)(struct pollfd *, nfds_t, int);
+static int (*orig_select)(int, fd_set *, fd_set *, fd_set *, struct timeval *);
+static int (*orig_close)(int);
+
+static CZFUDPRelay *CZFUDPRelayLookupLocked(int appFd) {
+    for (int i = 0; i < 32; i++) {
+        if (gUDPRelays[i].appFd == appFd && gUDPRelays[i].udpFd >= 0 && gUDPRelays[i].tcpFd >= 0) return &gUDPRelays[i];
+    }
+    return NULL;
+}
+// SOCKS UDP ASSOCIATE：在已连 SOCKS 口的 TCP fd 上发请求，
+// 读回中继地址。返回 YES 时 relayOut 填好（一般是 127.0.0.1:端口）。
+static BOOL CZFSocksUDPAssociate(int tcpFd, struct sockaddr_in *relayOut) {
+    const unsigned char greet[3] = {0x05, 0x01, 0x00};
+    unsigned char resp[2];
+    if (!CZFWriteAll(tcpFd, greet, 3) || !CZFReadAll(tcpFd, resp, 2)) return NO;
+    if (resp[0] != 0x05 || resp[1] != 0x00) return NO;
+    unsigned char req[10] = {0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+    if (!CZFWriteAll(tcpFd, req, sizeof(req))) return NO;
+    unsigned char head[4];
+    if (!CZFReadAll(tcpFd, head, 4)) return NO;
+    if (head[0] != 0x05 || head[1] != 0x00) return NO;
+    if (head[3] == 0x01) {
+        unsigned char rest[6];
+        if (!CZFReadAll(tcpFd, rest, 6)) return NO;
+        memset(relayOut, 0, sizeof(*relayOut));
+        relayOut->sin_family = AF_INET;
+        memcpy(&relayOut->sin_addr, rest, 4);
+        memcpy(&relayOut->sin_port, rest + 4, 2);
+        return YES;
+    }
+    if (head[3] == 0x03) {
+        unsigned char lenb;
+        if (!CZFReadAll(tcpFd, &lenb, 1)) return NO;
+        unsigned char buf[300];
+        if (lenb + 2 > sizeof(buf)) return NO;
+        if (!CZFReadAll(tcpFd, buf, lenb + 2)) return NO;
+        return NO;
+    }
+    return NO;
+}
+static CZFUDPRelay *CZFUDPRelayGetOrCreate(int appFd, const struct sockaddr_in *dst) {
+    if (!orig_connect) return NULL;
+    pthread_mutex_lock(&gUDPRelayLock);
+    CZFUDPRelay *r = CZFUDPRelayLookupLocked(appFd);
+    if (r) {
+        r->dstAddr = *dst;
+        pthread_mutex_unlock(&gUDPRelayLock);
+        return r;
+    }
+    pthread_mutex_unlock(&gUDPRelayLock);
+    int tcpFd = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcpFd < 0) return NULL;
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(tcpFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(tcpFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in socksAddr;
+    memset(&socksAddr, 0, sizeof(socksAddr));
+    socksAddr.sin_family = AF_INET;
+    socksAddr.sin_port = htons(CZF_SOCKS_PORT);
+    socksAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (orig_connect(tcpFd, (struct sockaddr *)&socksAddr, sizeof(socksAddr)) != 0) {
+        if (orig_close) orig_close(tcpFd);
+        return NULL;
+    }
+    struct sockaddr_in relayAddr;
+    if (!CZFSocksUDPAssociate(tcpFd, &relayAddr)) {
+        if (orig_close) orig_close(tcpFd);
+        return NULL;
+    }
+    int udpFd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpFd < 0) {
+        if (orig_close) orig_close(tcpFd);
+        return NULL;
+    }
+    if (orig_connect(udpFd, (struct sockaddr *)&relayAddr, sizeof(relayAddr)) != 0) {
+        if (orig_close) orig_close(tcpFd);
+        if (orig_close) orig_close(udpFd);
+        return NULL;
+    }
+    pthread_mutex_lock(&gUDPRelayLock);
+    CZFUDPRelay *again = CZFUDPRelayLookupLocked(appFd);
+    if (again) {
+        pthread_mutex_unlock(&gUDPRelayLock);
+        if (orig_close) orig_close(tcpFd);
+        if (orig_close) orig_close(udpFd);
+        return again;
+    }
+    CZFUDPRelay *slot = NULL;
+    for (int i = 0; i < 32; i++) {
+        if (gUDPRelays[i].appFd < 0 || gUDPRelays[i].udpFd < 0) { slot = &gUDPRelays[i]; break; }
+    }
+    if (!slot) {
+        pthread_mutex_unlock(&gUDPRelayLock);
+        if (orig_close) orig_close(tcpFd);
+        if (orig_close) orig_close(udpFd);
+        return NULL;
+    }
+    slot->appFd = appFd;
+    slot->tcpFd = tcpFd;
+    slot->udpFd = udpFd;
+    slot->relayAddr = relayAddr;
+    slot->dstAddr = *dst;
+    pthread_mutex_unlock(&gUDPRelayLock);
+    return slot;
+}
+static void CZFUDPRelaySyncFlags(int appFd, int relayFd) {
+    int flags = fcntl(appFd, F_GETFL, 0);
+    if (flags < 0) return;
+    int rflags = fcntl(relayFd, F_GETFL, 0);
+    if (rflags < 0) return;
+    BOOL appNB = (flags & O_NONBLOCK) != 0;
+    BOOL relayNB = (rflags & O_NONBLOCK) != 0;
+    if (appNB != relayNB) {
+        if (appNB) fcntl(relayFd, F_SETFL, rflags | O_NONBLOCK);
+        else fcntl(relayFd, F_SETFL, rflags & ~O_NONBLOCK);
+    }
+    struct timeval appTv;
+    socklen_t len = sizeof(appTv);
+    if (getsockopt(appFd, SOL_SOCKET, SO_RCVTIMEO, &appTv, &len) == 0) {
+        setsockopt(relayFd, SOL_SOCKET, SO_RCVTIMEO, &appTv, sizeof(appTv));
+    }
+}
+static ssize_t CZFUDPRelaySend(int appFd, const struct sockaddr_in *dst, const void *data, size_t len) {
+    if (len > 65000) { errno = EMSGSIZE; return -1; }
+    CZFUDPRelay *r = CZFUDPRelayGetOrCreate(appFd, dst);
+    if (!r) { errno = ECONNREFUSED; return -1; }
+    CZFUDPRelaySyncFlags(appFd, r->udpFd);
+    size_t total = 10 + len;
+    unsigned char *pkt = (unsigned char *)malloc(total);
+    if (!pkt) { errno = ENOMEM; return -1; }
+    pkt[0] = 0; pkt[1] = 0; pkt[2] = 0; pkt[3] = 0x01;
+    memcpy(pkt + 4, &dst->sin_addr, 4);
+    memcpy(pkt + 8, &dst->sin_port, 2);
+    memcpy(pkt + 10, data, len);
+    ssize_t n = send(r->udpFd, pkt, total, 0);
+    free(pkt);
+    if (n < 0) return -1;
+    if ((size_t)n != total) { errno = ECONNREFUSED; return -1; }
+    __sync_add_and_fetch(&gStatQuicProxied, 1);
+    CZFWriteStats(NO);
+    return (ssize_t)len;
+}
+static ssize_t CZFUDPRelayRecv(int appFd, void *out, size_t outCap, struct sockaddr *srcAddr, socklen_t *srcLen, int flags) {
+    pthread_mutex_lock(&gUDPRelayLock);
+    CZFUDPRelay *r = CZFUDPRelayLookupLocked(appFd);
+    int relayFd = r ? r->udpFd : -1;
+    pthread_mutex_unlock(&gUDPRelayLock);
+    if (relayFd < 0) { errno = EAGAIN; return -1; }
+    CZFUDPRelaySyncFlags(appFd, relayFd);
+    int recvFlags = 0;
+    if (flags & MSG_PEEK) recvFlags |= MSG_PEEK;
+    if (flags & MSG_DONTWAIT) recvFlags |= MSG_DONTWAIT;
+    unsigned char *pkt = (unsigned char *)malloc(outCap + 32);
+    if (!pkt) { errno = ENOMEM; return -1; }
+    ssize_t n = recv(relayFd, pkt, outCap + 32, recvFlags);
+    if (n < 0) { free(pkt); return -1; }
+    if (n < 10) { free(pkt); errno = ECONNREFUSED; return -1; }
+    if (pkt[2] != 0) { free(pkt); errno = ECONNREFUSED; return -1; }
+    size_t hdr = 0;
+    struct sockaddr_in src;
+    memset(&src, 0, sizeof(src));
+    src.sin_family = AF_INET;
+    if (pkt[3] == 0x01) {
+        if (n < 10) { free(pkt); errno = ECONNREFUSED; return -1; }
+        memcpy(&src.sin_addr, pkt + 4, 4);
+        memcpy(&src.sin_port, pkt + 8, 2);
+        hdr = 10;
+    } else if (pkt[3] == 0x03) {
+        unsigned char dl = pkt[4];
+        if (n < (ssize_t)(5 + dl + 2)) { free(pkt); errno = ECONNREFUSED; return -1; }
+        hdr = 5 + dl + 2;
+        src.sin_addr.s_addr = 0;
+        memcpy(&src.sin_port, pkt + 5 + dl, 2);
+    } else if (pkt[3] == 0x04) {
+        if (n < 22) { free(pkt); errno = ECONNREFUSED; return -1; }
+        hdr = 22;
+        memcpy(&src.sin_port, pkt + 20, 2);
+    } else {
+        free(pkt); errno = ECONNREFUSED; return -1;
+    }
+    size_t dataLen = (size_t)n - hdr;
+    size_t copyLen = dataLen < outCap ? dataLen : outCap;
+    memcpy(out, pkt + hdr, copyLen);
+    free(pkt);
+    if (srcAddr && srcLen && *srcLen >= sizeof(src)) {
+        memcpy(srcAddr, &src, sizeof(src));
+        *srcLen = sizeof(src);
+    }
+    return (ssize_t)copyLen;
 }
 
 // MARK: - QUIC 快速失败（sendto/sendmsg）
@@ -415,23 +802,203 @@ static BOOL CZFIsUDPSocket(int fd) {
 }
 
 static ssize_t CZFSendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen) {
-    if (addr && CZFIsQUICAddr(addr) && CZFIsUDPSocket(fd)) {
-        __sync_add_and_fetch(&gStatQuicBlocked, 1);
-        CZFWriteStats(NO);
-        errno = ECONNREFUSED;
-        return -1;
+    if (addr && CZFIsUDPSocket(fd)) {
+        if (CZFIsQUICAddr(addr)) {
+            if (!CZFCoreAlive()) {
+                __sync_add_and_fetch(&gStatQuicBlocked, 1);
+                CZFWriteStats(NO);
+                errno = ECONNREFUSED;
+                return -1;
+            }
+            return CZFUDPRelaySend(fd, (const struct sockaddr_in *)addr, buf, len);
+        }
+        if (gStrictMode && addr->sa_family == AF_INET) {
+            const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+            if (!CZFIsPrivateOrLoopback(ntohl(sin->sin_addr.s_addr))) {
+                __sync_add_and_fetch(&gStatConnFailed, 1);
+                CZFWriteStats(NO);
+                errno = ECONNREFUSED;
+                return -1;
+            }
+        }
+        if (gStrictMode && addr->sa_family == AF_INET6 && CZFIsPublicIPv6((const struct sockaddr_in6 *)addr)) {
+            __sync_add_and_fetch(&gStatConnFailed, 1);
+            CZFWriteStats(NO);
+            errno = ECONNREFUSED;
+            return -1;
+        }
     }
     return orig_sendto(fd, buf, len, flags, addr, addrlen);
 }
 
 static ssize_t CZFSendmsg(int fd, const struct msghdr *msg, int flags) {
-    if (msg && msg->msg_name && CZFIsQUICAddr((const struct sockaddr *)msg->msg_name) && CZFIsUDPSocket(fd)) {
-        __sync_add_and_fetch(&gStatQuicBlocked, 1);
-        CZFWriteStats(NO);
-        errno = ECONNREFUSED;
-        return -1;
+    if (msg && msg->msg_name && CZFIsUDPSocket(fd)) {
+        const struct sockaddr *addr = (const struct sockaddr *)msg->msg_name;
+        if (CZFIsQUICAddr(addr)) {
+            if (!CZFCoreAlive()) {
+                __sync_add_and_fetch(&gStatQuicBlocked, 1);
+                CZFWriteStats(NO);
+                errno = ECONNREFUSED;
+                return -1;
+            }
+            size_t total = 0;
+            for (int i = 0; i < msg->msg_iovlen; i++) total += msg->msg_iov[i].iov_len;
+            if (total > 65000) { errno = EMSGSIZE; return -1; }
+            unsigned char *flat = (unsigned char *)malloc(total ? total : 1);
+            if (!flat) { errno = ENOMEM; return -1; }
+            size_t off = 0;
+            for (int i = 0; i < msg->msg_iovlen; i++) {
+                memcpy(flat + off, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
+                off += msg->msg_iov[i].iov_len;
+            }
+            ssize_t r = CZFUDPRelaySend(fd, (const struct sockaddr_in *)addr, flat, total);
+            free(flat);
+            return r;
+        }
+        if (gStrictMode && addr->sa_family == AF_INET) {
+            const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+            if (!CZFIsPrivateOrLoopback(ntohl(sin->sin_addr.s_addr))) {
+                __sync_add_and_fetch(&gStatConnFailed, 1);
+                CZFWriteStats(NO);
+                errno = ECONNREFUSED;
+                return -1;
+            }
+        }
+        if (gStrictMode && addr->sa_family == AF_INET6 && CZFIsPublicIPv6((const struct sockaddr_in6 *)addr)) {
+            __sync_add_and_fetch(&gStatConnFailed, 1);
+            CZFWriteStats(NO);
+            errno = ECONNREFUSED;
+            return -1;
+        }
     }
     return orig_sendmsg(fd, msg, flags);
+}
+
+static ssize_t CZFRecvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen) {
+    pthread_mutex_lock(&gUDPRelayLock);
+    BOOL hasRelay = CZFUDPRelayLookupLocked(fd) != NULL;
+    pthread_mutex_unlock(&gUDPRelayLock);
+    if (hasRelay && CZFIsUDPSocket(fd)) {
+        return CZFUDPRelayRecv(fd, buf, len, addr, addrlen, flags);
+    }
+    return orig_recvfrom(fd, buf, len, flags, addr, addrlen);
+}
+
+static ssize_t CZFRecvmsg(int fd, struct msghdr *msg, int flags) {
+    pthread_mutex_lock(&gUDPRelayLock);
+    BOOL hasRelay = CZFUDPRelayLookupLocked(fd) != NULL;
+    pthread_mutex_unlock(&gUDPRelayLock);
+    if (hasRelay && msg && CZFIsUDPSocket(fd)) {
+        size_t total = 0;
+        for (int i = 0; i < msg->msg_iovlen; i++) total += msg->msg_iov[i].iov_len;
+        unsigned char *flat = (unsigned char *)malloc(total ? total : 1);
+        if (!flat) { errno = ENOMEM; return -1; }
+        socklen_t nameLen = msg->msg_namelen;
+        ssize_t r = CZFUDPRelayRecv(fd, flat, total, (struct sockaddr *)msg->msg_name, &nameLen, flags);
+        if (r >= 0) {
+            msg->msg_namelen = nameLen;
+            size_t off = 0;
+            size_t left = (size_t)r;
+            for (int i = 0; i < msg->msg_iovlen && left > 0; i++) {
+                size_t cp = left < msg->msg_iov[i].iov_len ? left : msg->msg_iov[i].iov_len;
+                memcpy(msg->msg_iov[i].iov_base, flat + off, cp);
+                off += cp; left -= cp;
+            }
+        }
+        free(flat);
+        return r;
+    }
+    return orig_recvmsg(fd, msg, flags);
+}
+
+static int CZFPoll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    if (!fds || nfds == 0) return orig_poll(fds, nfds, timeout);
+    nfds_t relayCount = 0;
+    int relayFds[64];
+    int relayIdx[64];
+    for (nfds_t i = 0; i < nfds && relayCount < 64; i++) {
+        if (fds[i].fd < 0 || !(fds[i].events & POLLIN)) continue;
+        pthread_mutex_lock(&gUDPRelayLock);
+        CZFUDPRelay *r = CZFUDPRelayLookupLocked(fds[i].fd);
+        int rf = r ? r->udpFd : -1;
+        pthread_mutex_unlock(&gUDPRelayLock);
+        if (rf >= 0) { relayFds[relayCount] = rf; relayIdx[relayCount] = (int)i; relayCount++; }
+    }
+    if (relayCount == 0) return orig_poll(fds, nfds, timeout);
+    struct pollfd *combined = (struct pollfd *)malloc(sizeof(struct pollfd) * (nfds + relayCount));
+    if (!combined) return orig_poll(fds, nfds, timeout);
+    for (nfds_t i = 0; i < nfds; i++) combined[i] = fds[i];
+    for (nfds_t i = 0; i < relayCount; i++) {
+        combined[nfds + i].fd = relayFds[i];
+        combined[nfds + i].events = POLLIN;
+        combined[nfds + i].revents = 0;
+    }
+    int r = orig_poll(combined, nfds + relayCount, timeout);
+    for (nfds_t i = 0; i < nfds; i++) fds[i].revents = combined[i].revents;
+    for (nfds_t i = 0; i < relayCount; i++) {
+        if (combined[nfds + i].revents & POLLIN) {
+            fds[relayIdx[i]].revents |= POLLIN;
+        }
+    }
+    free(combined);
+    if (r < 0) return r;
+    int count = 0;
+    for (nfds_t i = 0; i < nfds; i++) if (fds[i].revents != 0) count++;
+    return count;
+}
+
+static int CZFSelect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout) {
+    if (!readfds || nfds <= 0) return orig_select(nfds, readfds, writefds, exceptfds, timeout);
+    fd_set origRead = *readfds;
+    int relayFds[64]; int relayIdx[64]; nfds_t relayCount = 0;
+    int maxFd = nfds;
+    for (int fd = 0; fd < nfds && relayCount < 64; fd++) {
+        if (!FD_ISSET(fd, &origRead)) continue;
+        pthread_mutex_lock(&gUDPRelayLock);
+        CZFUDPRelay *r = CZFUDPRelayLookupLocked(fd);
+        int rf = r ? r->udpFd : -1;
+        pthread_mutex_unlock(&gUDPRelayLock);
+        if (rf >= 0) {
+            relayFds[relayCount] = rf; relayIdx[relayCount] = fd; relayCount++;
+            if (rf + 1 > maxFd) maxFd = rf + 1;
+        }
+    }
+    if (relayCount == 0) return orig_select(nfds, readfds, writefds, exceptfds, timeout);
+    fd_set combined = origRead;
+    for (nfds_t i = 0; i < relayCount; i++) FD_SET(relayFds[i], &combined);
+    int r = orig_select(maxFd, &combined, writefds, exceptfds, timeout);
+    if (r < 0) return r;
+    *readfds = origRead;
+    for (int fd = 0; fd < nfds; fd++) {
+        if (FD_ISSET(fd, &combined)) FD_SET(fd, readfds);
+        else FD_CLR(fd, readfds);
+    }
+    for (nfds_t i = 0; i < relayCount; i++) {
+        if (FD_ISSET(relayFds[i], &combined)) FD_SET(relayIdx[i], readfds);
+    }
+    for (nfds_t i = 0; i < relayCount; i++) FD_CLR(relayFds[i], readfds);
+    int count = 0;
+    for (int fd = 0; fd < nfds; fd++) {
+        if (readfds && FD_ISSET(fd, readfds)) count++;
+        if (writefds && FD_ISSET(fd, writefds)) count++;
+        if (exceptfds && FD_ISSET(fd, exceptfds)) count++;
+    }
+    return count;
+}
+
+static int CZFClose(int fd) {
+    pthread_mutex_lock(&gUDPRelayLock);
+    CZFUDPRelay *r = CZFUDPRelayLookupLocked(fd);
+    if (r) {
+        int tcpFd = r->tcpFd; int udpFd = r->udpFd;
+        r->appFd = -1; r->tcpFd = -1; r->udpFd = -1;
+        pthread_mutex_unlock(&gUDPRelayLock);
+        if (tcpFd >= 0 && orig_close) orig_close(tcpFd);
+        if (udpFd >= 0 && orig_close) orig_close(udpFd);
+    } else {
+        pthread_mutex_unlock(&gUDPRelayLock);
+    }
+    return orig_close(fd);
 }
 
 // MARK: - NSURLSession 配置改写（第二层拦截）
@@ -609,6 +1176,14 @@ static int CZFGetAddrInfo(const char *node, const char *service, const struct ad
 // 会递归、也不受重绑影响。
 __attribute__((constructor))
 static void CZFProxyInit(void) {
+    // 静态数组零初始化会把 appFd/tcpFd/udpFd 都置 0，槽位搜索
+    // 靠 <0 判空会永远找不到空槽（且 fd 0 会误命中），构造器
+    // 里先把 32 个槽全置 -1，之后 Close 也按 -1 回收。
+    for (int i = 0; i < 32; i++) {
+        gUDPRelays[i].appFd = -1;
+        gUDPRelays[i].tcpFd = -1;
+        gUDPRelays[i].udpFd = -1;
+    }
     gIPByHost = [NSMutableDictionary dictionary];
     gHostByIP = [NSMutableDictionary dictionary];
     // 先定好本 App 的统计文件路径（构造器最开始，后面钩子随时能写）
@@ -639,6 +1214,26 @@ static void CZFProxyInit(void) {
     }
     if (orig_sendmsg) {
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_sendmsg, (void *)CZFSendmsg, NULL);
+    }
+    orig_recvfrom = (ssize_t (*)(int, void *, size_t, int, struct sockaddr *, socklen_t *))dlsym(RTLD_DEFAULT, "recvfrom");
+    orig_recvmsg = (ssize_t (*)(int, struct msghdr *, int))dlsym(RTLD_DEFAULT, "recvmsg");
+    orig_poll = (int (*)(struct pollfd *, nfds_t, int))dlsym(RTLD_DEFAULT, "poll");
+    orig_select = (int (*)(int, fd_set *, fd_set *, fd_set *, struct timeval *))dlsym(RTLD_DEFAULT, "select");
+    orig_close = (int (*)(int))dlsym(RTLD_DEFAULT, "close");
+    if (orig_recvfrom) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_recvfrom, (void *)CZFRecvfrom, NULL);
+    }
+    if (orig_recvmsg) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_recvmsg, (void *)CZFRecvmsg, NULL);
+    }
+    if (orig_poll) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_poll, (void *)CZFPoll, NULL);
+    }
+    if (orig_select) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_select, (void *)CZFSelect, NULL);
+    }
+    if (orig_close) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_close, (void *)CZFClose, NULL);
     }
     CZFInstallSessionSwizzle();
     __sync_add_and_fetch(&gStatLoads, 1);
