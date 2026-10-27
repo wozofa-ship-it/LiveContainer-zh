@@ -716,7 +716,7 @@ public final class CZFVPNManager {
     /// 测完就回主线程，只含当轮结果，界面只合并其中通
     /// 的节点先显示，不通的继续重试、等最终 completion。
     /// completion 回主线程，结果与 nodeLinks 同序。
-    public func pingAllNodes(onPartial: (([CZFNodePingResult]) -> Void)? = nil, completion: @escaping ([CZFNodePingResult], Bool) -> Void) {
+    public func pingAllNodes(onPartial: (([CZFNodePingResult]) -> Void)? = nil, onProgress: ((Int, Int, String) -> Void)? = nil, completion: @escaping ([CZFNodePingResult], Bool) -> Void) {
         let links = nodeLinks
         guard !links.isEmpty else { completion([], false); return }
         // 先在调用线程把测速标志立起来再派后台队列：原来标
@@ -739,7 +739,7 @@ public final class CZFVPNManager {
             let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
-            var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/")
+            var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/", phase: "测速", onProgress: onProgress)
             // 核心在跑且整批被拒 = 核心占用测速，不是节点不通：
             // 测速只读，不停车重测、不重试（重试同样会被拒，
             // 只会白白拖时间），直接把被拒结果交给界面提示。
@@ -761,7 +761,7 @@ public final class CZFVPNManager {
                 for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
                     if failedIndices.isEmpty { break }
                     let failedLinks = failedIndices.map { links[$0] }
-                    let retry = self.runPingBatches(links: failedLinks, url: retryURL)
+                    let retry = self.runPingBatches(links: failedLinks, url: retryURL, phase: "重试", onProgress: onProgress)
                     var stillFailed: [Int] = []
                     for (j, idx) in failedIndices.enumerated() {
                         if retry.items[j].success {
@@ -817,7 +817,7 @@ public final class CZFVPNManager {
     }
 
     /// 逐批调 pingBatch（同步阻塞，必须在后台线程调）
-    private func runPingBatches(links: [String], url: String) -> (items: [CZFNodePingResult], batchRejected: Bool) {
+    private func runPingBatches(links: [String], url: String, phase: String = "", onProgress: ((Int, Int, String) -> Void)? = nil) -> (items: [CZFNodePingResult], batchRejected: Bool) {
         var items = [CZFNodePingResult?](repeating: nil, count: links.count)
         var batchRejected = false
         // 先把每个链接转成出站 JSON，转不动的直接记失败
@@ -855,6 +855,11 @@ public final class CZFVPNManager {
             }
             for entry in batch where items[entry.index] == nil {
                 items[entry.index] = CZFNodePingResult(success: false, delay: 10000)
+            }
+            if let onProgress {
+                let done = items.compactMap { $0 }.count
+                let total = links.count
+                DispatchQueue.main.async { onProgress(done, total, phase) }
             }
             start += 5
         }

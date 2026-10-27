@@ -116,6 +116,9 @@ struct LCSettingsView: View {
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
     @State var vpnPinging = false
     @State var vpnPingRejected = false
+    @State var vpnPingDone = 0
+    @State var vpnPingTotal = 0
+    @State var vpnPingPhase = "测速"
     @State var vpnPrewarmSuppressed = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     
@@ -577,37 +580,8 @@ struct LCSettingsView: View {
                         // 测完再点。
                         .disabled(vpnPinging)
                         .buttonStyle(.borderless)
-                        Button(vpnPinging ? "测速中…" : "测延迟") {
-                            vpnPingResults = [:]
-                            vpnPinging = true
-                            vpnPingRejected = false
-                            CZFVPNManager.shared.pingAllNodes(onPartial: { partial in
-                                // 通的先显示：只合并通的节点，不通的
-                                // 留空继续显示“测速中”，等最终结果；
-                                // 不在这里 save，最终结果才落盘。
-                                for (i, r) in partial.enumerated() where r.success {
-                                    vpnPingResults[i] = r
-                                }
-                            }) { results, rejected in
-                                if rejected {
-                                    // 被拒那批全是失败，不是节点真不通：
-                                    // 不覆写界面结果、不落盘，免得污染上次
-                                    // 真测结果、清理/排序按假不通走；只出警告，
-                                    // 清理/排序继续用上次真测结果。先清掉测速
-                                    // 开始时已清空、测速中只合了零星成功项的
-                                    // 表，刷新时从缓存恢复完整上次真结果。
-                                    vpnPingResults = [:]
-                                    vpnPingRejected = true
-                                } else {
-                                    var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
-                                    for (i, r) in results.enumerated() { map[i] = r }
-                                    vpnPingResults = map
-                                    vpnPingRejected = false
-                                    savePingResults()
-                                }
-                                vpnPinging = false
-                                refreshVPNState()
-                            }
+                        Button(vpnPinging ? (vpnPingTotal > 0 ? "\(vpnPingPhase) \(vpnPingDone)/\(vpnPingTotal)" : "测速中…") : "测延迟") {
+                            startVPNPing()
                         }
                         .disabled(vpnPinging || vpnNodes.isEmpty)
                         .buttonStyle(.borderless)
@@ -650,16 +624,25 @@ struct LCSettingsView: View {
                             .buttonStyle(.borderless)
                         }
                         // 测完后按延迟从低到高重排节点列表（不通
-                        // 的沉底、没测到的最后），活动节点按内容
-                        // 跟随、不重启核心
+                        // 的沉底、没测到的最后），在用节点固定
+                        // 在原位置不动、只排其余节点，活动节点
+                        // 按内容跟随、不重启核心。以前在用节点
+                        // 测速失败也会按不通沉底，列表顺序变了、
+                        // 容易误会成在用节点被换了。
                         if vpnPingResults.count > 1 {
                             Button("按延迟排序") {
                                 let links = CZFVPNManager.shared.nodeLinks
-                                let sorted = links.enumerated().sorted { a, b in
+                                let activeIdx = vpnActiveIndex
+                                let activeLink: String? = links.indices.contains(activeIdx) ? links[activeIdx] : nil
+                                let rest = links.enumerated().filter { $0.offset != activeIdx }.sorted { a, b in
                                     let ka = vpnPingResults[a.offset].map { $0.success ? $0.delay : Int.max - 1 } ?? Int.max
                                     let kb = vpnPingResults[b.offset].map { $0.success ? $0.delay : Int.max - 1 } ?? Int.max
                                     return ka < kb
                                 }.map { $0.element }
+                                var sorted = rest
+                                if let activeLink {
+                                    sorted.insert(activeLink, at: min(activeIdx, sorted.count))
+                                }
                                 CZFVPNManager.shared.replaceNodeOrder(sorted)
                                 vpnPingResults = [:]
                                 refreshVPNState()
@@ -668,11 +651,22 @@ struct LCSettingsView: View {
                             .buttonStyle(.borderless)
                         }
                         // 核心占用被拒时的提示：结果不是节点不通，
-                        // 是测速被在跑的核心挡了，先停核心再测。
+                        // 是测速被在跑的核心挡了。以前只给文字，
+                        // 要用户自己停核心再点测延迟；现在一键
+                        // 停核心重测：停核心、刷新、直接重测，
+                        // 重测时核心已停，不会再被拒。
                         if vpnPingRejected && !vpnPinging {
-                            Text("上次测速被在跑的核心占用，结果没更新：先停核心再测更准，清理/排序按上次真测结果")
-                                .font(.footnote)
-                                .foregroundStyle(.orange)
+                            HStack(spacing: 6) {
+                                Text("上次测速被在跑的核心占用，结果没更新：先停核心再测更准，清理/排序按上次真测结果")
+                                    .font(.footnote)
+                                    .foregroundStyle(.orange)
+                                Button("停核心重测") {
+                                    CZFVPNManager.shared.stop()
+                                    refreshVPNState()
+                                    startVPNPing()
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
                         Spacer()
                         Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
@@ -1005,10 +999,63 @@ struct LCSettingsView: View {
     func applySubscriptionLinks(_ links: [String]) {
         CZFVPNManager.shared.replaceAllNodes(links)
         UserDefaults.standard.set(vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "CZFVPNSubscriptionURL")
+        // 订阅导入时直接剪落盘缓存：以前只清内存结果，
+        // 被替换掉的节点还留在缓存里，下次存结果时才剪；
+        // 先按新列表剪掉，再刷新、再从缓存恢复，恢复的
+        // 只会是新列表里还留着的节点。
+        let prunedCache = (UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) as? [String: Int] ?? [:])
+            .filter { links.contains($0.key) }
+        UserDefaults.standard.set(prunedCache, forKey: Self.pingCacheKey)
         vpnPingResults = [:]
         refreshVPNState()
         successInfo = "订阅导入完成：共 \(links.count) 个节点（节点列表已替换为订阅内容）"
         successShow = true
+    }
+
+    // 测延迟的实际动作（测延迟按钮与被拒时的
+    // “停核心重测”共用，免得两处逻辑漂移）：
+    // 进度按批回主线程，按钮显示“测速 3/10”/
+    // “重试 2/5”，不再只有一句测速中。
+    func startVPNPing() {
+        vpnPingResults = [:]
+        vpnPinging = true
+        vpnPingRejected = false
+        vpnPingDone = 0
+        vpnPingTotal = vpnNodes.count
+        vpnPingPhase = "测速"
+        CZFVPNManager.shared.pingAllNodes(onPartial: { partial in
+            // 通的先显示：只合并通的节点，不通的
+            // 留空继续显示“测速中”，等最终结果；
+            // 不在这里 save，最终结果才落盘。
+            for (i, r) in partial.enumerated() where r.success {
+                vpnPingResults[i] = r
+            }
+        }, onProgress: { done, total, phase in
+            vpnPingDone = done
+            vpnPingTotal = total
+            vpnPingPhase = phase
+        }) { results, rejected in
+            if rejected {
+                // 被拒那批全是失败，不是节点真不通：
+                // 不覆写界面结果、不落盘，免得污染上次
+                // 真测结果、清理/排序按假不通走；只出警告，
+                // 清理/排序继续用上次真测结果。先清掉测速
+                // 开始时已清空、测速中只合了零星成功项的
+                // 表，刷新时从缓存恢复完整上次真结果。
+                vpnPingResults = [:]
+                vpnPingRejected = true
+            } else {
+                var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+                for (i, r) in results.enumerated() { map[i] = r }
+                vpnPingResults = map
+                vpnPingRejected = false
+                savePingResults()
+            }
+            vpnPinging = false
+            vpnPingDone = 0
+            vpnPingTotal = 0
+            refreshVPNState()
+        }
     }
 
     func refreshVPNState() {
