@@ -95,9 +95,18 @@ public final class CZFVPNManager {
     // 测速窗口内被挡下的源下载开关起核心请求：与
     // deferredEnsureApp 同理，测速收尾再补跑一次。
     private var deferredHostEnsure = false
-    // 核心闲置自动停时长：小火箭式常驻取舍——30 分钟内重开
-    // 免冷启动；真闲置才停（宿主被系统挂起时本就不耗电）
-    private static let autoStopDelay: TimeInterval = 1800
+    // 核心闲置自动停时长（CZF，可调）：设置页“单App VPN”里
+    // 选 5 / 10 / 30 分钟，默认 10 分钟（以前写死 30 分钟）。
+    // 已排队的停核心任务仍按排队时的时长触发，但触发时按
+    // 当前档位重算闲置时长：档位改短不会提前停、改长不会
+    // 误停，下次 App 变化重排时按新档位来，行为安全。
+    private static let autoStopMinutesKey = "CZFVPNAutoStopMinutes"
+    private static var autoStopDelay: TimeInterval {
+        // integer(forKey:) 在键不存在时返回 0，正好落到默认 10，
+        // 不用 object(as? Int) 的桥接不确定性（仓内 activeNodeIndex 同款读法）。
+        let minutes = UserDefaults.standard.integer(forKey: autoStopMinutesKey)
+        return TimeInterval([5, 10, 30].contains(minutes) ? minutes : 10) * 60
+    }
 
     private init() {}
 
@@ -579,7 +588,7 @@ public final class CZFVPNManager {
     }
 
     // 多任务列表变化后由 MultitaskDockManager 调用：还在跑的
-    // App 里已经没有被标记的了，就排一个 30 分钟后的停核心；
+    // App 里已经没有被标记的了，就按自动停档位排一个停核心；
     // 期间有被标记 App 起来（ensureRunning 会取消）就不停
     public func noteRunningAppsChanged(stillHasFlagged: Bool) {
         // 宿主自身走节点的开关开着时，核心同样算"还在被用"

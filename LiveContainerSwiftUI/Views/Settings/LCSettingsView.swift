@@ -112,6 +112,7 @@ struct LCSettingsView: View {
     @State var vpnNodes: [String] = []
     @State var vpnHostProxy = false
     @AppStorage("CZFVPNPrewarm") var vpnPrewarm = true
+    @AppStorage("CZFVPNAutoStopMinutes") var vpnAutoStopMinutes = 10
     @State var vpnActiveIndex = 0
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
     @State var vpnPingStaleIndices: Set<Int> = []
@@ -752,10 +753,20 @@ struct LCSettingsView: View {
                             }
                             refreshVPNState()
                         }
+                    Picker(selection: $vpnAutoStopMinutes) {
+                        Text("5 分钟").tag(5)
+                        Text("10 分钟").tag(10)
+                        Text("30 分钟").tag(30)
+                    } label: {
+                        HStack {
+                            LCSettingsIcon(systemName: "timer", color: .red.opacity(0.85))
+                            Text("核心闲置自动停")
+                        }
+                    }
                 } header: {
                     Text("单App VPN")
                 } footer: {
-                    Text("点节点行切换（核心在跑时立即生效），左滑可删。订阅导入会用订阅内容整体替换节点列表（当前选中的节点还在订阅里就继续用它），节点更新了再点一次「导入订阅」即可。点「测延迟」经每个节点真实发一次请求量往返毫秒数，测速不切换核心启停状态；核心在跑时测速可能被核心占用、结果不准，先停核心再测更准，通的节点会先显示出来。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。「打开时预热节点核心」开着时，进 LiveContainer 就先把核心热好，第一个 VPN App 点开不用等冷启动（不用的话核心随宿主挂起，不额外耗电）。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑可删。订阅导入会用订阅内容整体替换节点列表（当前选中的节点还在订阅里就继续用它），节点更新了再点一次「导入订阅」即可。点「测延迟」经每个节点真实发一次请求量往返毫秒数，测速不切换核心启停状态；核心在跑时测速可能被核心占用、结果不准，先停核心再测更准，通的节点会先显示出来。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。「打开时预热节点核心」开着时，进 LiveContainer 就先把核心热好，第一个 VPN App 点开不用等冷启动（不用的话核心随宿主挂起，不额外耗电）。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。最后一个标 VPN 的 App 关掉后，核心按「核心闲置自动停」选的分钟数闲置自动停，期间重开标 VPN 的 App 会取消这次自动停。")
                 }
                 
                 Section {

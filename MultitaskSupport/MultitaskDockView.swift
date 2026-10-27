@@ -152,6 +152,9 @@ class AppInfoProvider {
     // 它已最小化的时间；恢复可见、关窗、画中画、开关关时清掉。
     private var czfMinAutoCloseTimer: Timer?
     private var czfMinimizedSince: [String: Date] = [:]
+    // 同时运行上限（CZF）：3 个，第 4 个窗口注册时弹确认，
+    // 防连续注册时弹框叠加，只弹一个。
+    private var czfCapAlertShowing = false
     private var czfPanelOverlayBackdrop: UIView?
     private var czfPanelOverlayHost: UIHostingController<AnyView>?
     // 源面板覆盖层：与 App 面板同构，各自一套遮罩+宿主，互开时先关对方
@@ -818,16 +821,65 @@ class AppInfoProvider {
             if let bid = appInfo?.bundleIdentifier() {
                 self.czfRegisterTouchRaiseObserver(bundleId: bid)
             }
-            
+
             if self.apps.count == 1 {
                 self.showDock()
             } else if self.isVisible {
                 self.updateDockFrame()
             }
             CZFHostKeepAlive.shared.refresh()
+            self.czfEnforceRunningCap(newUUID: appUUID)
         }
     }
     
+    // 同时运行上限（CZF）：最多 3 个窗口。第 4 个窗口注册时
+    // 才触发（App 页点开、快捷栏点开都走 addRunningAppWithInfo
+    // 注册，所以两条路都拦得到；已在运行的点回来不算新注册）。
+    // 候选只认已最小化的窗口：可见的不动、画中画豁免、没有
+    // 最小化候选时不强制关可见窗口（上限此时是软上限，允许
+    // 第 4 个留着）。弹确认，点了“关闭并继续”才关最久最小
+    // 化的那个，点了“不开了”就关掉刚开的这个新窗口。
+    private func czfEnforceRunningCap(newUUID: String) {
+        guard apps.count > 3, !czfCapAlertShowing else { return }
+        let candidates = apps.filter { app in
+            guard app.appUUID != newUUID,
+                  let view = app.view,
+                  view.isHidden,
+                  let vc = view._viewDelegate() as? DecoratedAppSceneViewController,
+                  PiPManager.shared?.isPiP(withDecoratedVC: vc) != true else {
+                return false
+            }
+            return true
+        }
+        guard let oldest = candidates.sorted(by: {
+            // 没计时条目的窗口是 60 秒轮询还没扫到的新最小化，
+            // 按现在算（最新），不能按 distantPast 算最久，否则
+            // 刚最小化的反而会被先关掉。
+            (czfMinimizedSince[$0.appUUID] ?? Date()) < (czfMinimizedSince[$1.appUUID] ?? Date())
+        }).first else { return }
+        guard let keyWindow = self.keyWindow else { return }
+        var top = keyWindow.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        guard let presenter = top else { return }
+        czfCapAlertShowing = true
+        let alert = UIAlertController(
+            title: "同时运行已满 3 个",
+            message: "关闭最久最小化的「\(oldest.appName)」并继续打开新 App？",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "关闭并继续", style: .default) { [weak self] _ in
+            self?.czfCapAlertShowing = false
+            self?.closeAppWindow(uuid: oldest.appUUID)
+        })
+        alert.addAction(UIAlertAction(title: "不开了，关新 App", style: .destructive) { [weak self] _ in
+            self?.czfCapAlertShowing = false
+            self?.closeAppWindow(uuid: newUUID)
+        })
+        presenter.present(alert, animated: true)
+    }
+
     @objc public func minimizeAllWindows(except: DecoratedAppSceneViewController? = nil) {
         DispatchQueue.main.async {
             self.apps.forEach { app in
@@ -945,10 +997,11 @@ class AppInfoProvider {
         }
     }
 
-    // MARK: - 最小化超 30 分钟自动关（CZF）
-    // 开关在多任务设置页，键 CZFMinAutoCloseEnabled，键不存在 = 开。
-    // 只关“已最小化满 30 分钟”的窗口：可见的、画中画的、已关的都不动；
-    // 恢复可见后计时清零，重最小化重新计 30 分钟。60 秒一轮，误差
+    // MARK: - 最小化自动关（CZF）
+    // 开关在多任务设置页，键 CZFMinAutoCloseEnabled，键不存在 = 开；
+    // 时长键 CZFMinAutoCloseMinutes，10 / 30 / 60 分钟，默认 30。
+    // 只关“已最小化满设定时长”的窗口：可见的、画中画的、已关的都不动；
+    // 恢复可见后计时清零，重最小化重新计时间。60 秒一轮，误差
     // 不超过一轮；宿主被彻底关掉时定时器不跑，不存在补关误伤。
     private func startMinAutoCloseTimer() {
         DispatchQueue.main.async { [weak self] in
@@ -968,6 +1021,11 @@ class AppInfoProvider {
             czfMinimizedSince.removeAll()
             return
         }
+        // 自动关时长（CZF，可调）：设置页“最小化省电”里选
+        // 10 / 30 / 60 分钟，默认 30 分钟（以前写死 1800 秒）。
+        // integer(forKey:) 键不存在时返回 0，正好落到默认 30。
+        let closeMinutes = defaults.integer(forKey: "CZFMinAutoCloseMinutes")
+        let closeDelay = TimeInterval([10, 30, 60].contains(closeMinutes) ? closeMinutes : 30) * 60
         let now = Date()
         var toClose: [String] = []
         for app in apps {
@@ -985,7 +1043,7 @@ class AppInfoProvider {
             // 时不算，避免 0.3 秒动画就开始计时。
             if view.isHidden {
                 if let since = czfMinimizedSince[app.appUUID] {
-                    if now.timeIntervalSince(since) >= 1800 {
+                    if now.timeIntervalSince(since) >= closeDelay {
                         toClose.append(app.appUUID)
                     }
                 } else {

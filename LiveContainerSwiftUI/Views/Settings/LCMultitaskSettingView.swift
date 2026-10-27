@@ -34,6 +34,9 @@ struct LCMultitaskSettingView: View {
     // 按“键不存在 = 开”同款读法，@AppStorage 初始值 true 与之对齐。
     @AppStorage("CZFMinPowerSavingEnabled", store: LCUtils.appGroupUserDefault) var minPowerSavingEnabled = true
     @AppStorage("CZFMinAutoCloseEnabled", store: LCUtils.appGroupUserDefault) var minAutoCloseEnabled = true
+    // 最小化自动关时长（CZF，可调）：10 / 30 / 60 分钟，默认 30
+    // 分钟（以前写死 30 分钟）。Dock 侧按“键不存在 = 30”同款读法。
+    @AppStorage("CZFMinAutoCloseMinutes", store: LCUtils.appGroupUserDefault) var minAutoCloseMinutes = 30
 
     var body: some View {
         List {
@@ -148,13 +151,25 @@ struct LCMultitaskSettingView: View {
                 Toggle(isOn: $minAutoCloseEnabled) {
                     HStack {
                         LCSettingsIcon(systemName: "timer", color: .red)
-                        Text("最小化超 30 分钟自动关")
+                        Text("最小化自动关")
+                    }
+                }
+                if minAutoCloseEnabled {
+                    Picker(selection: $minAutoCloseMinutes) {
+                        Text("10 分钟").tag(10)
+                        Text("30 分钟").tag(30)
+                        Text("60 分钟").tag(60)
+                    } label: {
+                        HStack {
+                            LCSettingsIcon(systemName: "clock.fill", color: .orange)
+                            Text("自动关时间")
+                        }
                     }
                 }
             } header: {
                 Text("最小化省电")
             } footer: {
-                Text("最小化进后台：窗口最小化后把它的场景置为后台，让它自己停渲染、停视频、停定时器，叫回台前自动恢复前台；画中画不受影响。超 30 分钟自动关：最小化满 30 分钟还没叫回来就直接关窗，彻底停掉；恢复可见后重新计 30 分钟，画中画豁免。两条关了都回旧行为：最小化只藏视图、一直以前台跑。")
+                Text("最小化进后台：窗口最小化后把它的场景置为后台，让它自己停渲染、停视频、停定时器，叫回台前自动恢复前台；画中画不受影响。自动关：最小化满上面选的分钟数还没叫回来就直接关窗，彻底停掉；恢复可见后重新计时间，画中画豁免。两条关了都回旧行为：最小化只藏视图、一直以前台跑。")
             }
 
             Section {
