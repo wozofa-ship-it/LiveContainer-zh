@@ -101,23 +101,6 @@ public final class CZFVPNManager {
 
     private init() {}
 
-    // MARK: - 核心起停诊断日志（诊断版专用，用户复现后截图即定位）
-    // 只记起停/测速/挡下/补跑，不记节点链接、不记隐私；
-    // 存 UserDefaults、最多 60 条，设置页显示最近 12 条。
-    private static let coreLogKey = "CZFVPNCoreLog"
-    public static func appendCoreLog(_ msg: String) {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm:ss"
-        let line = "\(fmt.string(from: Date())) \(msg)"
-        var logs = UserDefaults.standard.stringArray(forKey: coreLogKey) ?? []
-        logs.append(line)
-        if logs.count > 60 { logs.removeFirst(logs.count - 60) }
-        UserDefaults.standard.set(logs, forKey: coreLogKey)
-    }
-    public var coreLogLines: [String] {
-        UserDefaults.standard.stringArray(forKey: Self.coreLogKey) ?? []
-    }
-
     // MARK: - 节点与标记（UserDefaults 存储）
 
     // 节点列表：老版本只存过单个链接，首次读时自动迁移成列表，
@@ -289,7 +272,6 @@ public final class CZFVPNManager {
             key.hasPrefix("CZFVPNEnabled-") && defaults.bool(forKey: key)
         }
         guard hasMarked else { return }
-        Self.appendCoreLog("prewarm start")
         _ = start()
     }
 
@@ -471,7 +453,6 @@ public final class CZFVPNManager {
     // 回去（测速中亲手停核心，测完又被收尾起回来，正是
     // “测速把核心启动了”的一种真实路径）。
     public func noteManualCoreToggle(started: Bool) {
-        Self.appendCoreLog("manual toggle started=\(started) running=\(isRunning)")
         vpnCoreLock.lock()
         coreActionEpoch += 1
         // 亲手起核心才清掉测速后的预热抑制：亲手停核心不
@@ -522,7 +503,6 @@ public final class CZFVPNManager {
         let pinging = isPinging
         if pinging, let appInfo {
             deferredEnsureApp = appInfo
-            Self.appendCoreLog("ensure deferred pinging")
         }
         vpnCoreLock.unlock()
         if pinging { return }
@@ -586,11 +566,7 @@ public final class CZFVPNManager {
             self.vpnCoreLock.lock()
             let pinging = self.isPinging
             self.vpnCoreLock.unlock()
-            if pinging {
-                Self.appendCoreLog("autoStop skipped pinging")
-                return
-            }
-            Self.appendCoreLog("autoStop fired")
+            if pinging { return }
             self.stop()
         }
         pendingStopWork = work
@@ -599,15 +575,12 @@ public final class CZFVPNManager {
 
     @discardableResult
     public func start() -> Bool {
-        Self.appendCoreLog("start() running=\(isRunning) pinging=\(isPinging)")
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
         // 手动 / 宿主 / 预热起核心：不归某个 App 所有，清掉
         // 养号归属，之后 App 自动启动才可以重新抢核心
         coreOwnerBundleId = nil
-        let ok = start(withLink: nodeLink)
-        Self.appendCoreLog("start() -> \(ok) running=\(isRunning)")
-        return ok
+        return start(withLink: nodeLink)
     }
 
     // 用指定链接起核心：已在跑且正是这条链接就直接成功；
@@ -689,7 +662,6 @@ public final class CZFVPNManager {
     }
 
     public func stop() {
-        Self.appendCoreLog("stop() running=\(isRunning) pinging=\(isPinging)")
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
         // 旧测速延迟重试链接的清理：只读版测速不再写它，
@@ -699,6 +671,9 @@ public final class CZFVPNManager {
         isRunning = false
         runningLink = nil
         coreOwnerBundleId = nil
+        // 停核心后状态行不再显示上次启动失败的旧报错，
+        // 改回“核心未启动”；启动失败时 start() 会重写它。
+        lastError = nil
     }
 
     // MARK: - 节点延迟测试
@@ -726,7 +701,6 @@ public final class CZFVPNManager {
     public func pingAllNodes(onPartial: (([CZFNodePingResult]) -> Void)? = nil, completion: @escaping ([CZFNodePingResult], Bool) -> Void) {
         let links = nodeLinks
         guard !links.isEmpty else { completion([], false); return }
-        Self.appendCoreLog("ping start running=\(isRunning)")
         // 先在调用线程把测速标志立起来再派后台队列：原来标
         // 志只在后台块里立，调用与后台执行之间的窗口里预
         // 热可能抢跑起核心，测速中就先变在跑；立标志本身
@@ -811,7 +785,6 @@ public final class CZFVPNManager {
             self.deferredHostEnsure = false
             self.isPinging = false
             self.vpnCoreLock.unlock()
-            Self.appendCoreLog("ping end running=\(self.isRunning) epochChanged=\(epochChanged) deferredApp=\(deferredApp != nil) deferredHost=\(deferredHost)")
             if let deferredApp {
                 self.ensureRunning(for: deferredApp)
             } else if postPingActiveLink != prePingActiveLink {

@@ -117,7 +117,6 @@ struct LCSettingsView: View {
     @State var vpnPinging = false
     @State var vpnPingRejected = false
     @State var vpnPrewarmSuppressed = false
-    @State var vpnCoreLog: [String] = []
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     
     @EnvironmentObject private var sharedModel : SharedModel
@@ -466,7 +465,7 @@ struct LCSettingsView: View {
                             vpnPingResults = [:]
                             refreshVPNState()
                         }
-                        .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging)
                     }
                     HStack {
                         TextField("粘贴订阅地址（https://…）", text: $vpnSubURL)
@@ -495,7 +494,7 @@ struct LCSettingsView: View {
                                 }
                             }
                         }
-                        .disabled(vpnSubBusy || vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(vpnSubBusy || vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging)
                     }
                     ForEach(Array(vpnNodes.enumerated()), id: \.offset) { index, link in
                         Button {
@@ -547,6 +546,10 @@ struct LCSettingsView: View {
                         }
                     }
                     .onDelete { offsets in
+                        // 测速中左滑也禁删：.disabled 不一定挡得住
+                        // List 的左滑删除，动作里再守一次，免得
+                        // 测速中列表变了、结果下标错位。
+                        guard !vpnPinging else { return }
                         for i in offsets.sorted(by: >) {
                             CZFVPNManager.shared.removeNode(at: i)
                         }
@@ -665,13 +668,6 @@ struct LCSettingsView: View {
                     }
                     .onAppear {
                         refreshVPNState()
-                    }
-                    // 诊断日志：最近 12 条起停/测速记录，复现后
-                    // 截图即定位是谁动了核心；诊断版才显示。
-                    if !vpnCoreLog.isEmpty {
-                        Text(vpnCoreLog.joined(separator: "\n"))
-                            .font(.system(size: 10).monospaced())
-                            .foregroundStyle(.gray)
                     }
                     Toggle(isOn: $vpnPrewarm) {
                         HStack {
@@ -935,6 +931,14 @@ struct LCSettingsView: View {
             sharedModel.deepLink = nil
             handleURL(url: link)
         }
+        // 切回前台刷新核心状态：核心在后台被自动停、被别的
+        // App 起停后，设置页按钮还是旧状态，下一按钮一刷新
+        // 才翻出来、看起来像那个按钮切的；切回前台就刷新，
+        // 按钮先对上真实状态。测速中刷新不翻核心按钮（见
+        // refreshVPNState 里的测速中守卫），不会打断测速。
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            refreshVPNState()
+        }
     }
     
     // 保活开关同步：开 → 把内置保活 dylib 放入全局 Tweaks 根目录并立即签名（没签名游客进程加载不了）；
@@ -1006,7 +1010,6 @@ struct LCSettingsView: View {
         vpnStatusMessage = CZFVPNManager.shared.lastError
         vpnHostProxy = CZFVPNManager.isHostProxyEnabled
         vpnPrewarmSuppressed = CZFVPNManager.shared.isPrewarmSuppressedAfterPing
-        vpnCoreLog = Array(CZFVPNManager.shared.coreLogLines.suffix(12))
         // 内存里的测速结果被清空（增删/导入/排序都会清）时，
         // 从落盘缓存按节点内容重建，没测过的节点不显示
         if vpnPingResults.isEmpty && !vpnPinging {
