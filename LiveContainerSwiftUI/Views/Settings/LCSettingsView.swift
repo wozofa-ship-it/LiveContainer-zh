@@ -115,6 +115,8 @@ struct LCSettingsView: View {
     @State var vpnActiveIndex = 0
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
     @State var vpnPinging = false
+    @State var vpnPingRejected = false
+    @State var vpnPrewarmSuppressed = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     
     @EnvironmentObject private var sharedModel : SharedModel
@@ -550,11 +552,13 @@ struct LCSettingsView: View {
                         vpnPingResults = [:]
                         refreshVPNState()
                     }
+                    // 测速中节点行置灰：测速中点节点行只会把勾
+                    // 先动、核心切换被挡下测完才补跑，看起来
+                    // 像切了其实还没切；置灰后测速中点不动，
+                    // 测完再点才是真切。
+                    .disabled(vpnPinging)
                     HStack {
                         Button(vpnCoreRunning ? "停止核心" : "启动核心") {
-                            // 亲手起停先记动作：测速窗口内亲手停核心，
-                            // 测速收尾不再按测速前状态把它起回来（反
-                            // 之亦然），见 CZFVPNManager 的 epoch 注释。
                             CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
                             if vpnCoreRunning {
                                 CZFVPNManager.shared.stop()
@@ -563,13 +567,27 @@ struct LCSettingsView: View {
                             }
                             refreshVPNState()
                         }
+                        // 测速中置灰：测速中亲手起停核心会和测速
+                        // 的 deferred 逻辑插队，状态容易翻；测速
+                        // 本身又不切核心，测速中起停没有意义，
+                        // 测完再点。
+                        .disabled(vpnPinging)
                         Button(vpnPinging ? "测速中…" : "测延迟") {
                             vpnPingResults = [:]
                             vpnPinging = true
-                            CZFVPNManager.shared.pingAllNodes { results in
+                            vpnPingRejected = false
+                            CZFVPNManager.shared.pingAllNodes(onPartial: { partial in
+                                // 通的先显示：只合并通的节点，不通的
+                                // 留空继续显示“测速中”，等最终结果；
+                                // 不在这里 save，最终结果才落盘。
+                                for (i, r) in partial.enumerated() where r.success {
+                                    vpnPingResults[i] = r
+                                }
+                            }) { results, rejected in
                                 var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                                 for (i, r) in results.enumerated() { map[i] = r }
                                 vpnPingResults = map
+                                vpnPingRejected = rejected
                                 savePingResults()
                                 vpnPinging = false
                                 refreshVPNState()
@@ -583,6 +601,7 @@ struct LCSettingsView: View {
                                 CZFVPNManager.shared.setActiveNode(at: fastest.key)
                                 refreshVPNState()
                             }
+                            .disabled(vpnPinging)
                         }
                         // 测完后一键清理不通的节点：只删明确测
                         // 出不通的、且不是当前在用节点的——在用
@@ -597,6 +616,10 @@ struct LCSettingsView: View {
                                 CZFVPNManager.shared.replaceAllNodes(kept)
                                 refreshVPNState()
                             }
+                            // 核心占用被拒时结果不可靠，禁清理，
+                            // 免得把好节点当不通删掉；测速中也禁，
+                            // 免得按还没重试完的临时失败删节点。
+                            .disabled(vpnPinging || vpnPingRejected)
                         }
                         // 测完后按延迟从低到高重排节点列表（不通
                         // 的沉底、没测到的最后），活动节点按内容
@@ -613,6 +636,14 @@ struct LCSettingsView: View {
                                 vpnPingResults = [:]
                                 refreshVPNState()
                             }
+                            .disabled(vpnPinging)
+                        }
+                        // 核心占用被拒时的提示：结果不是节点不通，
+                        // 是测速被在跑的核心挡了，先停核心再测。
+                        if vpnPingRejected && !vpnPinging {
+                            Text("测速被在跑的核心占用，结果不准：先停核心再测，勿按这批结果清理节点")
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
                         }
                         Spacer()
                         Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
@@ -636,6 +667,15 @@ struct LCSettingsView: View {
                         // 亲手拨一次预热开关：清掉测速后的预热抑制，
                         // 之后预热照常工作；拨开关本身不动核心状态。
                         CZFVPNManager.shared.notePrewarmSwitchToggled()
+                        refreshVPNState()
+                    }
+                    // 预热抑制可见：开关开着、测速后核心停着时，
+                    // 预热其实被压着不工作，以前界面上看不出，
+                    // 用户只会以为预热坏了；现在把状态说出来。
+                    if vpnPrewarmSuppressed && vpnPrewarm && !vpnCoreRunning {
+                        Text("测速后预热已暂停：拨一次预热开关可恢复")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
                     }
                     Toggle(isOn: $vpnHostProxy) {
                         HStack {
@@ -657,7 +697,7 @@ struct LCSettingsView: View {
                 } header: {
                     Text("单App VPN")
                 } footer: {
-                    Text("点节点行切换（核心在跑时立即生效），左滑可删。订阅导入会用订阅内容整体替换节点列表（当前选中的节点还在订阅里就继续用它），节点更新了再点一次「导入订阅」即可。点「测延迟」经每个节点真实发一次请求量往返毫秒数（核心在跑时测速会短暂停核心、测完自动起回来，几秒的事）。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。「打开时预热节点核心」开着时，进 LiveContainer 就先把核心热好，第一个 VPN App 点开不用等冷启动（不用的话核心随宿主挂起，不额外耗电）。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑可删。订阅导入会用订阅内容整体替换节点列表（当前选中的节点还在订阅里就继续用它），节点更新了再点一次「导入订阅」即可。点「测延迟」经每个节点真实发一次请求量往返毫秒数，测速不切换核心启停状态；核心在跑时测速可能被核心占用、结果不准，先停核心再测更准，通的节点会先显示出来。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。「打开时预热节点核心」开着时，进 LiveContainer 就先把核心热好，第一个 VPN App 点开不用等冷启动（不用的话核心随宿主挂起，不额外耗电）。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。")
                 }
                 
                 Section {
@@ -940,6 +980,7 @@ struct LCSettingsView: View {
         vpnCoreRunning = CZFVPNManager.shared.isRunning
         vpnStatusMessage = CZFVPNManager.shared.lastError
         vpnHostProxy = CZFVPNManager.isHostProxyEnabled
+        vpnPrewarmSuppressed = CZFVPNManager.shared.isPrewarmSuppressedAfterPing
         // 内存里的测速结果被清空（增删/导入/排序都会清）时，
         // 从落盘缓存按节点内容重建，没测过的节点不显示
         if vpnPingResults.isEmpty && !vpnPinging {

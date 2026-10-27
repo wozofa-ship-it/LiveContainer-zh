@@ -41,7 +41,7 @@ public final class CZFVPNManager {
     // 启动时间"+ 30 分钟延迟双保险，避免 App 重启时反复启停
     private var pendingStopWork: DispatchWorkItem?
     private var lastFlaggedLaunchAt = Date.distantPast
-    // 核心状态串行化：start/stop/测速恢复/开 App 预热原来在
+    // 核心状态串行化：start/stop/开 App 预热原来在
     // 主线程、detached Task、测速后台队列三处同时改
     // isRunning/runningLink/coreOwnerBundleId，测速中途开 App
     // 时 stop/start 互相插队，恢复完又被改回去。NSLock 在
@@ -54,40 +54,43 @@ public final class CZFVPNManager {
     private let vpnCoreLock = NSRecursiveLock()
     // 测速进行中标志：测速窗口内开 App、预热、切节点一律不
     // 直接动核心，改由测速收尾统一处理（见 pingAllNodes 末尾
-    // 的 deferredEnsure / 切节点跟随 / 延迟重试），否则测速
-    // 的停核心-重测-起回序列会被插队打乱。
+    // 的 deferredEnsure / 切节点跟随），否则测速结果会被
+    // 插队的核心启停打乱（pingBatch 被拒）。
     private var isPinging = false
     // 测速窗口内被挡下的开 App 请求：只记最后一个，测速完
     // 再给它 ensureRunning（游客启动时等核心，见 LCAppModel
     // 的 vpnCoreTask；挡下不等于丢掉）。
     private var deferredEnsureApp: LCAppInfo?
-    // 测速恢复起核心失败时留下的延迟重试链接：只由测速收尾
-    // 写、stop() 清、延迟重试闭包一次性消费；用户测速后亲
-    // 手停核心时 stop() 会清掉它，延迟重试不再把核心起回来。
+    // 旧测速收尾写过的延迟重试链接：只读版测速不再写它，
+    // 仅 stop() 在非测速窗口内清掉它作兼容；用户亲手停核
+    // 心时同样清掉，不留事后起回来的尾巴。
     private var pingRetryLink: String?
-    // 用户/ App 动作计数：测速收尾要不要按测速前状态恢复，
+    // 用户/ App 动作计数：测速收尾要不要碰预热抑制，
     // 就看测速窗口内有没有这类动作。开 App（ensureRunning，
     // 含测速收尾补跑）、源下载开关（ensureRunningForHost）、
     // 设置页亲手起停核心（noteManualCoreToggle）都会 +1；
-    // 预热、延迟重试、测速自身不 +1——它们是自动触发，
-    // 不能反过来推翻用户/ App 在测速窗口内做的决定，也
-    // 不能让收尾后的校验把它们当成用户动作放过。
+    // 预热、测速自身不 +1——它们是自动触发，不能反过来
+    // 推翻用户/ App 在测速窗口内做的决定。
     private var coreActionEpoch = 0
-    // 测速代次：每轮 pingAllNodes 开始时 +1。收尾后 3 秒的
-    // 校验只认同一代次，新一轮测速开始就作废旧校验，免得
-    // 旧校验去 undo 新一轮测速的收尾。
+    // 测速代次：每轮 pingAllNodes 开始时 +1，保留作代次
+    // 区分；只读版已删收尾后校验，不再用它去翻状态。
     private var pingGeneration = 0
-    // 测速恢复成“没在跑”后对预热的持久抑制：v186 只压
+    // 测速结束时核心没在跑时对预热的持久抑制：v186 只压
     // 10 秒，超过窗口、切走再进 App，预热又把核心起回来，
     // 用户认定的就是“测速改了核心”。本标志只在测速收尾
-    // 真正恢复成没在跑时置真，且落盘（UserDefaults），宿
+    // 看到核心没在跑时置真，且落盘（UserDefaults），宿
     // 主进程重启也不丢；只由三类手动动作清掉：亲手起核心、
     // 打开标了 VPN 的 App、亲手拨一次预热开关。预热开关值
     // 本身不动，开关关着时 prewarmIfNeeded 本来就返回，
-    // 本标志不影响它。恢复成在跑时清掉，不留旧抑制。
+    // 本标志不影响它。测速结束时核心在跑就清掉，不留旧抑制。
     private var prewarmSuppressedAfterPing: Bool {
         get { UserDefaults.standard.bool(forKey: "CZFVPNPrewarmSuppressedAfterPing") }
         set { UserDefaults.standard.set(newValue, forKey: "CZFVPNPrewarmSuppressedAfterPing") }
+    }
+    // 设置页显示用：测速后预热是否被压着（开关开着也不预热时，
+    // 界面要把这个状态说出来，不能让用户以为预热坏了）。
+    public var isPrewarmSuppressedAfterPing: Bool {
+        UserDefaults.standard.bool(forKey: "CZFVPNPrewarmSuppressedAfterPing")
     }
     // 测速窗口内被挡下的源下载开关起核心请求：与
     // deferredEnsureApp 同理，测速收尾再补跑一次。
@@ -247,12 +250,11 @@ public final class CZFVPNManager {
     /// 情况（没 App 启动过），核心随宿主进程被系统挂起，
     /// 不额外耗电
     public func prewarmIfNeeded() {
-        // 测速窗口内不预热：此时核心正被测速停掉重测，预热
-        // 起核心会让 pingBatch 再被拒、还打乱测速收尾的恢复
-        // 判断；预热本就是 opportunistic，下次进前台还会再跑
+        // 测速窗口内不预热：预热起核心会让 pingBatch 被拒、
+        // 测速结果不准；预热本就是 opportunistic，下次进前台还会再跑
         vpnCoreLock.lock()
         let pinging = isPinging
-        // 测速恢复成“没在跑”后一直不预热：见字段注释，
+        // 测速结束时核心没在跑就一直不预热：见字段注释，
         // 与时间无关、切走再进、进程重启都不放行，直到
         // 亲手起核心、打开标了 VPN 的 App、亲手拨一次
         // 预热开关三者之一出现。恢复成“在跑”时下面
@@ -298,8 +300,8 @@ public final class CZFVPNManager {
     // 活动节点变了而核心在跑：立刻按新节点重启（改完即生效）；
     // 没有可用节点了就停掉
     private func applyActiveNodeChange() {
-        // 测速窗口内不切：切节点会重启核心，打断测速的停-
-        // 重测-起回；节点选择已写进 UserDefaults，测速收尾
+        // 测速窗口内不切：切节点会重启核心、打断测速；
+        // 节点选择已写进 UserDefaults，测速收尾
         // 会比对测速前后的活动链接、再跟随这次切换（见
         // pingAllNodes 末尾），用户的切换不会丢。
         vpnCoreLock.lock()
@@ -493,10 +495,8 @@ public final class CZFVPNManager {
                 Self.setNodeOverride(current, for: appInfo)
             }
         }
-        // 测速窗口内不开核心：测速正在停核心重测，这时起核
-        // 心会跟测速的 stop/start 插队（两路并发调 libXray 的
-        // 生命周期，起可能失败、还可能把测速刚起回的核心换
-        // 链）。只记下这次请求，测速收尾会补跑它；取消自动
+        // 测速窗口内不开核心：这时起核心会让 pingBatch 被拒、
+        // 测速结果不准。只记下这次请求，测速收尾会补跑它；取消自动
         // 停、记启动时间、补钉节点这三件上面已经做了，不受
         // 挡下影响。
         vpnCoreLock.lock()
@@ -657,10 +657,8 @@ public final class CZFVPNManager {
     public func stop() {
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
-        // 测速后的延迟重试只认这一个链接：用户亲手停核心
-        // 时清掉，延迟重试不再违背用户的意思把它起回来；
-        // 测速窗口内调 stop()（测速自己的停核心分支）不走
-        // 这一支——那时重试链接还没写，写它的收尾在后头。
+        // 旧测速延迟重试链接的清理：只读版测速不再写它，
+        // 这里只在非测速窗口内清掉残留，免得事后起回来。
         if !isPinging { pingRetryLink = nil }
         _ = invoke(method: "stopXray", payload: [:])
         isRunning = false
@@ -680,13 +678,19 @@ public final class CZFVPNManager {
 
     /// 测全部节点的延迟（libXray 的 pingBatch：临时实例并发
     /// 测、每批最多 5 个，经节点真实发一次 HEAD 量往返）。
-    /// 注意 pingBatch 与在跑的核心抢同一把生命周期锁、核心
-    /// 在跑时整批会被拒——所以核心在跑时先停、测完按原样起
-    /// 回来（用户点测速触发，几秒的事）。completion 回主
-    /// 线程，结果与 nodeLinks 同序
-    public func pingAllNodes(completion: @escaping ([CZFNodePingResult]) -> Void) {
+    /// 测速只读：绝不 stop/start 核心、不改核心启停状态，
+    /// 也不在测完事后起回或校验翻盘——测速前核心在跑就
+    /// 保持在跑、没在跑就保持没在跑。代价要明说：核心
+    /// 在跑时 pingBatch 可能因生命周期锁被拒，整批结果
+    /// 会是失败，此时 completion 的 rejected 为真，界面
+    /// 要提示“核心在跑、测速被占用”而不是把节点标不通、
+    /// 更不能用这批结果去清理节点。onPartial 在第一轮
+    /// 测完就回主线程，只含当轮结果，界面只合并其中通
+    /// 的节点先显示，不通的继续重试、等最终 completion。
+    /// completion 回主线程，结果与 nodeLinks 同序。
+    public func pingAllNodes(onPartial: (([CZFNodePingResult]) -> Void)? = nil, completion: @escaping ([CZFNodePingResult], Bool) -> Void) {
         let links = nodeLinks
-        guard !links.isEmpty else { completion([]); return }
+        guard !links.isEmpty else { completion([], false); return }
         // 先在调用线程把测速标志立起来再派后台队列：原来标
         // 志只在后台块里立，调用与后台执行之间的窗口里预
         // 热可能抢跑起核心，测速中就先变在跑；立标志本身
@@ -696,41 +700,27 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
         DispatchQueue.global(qos: .userInitiated).async {
             // 抓状态必须和 start/stop 同一把锁：否则抓到的
-            // wasRunning/runningLink 可能是另一路 stop/start
-            // 做到一半的中间态，恢复就按错状态起/停。
+            // 核心在跑/活动链接可能是另一路 stop/start
+            // 做到一半的中间态，收尾判断就按错状态走。
             // 抓完立刻放锁——锁不包整段测速（见字段注释）。
             self.vpnCoreLock.lock()
             self.isPinging = true
             self.pingRetryLink = nil
             self.pingGeneration += 1
             let epochAtPingStart = self.coreActionEpoch
-            let wasRunning = self.isRunning
-            let originalRunningLink = self.runningLink
-            let originalOwner = self.coreOwnerBundleId
+            let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
             var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/")
-            // 测速窗口内已有用户/ App 动作时，停核心重测分支
-            // 也不立即起回：亲手停核心后这一步起回来，等于
-            // 在收尾之前就把用户的决定 undo 了；收尾同样会
-            // 因 epoch 变化跳过恢复，补跑的开 App 请求会按
-            // 自己的节点把核心起回来（那是 App 的动作）。
-            self.vpnCoreLock.lock()
-            let epochChangedMidPing = self.coreActionEpoch != epochAtPingStart
-            self.vpnCoreLock.unlock()
-            if wasRunning && outcome.batchRejected && !epochChangedMidPing {
-                self.stop()
-                outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/")
-                // 测速停核心再起回来，必须按原来在跑的那条链接起，
-                // 不能按全局活动节点起——否则钉死 App 的 IP 会被
-                // 一次测速悄悄换掉；原来没在跑就按全局起
-                if let orig = originalRunningLink, !orig.isEmpty {
-                    _ = self.start(withLink: orig)
-                    self.coreOwnerBundleId = originalOwner
-                } else {
-                    _ = self.start()
-                }
-            } else {
+            // 核心在跑且整批被拒 = 核心占用测速，不是节点不通：
+            // 测速只读，不停车重测、不重试（重试同样会被拒，
+            // 只会白白拖时间），直接把被拒结果交给界面提示。
+            let pingRejected = coreRunningAtStart && outcome.batchRejected
+            if let onPartial {
+                let firstItems = outcome.items
+                DispatchQueue.main.async { onPartial(firstItems) }
+            }
+            if !pingRejected {
                 // 假不通修法：第一地址（Cloudflare）个别失败时，
                 // 按顺序用另外两个地址单独重测，只认重测通的——
                 // 有些 REALITY 节点对 Cloudflare 那一路不通，但
@@ -739,8 +729,6 @@ public final class CZFVPNManager {
                 // 只用一个重试地址还不够：测速库对 204 空回应
                 // 的判定未必算成功，所以第二重试用返回 200 的
                 // 苹果连通性检测页兜底；三个地址都失败才标不通。
-                // 整批被拒时不走这一步（那是核心占用问题，
-                // 上面停核心重测的分支已经处理）
                 var failedIndices = outcome.items.enumerated().filter { !$0.element.success }.map { $0.offset }
                 for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
                     if failedIndices.isEmpty { break }
@@ -757,67 +745,27 @@ public final class CZFVPNManager {
                     failedIndices = stillFailed
                 }
             }
-            // 测速收尾：无条件按测速前状态恢复——测速本身绝不改
-            // 核心启用状态。上一轮只在收尾做一次立即起回：
-            // stopXray 的关停若是异步的，紧接着的 runXray 会
-            // 因生命周期锁未释放而失败，两次立即重试都撞在
-            // 同一个窗口上，之后再没人补救，核心就永久停在
-            // “未启动”，设置页刷新出来就是上一轮视频里那样。
-            // 本轮收尾分四步，全在同一把锁里判状态、做起停，
-            // 锁外再补跑被挡的请求：
-            // 1) 按测速前状态恢复（测速前在跑：没在跑才按原链
-            //    接起回、归属还原；测速前没在跑：测速窗口里
-            //    被别的触发拉起来的也停掉——但测速窗口内开
-            //    App/预热/切节点本轮已被 isPinging 挡下，这
-            //    里只处理测速自己的停核心分支残留）；
-            // 2) 恢复后仍没在跑、且测速前是在跑的，留一个延
-            //    迟重试链接，2 秒后（关停应已落定）再起一次，
-            //    仍失败就认栽、不再循环；
-            // 3) 测速窗口内用户换过活动节点：恢复完再跟随这
-            //    次切换（applyActiveNodeChange 在测速窗口内
-            //    被挡下时节点选择已写进 UserDefaults）；
-            // 4) 测速窗口内被挡下的开 App 请求：恢复完补跑
-            //    一次 ensureRunning（若它带钉死节点，优先于
-            //    第 3 步的全局切换，故有补跑时跳过第 3 步）。
+            // 测速收尾（只读版）：测速本身绝不动核心启停，
+            // 没有恢复、没有事后重试、没有校验翻盘。收尾只做
+            // 三件与核心启停无关的事：
+            // 1) 没用户动作时，把测速结束时的核心状态记成
+            //    预热抑制（在跑就清、没在跑就置），这样测速
+            //    后切回前台，预热不会把停着的核心悄悄起回来；
+            //    有用户动作时不碰抑制，亲手起停/开 App 的路
+            //    径自己会清或保留；
+            // 2) 测速窗口内被挡下的开 App / 源下载请求、以及
+            //    用户换过的活动节点，在测速结束后补跑一次——
+            //    这些是用户/App 自己的动作，不是测速在动核心；
+            // 3) 把结果和被拒标志交给 completion，界面据此
+            //    决定要不要提示“核心占用”以及要不要禁清理。
             var deferredApp: LCAppInfo?
             var deferredHost = false
             var postPingActiveLink = prePingActiveLink
-            var retryLink: String?
-            // 测速窗口内有没有用户/ App 动作（亲手起停、开 App、
-            // 源下载开关）：有，收尾就不再按测速前状态恢复，
-            // 否则会把用户在测速窗口内亲手做的决定 undo 回去
-            // （测速中亲手停核心，测完又被起回来；或反过来）。
-            // 没动作时才按测速前状态恢复，并把恢复结果记成
-            // 预热抑制：恢复成没在跑就置抑制、恢复成在跑就
-            // 清掉，与时间无关；有动作时不碰抑制——亲手起核
-            // 心、开 App 的路径自己会清，亲手停核心则有意
-            // 不清（见 noteManualCoreToggle）。
             self.vpnCoreLock.lock()
             let epochChanged = self.coreActionEpoch != epochAtPingStart
             if !epochChanged {
-                if wasRunning {
-                    if !self.isRunning {
-                        if let orig = originalRunningLink, !orig.isEmpty {
-                            let ok = self.start(withLink: orig)
-                            if ok {
-                                self.coreOwnerBundleId = originalOwner
-                            } else {
-                                retryLink = orig
-                            }
-                        } else {
-                            let ok = self.start()
-                            if !ok, !self.nodeLink.isEmpty {
-                                retryLink = self.nodeLink
-                            }
-                        }
-                    }
-                } else if self.isRunning {
-                    self.stop()
-                }
                 self.prewarmSuppressedAfterPing = !self.isRunning
             } else {
-                // 用户动作优先：不再恢复，免得把用户在测速
-                // 窗口内亲手做的决定 undo 回去；抑制不碰。
                 self.pingRetryLink = nil
             }
             postPingActiveLink = self.nodeLink
@@ -825,47 +773,6 @@ public final class CZFVPNManager {
             self.deferredEnsureApp = nil
             deferredHost = self.deferredHostEnsure
             self.deferredHostEnsure = false
-            // isPinging 先不放：同步重试期间仍挡预热/开 App，
-            // 免得重试和自动触发插队；重试完、放标志前，
-            // 核心状态已经是最终状态。
-            self.vpnCoreLock.unlock()
-            if let retryLink, !epochChanged {
-                // 同步重试（修 1 号问题：测速后核心状态翻了）：
-                // 旧逻辑是收尾起回失败就留一个 2 秒后的延迟
-                // 重试、再加一个 3 秒后的校验，completion 却
-                // 立刻回主线程刷新 UI——用户在 UI 上看到的
-                // 是“已翻”的中间态，2/3 秒后核心又悄悄翻
-                // 回来，UI 还不刷新，看起来就是测速改了核心。
-                // 现改为在 completion 之前、后台线程里同步
-                // 重试：最多 4 次、每次隔 0.5 秒（等 stopXray
-                // 异步落定），起回来就清抑制、还原归属；
-                // 4 次都失败就认栽、不再在 completion 之后
-                // 悄悄起回来，UI 看到的就是最终状态。
-                var restored = false
-                for _ in 0..<4 {
-                    self.vpnCoreLock.lock()
-                    let epochNow = self.coreActionEpoch
-                    let runningNow = self.isRunning
-                    self.vpnCoreLock.unlock()
-                    // 重试窗口内用户亲手动过核心就停手，不把
-                    // 他的决定 undo 回去；已在跑也不是重试
-                    // 的功劳，不碰归属和抑制。
-                    if epochNow != epochAtPingStart { break }
-                    if runningNow { break }
-                    Thread.sleep(forTimeInterval: 0.5)
-                    if self.start(withLink: retryLink) { restored = true; break }
-                }
-                if restored {
-                    self.vpnCoreLock.lock()
-                    self.coreOwnerBundleId = originalOwner
-                    self.prewarmSuppressedAfterPing = false
-                    self.vpnCoreLock.unlock()
-                }
-                self.vpnCoreLock.lock()
-                self.pingRetryLink = nil
-                self.vpnCoreLock.unlock()
-            }
-            self.vpnCoreLock.lock()
             self.isPinging = false
             self.vpnCoreLock.unlock()
             if let deferredApp {
@@ -877,7 +784,7 @@ public final class CZFVPNManager {
                 self.ensureRunningForHost()
             }
             let items = outcome.items
-            DispatchQueue.main.async { completion(items) }
+            DispatchQueue.main.async { completion(items, pingRejected) }
         }
     }
 
@@ -1109,7 +1016,7 @@ public final class CZFVPNManager {
         guard Self.isHostProxyEnabled else { return }
         // 源下载开关在测速窗口内打开时也不直接起核心：它
         // 和开 App 一样是用户动作，测速收尾再补跑，免得测
-        // 速窗口内起核心跟测速的停/起插队、测完状态翻掉。
+        // 速窗口内起核心让 pingBatch 被拒、测速结果不准。
         vpnCoreLock.lock()
         let pinging = isPinging
         if pinging {
