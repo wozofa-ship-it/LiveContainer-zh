@@ -513,6 +513,22 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     //     initDead10ccFix();
     // }
     // （原“防终止”开关已移除：实测无保活作用，保持不启用）
+    // 例外：多开隔离容器必须重新启用钥匙串/AppGroup 钩子。
+    // 根因实证（2026-10-27 Muse/Muse5）：v189/v190 只改了容器
+    // plist 里的 isolateAppGroup/keychainGroupId，但上面两个钩子
+    // 全局禁用后，运行时根本没人读这些值——钥匙串仍走原访问组、
+    // App Group 仍走真实共享路径，新空容器一启动就从共享钥匙串/
+    // App Group 里把旧登录态读回来，表现为“登一个另一个自动登”。
+    // 只对 isolateAppGroup==true 的容器开这两个钩子：单开 App
+    // 保持 2026-10-19 后的行为不变，不会把终止问题带回来；
+    // 多开的新实例改走自己的钥匙串组与 HOME/LCAppGroup，旧实例
+    // 继续走原存储，两边各登各的。代价先说清：开钩子后新实例
+    // 看不到旧共享钥匙串/App Group 里的旧登录，需要重登一次，
+    // 这是隔离生效的表现，不是又坏了。
+    if ([guestContainerInfo[@"isolateAppGroup"] boolValue]) {
+        SecItemGuestHooksInit();
+        NSFMGuestHooksInit();
+    }
 
     if(isLiveProcess) {
         NSURLSCGuestHooksInit();
