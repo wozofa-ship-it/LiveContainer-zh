@@ -117,6 +117,7 @@ struct LCSettingsView: View {
     @State var vpnPinging = false
     @State var vpnPingRejected = false
     @State var vpnPrewarmSuppressed = false
+    @State var vpnCoreLog: [String] = []
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     
     @EnvironmentObject private var sharedModel : SharedModel
@@ -665,6 +666,13 @@ struct LCSettingsView: View {
                     .onAppear {
                         refreshVPNState()
                     }
+                    // 诊断日志：最近 12 条起停/测速记录，复现后
+                    // 截图即定位是谁动了核心；诊断版才显示。
+                    if !vpnCoreLog.isEmpty {
+                        Text(vpnCoreLog.joined(separator: "\n"))
+                            .font(.system(size: 10).monospaced())
+                            .foregroundStyle(.gray)
+                    }
                     Toggle(isOn: $vpnPrewarm) {
                         HStack {
                             // 只动这两处图标观感：底色统一降到 0.85 不透明度，
@@ -998,6 +1006,7 @@ struct LCSettingsView: View {
         vpnStatusMessage = CZFVPNManager.shared.lastError
         vpnHostProxy = CZFVPNManager.isHostProxyEnabled
         vpnPrewarmSuppressed = CZFVPNManager.shared.isPrewarmSuppressedAfterPing
+        vpnCoreLog = Array(CZFVPNManager.shared.coreLogLines.suffix(12))
         // 内存里的测速结果被清空（增删/导入/排序都会清）时，
         // 从落盘缓存按节点内容重建，没测过的节点不显示
         if vpnPingResults.isEmpty && !vpnPinging {
