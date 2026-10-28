@@ -344,27 +344,34 @@ enum AltStoreSourceLoader {
     }
     
     private static func decodeSource(from data: Data, baseURL: URL) throws -> AltStoreSource {
+        // 日期格式器每轮解码只建一次：原来每个日期字段、
+        // 每个版本日期都新建 ISO8601 + DateFormatter，源里
+        // App 多就建一堆。不改成静态共享——DateFormatter
+        // 不是线程安全的，解码可能不在主线程跑；每轮自带
+        // 一份、同一轮内复用，JSON 解码本身是顺序的，
+        // 同一轮内不存在并发改格式器的情况。
+        let isoFormatter = ISO8601DateFormatter()
+        let shortFormatter = DateFormatter()
+        shortFormatter.dateFormat = "yyyy-MM-dd"
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom({ decoder in
             let container = try decoder.singleValueContainer()
             let rawValue = try container.decode(String.self)
-            if let isoDate = ISO8601DateFormatter().date(from: rawValue) {
+            if let isoDate = isoFormatter.date(from: rawValue) {
                 return isoDate
             }
-            let shortFormatter = DateFormatter()
-            shortFormatter.dateFormat = "yyyy-MM-dd"
             if let shortDate = shortFormatter.date(from: rawValue) {
                 return shortDate
             }
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid date format: \(rawValue)")
         })
-        
+
         let response = try decoder.decode(AltStoreSourceResponse.self, from: data)
         guard let name = response.name else {
             throw NSError(domain: "AltStoreSource", code: 0, userInfo: [NSLocalizedDescriptionKey: "lc.sources.error.malformed".loc])
         }
         let apps = (response.apps ?? []).compactMap { appResponse in
-            buildApp(from: appResponse, baseURL: baseURL, fallbackTint: response.tintColor)
+            buildApp(from: appResponse, baseURL: baseURL, fallbackTint: response.tintColor, isoFormatter: isoFormatter, shortFormatter: shortFormatter)
         }
         return AltStoreSource(
             name: name,
@@ -379,14 +386,14 @@ enum AltStoreSourceLoader {
         )
     }
     
-    private static func buildApp(from response: AltStoreSourceAppResponse, baseURL: URL, fallbackTint: String?) -> AltStoreSourceApp? {
+    private static func buildApp(from response: AltStoreSourceAppResponse, baseURL: URL, fallbackTint: String?, isoFormatter: ISO8601DateFormatter, shortFormatter: DateFormatter) -> AltStoreSourceApp? {
         guard let name = response.name,
               let bundleIdentifier = response.bundleIdentifier else {
             return nil
         }
-        
-        let versions = buildVersions(from: response, baseURL: baseURL)
-        let latest = versions.first ?? buildLegacyVersion(from: response, baseURL: baseURL)
+
+        let versions = buildVersions(from: response, baseURL: baseURL, isoFormatter: isoFormatter, shortFormatter: shortFormatter)
+        let latest = versions.first ?? buildLegacyVersion(from: response, baseURL: baseURL, isoFormatter: isoFormatter, shortFormatter: shortFormatter)
         
         return AltStoreSourceApp(
             name: name,
@@ -403,7 +410,7 @@ enum AltStoreSourceLoader {
         )
     }
     
-    private static func buildVersions(from response: AltStoreSourceAppResponse, baseURL: URL) -> [AltStoreSourceAppVersion] {
+    private static func buildVersions(from response: AltStoreSourceAppResponse, baseURL: URL, isoFormatter: ISO8601DateFormatter, shortFormatter: DateFormatter) -> [AltStoreSourceAppVersion] {
         guard let versions = response.versions else { return [] }
         return versions.compactMap { version in
             guard let versionString = version.version,
@@ -414,7 +421,7 @@ enum AltStoreSourceLoader {
             return AltStoreSourceAppVersion(
                 version: versionString,
                 buildVersion: version.buildVersion,
-                releaseDate: parseDate(version.date),
+                releaseDate: parseDate(version.date, isoFormatter: isoFormatter, shortFormatter: shortFormatter),
                 localizedDescription: version.localizedDescription,
                 downloadURL: downloadURL,
                 size: version.size
@@ -422,7 +429,7 @@ enum AltStoreSourceLoader {
         }
     }
     
-    private static func buildLegacyVersion(from response: AltStoreSourceAppResponse, baseURL: URL) -> AltStoreSourceAppVersion? {
+    private static func buildLegacyVersion(from response: AltStoreSourceAppResponse, baseURL: URL, isoFormatter: ISO8601DateFormatter, shortFormatter: DateFormatter) -> AltStoreSourceAppVersion? {
         guard let versionString = response.version,
               let downloadURLString = response.downloadURL,
               let downloadURL = url(for: downloadURLString, baseURL: baseURL) else {
@@ -431,20 +438,18 @@ enum AltStoreSourceLoader {
         return AltStoreSourceAppVersion(
             version: versionString,
             buildVersion: nil,
-            releaseDate: parseDate(response.versionDate),
+            releaseDate: parseDate(response.versionDate, isoFormatter: isoFormatter, shortFormatter: shortFormatter),
             localizedDescription: response.versionDescription ?? response.localizedDescription,
             downloadURL: downloadURL,
             size: nil
         )
     }
     
-    private static func parseDate(_ value: String?) -> Date? {
+    private static func parseDate(_ value: String?, isoFormatter: ISO8601DateFormatter, shortFormatter: DateFormatter) -> Date? {
         guard let value else { return nil }
-        if let isoDate = ISO8601DateFormatter().date(from: value) {
+        if let isoDate = isoFormatter.date(from: value) {
             return isoDate
         }
-        let shortFormatter = DateFormatter()
-        shortFormatter.dateFormat = "yyyy-MM-dd"
         return shortFormatter.date(from: value)
     }
     

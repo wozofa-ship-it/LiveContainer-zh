@@ -945,18 +945,35 @@ class AppInfoProvider {
         }
     }
 
+    /// 供设置页定时开关写盘时调用（见 LCAppSettingsView
+    /// .saveSchedMinSettings）：确保定时器在跑，重复调无害；
+    /// 关掉唯一一个定时后，下一轮检查发现无定时会自己停表。
+    @objc public func czfKickSchedMinTimer() {
+        startScheduledMinimizeOpenTimer()
+    }
+
+    // 定时器不再常驻：check 里没有任何 App 开着定时就停表，
+    // 下次开定时时由设置页 kick 重起；已开但今天已开过的
+    // 不算“没有”，明天还得靠它触发，所以只认开关，不认
+    // 今日已开标记。日期格式器只建一次，不再每 30 秒新建。
+    private static let schedMinDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd"
+        return f
+    }()
+
     private func checkScheduledMinimizeOpen() {
         let defaults = UserDefaults.standard
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd"
-        let today = formatter.string(from: Date())
+        let today = Self.schedMinDayFormatter.string(from: Date())
         let cal = Calendar.current
         let now = Date()
         let nowTotal = cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now)
         let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        var hasEnabled = false
         for app in allApps {
             guard let bundleId = app.appInfo.bundleIdentifier() else { continue }
             guard defaults.bool(forKey: "CZFSchedMinEnabled-\(bundleId)") else { continue }
+            hasEnabled = true
             if defaults.string(forKey: "CZFSchedMinLastDate-\(bundleId)") == today { continue }
             let target = defaults.integer(forKey: "CZFSchedMinMinutes-\(bundleId)")
             if nowTotal < target { continue }
@@ -966,6 +983,12 @@ class AppInfoProvider {
             defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
             czfMinimizeOpenApp(dataUUID: dataUUID, bundlePath: bundlePath)
             break
+        }
+        // 一个定时都没开：停掉定时器，不再每 30 秒空扫；
+        // 下次开定时时由设置页 kick 重起。
+        if !hasEnabled {
+            czfSchedMinTimer?.invalidate()
+            czfSchedMinTimer = nil
         }
     }
 

@@ -211,6 +211,12 @@ struct LCAppSettingsView: View {
         defaults.set(minutes, forKey: "CZFSchedMinMinutes-\(bid)")
         // 改设置后清掉今日已开标记，让新时间今天就能生效
         defaults.removeObject(forKey: "CZFSchedMinLastDate-\(bid)")
+        // 定时器只在有定时任务时跑：开定时后把它踢起来，
+        // 否则之前停掉的表不会自己恢复；关定时不踢，下一轮
+        // 检查发现无定时会自己停表。
+        if schedMinEnabled {
+            MultitaskDockManager.shared.czfKickSchedMinTimer()
+        }
     }
     
     var body: some View {

@@ -22,10 +22,17 @@ struct CZFSignatureExpiry: Identifiable {
         return "剩 \(daysLeft) 天"
     }
 
-    var dateText: String {
+    // 只在主线程渲染时调（续签区行视图），静态格式器不再
+    // 每次渲染新建；DateFormatter 本身不是线程安全的，别
+    // 在后台线程调 dateText。
+    private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "M月d日"
-        return f.string(from: expiryDate)
+        return f
+    }()
+
+    var dateText: String {
+        Self.dateFormatter.string(from: expiryDate)
     }
 }
 
@@ -49,10 +56,39 @@ enum CZFSignatureExpiryReader {
         return entries
     }
 
+    // 到期日缓存：续签区每次回前台都全量重读各 App 的
+    // mobileprovision、CMS 里扫 plist，到期日只有重签才
+    // 会变。按（文件路径 + 修改时间 + 大小）缓存，重签
+    // 必然改大小或修改时间，下一轮一定重读，不会读旧；
+    // 文件不存在时不缓存，每次仍会试读一次。loadAll 在
+    // 后台线程调，缓存读写加锁（DateFormatter 那边是主
+    // 线程渲染，不走这把锁）。
+    private static let expiryCacheLock = NSLock()
+    private static var expiryCache: [String: (mtime: Date, size: Int, date: Date?)] = [:]
+
+    private static func cachedExpiryDate(inFile path: String) -> Date? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.intValue else {
+            return expiryDate(inFile: path)
+        }
+        expiryCacheLock.lock()
+        let cached = expiryCache[path]
+        expiryCacheLock.unlock()
+        if let cached, cached.mtime == mtime, cached.size == size {
+            return cached.date
+        }
+        let date = expiryDate(inFile: path)
+        expiryCacheLock.lock()
+        expiryCache[path] = (mtime, size, date)
+        expiryCacheLock.unlock()
+        return date
+    }
+
     static func loadAll(entries: [(name: String, bundlePath: String)]) -> [CZFSignatureExpiry] {
         var out: [CZFSignatureExpiry] = []
         for e in entries {
-            guard let date = expiryDate(inFile: "\(e.bundlePath)/embedded.mobileprovision") else { continue }
+            guard let date = cachedExpiryDate(inFile: "\(e.bundlePath)/embedded.mobileprovision") else { continue }
             out.append(CZFSignatureExpiry(name: e.name, bundlePath: e.bundlePath, expiryDate: date))
         }
         return out.sorted { $0.expiryDate < $1.expiryDate }
