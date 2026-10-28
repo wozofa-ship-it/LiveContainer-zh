@@ -1003,6 +1003,12 @@ class AppInfoProvider {
     // 只关“已最小化满设定时长”的窗口：可见的、画中画的、已关的都不动；
     // 恢复可见后计时清零，重最小化重新计时间。60 秒一轮，误差
     // 不超过一轮；宿主被彻底关掉时定时器不跑，不存在补关误伤。
+    // 定时器不再常驻：checkMinAutoClose 发现没有最小化窗口
+    // 计时（或开关已关）就停掉；窗口最小化时由 czfKickMinAutoCloseTimer
+    // 重新起——最小化必经 DecoratedAppSceneViewController.minimizeWindow
+    //（标题栏按钮、快捷栏最小化全部、Swift 侧 minimizeWindow 都走它），
+    // 该方法完成隐藏后调这个 kick，start 本身幂等、重复调只会
+    // 重建同一个定时器，不会叠加。
     private func startMinAutoCloseTimer() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1014,11 +1020,19 @@ class AppInfoProvider {
         }
     }
 
+    /// 供 ObjC 侧最小化完成时调用（见 DecoratedAppSceneViewController
+    /// .minimizeWindow）：确保自动关定时器在跑，重复调无害。
+    @objc public func czfKickMinAutoCloseTimer() {
+        startMinAutoCloseTimer()
+    }
+
     private func checkMinAutoClose() {
         let defaults = LCUtils.appGroupUserDefault
         let enabled = defaults.object(forKey: "CZFMinAutoCloseEnabled") == nil || defaults.bool(forKey: "CZFMinAutoCloseEnabled")
         guard enabled else {
             czfMinimizedSince.removeAll()
+            czfMinAutoCloseTimer?.invalidate()
+            czfMinAutoCloseTimer = nil
             return
         }
         // 自动关时长（CZF，可调）：设置页“最小化省电”里选
@@ -1059,6 +1073,12 @@ class AppInfoProvider {
         for uuid in toClose {
             czfMinimizedSince.removeValue(forKey: uuid)
             closeAppWindow(uuid: uuid)
+        }
+        // 没有最小化窗口在计时了：停掉定时器，不再每 60 秒
+        // 空扫 apps；下次窗口最小化时由 kick 重新起。
+        if czfMinimizedSince.isEmpty {
+            czfMinAutoCloseTimer?.invalidate()
+            czfMinAutoCloseTimer = nil
         }
     }
 
@@ -1339,6 +1359,27 @@ class AppInfoProvider {
         action()
     }
 
+    // 起手点落在控件/滑块类视图上时，全局手势不接：视频
+    // 进度条一般在底部横跨全屏，从边缘 44pt 附近起手横拖
+    // 本来正落在边缘区 + 启用带双命中区，位移一过门槛就
+    // 触发面板/切 App，还跟 App 手势同时识别两边同动。
+    // 顺着触摸视图往上查祖先：UIControl（UISlider、按钮等）
+    // 全算，类名含 slider/scrub/seek/progress 的自定义
+    // 进度条（非 UIControl、自带 pan 的那种）也算；只拦
+    // 全局 pan 这一路，不动面板自身的边缘识别器。
+    private func czfTouchOnControlOrSlider(_ touch: UITouch) -> Bool {
+        var view = touch.view
+        while let v = view {
+            if v is UIControl { return true }
+            let name = String(describing: type(of: v)).lowercased()
+            if name.contains("slider") || name.contains("scrub") || name.contains("seek") || name.contains("progress") {
+                return true
+            }
+            view = v.superview
+        }
+        return false
+    }
+
     // 全部接收、只记录起手位置；触发判定在 handler 里按起手+落点做
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         // 屏幕边缘识别器（栏隐藏时的 UIScreenEdgePan）：按启用带
@@ -1351,6 +1392,10 @@ class AppInfoProvider {
         }
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
               let window = gestureRecognizer.view as? UIWindow else { return true }
+        if czfTouchOnControlOrSlider(touch) {
+            globalSwipeStartEdge = 0
+            return false
+        }
         let loc = touch.location(in: window)
         let height = window.bounds.height
         globalSwipeStartInBand = loc.y >= height * Self.czfEdgeBandTop && loc.y <= height * Self.czfEdgeBandBottom

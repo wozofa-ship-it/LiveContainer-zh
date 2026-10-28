@@ -1105,7 +1105,10 @@ struct LCSettingsView: View {
     // 进度按批回主线程，按钮显示“测速 3/10”/
     // “重试 2/5”，不再只有一句测速中。
     func startVPNPing() {
-        vpnPingResults = [:]
+        // 测速期间保留旧结果不清空：原来一开测就清表，
+        // 测速中界面是空的、要等整轮测完才回来；现在旧
+        // 结果先留着（按钮进度另行显示“测速 3/10”），
+        // 测完由 completion 整表替换，被拒也不覆写。
         vpnPinging = true
         vpnPingRejected = false
         vpnPingDone = 0
@@ -1127,10 +1130,9 @@ struct LCSettingsView: View {
                 // 被拒那批全是失败，不是节点真不通：
                 // 不覆写界面结果、不落盘，免得污染上次
                 // 真测结果、清理/排序按假不通走；只出警告，
-                // 清理/排序继续用上次真测结果。先清掉测速
-                // 开始时已清空、测速中只合了零星成功项的
-                // 表，刷新时从缓存恢复完整上次真结果。
-                vpnPingResults = [:]
+                // 清理/排序继续用上次真测结果。测速开始
+                // 时已不再清空旧表，这里也不清空，直接
+                // 保留旧结果即可，不用再靠缓存恢复。
                 vpnPingRejected = true
             } else {
                 var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]

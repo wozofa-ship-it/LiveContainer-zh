@@ -193,10 +193,24 @@ final class AltStoreSourcesViewModel: ObservableObject {
             return
         }
         isRefreshingAll = true
-        for url in sources.map({ $0.url }) {
-            await refreshSource(url: url)
+        defer { isRefreshingAll = false }
+        // 原来 for 循环一个个 await：源多时等待时间累加。
+        // 改成每 4 个一组并行刷：组内网络请求并行，组间顺序。
+        // refreshSource 是 MainActor 隔离的，sources 的读写
+        // 都在主 actor 上串行，网络 await 会挂起让出，不会
+        // 出现多任务同时改数组的竞态；缓存已在 loadStoredSources
+        // 里先显示，刷新期间旧内容不清空，失败只记 error。
+        let urls = sources.map({ $0.url })
+        var start = 0
+        while start < urls.count {
+            let chunk = Array(urls[start..<min(start + 4, urls.count)])
+            await withTaskGroup(of: Void.self) { group in
+                for url in chunk {
+                    group.addTask { await self.refreshSource(url: url) }
+                }
+            }
+            start += 4
         }
-        isRefreshingAll = false
     }
     
     private func refreshSource(url: URL) async {

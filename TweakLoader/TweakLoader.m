@@ -176,6 +176,26 @@ static BOOL gCZFStartInBand = YES;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;
 
+// 起手点落在控件/滑块类视图上时，两路手势都不接（与宿主
+// 侧 czfTouchOnControlOrSlider 同款）：视频进度条在底部
+// 横跨全屏，边缘起手横拖会误触发；拦截器不接，App 那路
+// 触摸就不会被取消，观察 pan 不接，面板信号也不会发。
+// 顺着触摸视图往上查祖先：UIControl 全算，类名含
+// slider/scrub/seek/progress 的自定义进度条也算。
+static BOOL CZFTouchOnControlOrSlider(UITouch *touch) {
+    UIView *view = touch.view;
+    while (view) {
+        if ([view isKindOfClass:[UIControl class]]) return YES;
+        NSString *name = [NSStringFromClass([view class]) lowercaseString];
+        if ([name rangeOfString:@"slider"].location != NSNotFound ||
+            [name rangeOfString:@"scrub"].location != NSNotFound ||
+            [name rangeOfString:@"seek"].location != NSNotFound ||
+            [name rangeOfString:@"progress"].location != NSNotFound) return YES;
+        view = view.superview;
+    }
+    return NO;
+}
+
 // 边缘带拦截识别器（手势双触发修正）：只负责一件事——起手
 // 在边缘带（44pt 内 + 高度 70%–90%，见 shouldReceiveTouch
 // 分支）且约 6pt 内横向占优时，立刻认是手势并取消 App 那路
@@ -313,6 +333,12 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     UIWindow *window = (UIWindow *)gestureRecognizer.view;
     if (![window isKindOfClass:[UIWindow class]]) return NO;
+    // 控件/进度条起手：观察 pan 与拦截器都不接——拦截器
+    // 不接就不会取消 App 触摸，进度条拖动完整归 App。
+    if (CZFTouchOnControlOrSlider(touch)) {
+        gCZFStartEdge = 0;
+        return NO;
+    }
     CGPoint loc = [touch locationInView:window];
     CGFloat width = window.bounds.size.width;
     CGFloat height = window.bounds.size.height;

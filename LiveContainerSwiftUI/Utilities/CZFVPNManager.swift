@@ -764,7 +764,8 @@ public final class CZFVPNManager {
             let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
-            var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/", phase: "测速", onProgress: onProgress)
+            var conversionCache: [String: String] = [:]
+            var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/", phase: "测速", onProgress: onProgress, conversionCache: &conversionCache)
             // 核心在跑且整批被拒 = 核心占用测速，不是节点不通：
             // 测速只读，不停车重测、不重试（重试同样会被拒，
             // 只会白白拖时间），直接把被拒结果交给界面提示。
@@ -786,7 +787,7 @@ public final class CZFVPNManager {
                 for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
                     if failedIndices.isEmpty { break }
                     let failedLinks = failedIndices.map { links[$0] }
-                    let retry = self.runPingBatches(links: failedLinks, url: retryURL, phase: "重试", onProgress: onProgress)
+                    let retry = self.runPingBatches(links: failedLinks, url: retryURL, phase: "重试", onProgress: onProgress, conversionCache: &conversionCache)
                     var stillFailed: [Int] = []
                     for (j, idx) in failedIndices.enumerated() {
                         if retry.items[j].success {
@@ -863,13 +864,14 @@ public final class CZFVPNManager {
             let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
-            var outcome = self.runPingBatches(links: [link], url: "https://cp.cloudflare.com/", phase: "测速", onProgress: nil)
+            var conversionCache: [String: String] = [:]
+            var outcome = self.runPingBatches(links: [link], url: "https://cp.cloudflare.com/", phase: "测速", onProgress: nil, conversionCache: &conversionCache)
             let pingRejected = coreRunningAtStart && outcome.batchRejected
             if !pingRejected {
                 var failed = outcome.items.first?.success == true ? [] : [0]
                 for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
                     if failed.isEmpty { break }
-                    let retry = self.runPingBatches(links: [link], url: retryURL, phase: "重试", onProgress: nil)
+                    let retry = self.runPingBatches(links: [link], url: retryURL, phase: "重试", onProgress: nil, conversionCache: &conversionCache)
                     if retry.items.first?.success == true {
                         outcome.items[0] = retry.items[0]
                         failed = []
@@ -907,18 +909,30 @@ public final class CZFVPNManager {
     }
 
     /// 逐批调 pingBatch（同步阻塞，必须在后台线程调）
-    private func runPingBatches(links: [String], url: String, phase: String = "", onProgress: ((Int, Int, String) -> Void)? = nil) -> (items: [CZFNodePingResult], batchRejected: Bool) {
+    /// conversionCache：同一轮测速内复用链接转换结果。
+    /// pingAllNodes/pingSingleNode 要对不通节点走三轮地址
+    /// （Cloudflare → gstatic → Apple），原来每轮都对每个
+    /// 链接重新调一次 convertShareLinksToXrayJson；转换结果
+    /// 只取决于链接本身，与测速地址无关，所以一轮内缓存
+    /// 一次即可，缓存只活在当次测速调用内，不跨轮复用。
+    private func runPingBatches(links: [String], url: String, phase: String = "", onProgress: ((Int, Int, String) -> Void)? = nil, conversionCache: inout [String: String]) -> (items: [CZFNodePingResult], batchRejected: Bool) {
         var items = [CZFNodePingResult?](repeating: nil, count: links.count)
         var batchRejected = false
         // 先把每个链接转成出站 JSON，转不动的直接记失败
         var pending: [(index: Int, xrayJson: String)] = []
         for (i, link) in links.enumerated() {
-            let conv = invoke(method: "convertShareLinksToXrayJson", payload: ["text": Self.normalizedShareLink(link)])
+            let normalized = Self.normalizedShareLink(link)
+            if let cached = conversionCache[normalized] {
+                pending.append((i, cached))
+                continue
+            }
+            let conv = invoke(method: "convertShareLinksToXrayJson", payload: ["text": normalized])
             if let conv, conv["success"] as? Bool == true,
                let data = conv["data"] as? [String: Any],
                let outbounds = data["outbounds"] as? [[String: Any]], !outbounds.isEmpty,
                let jsonData = try? JSONSerialization.data(withJSONObject: ["outbounds": outbounds]),
                let jsonStr = String(data: jsonData, encoding: .utf8) {
+                conversionCache[normalized] = jsonStr
                 pending.append((i, jsonStr))
             } else {
                 items[i] = CZFNodePingResult(success: false, delay: 10000)

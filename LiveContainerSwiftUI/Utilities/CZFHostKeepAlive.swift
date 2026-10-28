@@ -68,10 +68,36 @@ final class CZFHostKeepAlive {
     /// 白名单读法与 LCAppSettingsView.readKeepAliveList 同款：先读
     /// tweakPath，读到即算；两夹文件都不存在 = 全保。空文件读出空名单，
     /// 不是“不存在”，这时名单外的游客一律不保。
+    /// 缓存：原来每次 refresh() 都把文件全文读一遍，而 refresh
+    /// 在前后台切换、音频中断、游客注册时都会触发。现按
+    /// （文件路径 + 修改时间 + 大小）缓存名单，文件没变就
+    /// 不再读全文；设置页写名单必然改大小或修改时间，所
+    /// 以写后下一次 refresh 一定重读，不会读到旧名单。
+    /// refresh 只在主队列调（观察者 queue 均为 .main），
+    /// 缓存只在主队列读写，不另加锁。
+    private static var keepAliveListCacheURL: URL?
+    private static var keepAliveListCacheMtime: Date?
+    private static var keepAliveListCacheSize: Int?
+    private static var keepAliveListCache: [String]?
     private static func keepAliveNeeded(for bid: String) -> Bool {
         for url in [LCPath.tweakPath, LCPath.lcGroupTweakPath].map({ $0.appendingPathComponent("CZFKeepAliveApps.txt") }) {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let mtime = attrs[.modificationDate] as? Date,
+                  let size = (attrs[.size] as? NSNumber)?.intValue else {
+                continue
+            }
+            if keepAliveListCacheURL == url,
+               keepAliveListCacheMtime == mtime,
+               keepAliveListCacheSize == size,
+               let cached = keepAliveListCache {
+                return cached.contains(bid)
+            }
             if let content = try? String(contentsOf: url, encoding: .utf8) {
                 let list = content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                keepAliveListCacheURL = url
+                keepAliveListCacheMtime = mtime
+                keepAliveListCacheSize = size
+                keepAliveListCache = list
                 return list.contains(bid)
             }
         }

@@ -480,6 +480,10 @@
         // PiP 不走这里（minimizeWindowPiP 另有路），画中画不受影响。
         self.czfMinimized = YES;
         [self czfApplyMinimizedForeground];
+        // 最小化自动关定时器只在有最小化窗口时跑：这里是
+        // 所有最小化的必经之路，完成后把定时器踢起来；
+        // start 本身幂等，Swift 侧再调也不会叠加。
+        [[MultitaskDockManager shared] czfKickMinAutoCloseTimer];
     }];
 }
 
