@@ -213,8 +213,13 @@ struct LCAppSettingsView: View {
         defaults.removeObject(forKey: "CZFSchedMinLastDate-\(bid)")
         // 定时器只在有定时任务时跑：开定时后把它踢起来，
         // 否则之前停掉的表不会自己恢复；关定时不踢，下一轮
-        // 检查发现无定时会自己停表。
-        if schedMinEnabled {
+        // 检查发现无定时会自己停表。MultitaskDockManager
+        // 带 @available(iOS 16.0, *)，必须包 #available，
+        // 否则整批编译报 'only available in iOS 16.0 or newer'
+        //（98bd25e 构建 #230 唯一红字，照抄 LCAppModel /
+        // CZFHostKeepAlive 的包法）；iOS 16 以下多任务本就
+        // 不存在，跳过是正确行为。
+        if schedMinEnabled, #available(iOS 16.0, *) {
             MultitaskDockManager.shared.czfKickSchedMinTimer()
         }
     }
