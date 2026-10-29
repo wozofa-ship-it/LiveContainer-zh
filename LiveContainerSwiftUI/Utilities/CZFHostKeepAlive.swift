@@ -79,7 +79,11 @@ final class CZFHostKeepAlive {
     private static var keepAliveListCacheMtime: Date?
     private static var keepAliveListCacheSize: Int?
     private static var keepAliveListCache: [String]?
-    private static func keepAliveNeeded(for bid: String) -> Bool {
+    /// 白名单本身：文件存在返回名单，不存在返回 nil（不是空名单）。
+    /// keepAliveNeeded 用它时“不存在 = 全保”；自动关豁免用它时
+    /// “不存在 = 不豁免”，否则没建白名单时所有 App 都永不自动关，
+    /// 默认的自动关就废了——两处语义必须分开，不能共用一个返回值。
+    private static func cachedWhitelist() -> [String]? {
         for url in [LCPath.tweakPath, LCPath.lcGroupTweakPath].map({ $0.appendingPathComponent("CZFKeepAliveApps.txt") }) {
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                   let mtime = attrs[.modificationDate] as? Date,
@@ -90,7 +94,7 @@ final class CZFHostKeepAlive {
                keepAliveListCacheMtime == mtime,
                keepAliveListCacheSize == size,
                let cached = keepAliveListCache {
-                return cached.contains(bid)
+                return cached
             }
             if let content = try? String(contentsOf: url, encoding: .utf8) {
                 let list = content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -98,10 +102,18 @@ final class CZFHostKeepAlive {
                 keepAliveListCacheMtime = mtime
                 keepAliveListCacheSize = size
                 keepAliveListCache = list
-                return list.contains(bid)
+                return list
             }
         }
-        return true
+        return nil
+    }
+    private static func keepAliveNeeded(for bid: String) -> Bool {
+        cachedWhitelist()?.contains(bid) ?? true
+    }
+    /// 供最小化自动关豁免用：只有白名单文件存在、且该 App 在
+    /// 名单里时才豁免；文件不存在时返回 false，自动关照常跑。
+    static func isInKeepAliveWhitelist(for bid: String) -> Bool {
+        cachedWhitelist()?.contains(bid) ?? false
     }
 
     /// 开关/游客数/前后台/白名单任一变化时调：重算该不该播（主队列）。

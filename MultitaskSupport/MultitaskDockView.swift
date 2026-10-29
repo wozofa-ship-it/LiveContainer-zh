@@ -146,6 +146,14 @@ class AppInfoProvider {
     // 开/关只切可见性和位置；开没开以面板视图的 isHidden 为准，不以引用为准
     // 定时最小化打开的轮询定时器（30 秒一轮，只在宿主活着时跑）
     private var czfSchedMinTimer: Timer?
+    // 定时打开当天豁免名单：定时拉起的窗口当天不算自动关、
+    // 也不触发上限弹框，否则定时打开一最小化就进自动关
+    // 计时、满 3 个时还弹框等人点，定时执行就卡住。
+    // 只记当天（yyyyMMdd），次日检查时清掉重算：当天叫回
+    // 再最小化仍豁免，次日恢复正常，不用在每个恢复入口
+    // 逐个清标记；关窗后 uuid 不在运行列表，豁免自然失效。
+    private var czfSchedMinOpenedDay: String?
+    private var czfSchedMinOpenedUUIDs: Set<String> = []
     // 最小化超 30 分钟自动关（CZF）：60 秒一轮，只在宿主活着时跑；
     // 宿主被彻底关掉时不跑，下次打开时运行中列表是空的，无需补查。
     // 键为 appUUID（多开同 App 不同容器各算各的），值是首次看到
@@ -841,6 +849,10 @@ class AppInfoProvider {
     // 化的那个，点了“不开了”就关掉刚开的这个新窗口。
     private func czfEnforceRunningCap(newUUID: String) {
         guard apps.count > 3, !czfCapAlertShowing else { return }
+        // 定时打开不弹框：定时执行时人可能不在手机前，弹框
+        // 没人点就卡住；当天定时拉起的直接按软上限放行（第 4 个
+        // 先留着，与无最小化候选时一致），不关可见窗口。
+        if czfIsSchedMinOpened(uuid: newUUID) { return }
         let candidates = apps.filter { app in
             guard app.appUUID != newUUID,
                   let view = app.view,
@@ -992,9 +1004,31 @@ class AppInfoProvider {
         }
     }
 
+    /// 定时打开当天标记：拉起前就记，注册时上限检查、
+    /// 最小化后自动关检查都认这张名单。
+    private func czfMarkSchedMinOpened(uuid: String) {
+        let today = Self.schedMinDayFormatter.string(from: Date())
+        if czfSchedMinOpenedDay != today {
+            czfSchedMinOpenedDay = today
+            czfSchedMinOpenedUUIDs.removeAll()
+        }
+        czfSchedMinOpenedUUIDs.insert(uuid)
+    }
+
+    private func czfIsSchedMinOpened(uuid: String) -> Bool {
+        let today = Self.schedMinDayFormatter.string(from: Date())
+        if czfSchedMinOpenedDay != today {
+            czfSchedMinOpenedDay = today
+            czfSchedMinOpenedUUIDs.removeAll()
+            return false
+        }
+        return czfSchedMinOpenedUUIDs.contains(uuid)
+    }
+
     // 与快捷栏面板的「最小化打开」同一套路：已在运行直接最小化窗口；
     // 未运行先走 launch URL 拉起，再轮询等窗口出现后最小化。
     private func czfMinimizeOpenApp(dataUUID: String, bundlePath: String) {
+        czfMarkSchedMinOpened(uuid: dataUUID)
         if apps.contains(where: { $0.appUUID == dataUUID }) {
             minimizeWindow(uuid: dataUUID)
             return
@@ -1073,6 +1107,23 @@ class AppInfoProvider {
             }
             // 画中画在播视频：豁免，不计也不关。
             if PiPManager.shared?.isPiP(withDecoratedVC: vc) == true {
+                czfMinimizedSince.removeValue(forKey: app.appUUID)
+                continue
+            }
+            // 保活白名单：豁免，不计也不关。以前白名单只管宿主
+            // 音频保不保，自动关照样关，同一个“保活”两个意思
+            // 打架；现在名单里的最小化窗口自动关直接跳过。
+            // 文件不存在时 isInKeepAliveWhitelist 返回 false，
+            // 自动关照常跑，不会把默认自动关废掉。
+            if let bid = app.appInfo?.bundleIdentifier(), !bid.isEmpty,
+               CZFHostKeepAlive.isInKeepAliveWhitelist(for: bid) {
+                czfMinimizedSince.removeValue(forKey: app.appUUID)
+                continue
+            }
+            // 定时打开当天：豁免，不计也不关。定时拉起就是要
+            // 它在后台待命，最小化满 30 分钟就关等于白开；
+            // 只豁免当天，次日恢复正常（见 czfIsSchedMinOpened）。
+            if czfIsSchedMinOpened(uuid: app.appUUID) {
                 czfMinimizedSince.removeValue(forKey: app.appUUID)
                 continue
             }
