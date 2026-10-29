@@ -782,7 +782,6 @@ struct LCDataManagementView : View {
     // 备份文件夹（「iCloud 备份文件夹」选的那个）时，同一份直接
     // 写进那个文件夹根目录，与 App 备份放一起，不用再手动选位置。
     // 静态：备份 App 的后台流程结束时也顺手刷新一份（自动备份）。
-    @discardableResult
     /// 导出时除 CZF 键外，另带上的 LC 设置键：排序和定时。
     /// 只列设置本身，不带执行记录（LCSchedule*LastDate）和敏感/
     /// 设备相关键（证书数据/密码、外部文件夹书签等），那些不进备份。
@@ -795,6 +794,10 @@ struct LCDataManagementView : View {
         "LCAppSortType", "LCCustomSortOrder",
     ]
 
+    // 注意：@discardableResult 必须紧贴 func 写，中间不能插
+    // static let，否则编译报 attribute 不能用在这条声明上，
+    // 269b523 那次构建 #233 就是这么挂的。
+    @discardableResult
     static func writeCZFSettingsBackup() -> (local: URL?, externalFolderName: String?) {
         let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
         var payload: [String: Any] = [:]
