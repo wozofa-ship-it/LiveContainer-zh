@@ -126,6 +126,7 @@ struct LCSettingsView: View {
     @State var vpnPingTotal = 0
     @State var vpnPingPhase = "测速"
     @State var vpnPrewarmSuppressed = false
+    @State private var showVPNHelp = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     
     @EnvironmentObject private var sharedModel : SharedModel
@@ -139,6 +140,14 @@ struct LCSettingsView: View {
         _store = State(initialValue: LCUtils.store())
     }
     
+    /// 测完后有没有批量操作可做（切到最快/清理不通/按延迟排序
+    /// 任一出现）：批量操作行只在此时才出现，平时不占一行。
+    private var hasVPNBatchActions: Bool {
+        vpnPingResults.contains(where: { $0.value.success && $0.key != vpnActiveIndex })
+            || vpnPingResults.contains(where: { !$0.value.success && $0.key != vpnActiveIndex })
+            || vpnPingResults.count > 1
+    }
+
     var body: some View {
         NavigationView {
             Form {
@@ -621,6 +630,20 @@ struct LCSettingsView: View {
                         }
                         .disabled(vpnPinging || vpnSinglePinging || vpnNodes.isEmpty)
                         .buttonStyle(.borderless)
+                        Spacer()
+                        Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
+                            .font(.footnote)
+                            .foregroundStyle(.gray)
+                    }
+                    .onAppear {
+                        refreshVPNState()
+                    }
+                    // 测完后的批量操作单独放一行：原来启动/测延迟/
+                    // 切最快/清理/排序/被拒提示/状态全挤在一行，
+                    // 按钮一多就互相挤压截断；拆开后主操作行永远
+                    // 只有两个按钮加状态，批量行只在有操作时出现。
+                    if hasVPNBatchActions {
+                    HStack {
                         // 测完后一键切到最快的（只认测通的节点；
                         // 已经是最快时不显示，省得误会）
                         if let fastest = vpnPingResults.filter({ $0.value.success }).min(by: { $0.value.delay < $1.value.delay }), fastest.key != vpnActiveIndex {
@@ -686,31 +709,23 @@ struct LCSettingsView: View {
                             .disabled(vpnPinging || vpnSinglePinging)
                             .buttonStyle(.borderless)
                         }
-                        // 核心占用被拒时的提示：结果不是节点不通，
-                        // 是测速被在跑的核心挡了。以前只给文字，
-                        // 要用户自己停核心再点测延迟；现在一键
-                        // 停核心重测：停核心、刷新、直接重测，
-                        // 重测时核心已停，不会再被拒。
-                        if vpnPingRejected && !vpnPinging {
-                            HStack(spacing: 6) {
-                                Text("上次测速被在跑的核心占用，结果没更新：先停核心再测更准，清理/排序按上次真测结果")
-                                    .font(.footnote)
-                                    .foregroundStyle(.orange)
-                                Button("停核心重测") {
-                                    CZFVPNManager.shared.stop()
-                                    refreshVPNState()
-                                    startVPNPing()
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                        }
-                        Spacer()
-                        Text(vpnCoreRunning ? "核心运行中" : (vpnStatusMessage ?? "核心未启动"))
-                            .font(.footnote)
-                            .foregroundStyle(.gray)
                     }
-                    .onAppear {
-                        refreshVPNState()
+                    }
+                    // 被拒提示独立一行：原来它和一串按钮挤在同一行，
+                    // 长文字把按钮全挤没了；单独一行文字自然换行，
+                    // 按钮放下面一行，不再抢宽度。
+                    if vpnPingRejected && !vpnPinging {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("上次测速被在跑的核心占用，结果没更新：先停核心再测更准，清理/排序按上次真测结果")
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                            Button("停核心重测") {
+                                CZFVPNManager.shared.stop()
+                                refreshVPNState()
+                                startVPNPing()
+                            }
+                            .buttonStyle(.borderless)
+                        }
                     }
                     Toggle(isOn: $vpnPrewarm) {
                         HStack {
@@ -766,7 +781,26 @@ struct LCSettingsView: View {
                 } header: {
                     Text("单App VPN")
                 } footer: {
-                    Text("点节点行切换（核心在跑时立即生效），左滑可删。订阅导入会用订阅内容整体替换节点列表（当前选中的节点还在订阅里就继续用它），节点更新了再点一次「导入订阅」即可。点「测延迟」经每个节点真实发一次请求量往返毫秒数，测速不切换核心启停状态；核心在跑时测速可能被核心占用、结果不准，先停核心再测更准，通的节点会先显示出来。给某个 App 开 VPN：去该 App 的设置页打开「VPN 打开（内置节点）」；被标记的 App 打开时核心自动启动、全部关掉后自动停。「打开时预热节点核心」开着时，进 LiveContainer 就先把核心热好，第一个 VPN App 点开不用等冷启动（不用的话核心随宿主挂起，不额外耗电）。打开「源和下载也走内置节点」后，LiveContainer 刷源、从源下载 IPA 也经当前节点出网（境外源才需要开）。最后一个标 VPN 的 App 关掉后，核心按「核心关闭后自动停」选的分钟数自动停，期间重开标 VPN 的 App 会取消这次自动停。注意：只是最小化不算关，核心会继续跑，叫回时不用等重起。")
+                    // 原来这里是一整段 400 多字说明，常驻占十几行。
+                    // 改成默认只剩一行入口，点开才看精简版：关键意思
+                    // 都还在（切换/删除、订阅替换、测速、开 VPN、预热、
+                    // 源下载走节点、自动停、最小化不算关），但平时
+                    // 设置页不再被这段顶下去。
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button {
+                            showVPNHelp.toggle()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("VPN 说明")
+                                Image(systemName: showVPNHelp ? "chevron.up" : "chevron.down")
+                            }
+                        }
+                        .font(.footnote)
+                        .buttonStyle(.plain)
+                        if showVPNHelp {
+                            Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。")
+                        }
+                    }
                 }
                 
                 Section {
