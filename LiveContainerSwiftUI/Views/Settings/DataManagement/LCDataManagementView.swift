@@ -114,7 +114,7 @@ struct LCDataManagementView : View {
             } header: {
                 Text("设置备份")
             } footer: {
-                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；每次备份 App 时那份也会自动刷新。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
+                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置，连同 App 排序、定时备份/定时清理设置，一起打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；每次备份 App 时那份也会自动刷新。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
             }
             .fileImporter(isPresented: $showSettingsImporter, allowedContentTypes: [UTType.json]) { result in
                 switch result {
@@ -783,11 +783,37 @@ struct LCDataManagementView : View {
     // 写进那个文件夹根目录，与 App 备份放一起，不用再手动选位置。
     // 静态：备份 App 的后台流程结束时也顺手刷新一份（自动备份）。
     @discardableResult
+    /// 导出时除 CZF 键外，另带上的 LC 设置键：排序和定时。
+    /// 只列设置本身，不带执行记录（LCSchedule*LastDate）和敏感/
+    /// 设备相关键（证书数据/密码、外部文件夹书签等），那些不进备份。
+    static let settingsBackupExtraStandardKeys: Set<String> = [
+        "LCScheduleBackupEnabled", "LCScheduleBackupHour", "LCScheduleBackupMinute",
+        "LCScheduleBackupAppIDs", "LCScheduleBackupKeychainOnly",
+        "LCScheduleCacheEnabled", "LCScheduleCacheHour", "LCScheduleCacheMinute",
+    ]
+    static let settingsBackupAppGroupKeys: Set<String> = [
+        "LCAppSortType", "LCCustomSortOrder",
+    ]
+
     static func writeCZFSettingsBackup() -> (local: URL?, externalFolderName: String?) {
         let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
         var payload: [String: Any] = [:]
         for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) {
             payload[key] = value
+        }
+        // 排序在 App Group 里、定时备份/清理在标准库里但前缀是 LC，
+        // 原来只拷 CZF 的逻辑会漏掉这两类，这里显式补上。
+        let standard = UserDefaults.standard
+        for key in settingsBackupExtraStandardKeys {
+            if let value = standard.object(forKey: key) {
+                payload[key] = value
+            }
+        }
+        let appGroup = LCUtils.appGroupUserDefault
+        for key in settingsBackupAppGroupKeys {
+            if let value = appGroup.object(forKey: key) {
+                payload[key] = value
+            }
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
             return (nil, nil)
@@ -1034,9 +1060,18 @@ struct LCDataManagementView : View {
             return
         }
         var count = 0
-        for (key, value) in dict where key.hasPrefix("CZF") {
-            UserDefaults.standard.set(value, forKey: key)
-            count += 1
+        for (key, value) in dict {
+            if key.hasPrefix("CZF") || Self.settingsBackupExtraStandardKeys.contains(key) {
+                UserDefaults.standard.set(value, forKey: key)
+                count += 1
+            } else if Self.settingsBackupAppGroupKeys.contains(key) {
+                // 排序存在 App Group 里，导入必须写回 App Group，
+                // 写标准库的话排序管理器读不到，等于没恢复。
+                LCUtils.appGroupUserDefault.set(value, forKey: key)
+                count += 1
+            }
+            // 其余未知键一律不写：旧备份只有 CZF 键时行为不变，
+            // 证书、书签这类敏感/设备键就算进了文件也不会被导入。
         }
         settingsTransferMessage = "已导入 \(count) 项设置，重启 LiveContainer 后全部生效"
         showSettingsTransferAlert = true

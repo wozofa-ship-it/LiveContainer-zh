@@ -240,10 +240,31 @@ final class AltStoreSourcesViewModel: ObservableObject {
         }
     }
     
+    /// 内置源（CZF）：xiaofang-source 的应用源和插件源。首次启动时
+    /// 自动补进源列表，之后刷新时直接拉取，不用再手动加；
+    /// 只补一次（键 CZFBuiltinSourcesSeeded），之后用户手动删了
+    /// 就不再强行加回来，不是一直强制置顶。
+    private static let builtinSourceURLs: [URL] = [
+        URL(string: "https://xiaofang-source.pages.dev/source.json")!,
+        URL(string: "https://xiaofang-source.pages.dev/plugins.json")!,
+    ]
+    private let builtinSeedKey = "CZFBuiltinSourcesSeeded"
+
     private func loadStoredSources() {
         let defaults = UserDefaults.standard
         let stored = defaults.array(forKey: defaultsKey) as? [String] ?? []
-        let urls = stored.compactMap { URL(string: $0) }
+        var urls = stored.compactMap { URL(string: $0) }
+        if !defaults.bool(forKey: builtinSeedKey) {
+            var seeded = false
+            for builtin in Self.builtinSourceURLs where !urls.contains(builtin) {
+                urls.append(builtin)
+                seeded = true
+            }
+            if seeded {
+                defaults.set(urls.map { $0.absoluteString }, forKey: defaultsKey)
+            }
+            defaults.set(true, forKey: builtinSeedKey)
+        }
         self.sources = urls.map { SourceItem(url: $0, isLoading: false) }
         for index in sources.indices {
             let url = sources[index].url
