@@ -3226,7 +3226,7 @@ struct AppCardRow: View {
     @State private var appIcon: UIImage?
     
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             // App icon
             Group {
                 if let icon = appIcon {
@@ -3244,7 +3244,7 @@ struct AppCardRow: View {
             // 只显示 App 名字（用户要求：版本号/包名/UUID 不再显示）
             VStack(alignment: .leading, spacing: 2) {
                 Text(app.appInfo.displayName() ?? "Unknown")
-                    .font(.headline)
+                    .font(.subheadline)
                     .foregroundColor(.primary)
                     .lineLimit(1)
             }
@@ -3255,11 +3255,11 @@ struct AppCardRow: View {
             // 用户点名丑）；只有主动作「打开/启动」保留实心蓝
             Button(action: onMinimizeOpen) {
                 Text("最小化")
-                    .font(.subheadline)
+                    .font(.footnote)
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 7)
                     .background(Color(.systemGray5))
                     .clipShape(Capsule())
@@ -3267,11 +3267,11 @@ struct AppCardRow: View {
 
             Button(action: onSmallWindowOpen) {
                 Text("小窗口")
-                    .font(.subheadline)
+                    .font(.footnote)
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 7)
                     .background(Color(.systemGray5))
                     .clipShape(Capsule())
@@ -3280,11 +3280,11 @@ struct AppCardRow: View {
             // Launch button
             Button(action: onLaunch) {
                 Text(dockManager.apps.contains(where: { $0.appUUID == app.appInfo.dataUUID }) ? "打开" : "启动")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 7)
                     .background(Color.blue)
                     .clipShape(Capsule())
