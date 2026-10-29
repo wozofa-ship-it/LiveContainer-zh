@@ -1081,7 +1081,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
 
                 // 全新安装（非覆盖更新）：自动查这个 App 的备份
-                // 记录，有就直接恢复，没有就提示无备份记录
+                // 记录，有就直接恢复并弹窗，没有就不弹窗
                 Task { await self.autoRestoreBackupAfterInstall(app: newAppModel) }
             }
 
@@ -1092,7 +1092,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 全新安装完成后自动查备份记录（数据管理里备的）：
     /// 按显示名或 manifest 里的 Bundle ID 匹配备份文件夹，
     /// 有就直接恢复（容器+组数据+钥匙串整套）并提示已恢复，
-    /// 没有就提示无备份记录。只在全新安装时调——覆盖更新时
+    /// 没有就不弹窗。只在全新安装时调——覆盖更新时
     /// 数据本来就在，拿旧备份回滚反而会把新数据冲掉
     func autoRestoreBackupAfterInstall(app: LCAppModel) async {
         let fm = FileManager.default
@@ -1122,10 +1122,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         guard let found else {
-            await MainActor.run {
-                installInfo = "「\(name)」无备份记录"
-                installInfoShow = true
-            }
+            // 无备份就不弹窗：全新安装本来就没东西可恢复，
+            // 弹一次纯属打扰；有备份才弹窗（恢复结果在下面）
             return
         }
         let outcome = try? await LCDataManagementView.restoreOneApp(appFolder: found, app: app)
