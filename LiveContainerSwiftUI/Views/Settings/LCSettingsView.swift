@@ -57,19 +57,11 @@ struct LCSettingsView: View {
 
     @State private var certificateDataFound = false
 
-    // 签名剩余时间：续签区里只列各 App 到期日（只读展示）。
-    // 自动续签已去掉（2026-10-25）：回到前台拉起 Side 重签
-    // 全部会动各 App 的签名，Side 用的证书和 LC 存的不一致
-    // 时团队对不上、游客弹签名无效——用户亲指就是加了续签
-    // 之后开始报错，自动续签这部分不要了，显示保留。
-    @State private var signatureExpiries: [CZFSignatureExpiry] = []
-    private func refreshSignatureExpiries() {
-        let entries = CZFSignatureExpiryReader.snapshotEntries(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps)
-        DispatchQueue.global(qos: .userInitiated).async {
-            let list = CZFSignatureExpiryReader.loadAll(entries: entries)
-            DispatchQueue.main.async { signatureExpiries = list }
-        }
-    }
+    // 续签区已整段删掉（2026-10-29 用户亲定“没什么用”）：
+    // 一键续签只是跳 SideInstaller 🅥 走 refresh-all，企业证书
+    // 的 App 本来就会被跳过续不到，到期日列表也只是只读展示。
+    // CZFSignatureExpiry 工具文件还在仓里、未被引用，之后要
+    // 恢复续签区时可直接复用，不用重写读取逻辑。
 
     @StateObject private var certificateImportAlert = YesNoHelper()
     @StateObject private var certificateImportFromBuiltInSideStoreAlert = YesNoHelper()
@@ -127,6 +119,26 @@ struct LCSettingsView: View {
     @State var vpnPingPhase = "测速"
     @State var vpnPrewarmSuppressed = false
     @State private var showVPNHelp = false
+    // 宿主通知授权状态（CZF，2026-10-29 通知恢复）：
+    // 游客通知以宿主身份发出，系统里 LiveContainer 没授权，
+    // 通知就会静默丢掉；这行就是让用户一眼看到授权状态、
+    // 点一下补申请或跳系统设置。
+    @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
+    private var notificationAuthText: String {
+        switch notificationAuthStatus {
+        case .authorized: return "已开启"
+        case .denied: return "已关闭"
+        case .notDetermined: return "未申请"
+        case .provisional: return "临时授权"
+        case .ephemeral: return "临时"
+        @unknown default: return "未知"
+        }
+    }
+    private func refreshNotificationAuth() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async { notificationAuthStatus = settings.authorizationStatus }
+        }
+    }
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     
     @EnvironmentObject private var sharedModel : SharedModel
@@ -201,52 +213,6 @@ struct LCSettingsView: View {
                     } footer: {
                         Text("lc.settings.jitLessDesc".loc)
                     }
-                }
-                Section {
-                    Button {
-                        // 一键调用 SideInstaller 🅥 续签全部：跳它的
-                        // refresh-all 入口，它自己拉隧道续签
-                        if let url = URL(string: "sideinstaller://refresh-all") {
-                            UIApplication.shared.open(url, options: [:]) { success in
-                                if !success {
-                                    errorInfo = "没能打开 SideInstaller 🅥，请确认它已安装"
-                                    errorShow = true
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Text("一键续签（调用 SideInstaller 🅥）")
-                            Spacer()
-                            Image(systemName: "arrow.clockwise.circle")
-                                .foregroundStyle(.blue)
-                        }
-                    }
-                    // 各 App 签名剩余时间（按到期日从近到远排，
-                    // 快到期的标红；读不到描述文件的 App 不列）
-                    if signatureExpiries.isEmpty {
-                        Text("未读到签名到期时间")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        ForEach(signatureExpiries) { e in
-                            HStack {
-                                Text(e.name)
-                                Spacer()
-                                Text("\(e.label) · \(e.dateText)到期")
-                                    .font(.caption)
-                                    .foregroundColor(e.daysLeft <= 2 ? .red : .secondary)
-                            }
-                        }
-                    }
-                } header: {
-                    Text("续签")
-                } footer: {
-                    Text("点一下跳到 SideInstaller 🅥，自动续签全部个人 ID 签名的 App（包括 LiveContainer 自己，赶在签名到期前续上）。前提：LiveContainer 的安装包已放进 SideInstaller 🅥 的文件里、签名团队一致；若 SideInstaller 🅥 里没有它的安装包，会被跳过续不到。")
-                }
-                .onAppear { refreshSignatureExpiries() }
-                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-                    refreshSignatureExpiries()
                 }
                 if (store != .Unknown && store != .ADP) || LCUtils.isAppGroupAltStoreLike() {
                     Section{
@@ -344,87 +310,100 @@ struct LCSettingsView: View {
                     }
                 }
                 
+                // 界面区：说明从 footer 挪到各行下面的小字，
+                // 深色图标那行原来没有说明（footer 只讲动态颜色），
+                // 现在补上“横幅用 App 的深色图标”，两行说明各对各行。
                 Section{
                     Toggle(isOn: $dynamicColors) {
-                        HStack {
-                            LCSettingsIcon(systemName: "paintpalette.fill", color: .purple)
-                            Text("lc.settings.dynamicColors".loc)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                LCSettingsIcon(systemName: "paintpalette.fill", color: .purple)
+                                Text("lc.settings.dynamicColors".loc)
+                            }
+                            Text("lc.settings.dynamicColors.desc".loc)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                         }
                     }
                     if #available(iOS 18.0, *) {
                         Toggle(isOn: $darkModeIcon) {
-                            HStack {
-                                LCSettingsIcon(systemName: "moon.fill", color: .indigo)
-                                Text("lc.settings.darkModeIcon".loc)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    LCSettingsIcon(systemName: "moon.fill", color: .indigo)
+                                    Text("lc.settings.darkModeIcon".loc)
+                                }
+                                Text("App 横幅用 App 的深色图标")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
-                    
                 } header: {
                     Text("lc.settings.interface".loc)
-                } footer: {
-                    Text("lc.settings.dynamicColors.desc".loc)
                 }
+                // 杂项区：原来 5 个开关各占一个 Section、每段带一段
+                // footer 说明，竖着占 5 段；并成一段，说明挪到各行
+                // 下面的小字，意思一句不少。“清除通知”原来也单独
+                // 占一段，顺手并进这一段的末尾。严格隐藏那行只在
+                // 隐藏 App 已解锁时出现，原条件不变。
                 Section{
                     Toggle(isOn: $frameShortIcon) {
-                        HStack {
-                            LCSettingsIcon(systemName: "plus.app", color: .green)
-                            Text("lc.settings.FrameIcon".loc)
-                        }
-                    }
-                } header: {
-                    Text("lc.common.miscellaneous".loc)
-                } footer: {
-                    Text("lc.settings.FrameIconDesc".loc)
-                }
-                
-                Section {
-                    Toggle(isOn: $silentSwitchApp) {
-                        HStack {
-                            LCSettingsIcon(systemName: "eye.slash", color: .gray)
-                            Text("lc.settings.silentSwitchApp".loc)
-                        }
-                    }
-                } footer: {
-                    Text("lc.settings.silentSwitchAppDesc".loc)
-                }
-                
-                Section {
-                    Toggle(isOn: $silentOpenWebPage) {
-                        HStack {
-                            LCSettingsIcon(systemName: "globe", color: .teal)
-                            Text("lc.settings.silentOpenWebPage".loc)
-                        }
-                    }
-                } footer: {
-                    Text("lc.settings.silentOpenWebPageDesc".loc)
-                }
-                
-                if sharedModel.isHiddenAppUnlocked {
-                    Section {
-                        Toggle(isOn: $strictHiding) {
+                        VStack(alignment: .leading, spacing: 2) {
                             HStack {
-                                LCSettingsIcon(systemName: "hand.raised.fill", color: .red)
-                                Text("lc.settings.strictHiding".loc)
+                                LCSettingsIcon(systemName: "plus.app", color: .green)
+                                Text("lc.settings.FrameIcon".loc)
+                            }
+                            Text("lc.settings.FrameIconDesc".loc)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Toggle(isOn: $silentSwitchApp) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                LCSettingsIcon(systemName: "eye.slash", color: .gray)
+                                Text("lc.settings.silentSwitchApp".loc)
+                            }
+                            Text("lc.settings.silentSwitchAppDesc".loc)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Toggle(isOn: $silentOpenWebPage) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                LCSettingsIcon(systemName: "globe", color: .teal)
+                                Text("lc.settings.silentOpenWebPage".loc)
+                            }
+                            Text("lc.settings.silentOpenWebPageDesc".loc)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if sharedModel.isHiddenAppUnlocked {
+                        Toggle(isOn: $strictHiding) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    LCSettingsIcon(systemName: "hand.raised.fill", color: .red)
+                                    Text("lc.settings.strictHiding".loc)
+                                }
+                                Text("lc.settings.strictHidingDesc".loc)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                    } footer: {
-                        Text("lc.settings.strictHidingDesc".loc)
                     }
-                }
-                
-                Section {
                     Toggle(isOn: $dontSignApp) {
-                        HStack {
-                            LCSettingsIcon(systemName: "signature", color: .orange)
-                            Text("lc.settings.dontSign".loc)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                LCSettingsIcon(systemName: "signature", color: .orange)
+                                Text("lc.settings.dontSign".loc)
+                            }
+                            Text("lc.settings.dontSignDesc".loc)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                } footer: {
-                    Text("lc.settings.dontSignDesc".loc)
-                }
-
-                Section {
                     Button {
                         clearNotifications()
                     } label: {
@@ -433,6 +412,37 @@ struct LCSettingsView: View {
                             Text("lc.settings.clearNotifications".loc)
                         }
                     }
+                    // 通知权限行：状态从系统实时读；未申请点一下
+                    // 直接申请，已拒绝点一下跳系统设置，已开启不
+                    // 显示按钮。从系统设置回来时刷新一次状态。
+                    HStack {
+                        LCSettingsIcon(systemName: "bell.fill", color: .orange)
+                        Text("通知权限")
+                        Spacer()
+                        Text(notificationAuthText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if notificationAuthStatus != .authorized {
+                            Button(notificationAuthStatus == .denied ? "去设置" : "开启") {
+                                if notificationAuthStatus == .denied {
+                                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                                        UIApplication.shared.open(url)
+                                    }
+                                } else {
+                                    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+                                        refreshNotificationAuth()
+                                    }
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    .onAppear { refreshNotificationAuth() }
+                    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                        refreshNotificationAuth()
+                    }
+                } header: {
+                    Text("lc.common.miscellaneous".loc)
                 }
 
                 Section {
@@ -911,15 +921,20 @@ struct LCSettingsView: View {
                                 Text("lc.settings.resetSymbolOffsets".loc)
                             }
                         }
-                        Button {
-                            presentFLEXOverlay()
-                        } label: {
-                            HStack {
-                                LCSettingsIcon(systemName: "magnifyingglass", color: .purple)
-                                Text("lc.settings.showFlexOverlay".loc)
+                        // FLEX 行原来是没装也显示、只是置灰点不动；
+                        // 没装 FLEX 的机器上这行永远用不上，改成没装
+                        // 就不显示这行，有装才出现。注意：只是这一行
+                        // 隐藏，开发者区其他按钮不受影响。
+                        if NSClassFromString("FLEXManager") != nil {
+                            Button {
+                                presentFLEXOverlay()
+                            } label: {
+                                HStack {
+                                    LCSettingsIcon(systemName: "magnifyingglass", color: .purple)
+                                    Text("lc.settings.showFlexOverlay".loc)
+                                }
                             }
                         }
-                        .disabled(NSClassFromString("FLEXManager") == nil)
                     } header: {
                         Text("lc.settings.developerSettings".loc)
                     } footer: {
