@@ -873,8 +873,12 @@ struct LCDataManagementView : View {
                 // 两边都有：比较 manifest 修改时间，本地更新才覆盖
                 let srcManifest = src.appendingPathComponent("manifest.json")
                 let destManifest = dest.appendingPathComponent("manifest.json")
-                let srcDate = (try? fm.attributesOfItem(atPath: srcManifest.path))?[.modificationDate] as? Date ?? Date.distantPast
-                let destDate = (try? fm.attributesOfItem(atPath: destManifest.path))?[.modificationDate] as? Date ?? Date.distantPast
+                // 没 manifest 的旧结构文件夹：两边都是 distantPast 会永远跳过、
+                // 永远同步不到 iCloud；没 manifest 时退到文件夹本身的修改时间比
+                let srcDate = (try? fm.attributesOfItem(atPath: srcManifest.path))?[.modificationDate] as? Date
+                    ?? (try? fm.attributesOfItem(atPath: src.path))?[.modificationDate] as? Date ?? Date.distantPast
+                let destDate = (try? fm.attributesOfItem(atPath: destManifest.path))?[.modificationDate] as? Date
+                    ?? (try? fm.attributesOfItem(atPath: dest.path))?[.modificationDate] as? Date ?? Date.distantPast
                 if destDate >= srcDate { continue }
                 try? fm.removeItem(at: dest)
             }
@@ -1812,6 +1816,38 @@ struct LCDataManagementView : View {
     /// 器名对不上号，按原文件夹名放回原位并登记，登录态才能
     /// 跟着回来（见内注）。做成静态：安装流程装完新 App 后
     /// 也要调它自动恢复备份。
+    /// iCloud 恢复前把数据下到本地：只对外部（iCloud）文件夹下的源生效，
+    /// 本地备份直接返回（本地恢复行为不动）。文件夹壳先到、大文件后到时，
+    /// 直接拷会拷到占位空壳——钥匙串那处已因此加过单文件等待，
+    /// 数据容器和组容器之前没等，是同一类缺口。做法：对文件夹内
+    /// 所有文件逐个触发下载，轮询到全部 .current 或超时（默认 120 秒）；
+    /// 超时不报错，照常拷（拷到多少算多少，不比现在更差）。
+    static func waitForUbiquitousDownload(_ url: URL, fm: FileManager, maxSeconds: Int = 120) async {
+        guard let extURL = Self.externalBackupFolderURL(),
+              url.path.hasPrefix(extURL.path + "/") else { return }
+        try? fm.startDownloadingUbiquitousItem(at: url)
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey, .ubiquitousItemDownloadingStatusKey], options: [.skipsHiddenFiles]) else { return }
+        var files: [URL] = []
+        for case let file as URL in enumerator {
+            if files.count > 20000 { break }
+            if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
+            files.append(file)
+            try? fm.startDownloadingUbiquitousItem(at: file)
+        }
+        for _ in 0..<maxSeconds {
+            var allDone = true
+            for file in files {
+                if let status = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus,
+                   status != .current {
+                    allDone = false
+                    break
+                }
+            }
+            if allDone { return }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
     static func restoreOneApp(appFolder: URL, app: LCAppModel, loginOnly: Bool = false) async throws -> RestoreOutcome {
         let fm = FileManager.default
         // 登录态备份的容器里只有半套会话文件，恢复走合并（见
@@ -1842,6 +1878,8 @@ struct LCDataManagementView : View {
         var newDefaultContainer: LCContainer?
         for containerFolder in containerFolders {
             let folderName = containerFolder.lastPathComponent
+            // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
+            await Self.waitForUbiquitousDownload(containerFolder, fm: fm)
             if let live = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == folderName }) {
                 if isLoginBackup {
                     // 登录态备份只有半套会话文件：合并进现有
@@ -1909,6 +1947,8 @@ struct LCDataManagementView : View {
         if !loginOnly || isLoginBackup, let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
             for groupFolder in groupFolders {
                 let dest = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupFolder.lastPathComponent)
+                // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
+                await Self.waitForUbiquitousDownload(groupFolder, fm: fm)
                 if isLoginBackup && fm.fileExists(atPath: dest.path) {
                     // 登录态档的组容器同样是半套：合并，不整替
                     if Self.mergeLoginStateFiles(from: groupFolder, to: dest, fm: fm) > 0 {
@@ -1933,6 +1973,8 @@ struct LCDataManagementView : View {
             for folder in topFolders {
                 let n = folder.lastPathComponent
                 if n == "manifest.json" || n.hasSuffix(".app") || n == "AppGroup" || n == "Keychain" { continue }
+                // iCloud 源先等数据下完再合并，否则拷到占位空壳
+                await Self.waitForUbiquitousDownload(folder, fm: fm)
                 guard let target = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n })
                         ?? app.uiSelectedContainer ?? app.uiContainers.first else { continue }
                 if Self.mergeLoginStateFiles(from: folder, to: target.containerURL, fm: fm, mirrorGroupToHost: target.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath) > 0 {
