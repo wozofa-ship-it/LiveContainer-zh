@@ -429,16 +429,16 @@ struct LCDataManagementView : View {
                     HStack {
                         Text(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
                         Spacer()
-                        Image(systemName: backupSelectedIDs.contains(app.appInfo.bundleIdentifier() ?? "") ? "checkmark.circle.fill" : "circle")
+                        Image(systemName: backupSelectedIDs.contains(Self.instanceKey(for: app)) ? "checkmark.circle.fill" : "circle")
                             .foregroundColor(.blue)
                     }
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        let bid = app.appInfo.bundleIdentifier() ?? ""
-                        if backupSelectedIDs.contains(bid) {
-                            backupSelectedIDs.remove(bid)
+                        let key = Self.instanceKey(for: app)
+                        if backupSelectedIDs.contains(key) {
+                            backupSelectedIDs.remove(key)
                         } else {
-                            backupSelectedIDs.insert(bid)
+                            backupSelectedIDs.insert(key)
                         }
                     }
                 }
@@ -447,7 +447,7 @@ struct LCDataManagementView : View {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("lc.settings.backup".loc) {
                             pendingBackupApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
-                                backupSelectedIDs.contains($0.appInfo.bundleIdentifier() ?? "")
+                                backupSelectedIDs.contains(Self.instanceKey(for: $0))
                             }
                             showBackupSelect = false
                             showBackupScopeDialog = true
@@ -612,17 +612,17 @@ struct LCDataManagementView : View {
                             HStack {
                                 Text(app.appInfo.displayName() ?? "")
                                 Spacer()
-                                let bid = app.appInfo.bundleIdentifier() ?? ""
-                                Image(systemName: scheduleSelectedIDs.contains(bid) ? "checkmark.circle.fill" : "circle")
+                                let key = Self.instanceKey(for: app)
+                                Image(systemName: scheduleSelectedIDs.contains(key) ? "checkmark.circle.fill" : "circle")
                                     .foregroundColor(.blue)
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                let bid = app.appInfo.bundleIdentifier() ?? ""
-                                if scheduleSelectedIDs.contains(bid) {
-                                    scheduleSelectedIDs.remove(bid)
+                                let key = Self.instanceKey(for: app)
+                                if scheduleSelectedIDs.contains(key) {
+                                    scheduleSelectedIDs.remove(key)
                                 } else {
-                                    scheduleSelectedIDs.insert(bid)
+                                    scheduleSelectedIDs.insert(key)
                                 }
                             }
                         }
@@ -789,9 +789,33 @@ struct LCDataManagementView : View {
         "LCScheduleBackupEnabled", "LCScheduleBackupHour", "LCScheduleBackupMinute",
         "LCScheduleBackupAppIDs", "LCScheduleBackupKeychainOnly",
         "LCScheduleCacheEnabled", "LCScheduleCacheHour", "LCScheduleCacheMinute",
+        // 标准库里的 LC 开关：原来只拷 CZF 前缀 + 定时这两类，
+        // 设置页里这些 LC 开关一个都没进备份，恢复后全丢。
+        // 证书/密码/书签/设备号（LCCertificate*、LCDeviceUDID、
+        // 外部文件夹书签）一律不进，见下表外的排除原则。
+        "LCSwitchAppWithoutAsking", "LCOpenWebPageWithoutAsking",
+        "LCMultiAllowGameMode", "LCMultiAllowGameCategory",
+        "LCLaunchMultitaskMaximized", "LCLaunchInMultitaskMode",
+        "LCFrameShortcutIcons", "LCLoadTweaksToSelf",
+        "LCKeepSelectedWhenQuit", "LCKeepAliveEnabled",
+        "LCIgnoreJITOnLaunch", "LCWaitForDebugger",
+        "LCSharePrivateDataWithLiveProcess",
     ]
     static let settingsBackupAppGroupKeys: Set<String> = [
         "LCAppSortType", "LCCustomSortOrder",
+        // App Group 里的开关：排序之外这些原来也没进备份。
+        // CZFMin* 三个也在 App Group 里（设置页 @AppStorage
+        // 指明了 store），必须进这张表——导入先判这张表，
+        // 否则按 CZF 前缀误写标准库，界面读 App Group 等于没恢复。
+        // LCDeviceUDID 是设备号，不进（换机恢复会写错设备）。
+        "darkModeIcon", "dynamicColors",
+        "LCMultitaskMode", "LCMultitaskBottomWindowBar",
+        "LCAutoEndPiP", "LCSkipTerminatedScreen",
+        "LCRestartTerminatedApp", "LCMaxOneAppOnStage",
+        "LCDockWidth", "LCHideCollapsedDock", "LCHideDock",
+        "LCRedirectURLToHost", "LCDontSignApp", "LCStrictHiding",
+        "LCSideJITServerAddress", "LCSelected32BitEmulator", "LCJITEnablerType",
+        "CZFMinPowerSavingEnabled", "CZFMinAutoCloseEnabled", "CZFMinAutoCloseMinutes",
     ]
 
     // 注意：@discardableResult 必须紧贴 func 写，中间不能插
@@ -802,6 +826,12 @@ struct LCDataManagementView : View {
         let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
         var payload: [String: Any] = [:]
         for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) {
+            payload[key] = value
+        }
+        // App Group 里的 CZF 键也要：最小化省电三个开关存在
+        // App Group 里，只扫标准库会漏掉它们；已在 payload
+        // 里的（标准库同名）不动，标准库优先。
+        for (key, value) in LCUtils.appGroupUserDefault.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && payload[key] == nil {
             payload[key] = value
         }
         // 排序在 App Group 里、定时备份/清理在标准库里但前缀是 LC，
@@ -1073,9 +1103,59 @@ struct LCDataManagementView : View {
         showSettingsTransferAlert = true
     }
 
-    /// 导入设置备份：只认 CZF 开头的键，逐个写回标准
-    /// UserDefaults。JSON 数字回来是 NSNumber，UserDefaults
-    /// 读写都认，不用特殊处理
+    /// 设置字典写回（不弹提示，供手动导入和恢复共用）：
+    /// App Group 表先判——App Group 里的 CZF 键若按 CZF 前缀
+    /// 走会误写标准库，界面读 App Group 就等于没恢复；再判
+    /// CZF 前缀/标准扩展表 → 标准库；其余未知键一律不写
+    /// （旧备份只有 CZF 键时行为不变，证书、书签这类敏感/
+    /// 设备键就算进了文件也不会被导入）。返回写回项数。
+    @discardableResult
+    static func applySettingsDictionary(_ dict: [String: Any]) -> Int {
+        var count = 0
+        for (key, value) in dict {
+            if Self.settingsBackupAppGroupKeys.contains(key) {
+                LCUtils.appGroupUserDefault.set(value, forKey: key)
+                count += 1
+            } else if key.hasPrefix("CZF") || Self.settingsBackupExtraStandardKeys.contains(key) {
+                UserDefaults.standard.set(value, forKey: key)
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// 恢复时找设置备份并写回（只给完整恢复用，登录态恢复不
+    /// 碰全局设置）：跟恢复源同侧优先（iCloud 恢复用外部根
+    /// 的那份，本地恢复用文稿根的那份），首选没有再试另一侧；
+    /// 两边都没有返回 found=false。返回（写回项数，找到没有）。
+    static func restoreCZFSettings(for backupURL: URL) -> (imported: Int, found: Bool) {
+        let fm = FileManager.default
+        let localJSON = fm.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("CZFSettingsBackup.json")
+        var candidates: [URL] = []
+        if let extURL = Self.externalBackupFolderURL() {
+            let extJSON = extURL.appendingPathComponent("CZFSettingsBackup.json")
+            if backupURL.path.hasPrefix(extURL.path + "/") {
+                candidates.append(extJSON)
+                if let l = localJSON { candidates.append(l) }
+            } else {
+                if let l = localJSON { candidates.append(l) }
+                candidates.append(extJSON)
+            }
+        } else if let l = localJSON {
+            candidates.append(l)
+        }
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            return (Self.applySettingsDictionary(dict), true)
+        }
+        return (0, false)
+    }
+
+    /// 导入设置备份：只认 CZF 开头的键和两张扩展表，逐个写回
+    /// 对应 UserDefaults（标准库/App Group 分流见
+    /// applySettingsDictionary）。JSON 数字回来是 NSNumber，
+    /// UserDefaults 读写都认，不用特殊处理
     func importCZFSettings(from url: URL) {
         let scoped = url.startAccessingSecurityScopedResource()
         defer {
@@ -1089,20 +1169,7 @@ struct LCDataManagementView : View {
             showSettingsTransferAlert = true
             return
         }
-        var count = 0
-        for (key, value) in dict {
-            if key.hasPrefix("CZF") || Self.settingsBackupExtraStandardKeys.contains(key) {
-                UserDefaults.standard.set(value, forKey: key)
-                count += 1
-            } else if Self.settingsBackupAppGroupKeys.contains(key) {
-                // 排序存在 App Group 里，导入必须写回 App Group，
-                // 写标准库的话排序管理器读不到，等于没恢复。
-                LCUtils.appGroupUserDefault.set(value, forKey: key)
-                count += 1
-            }
-            // 其余未知键一律不写：旧备份只有 CZF 键时行为不变，
-            // 证书、书签这类敏感/设备键就算进了文件也不会被导入。
-        }
+        let count = Self.applySettingsDictionary(dict)
         settingsTransferMessage = "已导入 \(count) 项设置，重启 LiveContainer 后全部生效"
         showSettingsTransferAlert = true
     }
@@ -1599,6 +1666,16 @@ struct LCDataManagementView : View {
             backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(merged.count)）"
             lines.append(await restoreFromBackup(at: folderURL, presentResult: false, loginOnly: loginOnly))
         }
+        // 一键恢复全部：设置只做一次（单个恢复在各自报告里做，
+        // 这里逐个调时 presentResult=false 不做，免得重复写）。
+        if !loginOnly, let first = merged.first {
+            let s = Self.restoreCZFSettings(for: first)
+            if s.found {
+                lines.append("设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效")
+            } else {
+                lines.append("设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入")
+            }
+        }
         backupRestoreProgress = nil
         successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
         successShow = true
@@ -1770,6 +1847,20 @@ struct LCDataManagementView : View {
                 msg += "\n\n钥匙串：备份含 \(keychainFoundTotal) 条，已排队 \(keychainQueuedTotal) 条（打开 App 时由桥写回），宿主直写 \(keychainImportedTotal) 条"
                 if keychainUnwritableTotal > 0 {
                     msg += "\n其中 \(keychainUnwritableTotal) 条所属 App 不注入插件（桥不加载），排队文件不会被写回"
+                }
+            }
+            // 完整恢复才带回全局设置：设置 JSON 跟备份一起刷新
+            // （本地文稿根 + 外部备份根），但恢复流程从没读过它，
+            // 删后重装开关一个都没回来就是这个缺口。只在单个恢复
+            // 时做（一键恢复全部在汇总处做一次，免得每文件夹
+            // 重复写）；登录态恢复不碰全局设置（范围弹窗承诺
+            // “只写回登录”）。
+            if !loginOnly && presentResult {
+                let s = Self.restoreCZFSettings(for: backupURL)
+                if s.found {
+                    msg += "\n\n设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效"
+                } else {
+                    msg += "\n\n设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入"
                 }
             }
             if installRestoredCount > 0 {
@@ -2604,13 +2695,46 @@ struct LCDataManagementView : View {
         }
     }
     
+    /// 多开实例键：多开同款共用 Bundle ID，拿 bid 当选择键会
+    /// 选一个带另一个（Muse/Muse5 实证）。实例身份 = 数据
+    /// 文件夹名 dataUUID（每实例各一个，改名不动它）；没
+    /// dataUUID 的（默认容器）退到 bid + 显示名（多开建时强制
+    /// 不同名，撞不上）。键带 uuid:/bid: 前缀，两类永不串。
+    static func instanceKey(for app: LCAppModel) -> String {
+        if let uuid = app.appInfo.dataUUID, !uuid.isEmpty {
+            return "uuid:" + uuid
+        }
+        return "bid:" + (app.appInfo.bundleIdentifier() ?? "") + "#" + (app.appInfo.displayName() ?? "")
+    }
+
+    /// 定时备份旧存 bid 升实例键：老版本存的是 bid，新键是
+    /// 实例键；直接比对会全丢（定时备份悄悄备 0 个）。已是
+    /// 实例键的原样留；是 bid 的展开成该 bid 全部现实例
+    /// （老语义就是“这个 App 全选”，展开后行为不变）；
+    /// 两头都对不上的（已删 App）丢掉。只做内存换算，不写
+    /// 回（下次用户保存定时设置时自然落成新格式）。
+    static func migratedScheduleIDs(from stored: [String], apps: [LCAppModel]) -> Set<String> {
+        var out = Set<String>()
+        let keys = apps.map { Self.instanceKey(for: $0) }
+        for id in stored {
+            if keys.contains(id) {
+                out.insert(id)
+            } else {
+                for app in apps where (app.appInfo.bundleIdentifier() ?? "") == id {
+                    out.insert(Self.instanceKey(for: app))
+                }
+            }
+        }
+        return out
+    }
+
     func loadScheduleSettings() {
         let defaults = UserDefaults.standard
         scheduleEnabled = defaults.bool(forKey: "LCScheduleBackupEnabled")
         scheduleHour = defaults.integer(forKey: "LCScheduleBackupHour")
         scheduleMinute = defaults.integer(forKey: "LCScheduleBackupMinute")
         if let ids = defaults.stringArray(forKey: "LCScheduleBackupAppIDs") {
-            scheduleSelectedIDs = Set(ids)
+            scheduleSelectedIDs = Self.migratedScheduleIDs(from: ids, apps: sharedModel.apps + sharedModel.hiddenApps)
         }
         scheduleKeychainOnly = defaults.bool(forKey: "LCScheduleBackupKeychainOnly")
         // 默认 3:00
@@ -2688,8 +2812,9 @@ struct LCDataManagementView : View {
         if calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now) < hour * 60 + minute { return }
         let loginOnly = defaults.bool(forKey: "LCScheduleBackupKeychainOnly")
         let model = DataManager.shared.model
+        let migrated = Self.migratedScheduleIDs(from: ids, apps: model.apps + model.hiddenApps)
         let selected = (model.apps + model.hiddenApps).filter {
-            ids.contains($0.appInfo.bundleIdentifier() ?? "")
+            migrated.contains(Self.instanceKey(for: $0))
         }
         guard !selected.isEmpty else { return }
         let didBackup: Bool = await withCheckedContinuation { continuation in
