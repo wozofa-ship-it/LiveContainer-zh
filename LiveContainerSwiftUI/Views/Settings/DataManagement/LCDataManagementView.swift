@@ -2034,6 +2034,25 @@ struct LCDataManagementView : View {
             }
         }
         outcome.ok = restoredContainers > 0 || restoredExtras
+        // 恢复后清掉文件夹已不存在的容器条目：删 App 时文件夹被抹掉，
+        // 条目还留在列表里，容器菜单里就一堆 UUID 幽灵，选了也打不开、
+        // 登录也对不上，看着就是信息错乱。只删文件夹确实不存在的；
+        // 刚恢复出来的文件夹都在磁盘上，不动。若当前选中正好被清掉，
+        // 改选恢复出来的默认容器（或第一个还在的），免得下次打开仍
+        // 进空容器。放关窗口之前，让关窗口也按纠正后的 dataUUID 走。
+        let existingContainers = app.uiContainers.filter { fm.fileExists(atPath: $0.containerURL.path) }
+        if existingContainers.count != app.uiContainers.count {
+            app.uiContainers = existingContainers
+            app.appInfo.containers = existingContainers
+            if let selected = app.uiSelectedContainer, !existingContainers.contains(selected) {
+                let fallback = newDefaultContainer ?? existingContainers.first
+                app.uiSelectedContainer = fallback
+                if let fallback {
+                    app.uiDefaultDataFolder = fallback.folderName
+                    app.appInfo.dataUUID = fallback.folderName
+                }
+            }
+        }
         // 恢复免登录修正（2026-10-25）：钥匙串恢复只是把快照排队成
         // CZFKeychainImport.plist，真正写回在游客下次全新启动时由桥
         // 完成；恢复本身不杀已运行的游客，用户直接切回看到的还是未

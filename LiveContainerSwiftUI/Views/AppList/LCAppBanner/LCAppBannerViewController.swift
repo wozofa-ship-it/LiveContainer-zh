@@ -158,7 +158,12 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                     title: container.name,
                     state: container == model.uiSelectedContainer ? .on : .off
                 ) { _ in
+                    // 只改 uiSelectedContainer 不持久：模型重载时选中会按
+                    // dataUUID 重算回旧容器，等于白选。三个一起改，
+                    // 选了哪个、启动就用哪个、重进还是哪个。
                     model.uiSelectedContainer = container
+                    model.uiDefaultDataFolder = container.folderName
+                    model.appInfo.dataUUID = container.folderName
                     self?.refreshView()
                 }
             }
