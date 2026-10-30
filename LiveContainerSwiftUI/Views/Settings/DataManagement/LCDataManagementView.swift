@@ -840,6 +840,23 @@ struct LCDataManagementView : View {
         return (writtenLocal, extName)
     }
 
+    /// 备份文件夹是否有效：单 App 备份含 manifest.json，
+    /// 旧时间戳结构含子文件夹。空目录不算备份：同步时不把它
+    /// 扩散到 iCloud，免得那边也多个点进去恢复 0 个的空壳。
+    /// 注意恢复列表不拿它过滤——iCloud 文件夹可能只是元数据
+    /// 还没同步到，恢复时先触发下载等一等（见 restoreFromBackup），
+    /// 直接过滤会把还没同步好的真备份也藏起来。
+    static func isValidBackupFolder(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.appendingPathComponent("manifest.json").path) {
+            return true
+        }
+        if let children = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) {
+            return children.contains { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        }
+        return false
+    }
+
     // 兜底同步：把本地备份里外部文件夹还缺的/过期的补过去（选文件夹后、打开数据管理页时调用）
     static func syncAllLocalBackupsToExternalFolder() {
         guard let extURL = Self.externalBackupFolderURL() else { return }
@@ -849,6 +866,8 @@ struct LCDataManagementView : View {
         guard let localFolders = try? fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else { return }
         for src in localFolders {
             guard (try? src.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            // 本地空壳不同步到 iCloud，免得那边也多个空备份。
+            guard Self.isValidBackupFolder(src) else { continue }
             let dest = extURL.appendingPathComponent(src.lastPathComponent)
             if fm.fileExists(atPath: dest.path) {
                 // 两边都有：比较 manifest 修改时间，本地更新才覆盖
@@ -859,7 +878,11 @@ struct LCDataManagementView : View {
                 if destDate >= srcDate { continue }
                 try? fm.removeItem(at: dest)
             }
-            try? fm.copyItem(at: src, to: dest)
+            // 拷失败不留空壳：删掉拷一半的 dest，下次同步重拷；
+            // 否则空目录会进恢复列表，点进去就是“成功 0 个”。
+            if (try? fm.copyItem(at: src, to: dest)) == nil {
+                try? fm.removeItem(at: dest)
+            }
         }
     }
         func cleanUpUnusedFolders() async {
@@ -1575,13 +1598,38 @@ struct LCDataManagementView : View {
             // 兼容旧结构：如果是时间戳文件夹，里面是多个 App 文件夹
             let folderName = backupURL.lastPathComponent
             let manifestURL = backupURL.appendingPathComponent("manifest.json")
+            // iCloud 备份可能只同步了文件夹壳、内容元数据还没到本机：
+            // 直接读会读到空文件夹，误报“成功 0 个”。先触发下载，
+            // 等 manifest 出现或子项出现再读；等不到才按空处理。
+            // 已同步好的文件夹第一次检查就通过，不多等。
+            if let extURL = Self.externalBackupFolderURL(),
+               backupURL.path.hasPrefix(extURL.path + "/") {
+                try? fm.startDownloadingUbiquitousItem(at: backupURL)
+                for _ in 0..<15 {
+                    if fm.fileExists(atPath: manifestURL.path) { break }
+                    if let children = try? fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil), !children.isEmpty { break }
+                    backupRestoreProgress = "正在从 iCloud 下载 \(folderName)…"
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+            }
             let isSingleAppFolder = fm.fileExists(atPath: manifestURL.path)
-            
+
             let appFolders: [URL]
             if isSingleAppFolder {
                 appFolders = [backupURL]
             } else {
                 appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+            }
+            // 空文件夹：直接报失败，不再走“成功 / 恢复完成：0 个 App”误导人。
+            // iCloud 内容没同步到时上面已等过 15 秒，还空就是真空。
+            if appFolders.isEmpty {
+                let msg = "这个备份文件夹是空的，没有可恢复的数据（iCloud 内容可能还没同步到本机，稍后再试；或文件夹里确实没有备份）"
+                if presentResult {
+                    backupRestoreProgress = nil
+                    errorInfo = msg
+                    errorShow = true
+                }
+                return "\(folderName)：\(msg)"
             }
             var restoredCount = 0
             var keychainFoundTotal = 0
