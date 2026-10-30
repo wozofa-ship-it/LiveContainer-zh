@@ -3319,8 +3319,20 @@ struct AppCardRow: View {
     }
     
     private func loadIcon() {
+        // 卡片图标走共享缓存：LazyVStack 的行滑出滑回都会重新
+        // onAppear，原来每次都重新解一次图标；先查缓存命中直接
+        // 用，未命中才后台解一次并写回。键用 Bundle ID + dataUUID，
+        // 与 dock 那边名字_UUID 的键不同，不会串深色/浅色图标。
+        let cacheKey = "\(app.appInfo.bundleIdentifier() ?? "")_\(app.appInfo.dataUUID ?? "")"
+        if let cached = IconCacheManager.shared.getIcon(for: cacheKey) {
+            self.appIcon = cached
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let icon = app.appInfo.iconIsDarkIcon(false)
+            if let icon = icon {
+                IconCacheManager.shared.setIcon(icon, for: cacheKey)
+            }
             DispatchQueue.main.async {
                 self.appIcon = icon
             }
