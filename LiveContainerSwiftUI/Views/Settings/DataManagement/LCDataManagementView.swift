@@ -1470,13 +1470,14 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String]) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String], [String]) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
                     try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                     var count = 0
                     var backedUpNames: [String] = []
+                    var failedNames: [String] = []
                     var keychainTotal = 0
                     var loginFileTotal = 0
                     var loginBreakdownTotal: [String: Int] = [:]
@@ -1492,22 +1493,30 @@ struct LCDataManagementView : View {
                         DispatchQueue.main.async {
                             self.backupRestoreProgress = "正在备份 \(name)（\(index + 1)/\(apps.count)）"
                         }
-                        let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
-                        keychainTotal += one.keychainCount
-                        loginFileTotal += one.loginFileCount
-                        for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
-                        loginSkippedTotal += one.loginSkipped
-                        if !one.keychainHasSnapshot {
-                            snapshotMissing = true
+                        // 单个失败不 abort 整批：原来一个 throw 就停掉后面
+                        // 所有 App，还把已备好的 count 清零报 0——“好多都没
+                        // 备份上”就是这么来的。单个失败记下来继续备后面的，
+                        // 最后在报告里列出失败的。
+                        do {
+                            let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
+                            keychainTotal += one.keychainCount
+                            loginFileTotal += one.loginFileCount
+                            for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
+                            loginSkippedTotal += one.loginSkipped
+                            if !one.keychainHasSnapshot {
+                                snapshotMissing = true
+                            }
+                            if let s = one.bridgeStatus {
+                                bridgeStatuses.append("\(name)：\(s)")
+                            }
+                            if one.keychainCount > 0, let d = one.keychainSnapshotDate {
+                                snapshotDates.append("\(name)：\(dateFmt.string(from: d))")
+                            }
+                            count += 1
+                            backedUpNames.append(name)
+                        } catch {
+                            failedNames.append("\(name)：\(LCUtils.czfFriendlyError(error))")
                         }
-                        if let s = one.bridgeStatus {
-                            bridgeStatuses.append("\(name)：\(s)")
-                        }
-                        if one.keychainCount > 0, let d = one.keychainSnapshotDate {
-                            snapshotDates.append("\(name)：\(dateFmt.string(from: d))")
-                        }
-                        count += 1
-                        backedUpNames.append(name)
                     }
                     DispatchQueue.main.async {
                         self.backupRestoreProgress = "正在同步到备份文件夹…"
@@ -1516,15 +1525,19 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, []))
+                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], []))
                 }
             }
         }
         backupRestoreProgress = nil
         if let failure {
             errorInfo = LCUtils.czfFriendlyError(failure)
+            errorShow = true
+        } else if count == 0, !failedNames.isEmpty {
+            // 一个都没成：别报“成功 0 个”，直接报失败清单
+            errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
             errorShow = true
         } else {
             // 钥匙串导了几条必须报出来：以前恒为 0 也照报"备份
@@ -1555,6 +1568,9 @@ struct LCDataManagementView : View {
             if !snapshotDates.isEmpty {
                 successInfo += "\n—— 钥匙串快照时间 ——\n" + snapshotDates.joined(separator: "\n")
                 successInfo += "\n（快照是 App 打开/切后台时由桥写的；若之后登录过，先打开 App 切一次后台再备份）"
+            }
+            if !failedNames.isEmpty {
+                successInfo += "\n—— 以下 App 备份失败（已跳过，继续备了后面的）——\n" + failedNames.joined(separator: "\n")
             }
             successInfo += "\n" + backupRoot.path
             successShow = true
