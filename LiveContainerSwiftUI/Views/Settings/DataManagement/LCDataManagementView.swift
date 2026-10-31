@@ -114,7 +114,7 @@ struct LCDataManagementView : View {
             } header: {
                 Text("设置备份")
             } footer: {
-                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置，连同 App 排序、定时备份/定时清理设置，一起打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；每次备份 App 时那份也会自动刷新。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
+                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置，连同 App 排序、定时备份/定时清理设置、已添加源，一起打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；每次备份 App 时那份也会自动刷新。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
             }
             .fileImporter(isPresented: $showSettingsImporter, allowedContentTypes: [UTType.json]) { result in
                 switch result {
@@ -800,6 +800,14 @@ struct LCDataManagementView : View {
         "LCKeepSelectedWhenQuit", "LCKeepAliveEnabled",
         "LCIgnoreJITOnLaunch", "LCWaitForDebugger",
         "LCSharePrivateDataWithLiveProcess",
+        // 已添加源：2026-10-31 10:59 用户改口，设置备份导出
+        // 也要包括已添加源（推翻 04:18 不进备份的决定）。源地址
+        // 存在标准库（LCAltStoreSourcesView 读写标准库），进这
+        // 张标准表后导出、恢复、手动导入三路都走同一分支：
+        // 导出时 writeCZFSettingsBackup 读标准库带上它，恢复/
+        // 导入时 applySettingsDictionary 按本表写回标准库。
+        // 证书/密码/书签/设备号仍不进（见上排除原则）。
+        "LCAltStoreSourceURLs",
     ]
     static let settingsBackupAppGroupKeys: Set<String> = [
         "LCAppSortType", "LCCustomSortOrder",
@@ -1350,7 +1358,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String]) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
@@ -1367,6 +1375,7 @@ struct LCDataManagementView : View {
         var loginFileCount = 0
         var loginBreakdown: [String: Int] = [:]
         var loginSkipped = 0
+        var loginSkippedPaths: [String] = []
         // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
@@ -1436,6 +1445,7 @@ struct LCDataManagementView : View {
                     let r = Self.copyLoginStateFiles(from: srcURL, to: destURL, fm: fm)
                     loginFileCount += r.count
                     loginSkipped += r.skipped
+                    if loginSkippedPaths.count < 50 { loginSkippedPaths.append(contentsOf: r.skippedPaths.prefix(50 - loginSkippedPaths.count)) }
                     for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
                 }
             }
@@ -1448,6 +1458,7 @@ struct LCDataManagementView : View {
                         let r = Self.copyLoginStateFiles(from: src, to: groupRoot.appendingPathComponent(groupID), fm: fm)
                         loginFileCount += r.count
                         loginSkipped += r.skipped
+                        if loginSkippedPaths.count < 50 { loginSkippedPaths.append(contentsOf: r.skippedPaths.prefix(50 - loginSkippedPaths.count)) }
                         for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
                     }
                 }
@@ -1500,7 +1511,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkipped, newestDumpDate)
+        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkipped, newestDumpDate, loginSkippedPaths)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -1537,7 +1548,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String], [String]) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String], [String], [String]) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -1549,6 +1560,7 @@ struct LCDataManagementView : View {
                     var loginFileTotal = 0
                     var loginBreakdownTotal: [String: Int] = [:]
                     var loginSkippedTotal = 0
+                    var loginSkippedPathsTotal: [String] = []
                     var snapshotMissing = false
                     var bridgeStatuses: [String] = []
                     var snapshotDates: [String] = []
@@ -1570,6 +1582,7 @@ struct LCDataManagementView : View {
                             loginFileTotal += one.loginFileCount
                             for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
                             loginSkippedTotal += one.loginSkipped
+                            if loginSkippedPathsTotal.count < 10 { loginSkippedPathsTotal.append(contentsOf: one.loginSkippedPaths.prefix(10 - loginSkippedPathsTotal.count)) }
                             if !one.keychainHasSnapshot {
                                 snapshotMissing = true
                             }
@@ -1592,9 +1605,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackup()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], []))
+                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], [], []))
                 }
             }
         }
@@ -1627,6 +1640,16 @@ struct LCDataManagementView : View {
                 }
                 if loginSkippedTotal > 0 {
                     successInfo += "\n超 300MB 预算跳过 \(loginSkippedTotal) 个文件"
+                    // 只列前 10 条相对路径（弹窗塞不下 2985 条）：
+                    // 下次看到“登录态没回来”时，先对一下会话文件
+                    // 在不在这张跳过清单里，再定是预算问题还是
+                    // 钥匙串问题。
+                    if !loginSkippedPathsTotal.isEmpty {
+                        successInfo += "（前 \(loginSkippedPathsTotal.count) 条：\n" + loginSkippedPathsTotal.joined(separator: "\n") + "）"
+                        if loginSkippedTotal > loginSkippedPathsTotal.count {
+                            successInfo += "\n另有 \(loginSkippedTotal - loginSkippedPathsTotal.count) 个未列出"
+                        }
+                    }
                 }
             }
             if !bridgeStatuses.isEmpty {
@@ -1733,8 +1756,17 @@ struct LCDataManagementView : View {
             var keychainQueuedTotal = 0
             var keychainImportedTotal = 0
             var keychainUnwritableTotal = 0
+            // 宿主直写第一个非成功错误码（连同 App 名）：直写
+            // 失败码以前算了没展示，下次测试看到“钥匙串没回来”
+            // 时能直接点名卡在哪一环（-34018 多为无权访问组）。
+            var keychainStatusFirst: (name: String, status: OSStatus)?
             var missing: [(folder: URL, name: String, bundleID: String)] = []
             var noDataApps: [String] = []
+            // 单个恢复失败不 abort 整批（照抄 v213 备份侧模式）：
+            // 原来 restoreOneApp 一 throw，整个 restoreFromBackup
+            // 跳到外层 catch，后面所有 App 都没恢复、报告也丢了。
+            // 单个失败记下来继续恢复后面的，最后在报告里列出。
+            var restoreFailedApps: [String] = []
             var versionMismatchApps: [String] = []
             var missingFolders: [URL] = []
             let allApps = sharedModel.apps + sharedModel.hiddenApps
@@ -1757,7 +1789,18 @@ struct LCDataManagementView : View {
                    let bid = json["bundleIdentifier"], !bid.isEmpty {
                     let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
                     if matches.count == 1 {
-                        app = matches[0]
+                        // 显示名一致校验：manifest 记的显示名必须和
+                        // 唯一候选的显示名对上，否则可能是同款多开
+                        // 的另一个实例（只装 Muse、恢复 Muse5 备份
+                        // 时就会误认成 Muse，Muse5 数据盖进 Muse）。
+                        // 对不上不猜，走未安装流程（装/手动导入），
+                        // 宁可恢复失败也不错位。manifest 没写显示名
+                        // 的老备份沿用旧行为（count==1 即认）。
+                        let manifestName = json["displayName"] ?? ""
+                        let candidateName = matches[0].appInfo.displayName() ?? ""
+                        if manifestName.isEmpty || manifestName == candidateName {
+                            app = matches[0]
+                        }
                     }
                 }
                 guard let app else {
@@ -1775,18 +1818,34 @@ struct LCDataManagementView : View {
                     missing.append((folder: appFolder, name: appName, bundleID: appBundleID))
                     continue
                 }
-                let outcome = try await Self.restoreOneApp(appFolder: appFolder, app: app, loginOnly: loginOnly)
-                keychainFoundTotal += outcome.keychainFound
-                keychainQueuedTotal += outcome.keychainQueued
-                keychainImportedTotal += outcome.keychainImported
-                keychainUnwritableTotal += outcome.keychainUnwritable
-                if outcome.ok {
-                    restoredCount += 1
-                    if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
-                        versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
+                do {
+                    let outcome = try await Self.restoreOneApp(appFolder: appFolder, app: app, loginOnly: loginOnly)
+                    keychainFoundTotal += outcome.keychainFound
+                    keychainQueuedTotal += outcome.keychainQueued
+                    keychainImportedTotal += outcome.keychainImported
+                    keychainUnwritableTotal += outcome.keychainUnwritable
+                    if keychainStatusFirst == nil && outcome.keychainStatus != errSecSuccess {
+                        keychainStatusFirst = (app.appInfo.displayName() ?? folderName, outcome.keychainStatus)
                     }
-                } else {
-                    noDataApps.append(app.appInfo.displayName() ?? folderName)
+                    if outcome.ok {
+                        restoredCount += 1
+                        if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
+                            versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
+                        }
+                    } else {
+                        // 完整恢复时带上备份里容器数：0 个 = 备份里真
+                        // 没数据容器（备份侧缺东西）；>0 个 = 有容器
+                        // 但都没恢复出数据（空壳/合并 0 个，恢复侧问题）。
+                        // 登录态恢复不带（容器数结构上就是 0，会误导）。
+                        let displayName = app.appInfo.displayName() ?? folderName
+                        if loginOnly {
+                            noDataApps.append(displayName)
+                        } else {
+                            noDataApps.append("\(displayName)（备份里容器 \(outcome.containerFolderCount) 个）")
+                        }
+                    }
+                } catch {
+                    restoreFailedApps.append("\(app.appInfo.displayName() ?? folderName)：\(LCUtils.czfFriendlyError(error))")
                 }
             }
             // 未安装的 App：先从源里下载安装，等装好再恢复它的数据。
@@ -1808,6 +1867,13 @@ struct LCDataManagementView : View {
                     installNotFound.append(item.name)
                     continue
                 }
+                // 等安装前先快照已装集合：原来按 Bundle ID 或显示名
+                // 首匹配，装 Muse5 时列表里已有的 Muse（同款同
+                // Bundle ID）会先被认成“装好了”，Muse5 的数据就
+                // 盖进 Muse。只等新出现（快照里没有）且显示名对
+                // 上的那一个；显示名对不上宁可超时报安装失败，也
+                // 不错位恢复。
+                let beforeApps = Set((sharedModel.apps + sharedModel.hiddenApps).map { ObjectIdentifier($0) })
                 await MainActor.run {
                     NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL])
                 }
@@ -1817,7 +1883,7 @@ struct LCDataManagementView : View {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     let currentApps = sharedModel.apps + sharedModel.hiddenApps
                     installedApp = currentApps.first(where: {
-                        (!item.bundleID.isEmpty && ($0.appInfo.bundleIdentifier() ?? "") == item.bundleID) ||
+                        !beforeApps.contains(ObjectIdentifier($0)) &&
                         ($0.appInfo.displayName() ?? "") == item.name
                     })
                     if installedApp != nil { break }
@@ -1828,18 +1894,29 @@ struct LCDataManagementView : View {
                 }
                 // 再缓 2 秒等安装收尾落稳，然后恢复这个 App 的数据
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                let outcome2 = try await Self.restoreOneApp(appFolder: item.folder, app: installedApp, loginOnly: loginOnly)
-                keychainFoundTotal += outcome2.keychainFound
-                keychainQueuedTotal += outcome2.keychainQueued
-                keychainImportedTotal += outcome2.keychainImported
-                keychainUnwritableTotal += outcome2.keychainUnwritable
-                if outcome2.ok {
-                    installRestoredCount += 1
-                    if Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
-                        versionMismatchApps.append(item.name)
+                do {
+                    let outcome2 = try await Self.restoreOneApp(appFolder: item.folder, app: installedApp, loginOnly: loginOnly)
+                    keychainFoundTotal += outcome2.keychainFound
+                    keychainQueuedTotal += outcome2.keychainQueued
+                    keychainImportedTotal += outcome2.keychainImported
+                    keychainUnwritableTotal += outcome2.keychainUnwritable
+                    if keychainStatusFirst == nil && outcome2.keychainStatus != errSecSuccess {
+                        keychainStatusFirst = (item.name, outcome2.keychainStatus)
                     }
-                } else {
-                    noDataApps.append(item.name)
+                    if outcome2.ok {
+                        installRestoredCount += 1
+                        if Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
+                            versionMismatchApps.append(item.name)
+                        }
+                    } else {
+                        if loginOnly {
+                            noDataApps.append(item.name)
+                        } else {
+                            noDataApps.append("\(item.name)（备份里容器 \(outcome2.containerFolderCount) 个）")
+                        }
+                    }
+                } catch {
+                    restoreFailedApps.append("\(item.name)：\(LCUtils.czfFriendlyError(error))")
                 }
             }
             var msg = String(format: "lc.settings.restoreComplete".loc, restoredCount + installRestoredCount)
@@ -1848,6 +1925,23 @@ struct LCDataManagementView : View {
                 if keychainUnwritableTotal > 0 {
                     msg += "\n其中 \(keychainUnwritableTotal) 条所属 App 不注入插件（桥不加载），排队文件不会被写回"
                 }
+                // 直写失败码：以前算了没展示，“钥匙串没回来”时
+                // 只能猜卡在哪一环；现在把第一个非成功码连 App
+                // 名一起报出来。-34018 多为新签名描述文件没带
+                // 共享钥匙串组（签名/描述文件问题，App 代码修不了，
+                // 需重签带共享组的描述文件，或走文件会话恢复）。
+                if let first = keychainStatusFirst {
+                    msg += "\n宿主直写失败码：\(first.status)（\(first.name)，OSStatus）"
+                    if first.status == -34018 {
+                        msg += "——多为新签名描述文件没带共享钥匙串组，需重签带共享组的描述文件"
+                    }
+                }
+            } else if loginOnly {
+                // 登录态恢复却一条钥匙串都没找到：登录态无从
+                // 恢复，直接点名（以前这行直接消失，用户只能看
+                // 到“恢复完成 0 个”干瞪眼）。常见原因：备份时
+                // App 还没打开过、快照根本没生成。
+                msg += "\n\n钥匙串：备份里没有钥匙串快照，登录态无从恢复（备份前先打开一次要备份的 App，让桥生成快照）"
             }
             // 完整恢复才带回全局设置：设置 JSON 跟备份一起刷新
             // （本地文稿根 + 外部备份根），但恢复流程从没读过它，
@@ -1875,12 +1969,25 @@ struct LCDataManagementView : View {
             if !noDataApps.isEmpty {
                 msg += "\n\n未能恢复数据的 App（备份里没有可对应的数据容器）：\n" + noDataApps.joined(separator: "\n")
             }
+            if !restoreFailedApps.isEmpty {
+                msg += "\n\n恢复失败的 App（已跳过，继续恢复了后面的）：\n" + restoreFailedApps.joined(separator: "\n")
+            }
             if !versionMismatchApps.isEmpty {
                 msg += "\n\n备份版本与当前 App 版本不同的（数据已整套按备份时刻恢复；打开后若仍有个别信息异常，是新版读旧数据的兼容问题）：\n" + versionMismatchApps.joined(separator: "\n")
             }
+            // 一个都没恢复成时别再弹“成功”：v214 真机上“成功 /
+            // 恢复完成：0 个 App”就是这么误导人的（照抄 v213
+            // 备份侧“一个都没成直接报失败清单”的规矩）。正文
+            // 里各类失败清单照旧列出，只是换成错误弹窗。
             if presentResult {
-                successInfo = msg
-                successShow = true
+                let totalRestored = restoredCount + installRestoredCount
+                if totalRestored == 0 && (!restoreFailedApps.isEmpty || !noDataApps.isEmpty || !installFailed.isEmpty || !installNotFound.isEmpty) {
+                    errorInfo = msg
+                    errorShow = true
+                } else {
+                    successInfo = msg
+                    successShow = true
+                }
             }
             // 汇总用的一行摘要：恢复数 + 各类问题计数
             var line = "\(folderName)：已恢复 \(restoredCount + installRestoredCount) 个"
@@ -1888,9 +1995,19 @@ struct LCDataManagementView : View {
             if !installNotFound.isEmpty { issues.append("未在源中找到 \(installNotFound.count) 个") }
             if !installFailed.isEmpty { issues.append("安装失败 \(installFailed.count) 个") }
             if !noDataApps.isEmpty { issues.append("无可恢复数据 \(noDataApps.count) 个") }
+            if !restoreFailedApps.isEmpty { issues.append("恢复失败 \(restoreFailedApps.count) 个") }
             if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
             if !issues.isEmpty {
                 line += "（" + issues.joined(separator: "、") + "）"
+            }
+            // 一键汇总以前丢钥匙串明细：单文件夹报告里有的数，
+            // 汇总行里也要有，否则一键恢复后看不出登录态那路
+            // 到底排队了几条、直写了几条。
+            if keychainFoundTotal > 0 {
+                line += "；钥匙串备份含 \(keychainFoundTotal) 条，已排队 \(keychainQueuedTotal) 条，宿主直写 \(keychainImportedTotal) 条"
+                if keychainUnwritableTotal > 0 {
+                    line += "，\(keychainUnwritableTotal) 条不注入无法写回"
+                }
             }
             if presentResult {
                 backupRestoreProgress = nil
@@ -1916,6 +2033,11 @@ struct LCDataManagementView : View {
         var keychainQueued = 0
         var keychainUnwritable = 0
         var keychainStatus: OSStatus = errSecSuccess
+        // 备份文件夹里的数据容器文件夹数（manifest/.app/AppGroup/
+        // Keychain 之外）：ok=false 时区分“备份里真没容器”和
+        // “有容器但都没恢复出数据”（空壳/合并 0 个），下次测试
+        // 看到“备份里没有可对应的数据容器”时能直接定位是哪种。
+        var containerFolderCount = 0
     }
 
     /// 把一个 App 备份文件夹里的数据容器恢复到这个 App 名下。
@@ -1936,21 +2058,26 @@ struct LCDataManagementView : View {
         guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey, .ubiquitousItemDownloadingStatusKey], options: [.skipsHiddenFiles]) else { return }
         var files: [URL] = []
         for case let file as URL in enumerator {
-            if files.count > 20000 { break }
+            // 上限 20000 → 100000：用户实测一个备份 22832 个文件，
+            // 旧上限会漏掉 20000 之后的全部文件（既不触发下载、又
+            // 不等它们），恢复直接拷到占位空壳。100000 以上仍截断
+            // （极端大备份的残留上限，超时照常拷，不比现在更差）。
+            if files.count > 100000 { break }
             if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
             files.append(file)
             try? fm.startDownloadingUbiquitousItem(at: file)
         }
+        // 只轮询还没下完的：原来每秒全量扫一遍（N 个文件 × 120 秒），
+        // 文件一多就是几百万次 resourceValues；下完的移出本轮，越轮越少。
+        // 语义跟原来一致：读不到状态按已下完处理（不卡住），状态
+        // 为空或未下完继续等，超时照常拷。
+        var remaining = files
         for _ in 0..<maxSeconds {
-            var allDone = true
-            for file in files {
-                if let status = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus,
-                   status != .current {
-                    allDone = false
-                    break
-                }
+            remaining = remaining.filter { file in
+                guard let status = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus else { return false }
+                return status != .current
             }
-            if allDone { return }
+            if remaining.isEmpty { return }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }
@@ -2093,6 +2220,7 @@ struct LCDataManagementView : View {
         // 同名容器的组里（组号取目标容器自己的，删后重装时
         // 与备份一致；同名覆盖时按现有容器走，不串号）
         var outcome = RestoreOutcome()
+        outcome.containerFolderCount = containerFolders.count
         let keychainBackup = appFolder.appendingPathComponent("Keychain")
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             let plistFiles = files.filter { $0.pathExtension == "plist" }
@@ -2326,14 +2454,22 @@ struct LCDataManagementView : View {
     /// 文件排后面被截断。返回（实拷的会话文件数，目录分
     /// 布，超预算跳过数）——身份文件照拷但不计入文件数
     @discardableResult
-    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> (count: Int, breakdown: [String: Int], skipped: Int) {
+    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> (count: Int, breakdown: [String: Int], skipped: Int, skippedPaths: [String]) {
         var count = 0
         var bytes = 0
         var skipped = 0
+        // 跳过路径清单：以前只报“跳过 N 个文件”，从报告证不了
+        // 也证伪不了会话文件在不在跳过里；现在把相对路径也带
+        // 出来（只收前 50 条防 2985 个全列出把报告撑爆，数照全计）。
+        var skippedPaths: [String] = []
         var copied: [String] = []
         let entries = loginStateEntries(in: src, fm: fm).sorted { $0.size < $1.size }
         for e in entries {
-            if bytes + e.size > 300 * 1024 * 1024 { skipped += 1; continue }
+            if bytes + e.size > 300 * 1024 * 1024 {
+                skipped += 1
+                if skippedPaths.count < 50 { skippedPaths.append(e.rel) }
+                continue
+            }
             let d = dst.appendingPathComponent(e.rel)
             try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
             if (try? fm.copyItem(at: e.src, to: d)) != nil {
@@ -2344,7 +2480,7 @@ struct LCDataManagementView : View {
                 }
             }
         }
-        return (count, loginStateDirBreakdown(for: copied), skipped)
+        return (count, loginStateDirBreakdown(for: copied), skipped, skippedPaths)
     }
 
     /// 把登录态文件合并进现有容器（恢复用：同名文件逐个覆盖，

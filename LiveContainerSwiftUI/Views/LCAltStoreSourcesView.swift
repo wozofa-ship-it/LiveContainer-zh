@@ -1237,7 +1237,7 @@ private struct LCSourceAppBanner: View {
     let isSelected: Bool
     let onToggleSelect: () -> Void
     
-    @AppStorage("dynamicColors") private var dynamicColors = true
+    @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
     @EnvironmentObject private var sharedModel: SharedModel
     @State private var showDetail = false
