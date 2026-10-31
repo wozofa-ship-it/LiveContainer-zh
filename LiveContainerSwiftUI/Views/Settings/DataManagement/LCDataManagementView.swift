@@ -1877,12 +1877,23 @@ struct LCDataManagementView : View {
     /// 恢复范围弹窗选完后分发：单个恢复走 pendingRestoreURL，
     /// 一键恢复全部走 pendingRestoreAll（同一个范围套全部）
     func startPendingRestore(loginOnly: Bool) {
+        // 后台持有：大文件恢复拷盘时切后台/锁屏，系统不会
+        // 中途挂起；没它时主线程又被拷盘堵住，挂起不及时
+        // 就看门狗杀进程（闪退）。过期回调留空是故意的：
+        // 拷盘已挪后台（见三件套），主线程始终响应，过期
+        // 只是干净挂起、回前台继续，不杀进程；恢复结束必
+        // 调 endBackgroundTask。bgID 是 let，Task 捕获无
+        // Sendable 问题。UIApplication 本文件已 import，
+        // CZFHostKeepAlive 同款用法。
+        let bgID = UIApplication.shared.beginBackgroundTask { }
         if pendingRestoreAll {
             pendingRestoreAll = false
-            Task { await restoreAllBackups(loginOnly: loginOnly) }
+            Task { await restoreAllBackups(loginOnly: loginOnly); UIApplication.shared.endBackgroundTask(bgID) }
         } else if let url = pendingRestoreURL {
             pendingRestoreURL = nil
-            Task { await restoreFromBackup(at: url, loginOnly: loginOnly) }
+            Task { await restoreFromBackup(at: url, loginOnly: loginOnly); UIApplication.shared.endBackgroundTask(bgID) }
+        } else {
+            UIApplication.shared.endBackgroundTask(bgID)
         }
     }
 
@@ -2404,18 +2415,27 @@ struct LCDataManagementView : View {
         guard let extURL = Self.externalBackupFolderURL(),
               url.path.hasPrefix(extURL.path + "/") else { return }
         try? fm.startDownloadingUbiquitousItem(at: url)
-        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey, .ubiquitousItemDownloadingStatusKey], options: [.skipsHiddenFiles]) else { return }
-        var files: [URL] = []
-        for case let file as URL in enumerator {
-            // 上限 20000 → 100000：用户实测一个备份 22832 个文件，
-            // 旧上限会漏掉 20000 之后的全部文件（既不触发下载、又
-            // 不等它们），恢复直接拷到占位空壳。100000 以上仍截断
-            // （极端大备份的残留上限，超时照常拷，不比现在更差）。
-            if files.count > 100000 { break }
-            if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
-            files.append(file)
-            try? fm.startDownloadingUbiquitousItem(at: file)
-        }
+        // 整树枚举挪后台：大容器几万文件时逐个 resourceValues
+        // 在主线程同样是秒级长堵；逻辑与原来一字不差（上限、
+        // 逐个触发下载），只换执行线程。轮询段本身是 1 秒一
+        // 睡 + 短 filter，留在调用方线程。
+        let files: [URL] = await Task.detached {
+            let fm = FileManager.default
+            guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey, .ubiquitousItemDownloadingStatusKey], options: [.skipsHiddenFiles]) else { return [URL]() }
+            var out: [URL] = []
+            for case let file as URL in enumerator {
+                // 上限 20000 → 100000：用户实测一个备份 22832 个文件，
+                // 旧上限会漏掉 20000 之后的全部文件（既不触发下载、又
+                // 不等它们），恢复直接拷到占位空壳。100000 以上仍截断
+                // （极端大备份的残留上限，超时照常拷，不比现在更差）。
+                if out.count > 100000 { break }
+                if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
+                out.append(file)
+                try? fm.startDownloadingUbiquitousItem(at: file)
+            }
+            return out
+        }.value
+        if files.isEmpty { return }
         // 只轮询还没下完的：原来每秒全量扫一遍（N 个文件 × 120 秒），
         // 文件一多就是几百万次 resourceValues；下完的移出本轮，越轮越少。
         // 语义跟原来一致：读不到状态按已下完处理（不卡住），状态
@@ -2431,6 +2451,42 @@ struct LCDataManagementView : View {
             if remaining.isEmpty { return }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
+    }
+
+    /// 恢复拷盘三件套（只挪纯 FileManager 活，不动模型/@State）：
+    /// 整容器 copyItem（GB 级）在调用方线程同步跑是恢复闪退
+    /// 的根因——恢复经 Task{} 从 UI 发起、继承 MainActor，
+    /// 主线程被堵几分钟，切后台/锁屏时挂起不及时就看门狗
+    /// 杀进程（看着就是闪退，不是卡住）。备份侧 v216 已把
+    /// 同样问题挪到后台队列（见 backupApps 注释），恢复侧
+    /// 从没挪过。copyItem 本身是内核拷，不整文件进内存，
+    /// 所以不用改流式；要改的是线程 + 后台持有（见
+    /// startPendingRestore）。FileManager.default 在 detached
+    /// 内取，不从外层捕获，避免 Sendable 问题。
+    static func replaceContainerOffMain(from src: URL, to dest: URL) async throws {
+        try await Task.detached {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: dest.path) {
+                try fm.removeItem(at: dest)
+            }
+            try fm.copyItem(at: src, to: dest)
+        }.value
+    }
+
+    static func copyGroupOffMain(from src: URL, to dest: URL) async -> Bool {
+        await Task.detached {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: dest.path) {
+                try? fm.removeItem(at: dest)
+            }
+            return (try? fm.copyItem(at: src, to: dest)) != nil
+        }.value
+    }
+
+    static func mergeLoginStateOffMain(from src: URL, to dest: URL, mirrorGroupToHost: URL? = nil) async -> Int {
+        await Task.detached {
+            Self.mergeLoginStateFiles(from: src, to: dest, fm: FileManager.default, mirrorGroupToHost: mirrorGroupToHost)
+        }.value
     }
 
     /// v216：downloadProgress 原样透传给三处 iCloud 等待
@@ -2471,18 +2527,20 @@ struct LCDataManagementView : View {
                 if isLoginBackup {
                     // 登录态备份只有半套会话文件：合并进现有
                     // 容器（同名文件覆盖、其他数据不动），整
-                    // 容器替换会把没备的那半套数据删掉
-                    if Self.mergeLoginStateFiles(from: containerFolder, to: live.containerURL, fm: fm, mirrorGroupToHost: live.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath) > 0 {
+                    // 容器替换会把没备的那半套数据删掉。
+                    // 合并拷盘挪后台（见三件套注释）：逐文件
+                    // copyItem 累计也是主线程长堵。
+                    let mergeDest = live.containerURL
+                    let mergeMirror: URL? = live.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
+                    if await Self.mergeLoginStateOffMain(from: containerFolder, to: mergeDest, mirrorGroupToHost: mergeMirror) > 0 {
                         restoredContainers += 1
                     }
                     continue
                 }
-                // 同名容器还在（没删过 App）：原地覆盖
-                let destURL = live.containerURL
-                if fm.fileExists(atPath: destURL.path) {
-                    try fm.removeItem(at: destURL)
-                }
-                try fm.copyItem(at: containerFolder, to: destURL)
+                // 同名容器还在（没删过 App）：原地覆盖。
+                // 拷盘挪后台（见三件套注释），语义与原来
+                // 完全一致（存在先删再拷，失败照常 throw）。
+                try await Self.replaceContainerOffMain(from: containerFolder, to: live.containerURL)
                 restoredContainers += 1
                 continue
             }
@@ -2493,18 +2551,18 @@ struct LCDataManagementView : View {
             if isLoginBackup {
                 // 登录态备份的空壳（只剩身份文件、没有会话文件）
                 // 不登记成容器：否则安装后误报「已恢复备份记录」，
-                // 登录其实没回来；钥匙串部分走下面兜底建容器那套
-                let realFiles = Self.loginStateEntries(in: containerFolder, fm: fm).map { $0.rel }.filter { $0 != "LCContainerInfo.plist" }
+                // 登录其实没回来；钥匙串部分走下面兜底建容器那套。
+                // 整树枚举也挪后台：大容器几万文件时 resourceValues
+                // 逐个取在主线程同样是秒级长堵。
+                let realFiles = await Task.detached { Self.loginStateEntries(in: containerFolder, fm: FileManager.default) }.value.map { $0.rel }.filter { $0 != "LCContainerInfo.plist" }
                 if realFiles.isEmpty {
                     continue
                 }
             }
             let root = app.appInfo.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
             let destURL = root.appendingPathComponent(folderName)
-            if fm.fileExists(atPath: destURL.path) {
-                try fm.removeItem(at: destURL)
-            }
-            try fm.copyItem(at: containerFolder, to: destURL)
+            // 拷盘挪后台（见三件套注释），语义与原来一致。
+            try await Self.replaceContainerOffMain(from: containerFolder, to: destURL)
             let restoredName = (NSDictionary(contentsOf: destURL.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["name"] as? String ?? folderName
             let restored = LCContainer(infoDict: ["folderName": folderName, "name": restoredName], isShared: app.appInfo.isShared)
             var containers = app.uiContainers
@@ -2537,16 +2595,16 @@ struct LCDataManagementView : View {
                 // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
                 await Self.waitForUbiquitousDownload(groupFolder, fm: fm, onProgress: downloadProgress)
                 if isLoginBackup && fm.fileExists(atPath: dest.path) {
-                    // 登录态档的组容器同样是半套：合并，不整替
-                    if Self.mergeLoginStateFiles(from: groupFolder, to: dest, fm: fm) > 0 {
+                    // 登录态档的组容器同样是半套：合并，不整替。
+                    // 合并拷盘挪后台（见三件套注释）。
+                    if await Self.mergeLoginStateOffMain(from: groupFolder, to: dest) > 0 {
                         restoredExtras = true
                     }
                     continue
                 }
-                if fm.fileExists(atPath: dest.path) {
-                    try? fm.removeItem(at: dest)
-                }
-                if (try? fm.copyItem(at: groupFolder, to: dest)) != nil {
+                // 组容器整替拷盘挪后台（见三件套注释），语义
+                // 与原来一致（存在先删、失败静默不记）。
+                if await Self.copyGroupOffMain(from: groupFolder, to: dest) {
                     restoredExtras = true
                 }
             }
@@ -2564,7 +2622,11 @@ struct LCDataManagementView : View {
                 await Self.waitForUbiquitousDownload(folder, fm: fm, onProgress: downloadProgress)
                 guard let target = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n })
                         ?? app.uiSelectedContainer ?? app.uiContainers.first else { continue }
-                if Self.mergeLoginStateFiles(from: folder, to: target.containerURL, fm: fm, mirrorGroupToHost: target.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath) > 0 {
+                // 合并拷盘挪后台（见三件套注释）：目标值先在
+                // 调用方线程取出，只把纯 URL 传进 detached。
+                let mergeDest = target.containerURL
+                let mergeMirror: URL? = target.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
+                if await Self.mergeLoginStateOffMain(from: folder, to: mergeDest, mirrorGroupToHost: mergeMirror) > 0 {
                     restoredExtras = true
                 }
             }
