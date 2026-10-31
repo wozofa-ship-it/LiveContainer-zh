@@ -2501,22 +2501,60 @@ extension EnvironmentValues {
 
 // MARK: - All Apps List View
 // 面板顶部固定 App 的存储（用户定）：长按列表行固定/取消固定，
-// 按 bundleIdentifier 记（重装不丢），存 App Group 默认设置。
+// 按实例记：键是“包名_数据文件夹名（dataUUID）”，与图标缓存
+// 同款写法。只按包名记会把同 App 多开的全部实例一起固定
+// （用户实证：固定一个 Muse，固定区出现两个 Muse）。
+// 注意：删 App 重装会换数据文件夹，固定不跟过去（只丢固定，
+// 不丢数据）；平时更新不换文件夹，固定不受影响。
 final class CZFPinnedAppsStore: ObservableObject {
     static let shared = CZFPinnedAppsStore()
     @Published private(set) var pinnedIds: [String] = []
     private let defaultsKey = "CZFPinnedPanelApps"
+    private let migratedKey = "CZFPinnedPanelAppsMigratedV2"
     init() {
         pinnedIds = LCUtils.appGroupUserDefault.stringArray(forKey: defaultsKey) ?? []
     }
-    func isPinned(_ id: String) -> Bool { pinnedIds.contains(id) }
-    func toggle(_ id: String) {
-        if let idx = pinnedIds.firstIndex(of: id) {
+    /// 固定键：实例粒度。dataUUID 是数据文件夹名，多开各实例不同；
+    /// 为空时退到“包名_”（该模型无容器、跑不起来，撞键也无实际影响）。
+    static func pinKey(for app: LCAppModel) -> String {
+        "\(app.appInfo.bundleIdentifier() ?? "")_\(app.appInfo.dataUUID ?? "")"
+    }
+    /// 入参直接是模型对象，不再传裸字符串——传错键（比如包名）
+    /// 就是这次 bug 的根源，API 上直接堵死。
+    func isPinned(_ app: LCAppModel) -> Bool { pinnedIds.contains(Self.pinKey(for: app)) }
+    func toggle(_ app: LCAppModel) {
+        let key = Self.pinKey(for: app)
+        if let idx = pinnedIds.firstIndex(of: key) {
             pinnedIds.remove(at: idx)
         } else {
-            pinnedIds.append(id)
+            pinnedIds.append(key)
         }
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+    }
+    /// 旧版按包名存的固定项迁移（只跑一次）：单实例的包名直转
+    /// 成该实例的键（用户的固定保留）；多实例的包名无法断定
+    /// 当初固定的是哪一个，丢弃（用户重固定一次即可，点一下），
+    /// 绝不猜一个实例替用户固定；已删 App 的残留一并清掉。
+    /// 模型表为空时不跑、不记迁移完成（等面板下次打开模型到了再跑）。
+    func migrateLegacyPins(models: [LCAppModel]) {
+        guard !LCUtils.appGroupUserDefault.bool(forKey: migratedKey) else { return }
+        guard !models.isEmpty else { return }
+        var migrated: [String] = []
+        for entry in pinnedIds {
+            if models.contains(where: { Self.pinKey(for: $0) == entry }) {
+                if !migrated.contains(entry) { migrated.append(entry) }
+                continue
+            }
+            let sameBundle = models.filter { ($0.appInfo.bundleIdentifier() ?? "") == entry }
+            if sameBundle.count == 1, let only = sameBundle.first {
+                let key = Self.pinKey(for: only)
+                if !migrated.contains(key) { migrated.append(key) }
+            }
+            // 多实例（sameBundle.count > 1）或查无此 App：一律丢弃。
+        }
+        pinnedIds = migrated
+        LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+        LCUtils.appGroupUserDefault.set(true, forKey: migratedKey)
     }
 }
 
@@ -2534,7 +2572,7 @@ struct PinnedAppsStripView: View {
     let onClose: () -> Void
 
     private var pinnedApps: [LCAppModel] {
-        sortManager.sortedApps.filter { pinnedStore.isPinned($0.appInfo.bundleIdentifier() ?? "") }
+        sortManager.sortedApps.filter { pinnedStore.isPinned($0) }
     }
 
     var body: some View {
@@ -2583,6 +2621,12 @@ struct PinnedAppsStripView: View {
         .padding(.horizontal, 16)
         .padding(.top, 16)
         .padding(.bottom, 2)
+        // 旧版按包名存的固定项迁移：面板打开时跑一次（模型到了
+        // 才跑，模型没到不记完成、下次打开再跑；跑过一次就不再跑）。
+        // 任务绑模型数：模型表从空变有也触发，不会卡在空表上。
+        .task(id: sortManager.sortedApps.count) {
+            pinnedStore.migrateLegacyPins(models: sortManager.sortedApps)
+        }
     }
 }
 
@@ -3397,10 +3441,10 @@ struct AppCardRow: View {
         // 正在运行的还多两个：重启（卡死时一步恢复）、关闭
         .contextMenu {
             Button {
-                pinnedStore.toggle(app.appInfo.bundleIdentifier() ?? "")
+                pinnedStore.toggle(app)
             } label: {
-                Label(pinnedStore.isPinned(app.appInfo.bundleIdentifier() ?? "") ? "取消固定" : "固定到顶部",
-                      systemImage: pinnedStore.isPinned(app.appInfo.bundleIdentifier() ?? "") ? "pin.slash" : "pin")
+                Label(pinnedStore.isPinned(app) ? "取消固定" : "固定到顶部",
+                      systemImage: pinnedStore.isPinned(app) ? "pin.slash" : "pin")
             }
             if let uuid = app.appInfo.dataUUID,
                dockManager.apps.contains(where: { $0.appUUID == uuid }) {
