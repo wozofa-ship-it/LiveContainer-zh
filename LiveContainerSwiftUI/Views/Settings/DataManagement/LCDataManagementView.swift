@@ -1317,7 +1317,7 @@ struct LCDataManagementView : View {
     /// 碰全局设置）：跟恢复源同侧优先（iCloud 恢复用外部根
     /// 的那份，本地恢复用文稿根的那份），首选没有再试另一侧；
     /// 两边都没有返回 found=false。返回（写回项数，找到没有）。
-    static func restoreCZFSettings(for backupURL: URL) -> (imported: Int, found: Bool) {
+    static func restoreCZFSettings(for backupURL: URL) async -> (imported: Int, found: Bool) {
         let fm = FileManager.default
         let localJSON = fm.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("CZFSettingsBackup.json")
         var candidates: [URL] = []
@@ -1334,7 +1334,10 @@ struct LCDataManagementView : View {
             candidates.append(l)
         }
         for url in candidates {
-            guard let data = try? Data(contentsOf: url),
+            // 设置 JSON 在外部 iCloud 根，不在门/wait 覆盖内：
+            // 占位时主线程现读会堵下载；只把 Data 放 detached，
+            // 解析 + 写回仍在调用方线程（与钥匙串导入同款分工）。
+            guard let data = await Task.detached { try? Data(contentsOf: url) }.value,
                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             return (Self.applySettingsDictionary(dict), true)
         }
@@ -1991,7 +1994,7 @@ struct LCDataManagementView : View {
         // 一键恢复全部：设置只做一次（单个恢复在各自报告里做，
         // 这里逐个调时 presentResult=false 不做，免得重复写）。
         if !loginOnly, let first = merged.first {
-            let s = Self.restoreCZFSettings(for: first)
+            let s = await Self.restoreCZFSettings(for: first)
             if s.found {
                 lines.append("设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效")
             } else {
@@ -2022,7 +2025,7 @@ struct LCDataManagementView : View {
         // 报告里做，这里逐个调时 presentResult=false 不做，
         // 免得重复写；只对第一个已选文件夹做）
         if !loginOnly, let first = folders.first {
-            let s = Self.restoreCZFSettings(for: first)
+            let s = await Self.restoreCZFSettings(for: first)
             if s.found {
                 lines.append("设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效")
             } else {
@@ -2132,8 +2135,7 @@ struct LCDataManagementView : View {
                 // 对上就是同一个实例。对不上时走下面旧逻辑（老备
                 // 份不动，显示名/Bundle ID/改名兜底照旧）。
                 var app: LCAppModel? = nil
-                if let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                if let json = await Self.manifestDict(appFolder: appFolder),
                    let du = json["dataUUID"], !du.isEmpty {
                     app = allApps.first(where: { ($0.appInfo.dataUUID ?? "") == du })
                 }
@@ -2148,8 +2150,7 @@ struct LCDataManagementView : View {
                 // Bundle ID；同款只装了一个时才能唯一认出，多开装
                 // 了两个时不猜（猜错会把数据还给错的那个）。
                 if app == nil,
-                   let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let json = await Self.manifestDict(appFolder: appFolder),
                    let bid = json["bundleIdentifier"], !bid.isEmpty {
                     let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
                     if matches.count == 1 {
@@ -2185,8 +2186,7 @@ struct LCDataManagementView : View {
                 var fallbackNote: String? = nil
                 var ambiguousNote: String? = nil
                 if app == nil,
-                   let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let json = await Self.manifestDict(appFolder: appFolder),
                    let bid = json["bundleIdentifier"], !bid.isEmpty {
                     let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
                     if matches.count == 1 {
@@ -2202,8 +2202,7 @@ struct LCDataManagementView : View {
                 // 跳过本段：同款实例显示名相同，显示名无法
                 // 再区分它们，猜了也是错）。
                 if app == nil, ambiguousNote == nil,
-                   let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let json = await Self.manifestDict(appFolder: appFolder),
                    let manifestName = json["displayName"], !manifestName.isEmpty {
                     let manifestBid = json["bundleIdentifier"] ?? ""
                     let matches = allApps.filter {
@@ -2226,11 +2225,9 @@ struct LCDataManagementView : View {
                 }
                 guard let app else {
                     // App 未安装：记下它的备份文件夹和身份，后面先装再恢复
-                    let manifestURL = appFolder.appendingPathComponent("manifest.json")
                     var appName = folderName
                     var appBundleID = ""
-                    if let data = try? Data(contentsOf: manifestURL),
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                    if let json = await Self.manifestDict(appFolder: appFolder) {
                         if let displayName = json["displayName"], !displayName.isEmpty {
                             appName = displayName
                         }
@@ -2261,7 +2258,7 @@ struct LCDataManagementView : View {
                     }
                     if outcome.ok {
                         restoredCount += 1
-                        if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
+                        if await Self.backupVersionDiffers(appFolder: appFolder, app: app) {
                             versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
                         }
                         if let note = fallbackNote {
@@ -2351,7 +2348,7 @@ struct LCDataManagementView : View {
                     }
                     if outcome2.ok {
                         installRestoredCount += 1
-                        if Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
+                        if await Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
                             versionMismatchApps.append(item.name)
                         }
                     } else {
@@ -2403,7 +2400,7 @@ struct LCDataManagementView : View {
             // 重复写）；登录态恢复不碰全局设置（范围弹窗承诺
             // “只写回登录”）。
             if !loginOnly && presentResult {
-                let s = Self.restoreCZFSettings(for: backupURL)
+                let s = await Self.restoreCZFSettings(for: backupURL)
                 if s.found {
                     msg += "\n\n设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效"
                 } else {
@@ -2623,6 +2620,34 @@ struct LCDataManagementView : View {
         }.value
     }
 
+    /// 恢复路径上的 iCloud 源字节读（v223，慢网看门狗口子）：
+    /// 恢复链跑在主线程（Task{} 从 UI 发起继承 MainActor，见
+    /// 三件套注释），而 Data(contentsOf:) 在占位文件上会触发
+    /// 下载并同步堵到下完为止——慢网下主线程被堵久了，系统
+    /// 看门狗杀进程，看着就是卡住然后闪退。门只验元数据
+    /// （fileExists + 列目录，不读字节），wait 只覆盖容器/
+    /// 组文件夹，不覆盖 manifest、Keychain、设置 JSON；这三
+    /// 处原来全在主线程现读。修法沿三件套/钥匙串导入同款：
+    /// 纯 Data + 解析放 Task.detached（只传 URL、只回纯值，
+    /// 不碰模型/@State），调用方线程只用结果。Swift 5 mode，
+    /// [[String: Any]] 捕获可编译（importKeychainItems 同款
+    /// 前例）；CI 为最终 verdict。
+    static func manifestDict(appFolder: URL) async -> [String: String]? {
+        await Task.detached {
+            guard let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return nil }
+            return json
+        }.value
+    }
+
+    static func readKeychainPlist(file: URL) async -> (data: Data, items: [[String: Any]])? {
+        await Task.detached {
+            guard let data = try? Data(contentsOf: file),
+                  let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { return nil }
+            return (data, items)
+        }.value
+    }
+
     /// v216：downloadProgress 原样透传给三处 iCloud 等待
     /// （容器、组容器、登录态合并），调用方在主线程写文案。
     static func restoreOneApp(appFolder: URL, app: LCAppModel, loginOnly: Bool = false, downloadProgress: ((Int, Int) -> Void)? = nil) async throws -> RestoreOutcome {
@@ -2630,7 +2655,11 @@ struct LCDataManagementView : View {
         // 登录态备份的容器里只有半套会话文件，恢复走合并（见
         // 循环内分支）；完整备份整套替换；只恢复登录态时完整
         // 备份的容器不进循环，会话文件在下面单独合并
-        let isLoginBackup = Self.backupScope(of: appFolder) == "login"
+        // manifest 只读一次（detached，见 helpers 注释）：
+        // 原来 backupScope 与下面各读一次，全在主线程；
+        // scope/默认容器/组号/模块夹全从这次结果取。
+        let manifestJSON = await Self.manifestDict(appFolder: appFolder)
+        let isLoginBackup = manifestJSON?["scope"] == "login"
         // 备份里的容器文件夹（跳过 manifest、.app 本体，
         // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）
         var containerFolders: [URL] = []
@@ -2643,8 +2672,7 @@ struct LCDataManagementView : View {
         var manifestDataUUID = ""
         var manifestKeychainGroupId: Int? = nil
         var manifestTweakFolder = ""
-        if let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+        if let json = manifestJSON {
             manifestDataUUID = json["dataUUID"] ?? ""
             if let g = json["keychainGroupId"], let gv = Int(g) {
                 manifestKeychainGroupId = gv
@@ -2774,9 +2802,8 @@ struct LCDataManagementView : View {
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             let plistFiles = files.filter { $0.pathExtension == "plist" }
             for file in plistFiles {
-                if let data = try? Data(contentsOf: file),
-                   let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] {
-                    outcome.keychainFound += items.count
+                if let plist = await Self.readKeychainPlist(file: file) {
+                    outcome.keychainFound += plist.items.count
                 }
             }
             // 没容器可落先补一个：刚装完还没打开过的 App 一个
@@ -2815,17 +2842,22 @@ struct LCDataManagementView : View {
                     ?? app.uiContainers.first
                 guard let target else { continue }
                 // 从 iCloud 文件夹恢复时文件可能还是占位没下到
-                // 本地（读出来直接失败）：先触发下载、短等重试
-                var data = try? Data(contentsOf: file)
-                if data == nil {
+                // 本地：先触发下载、短等重试；读放 detached（见
+                // helpers 注释），主线程不堵下载。注意 Data 读
+                // 占位是同步堵、不是快速失败，所以重试前的第
+                // 一读也必须 detached（原注释“读出来直接失败”
+                // 只对真缺失/损坏成立，对占位不成立）。
+                var plist = await Self.readKeychainPlist(file: file)
+                if plist == nil {
                     try? fm.startDownloadingUbiquitousItem(at: file)
-                    for _ in 0..<5 where data == nil {
+                    for _ in 0..<5 where plist == nil {
                         try? await Task.sleep(nanoseconds: 1_000_000_000)
-                        data = try? Data(contentsOf: file)
+                        plist = await Self.readKeychainPlist(file: file)
                     }
                 }
-                guard let data,
-                      let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
+                guard let plist else { continue }
+                let data = plist.data
+                let items = plist.items
                 let writeResult = await Self.importKeychainItems(items, container: target)
                 outcome.keychainImported += writeResult.imported
                 if writeResult.imported == 0 && writeResult.lastStatus != errSecSuccess {
@@ -3072,9 +3104,8 @@ struct LCDataManagementView : View {
 
     /// 备份的版本号与当前已装版本是否不同（版本更新后恢复
     /// 旧备份时提示用，让用户知道数据是旧版时刻的整套快照）
-    static func backupVersionDiffers(appFolder: URL, app: LCAppModel) -> Bool {
-        guard let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+    static func backupVersionDiffers(appFolder: URL, app: LCAppModel) async -> Bool {
+        guard let json = await Self.manifestDict(appFolder: appFolder),
               let backupVersion = json["version"], !backupVersion.isEmpty,
               let currentVersion = app.appInfo.version(), !currentVersion.isEmpty else {
             return false
