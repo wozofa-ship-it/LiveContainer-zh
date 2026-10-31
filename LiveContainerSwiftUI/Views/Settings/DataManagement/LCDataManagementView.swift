@@ -1406,7 +1406,17 @@ struct LCDataManagementView : View {
 
     func backupDateText(for folderURL: URL) -> String {
         let manifestURL = folderURL.appendingPathComponent("manifest.json")
-        if let data = try? Data(contentsOf: manifestURL),
+        // 行日期跑在 body 主线程：iCloud 源 manifest 未下载时
+        // Data(contentsOf:) 会触发隐式下载、慢网卡住界面；
+        // 未同步跳过 Data 读、直接走下面 mtime 兜底（纯元数据，
+        // 与读失败同款路径），绝不为了一行日期去拉下载。
+        let manifestDownloaded: Bool = {
+            guard let extURL = Self.externalBackupFolderURL(),
+                  folderURL.path.hasPrefix(extURL.path + "/") else { return true }
+            return Self.isFileDownloaded(manifestURL, underExternal: true)
+        }()
+        if manifestDownloaded,
+           let data = try? Data(contentsOf: manifestURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
            let dateStr = json["backupDate"], !dateStr.isEmpty {
             return "备份时间：\(dateStr)"
@@ -1502,8 +1512,18 @@ struct LCDataManagementView : View {
             .contentShape(Rectangle())
             .onTapGesture {
                 previewFolderURL = folderURL
-                previewItems = Self.previewItems(for: folderURL)
-                showBackupPreview = true
+                // 预览计算放 Task：原来点行同步算清单，登录档整树
+                // 枚举在主线程堵几秒到几十秒、看门狗杀进程；
+                // Task 挂起不堵主线程，算完再弹 sheet（终态与
+                // 原来一致）。连点两行时只认最后一次（先算完的
+                // 旧结果不覆盖新行），防异步时序错位。
+                Task {
+                    let items = await Self.previewItems(for: folderURL)
+                    if previewFolderURL == folderURL {
+                        previewItems = items
+                        showBackupPreview = true
+                    }
+                }
             }
             Spacer()
             Button {
@@ -2991,7 +3011,17 @@ struct LCDataManagementView : View {
     /// 这份备份的范围（manifest 里的 scope 标记；旧备份没有
     /// 这个字段，一律按完整备份对待，返回空串）
     static func backupScope(of folderURL: URL) -> String {
-        guard let data = try? Data(contentsOf: folderURL.appendingPathComponent("manifest.json")),
+        // 行角标跑在 body 主线程：iCloud 源 manifest 未下载时
+        // Data(contentsOf:) 会触发隐式下载、慢网卡住界面；
+        // 未同步按“无 manifest”处理（返回空串，与读失败同款），
+        // 绝不为了一行角标去拉下载（previewItem 同款守卫）。
+        let manifestURL = folderURL.appendingPathComponent("manifest.json")
+        if let extURL = externalBackupFolderURL(),
+           folderURL.path.hasPrefix(extURL.path + "/"),
+           !isFileDownloaded(manifestURL, underExternal: true) {
+            return ""
+        }
+        guard let data = try? Data(contentsOf: manifestURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
             return ""
         }
@@ -3577,22 +3607,50 @@ struct LCDataManagementView : View {
     /// 时把它当 App 文件夹处理的行为一致）。只读元数据 + 已下载
     /// 文件内容，绝不触发 iCloud 下载；未同步的钥匙串只标
     /// “未同步”，不给假数字。
-    static func previewItems(for folderURL: URL) -> [BackupPreviewItem] {
+    /// 登录态预览会话文件数：整树枚举放 detached（只传目录值、
+    /// 只回计数值，不碰模型/@State）。原来在点行主线程同步跑，
+    /// 大容器几万文件时 resourceValues 逐个取是秒级长堵；v223
+    /// 没动预览，登录恢复点行先卡在这里、再看门狗杀进程
+    /// （卡 + 闪退）。逻辑与原来一字不差：跳过目录、100000
+    /// 封顶、skipsHiddenFiles。
+    static func sessionFileCount(dirs: [URL]) async -> Int {
+        await Task.detached {
+            let fm = FileManager.default
+            var count = 0
+            for dir in dirs {
+                if let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                    for case let file as URL in enumerator {
+                        if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
+                        count += 1
+                        if count > 100000 { break }
+                    }
+                }
+                if count > 100000 { break }
+            }
+            return count
+        }.value
+    }
+
+    static func previewItems(for folderURL: URL) async -> [BackupPreviewItem] {
         let fm = FileManager.default
         let underExternal: Bool = {
             guard let extURL = externalBackupFolderURL() else { return false }
             return folderURL.path.hasPrefix(extURL.path + "/")
         }()
         if fm.fileExists(atPath: folderURL.appendingPathComponent("manifest.json").path) {
-            return [previewItem(for: folderURL, fm: fm, underExternal: underExternal)]
+            return [await previewItem(for: folderURL, fm: fm, underExternal: underExternal)]
         }
         guard let children = try? fm.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil) else { return [] }
-        return children.filter { !$0.lastPathComponent.hasPrefix(".") && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-            .map { previewItem(for: $0, fm: fm, underExternal: underExternal) }
+        // 顺序 await 保序：原来 map 顺序即展示顺序，并行会乱序。
+        var out: [BackupPreviewItem] = []
+        for child in children.filter({ !$0.lastPathComponent.hasPrefix(".") && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true })
+            .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            out.append(await previewItem(for: child, fm: fm, underExternal: underExternal))
+        }
+        return out
     }
 
-    static func previewItem(for folderURL: URL, fm: FileManager, underExternal: Bool) -> BackupPreviewItem {
+    static func previewItem(for folderURL: URL, fm: FileManager, underExternal: Bool) async -> BackupPreviewItem {
         // 预览跑在点按的主线程：iCloud 源的 manifest 没下载到
         // 本机时直接 Data(contentsOf:) 会触发隐式下载、卡住
         // 界面——先看下载状态，未同步时按“无 manifest”处理
@@ -3626,21 +3684,12 @@ struct LCDataManagementView : View {
         }
         // 会话文件只对登录态档计数（完整档的会话文件在整容器里，
         // 不单数）：递归数容器顶层条目下的文件，100001 封顶。
+        // 整树枚举放 detached（见 sessionFileCount 注释）：原来
+        // 在点行主线程同步跑，大容器几万文件时是秒级长堵。
         var sessionFileCount: Int? = nil
         if info?.scope == "login" {
-            var count = 0
             let containerDirs = children.filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }
-            for dir in containerDirs {
-                if let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-                    for case let file as URL in enumerator {
-                        if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
-                        count += 1
-                        if count > 100000 { break }
-                    }
-                }
-                if count > 100000 { break }
-            }
-            sessionFileCount = count
+            sessionFileCount = await Self.sessionFileCount(dirs: containerDirs)
         }
         return BackupPreviewItem(
             folderName: folderURL.lastPathComponent,

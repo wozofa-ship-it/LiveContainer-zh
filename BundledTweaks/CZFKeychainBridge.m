@@ -155,15 +155,75 @@ static NSInteger CZFKBStatEntitled = 0;
 static NSInteger CZFKBStatAlias = 0;
 static NSInteger CZFKBStatDefault = 0;
 static NSInteger CZFKBStatLCDefault = 0;
+// 自定义组记账（信息性：已含在上面某一路里，不进总数公式）
+// 归属过滤计数（信息性：被排除的条目总数，未计入任何一路）
+static NSInteger CZFKBStatCustom = 0;
+static NSInteger CZFKBStatExcluded = 0;
+
+// 归属过滤（单开通用修复，隔离容器不用）：
+// 组名是否以点分段为单位完整包含 Bundle ID（防 com.example.app
+// 误含 com.example.app2：子串匹配会错，段匹配不会）。
+static BOOL CZFKBGroupContainsBid(NSString *group, NSString *bid) {
+    if (!group.length || !bid.length) return NO;
+    NSArray<NSString *> *gParts = [group componentsSeparatedByString:@"."];
+    NSArray<NSString *> *bParts = [bid componentsSeparatedByString:@"."];
+    if (bParts.count == 0 || gParts.count < bParts.count) return NO;
+    for (NSUInteger i = 0; i + bParts.count <= gParts.count; i++) {
+        BOOL match = YES;
+        for (NSUInteger j = 0; j < bParts.count; j++) {
+            if (![gParts[i + j] isEqualToString:bParts[j]]) { match = NO; break; }
+        }
+        if (match) return YES;
+    }
+    return NO;
+}
+
+// 条目字段是否指向本 App（共享组里的逐条目归属，宁可漏收不串号）：
+// 只看字符串字段（service/account/generic/label；NSData 的 generic
+// 是二进制，没法按名匹配，跳过）。命中任一即归属：
+// - 字段含 Bundle ID 全串；
+// - 字段含 Bundle ID 末段（末段即 App 名，如 Aweme）；
+// - 末段含字段（字段是 App 名的 4 字以上片段，如 awem）；
+// - 字段含容器名 / 容器名含字段（容器名若是显示名，能接住中文服务名；
+//   若是 UUID 则天然不命中，无误伤）。
+// 刻意不用“Bundle ID 含字段”（字段是 login/token 这类通用词时，
+// Bundle ID 恰好含它不代表归属，误收就是串号）。
+static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString *folderName) {
+    if (!bundleID.length) return NO;
+    NSString *last = [bundleID componentsSeparatedByString:@"."].lastObject;
+    NSArray<NSString *> *keys = @[
+        (__bridge NSString *)kSecAttrService,
+        (__bridge NSString *)kSecAttrAccount,
+        (__bridge NSString *)kSecAttrGeneric,
+        (__bridge NSString *)kSecAttrLabel,
+    ];
+    for (NSString *k in keys) {
+        id v = item[k];
+        if (![v isKindOfClass:NSString.class]) continue;
+        NSString *f = (NSString *)v;
+        if (f.length < 3) continue;
+        if ([f localizedCaseInsensitiveContainsString:bundleID]) return YES;
+        if (last.length >= 3 && [f localizedCaseInsensitiveContainsString:last]) return YES;
+        if (last.length >= 3 && f.length >= 4 && [last localizedCaseInsensitiveContainsString:f]) return YES;
+        if (folderName.length >= 3 && [f localizedCaseInsensitiveContainsString:folderName]) return YES;
+        if (folderName.length >= 3 && f.length >= 4 && [folderName localizedCaseInsensitiveContainsString:f]) return YES;
+    }
+    return NO;
+}
 
 // defaultGroup：非隔离容器才传（= <团队>.<Bundle ID>）；
 // 隔离容器传 nil，归属谓词与旧版一字不差，共享组路不动。
 // lcDefaultGroup：进程默认组（= application-identifier），
 // 非隔离容器才传；隔离容器传 nil（钩子开时不走这里，且隔
 // 离容器绝不碰共享的进程默认组，防串登录）。
-static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName, NSString *defaultGroup, NSString *lcDefaultGroup) {
+// bundleID：非隔离容器才传（= 容器 plist 的 appIdentifier）；
+// 隔离容器传 nil，此时归属谓词与旧版一字不差（4 项全留，真隔离
+// 时默认组/进程默认组本来就是 nil，退化成共享组 + alis），
+// 自定义组/归属过滤/计数一律不启用，隔离路不动。
+static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName, NSString *defaultGroup, NSString *lcDefaultGroup, NSString *bundleID) {
     NSMutableArray *all = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
+    NSMutableSet *seenExcluded = [NSMutableSet set];
     void (^collect)(NSDictionary *, NSInteger *) = ^(NSDictionary *query, NSInteger *stat) {
         CFTypeRef result = nil;
         OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
@@ -174,18 +234,9 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             if (![item isKindOfClass:NSDictionary.class]) continue;
             // 只收本 App 的：逐组扫会扫到别的 App 存在同批共
             // 享组里的条目，混进来恢复时会把别人的令牌写进这
-            // 个 App、同键不同值还会在去重时互相顶掉。归属看
-            // 条目自己的 agrp（=本容器组）或 alis（=本容器名）
+            // 个 App、同键不同值还会在去重时互相顶掉。
             NSString *itemGroup = item[(__bridge NSString *)kSecAttrAccessGroup];
             NSString *itemAlias = item[@"alis"];
-            // 非隔离：默认组专属该 Bundle ID，不存在共享组那
-            // 种跨 App 污染，放行安全。隔离容器 defaultGroup
-            // 传 nil，本行退化成旧谓词，一字不动。
-            BOOL mine = (group && itemGroup && [itemGroup isEqualToString:group])
-                     || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
-                     || (lcDefaultGroup && itemGroup && [itemGroup isEqualToString:lcDefaultGroup])
-                     || (itemAlias && [itemAlias isEqualToString:folderName]);
-            if (!mine) continue;
             NSString *cls = item[(__bridge NSString *)kSecClass] ?: (__bridge NSString *)kSecClassGenericPassword;
             NSDictionary *clean = CZFKBCleanItem(item, cls);
             NSString *identity = [NSString stringWithFormat:@"%@|%@|%@|%@",
@@ -196,16 +247,74 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             // 身份字段多为字符串；NSData 的 description 是内容
             // 的十六进制，同样能区分。撞键只会误丢内容相同的
             // 重复条，不丢数据
+            BOOL mine = NO;
+            if (!bundleID.length) {
+                // 无 bundleID（隔离容器传 nil；或非隔离容器 plist
+                // 缺 appIdentifier 的回落）：旧谓词一字不动（4 项
+                // 全留）。真隔离时 defaultGroup/lcDefaultGroup 本来
+                // 就是 nil，本行退化成共享组 + alis；回落时 lcDefault
+                // 项仍在（v218 全收行为保留，无法归属时不擅自收紧）。
+                // 自定义组/归属过滤/计数一律不启用。
+                mine = (group && itemGroup && [itemGroup isEqualToString:group])
+                    || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
+                    || (lcDefaultGroup && itemGroup && [itemGroup isEqualToString:lcDefaultGroup])
+                    || (itemAlias && [itemAlias isEqualToString:folderName]);
+            } else {
+                // 非隔离：专属组（本容器共享组、默认组、含 Bundle ID
+                // 的组）组本身就是归属证明，全收；其他组（进程默认
+                // 组、厂商共享组、其他获授权组）是共享存储，逐条目
+                // 归属过滤（字段指向本 App 才收），不归属的排除、
+                // 不进快照（防串号）。旧版这里只认 4 组：厂商组里
+                // 的条目明明被获授权组查询捞到了，却被谓词丢掉——
+                // 单开 App（抖音/Muse/Mithka）收 0 的最大漏口。
+                // 进程默认组旧版是全收（v218），现改为归属过滤：
+                // 通用服务名的条目会被排除（残留缺口，见回执注释），
+                // 但快照不再含其他单开 App 的条目。
+                if ((itemAlias && [itemAlias isEqualToString:folderName])
+                    || (group && itemGroup && [itemGroup isEqualToString:group])
+                    || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
+                    || CZFKBGroupContainsBid(itemGroup, bundleID)) {
+                    mine = YES;
+                } else if (itemGroup && CZFKBItemMatchesApp(item, bundleID, folderName)) {
+                    mine = YES;
+                } else {
+                    // 含无组名：无法归属，保守排除
+                    mine = NO;
+                }
+            }
+            if (!mine) {
+                // 归属过滤掉的去重计数（隔离不计，见上）：同一条目
+                // 会被多路查询重复捞到，只计一次，否则数字虚高。
+                // 注意：谓词与查询无关（同一条目在任何一路的结论
+                // 相同），故先被排除的条目不会在后一路被收进。
+                if (bundleID.length && ![seenExcluded containsObject:identity]) {
+                    [seenExcluded addObject:identity];
+                    CZFKBStatExcluded += 1;
+                }
+                continue;
+            }
             if ([seen containsObject:identity]) continue;
             [seen addObject:identity];
             [all addObject:clean];
             if (stat) *stat += 1;
+            // 自定义组记账（信息性，不进 exported 总数公式）：
+            // 组既不是共享组、默认组、进程默认组，却被收进来的条目
+            // （厂商组等）。它已被上面某一路 stat 计过一次，这里
+            // 只做交叉记账，不重复加进总数。
+            if (bundleID.length && itemGroup
+                && !(group && [itemGroup isEqualToString:group])
+                && !(defaultGroup && [itemGroup isEqualToString:defaultGroup])
+                && !(lcDefaultGroup && [itemGroup isEqualToString:lcDefaultGroup])) {
+                CZFKBStatCustom += 1;
+            }
         }
     };
     CZFKBStatEntitled = 0;
     CZFKBStatAlias = 0;
     CZFKBStatDefault = 0;
     CZFKBStatLCDefault = 0;
+    CZFKBStatCustom = 0;
+    CZFKBStatExcluded = 0;
     for (NSString *cls in @[(__bridge NSString *)kSecClassGenericPassword, (__bridge NSString *)kSecClassInternetPassword]) {
         // 主路：逐个获授权组查。游客钩子写条目时把组改成本
         // 容器的组，那个组必在这张表里；团队前缀对不上也不
@@ -249,9 +358,12 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
         // 牌最可能就在这里。隔离容器 lcDefaultGroup 为 nil，
         // 直接跳过（钩子开时写操作已改写到共享组，不走这里；
         // 且隔离容器绝不碰共享的进程默认组，防串登录）。
-        // 注意：此组是共享存储，导出的条目可能属于其他单开
-        // App；写回时原样写回同一共享组（见 CZFKBImport），
-        // 不是按容器归属分发，故回执里单独记账、不混入逐组。
+        // 注意：此组是共享存储，导出时逐条目归属过滤（见 collect
+        // 内谓词：字段指向本 App 才收），不归属的排除、不进快照
+        // （防串号；旧版 v218 是全收，快照会含其他单开 App 的条目，
+        // 现收紧）。写回时归属后的条目原样写回同一共享组（见
+        // CZFKBImport），不盖 alis（见导入注释）。回执里进程默认
+        // 组计数现为归属后计数（不再是全量），归属过滤掉的数另计。
         if (lcDefaultGroup) {
             collect(@{
                 (__bridge NSString *)kSecClass: cls,
@@ -321,6 +433,19 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
                         NSRange sharedRange = [origGroup rangeOfString:@".com.kdt.livecontainer.shared"];
                         if (sharedRange.location != NSNotFound && team.length) {
                             target = [team stringByAppendingString:[origGroup substringFromIndex:sharedRange.location]];
+                        } else if (team.length) {
+                            // 自定义组（厂商共享组等）：原组既不是进程默认组
+                            // 也不是共享组 → 保留后缀、只换当前团队前缀。
+                            // 原组是旧团队默认组时换完正好等于 writeGroup，
+                            // 与旧 else 行为一致；原组是厂商组时写回 App
+                            // 显式指定的那个组，App 才能读到（旧 else 写默认
+                            // 组，App 按厂商组查就扑空——自定义组令牌恢复后
+                            // 仍未登录的半截修复）。无点/无团队时 target 保
+                            // 持传入的 group（旧行为）。
+                            NSRange dot = [origGroup rangeOfString:@"."];
+                            if (dot.location != NSNotFound) {
+                                target = [team stringByAppendingString:[origGroup substringFromIndex:dot.location]];
+                            }
                         }
                     }
                 }
@@ -384,6 +509,8 @@ static void CZFKBRun(void) {
         CZFKBStatAlias = 0;
         CZFKBStatDefault = 0;
         CZFKBStatLCDefault = 0;
+        CZFKBStatCustom = 0;
+        CZFKBStatExcluded = 0;
         // 等 LCBootstrap 把 HOME 指到容器、容器信息文件落位
         // （构造函数跑在引导之前是常态）
         NSString *home = nil;
@@ -452,7 +579,7 @@ static void CZFKBRun(void) {
         if (writeGroup) {
             imported = CZFKBImport(home, writeGroup, folderName, isolated, team, lcDefaultGroup);
         }
-        CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup, lcDefaultGroup);
+        CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup, lcDefaultGroup, isolated ? nil : bundleID);
         // 状态回执：宿主备份弹窗直接带出来，桥跑没跑、组对
         // 不对、条目在不在，一行定案
         BOOL inEntitled = group && [entitled containsObject:group];
@@ -462,12 +589,20 @@ static void CZFKBRun(void) {
         // 组计数，下次定案直接看默认组有没有命中。本批再加
         // 进程默认组计数 + lcDefaultGroup + lcProbe（exported
         // 总数 = 四路之和，括号里四路分开记账，不混）。
+        // 本批再加自定义组 + 归属过滤掉（只加字段，旧字段名、
+        // 顺序、总数公式一字不动：exported 总数仍 = 逐组+别名+
+        // 默认组+进程默认组四路之和；自定义组是交叉记账（已被某
+        // 一路计过，不重复加），归属过滤掉未计入任何一路。
+        // 注意：进程默认组计数语义收紧（v218 是全量，现为归属后
+        // 计数）；归属过滤掉含被排除的进程默认组/厂商组条目，
+        // 两数相加才是该组实际捞到的总数。
         NSString *status = [NSString stringWithFormat:
-            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d",
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d",
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
             (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias + CZFKBStatDefault + CZFKBStatLCDefault),
             (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)CZFKBStatDefault, (long)CZFKBStatLCDefault,
+            (long)CZFKBStatCustom, (long)CZFKBStatExcluded,
             isolated ? @"YES" : @"NO", defaultGroup ?: @"(nil)", writeGroup ?: @"(nil)", lcDefaultGroup ?: @"(nil)", (int)lcProbe,
             (long)CZFKBStatImported,
             (long)CZFKBStatImportTotal, (int)CZFKBStatImportFail];
