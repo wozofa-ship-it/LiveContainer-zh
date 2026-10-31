@@ -2097,6 +2097,7 @@ struct LCDataManagementView : View {
             }
             var restoredCount = 0
             var keychainFoundTotal = 0
+            var keychainPlistTotal = 0
             var keychainQueuedTotal = 0
             var keychainImportedTotal = 0
             var keychainUnwritableTotal = 0
@@ -2245,6 +2246,7 @@ struct LCDataManagementView : View {
                         }
                     })
                     keychainFoundTotal += outcome.keychainFound
+                    keychainPlistTotal += outcome.keychainPlistFiles
                     keychainQueuedTotal += outcome.keychainQueued
                     keychainImportedTotal += outcome.keychainImported
                     keychainUnwritableTotal += outcome.keychainUnwritable
@@ -2268,10 +2270,14 @@ struct LCDataManagementView : View {
                         // 完整恢复时带上备份里容器数：0 个 = 备份里真
                         // 没数据容器（备份侧缺东西）；>0 个 = 有容器
                         // 但都没恢复出数据（空壳/合并 0 个，恢复侧问题）。
-                        // 登录态恢复不带（容器数结构上就是 0，会误导）。
+                        // 登录态恢复也带数：容器数现已是实数（完整
+                        // 备份登录态恢复取合并循环的顶层文件夹数，
+                        // 不再是结构 0），会话合并数与钥匙串条数一
+                        // 起，0 报告时能直接定位是文件夹空、合并 0
+                        // 还是快照空——14:45 弹窗只写裸名，定不了。
                         let displayName = app.appInfo.displayName() ?? folderName
                         if loginOnly {
-                            noDataApps.append(displayName)
+                            noDataApps.append("\(displayName)（备份里容器 \(outcome.containerFolderCount) 个，会话文件合并 \(outcome.mergedLoginFiles) 个，钥匙串快照 \(outcome.keychainFound) 条）")
                         } else {
                             noDataApps.append("\(displayName)（备份里容器 \(outcome.containerFolderCount) 个）")
                         }
@@ -2384,8 +2390,16 @@ struct LCDataManagementView : View {
                 // 登录态恢复却一条钥匙串都没找到：登录态无从
                 // 恢复，直接点名（以前这行直接消失，用户只能看
                 // 到“恢复完成 0 个”干瞪眼）。常见原因：备份时
-                // App 还没打开过、快照根本没生成。
-                msg += "\n\n钥匙串：备份里没有钥匙串快照，登录态无从恢复（备份前先打开一次要备份的 App，让桥生成快照）"
+                // App 还没打开过、快照根本没生成。再分一层：
+                // 快照文件在但读出 0 条 = 快照本身为空（桥跑过，
+                // 没收到令牌），或文件还没同步完/已损坏——恢复
+                // 侧读不到条目，分不出来；两路做法一样（确认
+                // 文件夹已同步 + 打开 App 切后台重备），写在一起。
+                if keychainPlistTotal > 0 {
+                    msg += "\n\n钥匙串：备份里有快照文件但读出 0 条（快照本身为空，或文件还没同步完；先在文件 App 里确认文件夹已下载，再打开 App 切一次后台重新备份）"
+                } else {
+                    msg += "\n\n钥匙串：备份里没有钥匙串快照，登录态无从恢复（备份前先打开一次要备份的 App，让桥生成快照）"
+                }
             }
             // v216：登录态提醒链——排队快照在 App 下次全新启动
             // 时才由桥写回，不打开就还没恢复登录态；恢复完逐个
@@ -2509,7 +2523,18 @@ struct LCDataManagementView : View {
         // Keychain 之外）：ok=false 时区分“备份里真没容器”和
         // “有容器但都没恢复出数据”（空壳/合并 0 个），下次测试
         // 看到“备份里没有可对应的数据容器”时能直接定位是哪种。
+        // 登录态恢复时也是实数：完整备份登录态恢复的容器数取
+        // 合并循环的顶层文件夹数（见 loginMergeFolderCount），
+        // 不再是结构 0。
         var containerFolderCount = 0
+        // 登录态合并进来的会话文件数（容器合并 + 组容器登录
+        // 合并 + 完整备份会话合并之和）：登录态恢复报 0 时，
+        // 凭它区分“备份里没东西”与“东西在但没合进来”。
+        var mergedLoginFiles = 0
+        // 备份 Keychain 目录里的 plist 文件数（不管条目数）：
+        // 0 = 目录缺/空；>0 但 keychainFound=0 = 快照文件在
+        // 但读出 0 条（空快照，或文件未同步完/已损坏）。
+        var keychainPlistFiles = 0
     }
 
     /// 把一个 App 备份文件夹里的数据容器恢复到这个 App 名下。
@@ -2680,6 +2705,11 @@ struct LCDataManagementView : View {
             manifestTweakFolder = json["tweakFolder"] ?? ""
         }
         var restoredContainers = 0
+        // 登录态合并计数（三种合并之和，见各合并点）与完整
+        // 备份登录态恢复的顶层文件夹数（容器数修正用，见
+        // outcome 赋值处）：只记数，不改合并语义。
+        var mergedLoginFiles = 0
+        var loginMergeFolderCount = 0
         var newDefaultContainer: LCContainer?
         for containerFolder in containerFolders {
             let folderName = containerFolder.lastPathComponent
@@ -2694,7 +2724,9 @@ struct LCDataManagementView : View {
                     // copyItem 累计也是主线程长堵。
                     let mergeDest = live.containerURL
                     let mergeMirror: URL? = live.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
-                    if await Self.mergeLoginStateOffMain(from: containerFolder, to: mergeDest, mirrorGroupToHost: mergeMirror) > 0 {
+                    let merged = await Self.mergeLoginStateOffMain(from: containerFolder, to: mergeDest, mirrorGroupToHost: mergeMirror)
+                    mergedLoginFiles += merged
+                    if merged > 0 {
                         restoredContainers += 1
                     }
                     continue
@@ -2759,7 +2791,9 @@ struct LCDataManagementView : View {
                 if isLoginBackup && fm.fileExists(atPath: dest.path) {
                     // 登录态档的组容器同样是半套：合并，不整替。
                     // 合并拷盘挪后台（见三件套注释）。
-                    if await Self.mergeLoginStateOffMain(from: groupFolder, to: dest) > 0 {
+                    let merged = await Self.mergeLoginStateOffMain(from: groupFolder, to: dest)
+                    mergedLoginFiles += merged
+                    if merged > 0 {
                         restoredExtras = true
                     }
                     continue
@@ -2772,11 +2806,32 @@ struct LCDataManagementView : View {
             }
         }
         // 完整备份 + 只恢复登录态：整套容器不动，只把备份容器
-        // 里的会话文件合并进现有容器（钥匙串在下面照常写回）；
-        // 容器一个都没有（刚装完）时跳过文件部分，钥匙串兜底
-        // 建容器那套逻辑照旧
+        // 里的会话文件合并进现有容器（钥匙串在下面照常写回）。
+        // 刚装完没打开过的 App 一个容器都没有：原来合并循环
+        // 的 target 守卫会全部跳过，会话文件明明在备份里却
+        // 一个都合并不进来，直接报 0（原来指望钥匙串段“补一
+        // 个默认容器”，但快照 absent 时那段根本不建——
+        // 14:45 Mithka 登录态恢复 0 个就是这条路）。照钥匙
+        // 串段同款先补一个默认容器，合并才有落点；文件夹一
+        // 个都没有时不补。补的容器就是 App 的合法默认容器
+        // （首启也会建一个），钥匙串段随后复用它，不重复建。
         if loginOnly && !isLoginBackup {
             let topFolders = (try? fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)) ?? []
+            loginMergeFolderCount = topFolders.filter { let n = $0.lastPathComponent; return n != "manifest.json" && !n.hasSuffix(".app") && n != "AppGroup" && n != "Keychain" }.count
+            if app.uiContainers.isEmpty, loginMergeFolderCount > 0 {
+                let newName = manifestDataUUID.isEmpty ? NSUUID().uuidString : manifestDataUUID
+                let newContainer = LCContainer(folderName: newName, name: newName, isShared: app.appInfo.isShared)
+                var containers = app.uiContainers
+                containers.append(newContainer)
+                app.uiContainers = containers
+                app.appInfo.containers = containers
+                app.uiSelectedContainer = newContainer
+                app.uiDefaultDataFolder = newName
+                app.appInfo.dataUUID = newName
+                if let bundleID = app.appInfo.bundleIdentifier() {
+                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
+                }
+            }
             for folder in topFolders {
                 let n = folder.lastPathComponent
                 if n == "manifest.json" || n.hasSuffix(".app") || n == "AppGroup" || n == "Keychain" { continue }
@@ -2788,7 +2843,9 @@ struct LCDataManagementView : View {
                 // 调用方线程取出，只把纯 URL 传进 detached。
                 let mergeDest = target.containerURL
                 let mergeMirror: URL? = target.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
-                if await Self.mergeLoginStateOffMain(from: folder, to: mergeDest, mirrorGroupToHost: mergeMirror) > 0 {
+                let merged = await Self.mergeLoginStateOffMain(from: folder, to: mergeDest, mirrorGroupToHost: mergeMirror)
+                mergedLoginFiles += merged
+                if merged > 0 {
                     restoredExtras = true
                 }
             }
@@ -2797,10 +2854,15 @@ struct LCDataManagementView : View {
         // 同名容器的组里（组号取目标容器自己的，删后重装时
         // 与备份一致；同名覆盖时按现有容器走，不串号）
         var outcome = RestoreOutcome()
-        outcome.containerFolderCount = containerFolders.count
+        // 完整备份登录态恢复时 containerFolders 本来就是空
+        // （结构 0），容器数取合并循环的顶层文件夹数才是实数；
+        // 其余两路 loginMergeFolderCount=0，结果不变。
+        outcome.containerFolderCount = containerFolders.count + loginMergeFolderCount
+        outcome.mergedLoginFiles = mergedLoginFiles
         let keychainBackup = appFolder.appendingPathComponent("Keychain")
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             let plistFiles = files.filter { $0.pathExtension == "plist" }
+            outcome.keychainPlistFiles = plistFiles.count
             for file in plistFiles {
                 if let plist = await Self.readKeychainPlist(file: file) {
                     outcome.keychainFound += plist.items.count
