@@ -756,11 +756,16 @@ class LCAppModel: ObservableObject, Hashable {
             // 已有窗口必须属于本条目：同包名别的条目若共用容器，
             // 按 dataUUID 找会把别人的窗口顶回来；归属对不上
             // 就不顶，交给 runApp 去拆容器、起新窗口。
-            if let dockApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == dataUUID }),
-               let dockPath = dockApp.appInfo?.relativeBundlePath,
-               !dockPath.isEmpty,
-               dockPath != appInfo.relativeBundlePath {
-                return false
+            if let dockApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == dataUUID }) {
+                // dock 条目存在却无法证明归属（appInfo 缺失或路径
+                // 为空）时视为未知，一律不顶窗口，交给 runApp；
+                // 宁可多起一个窗口，不顶错别人的。
+                guard let dockPath = dockApp.appInfo?.relativeBundlePath, !dockPath.isEmpty else {
+                    return false
+                }
+                if dockPath != appInfo.relativeBundlePath {
+                    return false
+                }
             }
             if let urlScheme {
                 UserDefaults.standard.setValue(urlScheme, forKey: "launchAppUrlScheme")

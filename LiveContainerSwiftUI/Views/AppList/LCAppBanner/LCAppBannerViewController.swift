@@ -99,7 +99,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             // 这里按容器找会把别人的窗口顶回来；归属对不上就
             // 不顶，直接走 runApp，runApp 里会拆共享容器、起新窗口。
             let dockApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == currentDataFolder })
-            let dockBelongsToOther = dockApp.flatMap { $0.appInfo?.relativeBundlePath }.map { !$0.isEmpty && $0 != configuration.model.appInfo.relativeBundlePath } ?? false
+            // dock 条目存在却无法证明归属（appInfo 缺失或路径为
+            // 空）时视为未知，一律不顶窗口，交给 runApp 去拆容器、
+            // 起新窗口；宁可多起一个窗口，不顶错别人的。dock 条目
+            // 根本不存在时不拦（带回尝试自然失败，同样走 runApp）。
+            let dockBelongsToOther: Bool
+            if let dockPath = dockApp?.appInfo?.relativeBundlePath, !dockPath.isEmpty {
+                dockBelongsToOther = dockPath != configuration.model.appInfo.relativeBundlePath
+            } else {
+                dockBelongsToOther = dockApp != nil
+            }
             // 原生窗口模式下 dock 里可能没有这条记录，再按容器
             // 本身判一次：选中容器若被同包名别的条目也在用，
             // 这里按容器找同样会把别人的窗口顶回来，一律不顶。

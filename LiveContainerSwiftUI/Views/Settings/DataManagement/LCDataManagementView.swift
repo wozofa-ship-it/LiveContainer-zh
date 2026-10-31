@@ -2022,6 +2022,11 @@ struct LCDataManagementView : View {
             }
         }
         backupRestoreProgress = nil
+        // 恢复完成：清 AppInfo 缓存与 dock 残留条目（恢复会改
+        // 模型容器/换实例，旧缓存与旧条目会指错 App）。
+        if #available(iOS 16.0, *) {
+            MultitaskDockManager.refreshAfterAppChanged()
+        }
         successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
         successShow = true
     }
@@ -2053,6 +2058,10 @@ struct LCDataManagementView : View {
             }
         }
         backupRestoreProgress = nil
+        // 恢复完成：同款清缓存与 dock 残留（见一键恢复全部）。
+        if #available(iOS 16.0, *) {
+            MultitaskDockManager.refreshAfterAppChanged()
+        }
         // 注意：这里用 folders.count，不照抄一键恢复全部的
         // lines.count——后者把 settings 行也算进去了，设置
         // 恢复成功时会把头数多算 1 个；已选报头只认勾中数
@@ -2477,6 +2486,12 @@ struct LCDataManagementView : View {
                 } else {
                     successInfo = msg
                     successShow = true
+                }
+                // 单个恢复完成：同款清缓存与 dock 残留。只在
+                // presentResult 时跑一次；一键/已选逐个调时
+                // presentResult=false，不重复跑（批完成时跑）。
+                if #available(iOS 16.0, *) {
+                    MultitaskDockManager.refreshAfterAppChanged()
                 }
             }
             // 汇总用的一行摘要：恢复数 + 各类问题计数

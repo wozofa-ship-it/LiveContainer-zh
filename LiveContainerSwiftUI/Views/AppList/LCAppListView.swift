@@ -1069,6 +1069,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     sharedModel.apps.removeAll { $0 == appToReplace }
                     sharedModel.apps.append(newAppModel)
                 }
+                // 覆盖安装（旧模型换新模型）后同款清掉，否则旧
+                // 包路径的缓存/dock 条目会指到已替换的 App。
+                if #available(iOS 16.0, *) {
+                    MultitaskDockManager.refreshAfterAppChanged()
+                }
 
             } else {
                 let newAppModel = LCAppModel(appInfo: finalNewApp, delegate: self)
@@ -1543,7 +1548,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             sharedModel.hiddenApps.removeAll { now in
                 return app == now
             }
-            
+            // 删 App 后 AppInfo 缓存与 dock 残留条目一起清，否
+            // 则删掉的 App 还会按旧 LCAppInfo 被解析、旧 dock
+            // 条目还会被顶回前台（MultitaskDockManager 是
+            // iOS 16+ 类，必须用 #available 包住）。
+            if #available(iOS 16.0, *) {
+                MultitaskDockManager.refreshAfterAppChanged()
+            }
         }
     }
     

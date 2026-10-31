@@ -689,8 +689,57 @@ class AppInfoProvider {
         }
     }
     
+    // 清掉无窗口的残留 dock 条目：容器已不在任何已装 App 名下，
+    // 或对应 App 已不在（被删/被覆盖替换）。正在运行的窗口
+    // （view 非空）一律不动；本函数不关任何窗口，只删条目记录。
+    // 调用点：App 删除/覆盖安装/恢复完成，以及 bring-to-front 前
+    // 的安全网。必须在主线程调（apps 是 @Published）。
+    func pruneStaleDockEntries() {
+        let allModels = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        var ownedContainers = Set<String>()
+        for model in allModels {
+            for container in model.uiContainers {
+                ownedContainers.insert(container.folderName)
+            }
+            for container in model.appInfo.containers {
+                ownedContainers.insert(container.folderName)
+            }
+        }
+        let ownedBundlePaths = Set(allModels.compactMap { $0.appInfo.relativeBundlePath })
+        apps.removeAll { entry in
+            // 正在运行的窗口：view 是窗口存在的硬证据，一律不动。
+            guard entry.view == nil else { return false }
+            // 容器已无任何已装 App 认领 → 残留条目，剪掉。
+            if !ownedContainers.contains(entry.appUUID) {
+                return true
+            }
+            // 容器还在，但条目对应的 App 已不在（被覆盖替换后旧
+            // 条目指着旧包路径）→ 剪掉；appInfo 缺失时无法证明
+            // App 已走，留给带回守卫处理，不在这里剪。
+            if let entryPath = entry.appInfo?.relativeBundlePath, !ownedBundlePaths.contains(entryPath) {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// App 删除/覆盖安装/恢复完成 后调用：AppInfo 缓存与 dock
+    /// 残留条目一起清掉，否则删掉/换掉的 App 还会按旧 LCAppInfo
+    /// 被解析、旧 dock 条目还会被顶回前台。正在运行的窗口不动
+    /// （见 pruneStaleDockEntries）。必须在主线程调。
+    /// 注意：本类是 iOS 16+ 类，调用方须用 #available 包住。
+    static func refreshAfterAppChanged() {
+        AppInfoProvider.shared.clearCache()
+        MultitaskDockManager.shared.pruneStaleDockEntries()
+    }
+
     // Find and bring corresponding multitask view to front
     func bringMultitaskViewToFront(uuid: String, from center: CGPoint? = nil) -> Bool {
+        // 带回前先清残留条目：无窗口的过期条目若留着，find 会
+        // 按 uuid 命中它（即使 view 为空也会走一圈）；清掉后带回
+        // 失败即回 false，调用方自然走正常启动。正在运行的窗口
+        // 不受影响（prune 从不剪 view 非空的条目）。
+        pruneStaleDockEntries()
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
             return false
         }
@@ -2606,7 +2655,15 @@ struct AllAppsListView: View {
             // 窗口必须属于本条目：同包名别的条目若共用容器，
             // 按 dataUUID 找会把别人的窗口顶回来；归属对不上
             // 就不顶，走下面 URL 启动，runApp 里会拆共享容器。
-            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? false
+            // runningApp 存在却无法证明归属（appInfo 缺失或路径
+            // 为空）时同样视为未知，一律不顶；宁可多起一个窗口，
+            // 不顶错别人的。
+            let belongsToOther: Bool
+            if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                belongsToOther = runningPath != app.appInfo.relativeBundlePath
+            } else {
+                belongsToOther = true
+            }
             if !belongsToOther {
                 let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
                 closePanel()
@@ -2657,7 +2714,15 @@ struct AllAppsListView: View {
         guard let dataUUID = app.appInfo.dataUUID else { return }
         // 已在运行：把它的窗口带到前面，并还原为小窗口
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? false
+            // runningApp 存在却无法证明归属（appInfo 缺失或路径
+            // 为空）时视为未知，一律不顶窗口，交给 runApp 起新
+            // 窗口；宁可多起一个窗口，不顶错别人的。
+            let belongsToOther: Bool
+            if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                belongsToOther = runningPath != app.appInfo.relativeBundlePath
+            } else {
+                belongsToOther = true
+            }
             if !belongsToOther {
                 let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
                 unmaximizeWindow(uuid: dataUUID)
