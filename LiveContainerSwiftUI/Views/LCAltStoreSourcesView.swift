@@ -1244,13 +1244,21 @@ private struct LCSourceAppBanner: View {
     @State private var copiedCardURL = false
     // 忽略/取消忽略后翻一下，强制本行按新状态重画
     @State private var ignoreRefresh = false
+    // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
+    @State private var showInstancePicker = false
     
     private var isInstalled: Bool {
         (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
     }
     
+    // 注意：installedAppModel 只供 hasUpdate 版本比较；启动绝不走它
+    //（多开时“打开”按下面 installedAppModels 走单开直启/多开选实例）。
     private var installedAppModel: LCAppModel? {
         (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })
+    }
+
+    private var installedAppModels: [LCAppModel] {
+        (sharedModel.apps + sharedModel.hiddenApps).filter { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
     }
     
     // 源里版本比已装版本新 → 有更新（被用户忽略的这个版本不算）
@@ -1449,8 +1457,11 @@ private struct LCSourceAppBanner: View {
                 } else if !isDylib && isInstalled {
                     HStack(spacing: 6) {
                         Button {
-                            if let installedApp = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) {
-                                Task { try? await installedApp.runApp() }
+                            let matches = installedAppModels
+                            if matches.count == 1, let only = matches.first {
+                                Task { try? await only.runApp() }
+                            } else if matches.count > 1 {
+                                showInstancePicker = true
                             }
                         } label: {
                             Text("lc.common.open".loc)
@@ -1543,6 +1554,30 @@ private struct LCSourceAppBanner: View {
         }
         .sheet(isPresented: $showDetail) {
             LCSourceAppDetailView(app: app, source: source)
+        }
+        .sheet(isPresented: $showInstancePicker) {
+            NavigationView {
+                List(installedAppModels, id: \.self) { model in
+                    Button {
+                        showInstancePicker = false
+                        Task { try? await model.runApp() }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(model.appInfo.displayName())
+                                .font(.system(size: 15)).bold()
+                            Text("容器 \(model.uiSelectedContainer?.name ?? model.uiSelectedContainer?.folderName ?? "") • 版本 \(model.appInfo.version())")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .navigationTitle("选择要打开的实例")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { showInstancePicker = false }
+                    }
+                }
+            }
         }
     }
 }
