@@ -892,8 +892,17 @@ actor CZFMultitaskLaunchGate {
     func czfWaitForWindowAndRelease(uuid: String) async {
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline {
-            let appeared = await MainActor.run {
-                MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == uuid })
+            // MultitaskDockManager 带 @available(iOS 16.0, *)，跨文件
+            // 引用必须包 #available（v170 血泪：不包编不过）；16 以下
+            // 多任务根本不存在，else 走 false 即可（持门路本身也只在
+            // 16+ 才走，这里只是为编译兜底）。
+            let appeared: Bool
+            if #available(iOS 16.0, *) {
+                appeared = await MainActor.run {
+                    MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == uuid })
+                }
+            } else {
+                appeared = false
             }
             if appeared {
                 break
