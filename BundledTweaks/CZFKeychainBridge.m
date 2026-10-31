@@ -73,6 +73,26 @@ static NSString *CZFKBGroupString(NSString *team, NSInteger groupId) {
     return [NSString stringWithFormat:@"%@.com.kdt.livecontainer.shared.%ld", team, (long)groupId];
 }
 
+// 单开容器的默认钥匙串组：钩子关时 App 的 SecItem 调用原样
+// 通过，无组名时 iOS 落到 <团队>.<Bundle ID>。隔离容器不走
+// 这里（钩子开，全部改写到共享组），见 CZFKBIsIsolatedContainer。
+static NSString *CZFKBDefaultGroup(NSString *team, NSString *bundleID) {
+    if (!team.length || !bundleID.length) return nil;
+    return [NSString stringWithFormat:@"%@.%@", team, bundleID];
+}
+
+// 隔离判定：plist 有 isolateAppGroup 键就用它（现行
+// makeLCContainerInfoPlist 已写该键，无需补字段）；缺键的
+// 旧版 plist 判不明，保守走共享组路：反向误判（隔离实例按
+// 非隔离处理）会把它的快照写进同包名共用的默认组，造成多
+// 开串登录；正向误判（非隔离按隔离处理）只维持现状、不回
+// 归、不串号。宁可旧容器暂不享受修复，也不冒串登录风险。
+static BOOL CZFKBIsIsolatedContainer(NSDictionary *info) {
+    id v = info[@"isolateAppGroup"];
+    if (!v) return YES;
+    return [v boolValue];
+}
+
 // 本进程签名里真正被授权的钥匙串组全表：团队前缀以签名实
 // 际写死的为准（个人 ID 重签后宿主与游客两个进程读到的团
 // 队 ID 可能不一致，靠拼字符串永远对不上）。条目不管躺在
@@ -110,8 +130,11 @@ static NSDictionary *CZFKBCleanItem(NSDictionary *item, NSString *cls) {
 // 导出各路的新增条数（去重后按来源记账），写进状态回执
 static NSInteger CZFKBStatEntitled = 0;
 static NSInteger CZFKBStatAlias = 0;
+static NSInteger CZFKBStatDefault = 0;
 
-static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName) {
+// defaultGroup：非隔离容器才传（= <团队>.<Bundle ID>）；
+// 隔离容器传 nil，归属谓词与旧版一字不差，共享组路不动。
+static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName, NSString *defaultGroup) {
     NSMutableArray *all = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     void (^collect)(NSDictionary *, NSInteger *) = ^(NSDictionary *query, NSInteger *stat) {
@@ -128,7 +151,11 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             // 条目自己的 agrp（=本容器组）或 alis（=本容器名）
             NSString *itemGroup = item[(__bridge NSString *)kSecAttrAccessGroup];
             NSString *itemAlias = item[@"alis"];
+            // 非隔离：默认组专属该 Bundle ID，不存在共享组那
+            // 种跨 App 污染，放行安全。隔离容器 defaultGroup
+            // 传 nil，本行退化成旧谓词，一字不动。
             BOOL mine = (group && itemGroup && [itemGroup isEqualToString:group])
+                     || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
                      || (itemAlias && [itemAlias isEqualToString:folderName]);
             if (!mine) continue;
             NSString *cls = item[(__bridge NSString *)kSecClass] ?: (__bridge NSString *)kSecClassGenericPassword;
@@ -149,6 +176,7 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
     };
     CZFKBStatEntitled = 0;
     CZFKBStatAlias = 0;
+    CZFKBStatDefault = 0;
     for (NSString *cls in @[(__bridge NSString *)kSecClassGenericPassword, (__bridge NSString *)kSecClassInternetPassword]) {
         // 主路：逐个获授权组查。游客钩子写条目时把组改成本
         // 容器的组，那个组必在这张表里；团队前缀对不上也不
@@ -172,6 +200,19 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             (__bridge NSString *)kSecReturnAttributes: @YES,
             (__bridge NSString *)kSecReturnData: @YES,
         }, &CZFKBStatAlias);
+        // 非隔离加一查默认组：默认组若已在授权表里，逐组扫
+        // 已捞到、去重后这里不重复记账；若不在表里，只有这
+        // 一查能捞到。隔离容器 defaultGroup 为 nil，直接跳过。
+        if (defaultGroup) {
+            collect(@{
+                (__bridge NSString *)kSecClass: cls,
+                (__bridge NSString *)kSecAttrAccessGroup: defaultGroup,
+                (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+                (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
+                (__bridge NSString *)kSecReturnAttributes: @YES,
+                (__bridge NSString *)kSecReturnData: @YES,
+            }, &CZFKBStatDefault);
+        }
     }
     // 空的也写：文件存在本身就是"桥跑过、快照为空"的凭据，
     // 宿主据此区分"还没打开过 App"和"真没令牌"
@@ -258,6 +299,7 @@ static void CZFKBRun(void) {
         // 而实际 100 条）
         CZFKBStatEntitled = 0;
         CZFKBStatAlias = 0;
+        CZFKBStatDefault = 0;
         // 等 LCBootstrap 把 HOME 指到容器、容器信息文件落位
         // （构造函数跑在引导之前是常态）
         NSString *home = nil;
@@ -279,6 +321,15 @@ static void CZFKBRun(void) {
         NSInteger groupId = [info[@"keychainGroupId"] integerValue];
         NSString *team = CZFKBTeamIdentifier();
         NSString *group = CZFKBGroupString(team, groupId);
+        // 分流：隔离 → 共享组（旧路）；非隔离 → 默认组（新口
+        // 子）。默认组拿不到（无团队/无 Bundle ID）时回落共
+        // 享组，维持现状、不崩。appIdentifier 取自容器 plist，
+        // 非字符串时按缺失处理。
+        BOOL isolated = CZFKBIsIsolatedContainer(info);
+        id bundleIDValue = info[@"appIdentifier"];
+        NSString *bundleID = [bundleIDValue isKindOfClass:NSString.class] ? bundleIDValue : nil;
+        NSString *defaultGroup = isolated ? nil : CZFKBDefaultGroup(team, bundleID);
+        NSString *writeGroup = (!isolated && defaultGroup) ? defaultGroup : group;
         NSArray<NSString *> *entitled = CZFKBEntitledGroups();
         if (!group && entitled.count == 0) return;
         NSString *folderName = home.lastPathComponent;
@@ -297,19 +348,25 @@ static void CZFKBRun(void) {
             probe = SecItemCopyMatching((__bridge CFDictionaryRef)probeQuery, nil);
         }
         NSInteger imported = 0;
-        if (group) {
-            imported = CZFKBImport(home, group, folderName);
+        if (writeGroup) {
+            imported = CZFKBImport(home, writeGroup, folderName);
         }
-        CZFKBExport(home, entitled ?: @[], group, folderName);
+        CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup);
         // 状态回执：宿主备份弹窗直接带出来，桥跑没跑、组对
         // 不对、条目在不在，一行定案
         BOOL inEntitled = group && [entitled containsObject:group];
+        // 回执只加字段不改旧字段：宿主原文展示、无解析依赖，
+        // 旧字段语义不变（group 仍是共享组、probe 仍探共享
+        // 组）；新增 isolated/defaultGroup/writeGroup 与默认
+        // 组计数，下次定案直接看默认组有没有命中。
         NSString *status = [NSString stringWithFormat:
-            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld） imported=%ld/%ld fail=%d",
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ imported=%ld/%ld fail=%d",
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
-            (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias),
-            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)CZFKBStatImported,
+            (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias + CZFKBStatDefault),
+            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)CZFKBStatDefault,
+            isolated ? @"YES" : @"NO", defaultGroup ?: @"(nil)", writeGroup ?: @"(nil)",
+            (long)CZFKBStatImported,
             (long)CZFKBStatImportTotal, (int)CZFKBStatImportFail];
         [status writeToFile:[home stringByAppendingPathComponent:@"CZFKeychainBridgeStatus.txt"]
                  atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -332,10 +389,19 @@ static BOOL CZFKBTryImportEarly(void) {
         if (!info) return NO;
         NSString *importPath = [home stringByAppendingPathComponent:@"CZFKeychainImport.plist"];
         if (![[NSFileManager defaultManager] fileExistsAtPath:importPath]) return YES;
+        // 抢导必须与全量流程用同一写回目标，否则抢导写进共
+        // 享组、App 读默认组还是看不见，且排队文件已被抢导
+        // 删掉、全量流程无从补救。分流逻辑与 CZFKBRun 一致。
         NSInteger groupId = [info[@"keychainGroupId"] integerValue];
-        NSString *group = CZFKBGroupString(CZFKBTeamIdentifier(), groupId);
-        if (!group) return NO;
-        CZFKBImport(home, group, home.lastPathComponent);
+        NSString *team = CZFKBTeamIdentifier();
+        NSString *group = CZFKBGroupString(team, groupId);
+        BOOL isolated = CZFKBIsIsolatedContainer(info);
+        id bundleIDValue = info[@"appIdentifier"];
+        NSString *bundleID = [bundleIDValue isKindOfClass:NSString.class] ? bundleIDValue : nil;
+        NSString *defaultGroup = isolated ? nil : CZFKBDefaultGroup(team, bundleID);
+        NSString *writeGroup = (!isolated && defaultGroup) ? defaultGroup : group;
+        if (!writeGroup) return NO;
+        CZFKBImport(home, writeGroup, home.lastPathComponent);
         return YES;
     } @catch (NSException *e) {
         return NO;
