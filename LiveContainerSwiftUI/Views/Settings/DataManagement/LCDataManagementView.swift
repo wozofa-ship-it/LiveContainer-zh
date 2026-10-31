@@ -1974,6 +1974,10 @@ struct LCDataManagementView : View {
             var keychainStatusFirst: (name: String, status: OSStatus)?
             var missing: [(folder: URL, name: String, bundleID: String)] = []
             var noDataApps: [String] = []
+            // 兜底配对 / 多候选对不上的 App（见配对兜底注释）：
+            // 只记名，不新开 UserDefaults 键
+            var ambiguousApps: [String] = []
+            var fallbackPairedApps: [String] = []
             // 单个恢复失败不 abort 整批（照抄 v213 备份侧模式）：
             // 原来 restoreOneApp 一 throw，整个 restoreFromBackup
             // 跳到外层 catch，后面所有 App 都没恢复、报告也丢了。
@@ -2034,6 +2038,63 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
+                // 兜底配对（严格三段全 miss 时才进，不换严格规则）：
+                // 删 Live 重装后全部 manifest dataUUID 都过期，严格
+                // 第一段全灭；文件夹名是多开后缀名、显示名改过时
+                // 第二段也灭；第三段又被显示名一致校验拦住时，
+                // 整个备份就掉进“未安装”流程——App 明明装着，却
+                // 要去源里重装，源里没有就报 0。这两段只在唯一
+                // 候选时才认，多候选一律不猜（见 ambiguousApps）。
+                // 兜底配对成功后走下面同一套 restoreOneApp 全流程
+                //（数据 + 钥匙串排队），不只报个数。
+                // 4a：按 manifest Bundle ID 兜底（唯一候选才认；
+                // 显示名不要求一致——改名/删剩单实例时显示名
+                // 对不上是常态；Bundle ID 是 App 身份，不同
+                // Bundle ID 的绝不配。已知取舍：同款多开删剩
+                // 一个时，这段会把已删实例的备份配给现存同款
+                // 实例——要避开就保留两个实例再恢复）。
+                var fallbackNote: String? = nil
+                var ambiguousNote: String? = nil
+                if app == nil,
+                   let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let bid = json["bundleIdentifier"], !bid.isEmpty {
+                    let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
+                    if matches.count == 1 {
+                        app = matches[0]
+                        fallbackNote = "按 Bundle ID 兜底"
+                    } else if matches.count > 1 {
+                        ambiguousNote = "同款多开 \(matches.count) 个，无法唯一确定"
+                    }
+                }
+                // 4b：按 manifest 显示名兜底（唯一候选才认；若
+                // manifest 有 Bundle ID，候选的 Bundle ID 必须
+                // 一致——同名不同 App 绝不配。4a 已判多候选时
+                // 跳过本段：同款实例显示名相同，显示名无法
+                // 再区分它们，猜了也是错）。
+                if app == nil, ambiguousNote == nil,
+                   let data = try? Data(contentsOf: appFolder.appendingPathComponent("manifest.json")),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                   let manifestName = json["displayName"], !manifestName.isEmpty {
+                    let manifestBid = json["bundleIdentifier"] ?? ""
+                    let matches = allApps.filter {
+                        ($0.appInfo.displayName() ?? "") == manifestName &&
+                        (manifestBid.isEmpty || ($0.appInfo.bundleIdentifier() ?? "") == manifestBid)
+                    }
+                    if matches.count == 1 {
+                        app = matches[0]
+                        fallbackNote = "按显示名兜底"
+                    } else if matches.count > 1 {
+                        ambiguousNote = "同名 \(matches.count) 个，无法唯一确定"
+                    }
+                }
+                // 兜底多候选：App 装着但无法唯一确定，不进
+                // “未安装”流程（否则会去源里重装一个重复实例），
+                // 也不猜——报告里明说对不上。
+                if app == nil, let note = ambiguousNote {
+                    ambiguousApps.append("\(folderName)（\(note)）")
+                    continue
+                }
                 guard let app else {
                     // App 未安装：记下它的备份文件夹和身份，后面先装再恢复
                     let manifestURL = appFolder.appendingPathComponent("manifest.json")
@@ -2073,6 +2134,9 @@ struct LCDataManagementView : View {
                         restoredCount += 1
                         if Self.backupVersionDiffers(appFolder: appFolder, app: app) {
                             versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
+                        }
+                        if let note = fallbackNote {
+                            fallbackPairedApps.append("\(app.appInfo.displayName() ?? folderName)（\(note)）")
                         }
                     } else {
                         // 完整恢复时带上备份里容器数：0 个 = 备份里真
@@ -2229,6 +2293,12 @@ struct LCDataManagementView : View {
             if !noDataApps.isEmpty {
                 msg += "\n\n未能恢复数据的 App（备份里没有可对应的数据容器）：\n" + noDataApps.joined(separator: "\n")
             }
+            if !fallbackPairedApps.isEmpty {
+                msg += "\n\n兜底配对恢复的 App（严格匹配未命中，按唯一候选配对，走正常恢复全流程）：\n" + fallbackPairedApps.joined(separator: "\n")
+            }
+            if !ambiguousApps.isEmpty {
+                msg += "\n\n无法唯一确定恢复目标的 App（未恢复，也未去重装；请保留对应实例后手动单文件夹恢复）：\n" + ambiguousApps.joined(separator: "\n")
+            }
             if !restoreFailedApps.isEmpty {
                 msg += "\n\n恢复失败的 App（已跳过，继续恢复了后面的）：\n" + restoreFailedApps.joined(separator: "\n")
             }
@@ -2241,7 +2311,7 @@ struct LCDataManagementView : View {
             // 里各类失败清单照旧列出，只是换成错误弹窗。
             if presentResult {
                 let totalRestored = restoredCount + installRestoredCount
-                if totalRestored == 0 && (!restoreFailedApps.isEmpty || !noDataApps.isEmpty || !installFailed.isEmpty || !installNotFound.isEmpty) {
+                if totalRestored == 0 && (!restoreFailedApps.isEmpty || !noDataApps.isEmpty || !ambiguousApps.isEmpty || !installFailed.isEmpty || !installNotFound.isEmpty) {
                     errorInfo = msg
                     errorShow = true
                 } else {
@@ -2255,10 +2325,14 @@ struct LCDataManagementView : View {
             if !installNotFound.isEmpty { issues.append("未在源中找到 \(installNotFound.count) 个") }
             if !installFailed.isEmpty { issues.append("安装失败 \(installFailed.count) 个") }
             if !noDataApps.isEmpty { issues.append("无可恢复数据 \(noDataApps.count) 个") }
+            if !ambiguousApps.isEmpty { issues.append("多候选对不上 \(ambiguousApps.count) 个") }
             if !restoreFailedApps.isEmpty { issues.append("恢复失败 \(restoreFailedApps.count) 个") }
             if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
             if !issues.isEmpty {
                 line += "（" + issues.joined(separator: "、") + "）"
+            }
+            if !fallbackPairedApps.isEmpty {
+                line += "（含兜底配对 \(fallbackPairedApps.count) 个）"
             }
             // 一键汇总以前丢钥匙串明细：单文件夹报告里有的数，
             // 汇总行里也要有，否则一键恢复后看不出登录态那路
