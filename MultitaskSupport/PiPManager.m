@@ -83,6 +83,10 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)stopPiP {
+    // C2：同步清残留标志，不再全靠异步 WillStop 回调——
+    // 回调漏掉时标志永久残留，此后全部场景更新被丢。
+    // WillStop 到时还会再清一次，幂等。
+    self.displayingVC.shouldIgnoreSceneUpdates = NO;
     [self.pipController stopPictureInPicture];
 }
 

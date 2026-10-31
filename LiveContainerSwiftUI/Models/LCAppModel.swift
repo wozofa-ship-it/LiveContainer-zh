@@ -511,6 +511,45 @@ class LCAppModel: ObservableObject, Hashable {
         } else {
             jitDefersKeyWrite = jitNeeded
         }
+        // 串行门（多任务路）：启动键是全局单键（selected/
+        // selectedContainer），亚秒级连点两次多任务启动会把第
+        // 一次的键顶掉、客读到第二次的键而起错 App。写键前先
+        // 持门，客窗口出现（dockManager.apps 含本容器，与
+        // smallWindowOpenApp 认同一信号）或启动失败/15 秒超时
+        // 才释放；第二次启动绝不挂到超时（拿门最多等 60 秒，
+        // 仍拿不到就无门放行、不抛错）。经典路不动——宿主启动
+        // 调用后即 SIGKILL，无门可持；delegate 写键路（非多任
+        // 务 JIT）也不持门，键时序一字不动。
+        // 本次是否走这里写键并起多任务窗的两条路（与下面
+        // launch 分支一一对应）：17.4+ 时 multitask 即是；
+        // 17.4 以下时 multitask 且非 JIT 才是（multitask+JIT
+        // 走 delegate 路，键不在这里写，不持门）。
+        let czfMultitaskLaunchHere: Bool
+        if #available(iOS 17.4, *) {
+            czfMultitaskLaunchHere = multitask
+        } else if #available(iOS 16.0, *) {
+            czfMultitaskLaunchHere = multitask && !jitNeeded
+        } else {
+            czfMultitaskLaunchHere = false
+        }
+        var czfGateHeld = false
+        var czfGateUUID: String?
+        if czfMultitaskLaunchHere, let folderName = uiSelectedContainer?.folderName {
+            czfGateHeld = try await CZFMultitaskLaunchGate.shared.acquire(for: folderName)
+            if czfGateHeld {
+                czfGateUUID = folderName
+            }
+        }
+        // 失败释放：链路抛错会跳过下面的交接，门还在手里时由
+        // 这个 defer 放掉；成功交接后 czfGateUUID 已置空，
+        // defer 不再动手。defer 里不能 await，用 Task 送释放。
+        defer {
+            if let uuid = czfGateUUID {
+                Task {
+                    await CZFMultitaskLaunchGate.shared.release(for: uuid)
+                }
+            }
+        }
         if !jitDefersKeyWrite {
             if let bundleIdOverride {
                 UserDefaults.standard.set(bundleIdOverride, forKey: "selected")
@@ -565,7 +604,16 @@ class LCAppModel: ObservableObject, Hashable {
             }
             LCSharedUtils.launchToGuestApp(withClassicMode: classicMode)
         }
-        
+
+        // 启动成功：门交接给等窗任务——客窗口出现或 15 秒超时
+        // 才释放；runApp 本身不等窗返回，isAppRunning 周期不变。
+        if czfGateHeld, let uuid = czfGateUUID {
+            czfGateUUID = nil
+            Task.detached {
+                await CZFMultitaskLaunchGate.shared.czfWaitForWindowAndRelease(uuid: uuid)
+            }
+        }
+
         // Record the launch time
         appInfo.lastLaunched = Date()
 
@@ -797,5 +845,61 @@ class LCAppModel: ObservableObject, Hashable {
             }
             return found
         }
+    }
+}
+
+// MARK: - 多任务启动串行门（CZF，3.8.230）
+// 启动键是全局单键，多任务路两次启动亚秒级连点会互相顶键、
+// 客读错键起错 App。门是全局一把（不分容器——键本身就是
+// 全局的）：写键前持门，客窗口出现或启动失败才放行。
+// 取消：acquire 的检查与 sleep 在任务取消时抛错，门不落袋；
+// 等待上限：持门等窗最多 15 秒、拿门最多 60 秒，超时即放
+// 行/无门启动，第二次启动绝不无限挂起。
+actor CZFMultitaskLaunchGate {
+    static let shared = CZFMultitaskLaunchGate()
+    private var holder: String?
+
+    /// 拿门：已有持有者时每 0.1 秒轮询，最多 60 秒；返回
+    /// true = 已持门（调用方负责释放），false = 超时未拿到
+    /// （无门放行，调用方不得释放）。任务取消时抛错。
+    func acquire(for uuid: String) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(60)
+        while true {
+            try Task.checkCancellation()
+            if holder == nil {
+                holder = uuid
+                return true
+            }
+            if Date() >= deadline {
+                return false
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// 放门：只有持有者能放，别人的释放一律忽略（超时无门
+    /// 放行的调用方、已交接的等窗任务都不会误清别人的门）。
+    func release(for uuid: String) {
+        if holder == uuid {
+            holder = nil
+        }
+    }
+
+    /// 等窗后放门：每 0.3 秒在主线程认一次 dockManager.apps
+    /// 含本容器（与 smallWindowOpenApp 认同一信号），出现
+    /// 即放；15 秒未出现也放——门绝不为一次慢启动/失败启动
+    /// 一直占着。
+    func czfWaitForWindowAndRelease(uuid: String) async {
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            let appeared = await MainActor.run {
+                MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == uuid })
+            }
+            if appeared {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        release(for: uuid)
     }
 }

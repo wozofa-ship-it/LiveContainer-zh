@@ -115,6 +115,9 @@ class AppInfoProvider {
     @objc let appUUID: String
     let appInfo: LCAppInfo?
     let view: UIView?
+    // C4：条目创建时间（=窗口创建时间）——客进程已死的 stale
+    // 窗只清 30 秒以上的，刚建窗、pid 还没落位时不误清。
+    let czfAppearedAt = Date()
     
     @objc init(appName: String, appUUID: String, appInfo: LCAppInfo? = nil, view: UIView?) {
         self.appName = appName
@@ -123,6 +126,12 @@ class AppInfoProvider {
         self.view = view
         super.init()
     }
+}
+
+// C6：多任务窗口出现信号——dock 条目追加时发，smallWindow
+// 的建窗回调与串行门都认它（与 smallWindow 旧轮询同一信号）。
+extension Notification.Name {
+    static let czfMultitaskWindowAppeared = Notification.Name("CZFMultitaskWindowAppeared")
 }
 
 // MARK: - MultitaskDockView Manager
@@ -733,8 +742,17 @@ class AppInfoProvider {
         MultitaskDockManager.shared.pruneStaleDockEntries()
     }
 
+    // C4 信号：最近一次 bring 调用是否清掉了死窗（见
+    // bringMultitaskViewToFront；removeRunningApp 是异步的，
+    // 调用方不能靠事后查 apps 来判断）。
+    var czfLastBringCleanedDeadWindowUUID: String?
+
     // Find and bring corresponding multitask view to front
     func bringMultitaskViewToFront(uuid: String, from center: CGPoint? = nil) -> Bool {
+        // C4 信号：本次调用是否清掉了死窗——removeRunningApp
+        // 是异步的，调用方不能靠事后查 apps 是否还在来判断，
+        // 必须认这个同步置位的旗（每次调用入口先清零）。
+        czfLastBringCleanedDeadWindowUUID = nil
         // 带回前先清残留条目：无窗口的过期条目若留着，find 会
         // 按 uuid 命中它（即使 view 为空也会走一圈）；清掉后带回
         // 失败即回 false，调用方自然走正常启动。正在运行的窗口
@@ -746,6 +764,24 @@ class AppInfoProvider {
 
         for window in windowScene.windows {
             if let targetView = findMultitaskView(in: window, withUUID: uuid) {
+                // C4：客进程已死的 stale 窗兜底——视图还在、pid 已无
+                // （jetsam 后清理链丢了），带回只会顶回一帧死画面：
+                // 拆条目 + 摘视图 + 清场景，返回 false 让调用方走
+                // 正常启动（即重启入口）。进程活着一律不动；30 秒
+                // 内的新窗不动（刚建窗时 pid 可能还没落位，误清
+                // 正在启动的窗口比留一个死窗更糟）；条目对不上
+                // （年龄未知）时保守不动。
+                if let decoratedVC = targetView._viewDelegate() as? DecoratedAppSceneViewController,
+                   let appSceneVC = decoratedVC.appSceneVC,
+                   !appSceneVC.isAppRunning,
+                   let entry = apps.first(where: { $0.appUUID == uuid }),
+                   Date().timeIntervalSince(entry.czfAppearedAt) > 30 {
+                    czfLastBringCleanedDeadWindowUUID = uuid
+                    removeRunningApp(uuid)
+                    targetView.removeFromSuperview()
+                    appSceneVC.appTerminationCleanUp()
+                    return false
+                }
                 passURLSchemeToView(targetView)
                 // 用视图实际所在的窗口做置顶：findMultitaskView 不看 window 参数，
                 // 循环第一个窗口未必是视图的窗口，窗口级置顶会抬错窗口。
@@ -781,7 +817,16 @@ class AppInfoProvider {
         let isHidden = view.isHidden || view.alpha < 0.1
         let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController
         let isMaximized = decoratedVC?.isMaximized ?? false
-        
+
+        // C2：带回前台时 PiP 未激活却残留 shouldIgnoreSceneUpdates
+        // （WillStop 回调漏掉）→ 先清掉，否则此后场景更新全被丢、
+        // 窗口只剩最后一帧；PiP 正激活时不动，stopPiP 也已同步清。
+        if let decoratedVC, let appSceneVC = decoratedVC.appSceneVC,
+           PiPManager.shared?.isPiP(withDecoratedVC: decoratedVC) != true,
+           appSceneVC.shouldIgnoreSceneUpdates {
+            appSceneVC.shouldIgnoreSceneUpdates = false
+        }
+
         // when a fullscreen multitask app is brought to front, optionally hide other windows
         if UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") && isMaximized {
             MultitaskDockManager.shared.minimizeAllWindows(except: decoratedVC)
@@ -822,7 +867,13 @@ class AppInfoProvider {
             )
         } else {
             bringViewToFront(view, in: window)
-            
+            // C3：可见分支以前只走脉冲动画、不写前台——客经不藏
+            // 视图路径被后台化后，窗口看着回了前台、客仍后台；
+            // 这里补一次前台写（PiP 激活时 czfSetSceneForeground
+            // 自己跳过，残留标志已由上面 C2 清掉）。单次慢点
+            // 的脉冲动画本身不动。
+            decoratedVC?.appSceneVC?.czfSetSceneForeground(true)
+
             UIView.animate(withDuration: Constants.shortAnimationDuration1, animations: {
                 let scale = Constants.bringToFrontScale
                 view.transform = CGAffineTransform(scaleX: scale, y: scale)
@@ -872,9 +923,12 @@ class AppInfoProvider {
         
         let appName = appInfo?.displayName() ?? "Unknown App"
         let appModel = DockAppModel(appName: appName, appUUID: appUUID, appInfo: appInfo, view: view)
-        
+
         DispatchQueue.main.async {
             self.apps.append(appModel)
+            // C6：窗口出现信号（条目真正追加时才发，调用方凭
+            // appUUID 过滤；串行门轮询的也是这个 apps 信号）。
+            NotificationCenter.default.post(name: .czfMultitaskWindowAppeared, object: nil, userInfo: ["appUUID": appUUID])
             if let bid = appInfo?.bundleIdentifier() {
                 self.czfRegisterTouchRaiseObserver(bundleId: bid)
             }
@@ -888,7 +942,31 @@ class AppInfoProvider {
             self.czfEnforceRunningCap(newUUID: appUUID)
         }
     }
-    
+
+    /// C6 回调：等指定 dataUUID 的窗口出现（dock 条目追加）再
+    /// 调 handler；超时（默认 30 秒）未出现则放弃等、不留野
+    /// 观察者。调用方须在启动前注册——窗口出现先于注册的竞
+    /// 态由开头的已存在检查兜底（已在就地调 handler）。
+    func czfOnWindowAppeared(uuid: String, timeout: TimeInterval = 30, handler: @escaping () -> Void) {
+        if apps.contains(where: { $0.appUUID == uuid }) {
+            handler()
+            return
+        }
+        var observer: NSObjectProtocol?
+        observer = NotificationCenter.default.addObserver(forName: .czfMultitaskWindowAppeared, object: nil, queue: .main) { note in
+            guard (note.userInfo?["appUUID"] as? String) == uuid else { return }
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            handler()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+    }
+
     // 同时运行上限（CZF）：最多 3 个窗口。第 4 个窗口注册时
     // 才触发（App 页点开、快捷栏点开都走 addRunningAppWithInfo
     // 注册，所以两条路都拦得到；已在运行的点回来不算新注册）。
@@ -1674,19 +1752,43 @@ class AppInfoProvider {
 
     // 面板动作防重复：同一次滑动可能被插件（Darwin）和宿主窗口
     // 识别器两条路各报一次（小窗口模式两边都收得到触摸），切换式
-    // 开关下第二下会把刚打开的面板又关掉，还多震一下。0.4 秒内
-    // 的重复调用直接吞掉，一次滑动只算一次。两个面板共用一个
-    // 时间戳（互斥呈现，连着误报两边也只认第一下）。
+    // 开关下第二下会把刚打开的面板又关掉，还多震一下。
+    // 分来源去重（行为底线不动：启用带、控件排除、切换式全不变）：
+    // 同来源 0.4 秒内重复吞掉（各来源各算各的，不再互相吞掉对方
+    // 的第二次滑动）；跨来源回声另防——任一面板刚由另一来源打开
+    // （1.0 秒内），本次就是同一物理滑动的第二路信号，直接吞掉，
+    // 不开了又关、不多震。面板内互切（switchPanels）仍用下面
+    // 共用的 czfLastPanelActionAt，不走这两路。
     private var czfLastPanelActionAt = Date.distantPast
+    private enum CZFPanelSignalSource { case host, funnel }
+    private var czfLastHostPanelActionAt = Date.distantPast
+    private var czfLastFunnelPanelActionAt = Date.distantPast
+    private var czfLastPanelOpenedAt = Date.distantPast
+    private var czfLastPanelOpenedSource: CZFPanelSignalSource?
 
     @objc public func czfOpenAppPanel() {
+        czfToggleAppPanel(source: .host)
+    }
+
+    @objc public func czfOpenAppPanelFromFunnel() {
+        czfToggleAppPanel(source: .funnel)
+    }
+
+    private func czfToggleAppPanel(source: CZFPanelSignalSource) {
         guard Self.czfEdgeGesturesEnabled else { return }
         // 不再要求已打开 App/快捷栏可见：用户定任意位置（包括刚
         // 进 LiveContainer 的主界面）都要能调出面板，与源面板同
         // 待遇。呈现走 keyWindow 兜底（presentAllAppsPanel 内）。
         let now = Date()
-        guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
-        czfLastPanelActionAt = now
+        switch source {
+        case .host:
+            guard now.timeIntervalSince(czfLastHostPanelActionAt) > 0.4 else { return }
+            czfLastHostPanelActionAt = now
+        case .funnel:
+            guard now.timeIntervalSince(czfLastFunnelPanelActionAt) > 0.4 else { return }
+            czfLastFunnelPanelActionAt = now
+        }
+        if now.timeIntervalSince(czfLastPanelOpenedAt) < 1.0, czfLastPanelOpenedSource != source { return }
         edgeCallbackBuzz()
         // 切换式（用户要求）：面板已打开再滑一次就关掉，
         // 不再是只能滑开、关还得点按钮/点遮罩。
@@ -1694,6 +1796,8 @@ class AppInfoProvider {
             dismissPanelOverlay()
             return
         }
+        czfLastPanelOpenedAt = now
+        czfLastPanelOpenedSource = source
         presentAllAppsPanel()
     }
 
@@ -1703,15 +1807,32 @@ class AppInfoProvider {
     // 明确要求）；呈现走 keyWindow 兜底。同样是切换式：已打开
     // 再滑一次关掉。
     @objc public func czfOpenSourcesPanel() {
+        czfToggleSourcesPanel(source: .host)
+    }
+
+    @objc public func czfOpenSourcesPanelFromFunnel() {
+        czfToggleSourcesPanel(source: .funnel)
+    }
+
+    private func czfToggleSourcesPanel(source: CZFPanelSignalSource) {
         guard Self.czfEdgeGesturesEnabled else { return }
         let now = Date()
-        guard now.timeIntervalSince(czfLastPanelActionAt) > 0.4 else { return }
-        czfLastPanelActionAt = now
+        switch source {
+        case .host:
+            guard now.timeIntervalSince(czfLastHostPanelActionAt) > 0.4 else { return }
+            czfLastHostPanelActionAt = now
+        case .funnel:
+            guard now.timeIntervalSince(czfLastFunnelPanelActionAt) > 0.4 else { return }
+            czfLastFunnelPanelActionAt = now
+        }
+        if now.timeIntervalSince(czfLastPanelOpenedAt) < 1.0, czfLastPanelOpenedSource != source { return }
         edgeCallbackBuzz()
         if isSourcesPanelOpen {
             dismissSourcesOverlay()
             return
         }
+        czfLastPanelOpenedAt = now
+        czfLastPanelOpenedSource = source
         presentSourcesPanel()
     }
 
@@ -2069,8 +2190,8 @@ class AppInfoProvider {
                     case "czf.dock.rightInward": manager.czfEdgeRightInward()
                     case "czf.dock.rightOutward": manager.czfEdgeRightOutward()
                     case "czf.dock.leftOutward": manager.czfEdgeLeftOutward()
-                    case "czf.dock.openPanel": manager.czfOpenAppPanel()
-                    case "czf.dock.openSources": manager.czfOpenSourcesPanel()
+                    case "czf.dock.openPanel": manager.czfOpenAppPanelFromFunnel()
+                    case "czf.dock.openSources": manager.czfOpenSourcesPanelFromFunnel()
                     default: break
                     }
                 }
@@ -2776,28 +2897,39 @@ struct AllAppsListView: View {
                 belongsToOther = true
             }
             if !belongsToOther {
-                let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                unmaximizeWindow(uuid: dataUUID)
-                closePanel()
-                return
+                let brought = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                if brought {
+                    unmaximizeWindow(uuid: dataUUID)
+                    closePanel()
+                    return
+                }
+                // 带回失败：条目还在且不是本次 C4 清掉的（窗口
+                // 不在任何窗口里等）→ 保持旧行为，不重复起新窗；
+                // 本次 C4 清掉了死窗，或 prune 同步剪掉了无窗残
+                // 留（条目已不在）→ 落到下面 runApp 起新窗（即
+                // 重启入口）。注意不能只查条目在不在：C4 的
+                // removeRunningApp 是异步的，刚调完时条目还在。
+                let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == dataUUID
+                let entryGone = !dockManager.apps.contains(where: { $0.appUUID == dataUUID })
+                if !cleanedByC4 && !entryGone {
+                    unmaximizeWindow(uuid: dataUUID)
+                    closePanel()
+                    return
+                }
             }
         }
         closePanel()
+        // C6 回调驱动：先注册、再启动——窗口出现（dock 条目
+        // 追加）才还原为小窗，不再 0.3 秒×30 次轮询、9 秒过期；
+        // 启动慢（签名/VPN/JIT）时窗出来仍能还原。30 秒未出现
+        // 则放弃等，不留野观察者；还原前仍留 0.35 秒让窗落稳。
+        dockManager.czfOnWindowAppeared(uuid: dataUUID, timeout: 30) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.unmaximizeWindow(uuid: dataUUID)
+            }
+        }
         Task {
             try? await app.runApp(multitask: true, containerFolderName: dataUUID)
-        }
-        // 等窗口建好后还原为小窗口（轮询窗口出现）
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
-            attempts += 1
-            if self.dockManager.apps.contains(where: { $0.appUUID == dataUUID }) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    self.unmaximizeWindow(uuid: dataUUID)
-                }
-                timer.invalidate()
-            } else if attempts >= 30 {
-                timer.invalidate()
-            }
         }
     }
 

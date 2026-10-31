@@ -17,6 +17,13 @@
 @property(nonatomic) UIBarButtonItem *maximizeButton;
 @property(nonatomic) bool isAppTerminationRequested;
 @property(nonatomic) BOOL czfRestoreApplied;
+// C1：最大化/还原切换进行中标志——还原 0.3 秒动画内再调
+// maximizeWindow 时直接返回，不再起第二套动画抢帧。
+@property(nonatomic) BOOL czfMaximizeAnimating;
+// C5：窗口动画序号——最小化与恢复各起一次动画时 +1；
+// 最小化 completion 只认最新序号，旧动画被新动作打断时
+// 不再由旧 completion 落态，改由新动作自己的路径落态。
+@property(nonatomic) NSInteger czfWindowAnimSeq;
 // 最小化省电（CZF）：YES = 本窗口已最小化，场景应为后台；
 // 恢复时清掉。只做标记，真正的 foreground 写在下面三个方法里。
 @property(nonatomic) BOOL czfMinimized;
@@ -437,6 +444,9 @@
 // animateViewAppearance（带取消隐藏的恢复路）调，不由单纯调层级的
 // bringViewToFront 调——后者不取消隐藏，调了会让藏着的窗口也变前台。
 - (void)czfRestoreFromMinimize {
+    // C5：恢复接管最终态——进行中的最小化动画若被这次恢复
+    // 打断，它的 completion 凭序号认出自己已过时、不再落态。
+    self.czfWindowAnimSeq++;
     self.czfMinimized = NO;
     [self czfApplyMinimizedForeground];
 }
@@ -468,11 +478,19 @@
     // 主页顶到全屏游客前面（顶层切换只会把游客窗口带到
     // 前面，见 MultitaskDockManager 的 bringMultitaskViewToFront）。
     [self czfDismissKeyboard];
+    // C5：记下本次最小化动画的序号；completion 里只认最新
+    // 序号——被更新的最小化/恢复打断的旧动画不再落态。
+    NSInteger czfMinAnimSeq = ++self.czfWindowAnimSeq;
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.alpha = 0;
         self.view.transform = CGAffineTransformMakeScale(0.1, 0.1);
     } completion:^(BOOL finished) {
-        if (!finished) return;
+        if (czfMinAnimSeq != self.czfWindowAnimSeq) return;
+        // C5：中断也落确定态——原来 !finished 直接 return，
+        // 视图会停在 alpha=0/scale=0.1 却未 hidden、未最小化、
+        // 场景仍前台（看着像窗口没了，实际还在前台占位）。
+        // finished 仅用于区分是否跑完，不再决定落不落态。
+        (void)finished;
         self.view.hidden = YES;
         self.view.transform = CGAffineTransformIdentity;
         [self.view.superview sendSubviewToBack:self.view];
@@ -507,8 +525,14 @@
 }
 
 - (void)maximizeWindow {
+    // C1：重入守卫——还原 0.3 秒动画内标志还没落位时再调，
+    // 旧代码会按旧标志再走一次还原、两套动画同改 frame；
+    // 现在进行中直接返回，程序化切换（unmaximizeWindow）
+    // 也因此不会二次动画。
+    if (self.czfMaximizeAnimating) return;
+    self.czfMaximizeAnimating = YES;
     void (^updateSettingsBlock)(UIMutableApplicationSceneSettings *settings);
-    
+
     [self.view layoutIfNeeded];
     if (self.isMaximized) {
         updateSettingsBlock = ^(UIMutableApplicationSceneSettings *settings) {
@@ -516,16 +540,18 @@
         };
         CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
         CGRect newFrame = CGRectMake(self.originalFrame.origin.x * maxFrame.size.width, self.originalFrame.origin.y * maxFrame.size.height, self.originalFrame.size.width, self.originalFrame.size.height);
+        // C1：切换开始时同步落位，不再等 completion 才置 NO。
+        self.isMaximized = NO;
         [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
             self.view.frame = newFrame;
             self.view.layer.borderWidth = 1;
             self.resizeHandle.alpha = 1;
-            
+
             [self.appSceneVC updateSettingsWithBlock:updateSettingsBlock];
-            
+
             [self.view layoutIfNeeded];
         } completion:^(BOOL finished) {
-            self.isMaximized = NO;
+            self.czfMaximizeAnimating = NO;
             [self czfSaveWindowState];
             // 还原成小窗口后必须重算标题栏显隐：最大化时若快捷栏是
             // 收起的，栏被自动藏了（沉浸全屏）；不重算的话还原后栏
@@ -542,17 +568,20 @@
             [self updateMaximizedFrameWithSettings:settings];
         };
         [self updateOriginalFrame];
+        // C1：原始帧必须在标志还是 NO 时存（updateOriginalFrame
+        // 在已最大化时直接返回），存完再同步落位为 YES。
+        self.isMaximized = YES;
         [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-            self.isMaximized = YES;
             [self updateVerticalConstraints];
-            
+
             self.view.layer.borderWidth = 0;
             self.resizeHandle.alpha = 0;
-            
+
             [self.appSceneVC updateSettingsWithBlock:updateSettingsBlock];
-            
+
             [self.view layoutIfNeeded];
         } completion:^(BOOL finished) {
+            self.czfMaximizeAnimating = NO;
             [self czfSaveWindowState];
             UIImage *restoreImage = [UIImage systemImageNamed:@"arrow.down.right.and.arrow.up.left.circle"];
             UIImageConfiguration *restoreConfig = [UIImageSymbolConfiguration configurationWithPointSize:16.0 weight:UIImageSymbolWeightMedium];

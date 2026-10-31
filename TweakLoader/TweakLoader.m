@@ -167,6 +167,12 @@ static void TweakLoaderConstructor() {
 // 由上文 TweakLoaderConstructor 调用；禁注入的 App 不装。
 
 static const void *kCZFDockGestureInstalledKey = &kCZFDockGestureInstalledKey;
+// 逐窗识别器：单例 handler 原来只用两个 ivar 存最近一次装的
+// pan/cancel，多窗口时后装的窗口会覆盖先装的，delegate 里按
+// ivar 比对就认错窗（A 窗的 cancel 被当成观察 pan 等）；改
+// 成跟 installed 标志一样挂在窗口自己身上，各窗各认各的。
+static const void *kCZFDockGesturePanKey = &kCZFDockGesturePanKey;
+static const void *kCZFDockGestureCancelKey = &kCZFDockGestureCancelKey;
 // 起手位置：0=不在边缘 1=左边缘 2=右边缘（shouldReceive 时记录，handler 里判定）
 static NSInteger gCZFStartEdge = 0;
 // 起手高度是否在启用带内：边缘手势只认屏幕高度 70%–90% 一段
@@ -254,8 +260,6 @@ static BOOL CZFTouchOnControlOrSlider(UITouch *touch) {
 @end
 
 @interface CZFDockGestureHandler : NSObject <UIGestureRecognizerDelegate> {
-    UIPanGestureRecognizer *_observerPan;
-    CZFEdgeCancelRecognizer *_cancelPan;
 }
 + (instancetype)shared;
 - (void)installOnWindow:(UIWindow *)window;
@@ -315,14 +319,14 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(czfHandlePan:)];
     pan.cancelsTouchesInView = NO;
     pan.delegate = self;
-    _observerPan = pan;
+    objc_setAssociatedObject(window, kCZFDockGesturePanKey, pan, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [window addGestureRecognizer:pan];
     // 拦截识别器与观察 pan 同窗共存：只接边缘带起手，认了即
     // 取消 App 触摸；面板信号仍由观察 pan 按严门槛发
     CZFEdgeCancelRecognizer *cancel = [[CZFEdgeCancelRecognizer alloc] initWithTarget:self action:@selector(czfCancelPanFired:)];
     cancel.cancelsTouchesInView = YES;
     cancel.delegate = self;
-    _cancelPan = cancel;
+    objc_setAssociatedObject(window, kCZFDockGestureCancelKey, cancel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [window addGestureRecognizer:cancel];
 }
 
@@ -342,7 +346,9 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     CGPoint loc = [touch locationInView:window];
     CGFloat width = window.bounds.size.width;
     CGFloat height = window.bounds.size.height;
-    if (gestureRecognizer == _cancelPan) {
+    // 身份按本窗挂的识别器认，不按单例 ivar（多窗口覆盖已修）。
+    CZFEdgeCancelRecognizer *cancelPan = objc_getAssociatedObject(window, kCZFDockGestureCancelKey);
+    if (gestureRecognizer == cancelPan) {
         // 拦截器只接边缘带起手：边缘 44pt 内 + 高度 70%–90%
         // （与观察 pan 的边缘/启用带同值）；其余一律不接，
         // App 完全不受影响；全局变量只归观察 pan 写，不碰
@@ -362,12 +368,15 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    // 拦截器只跟观察 pan 共存：共存观察 pan 才能在拦截认了
+    // 拦截器只跟同窗的观察 pan 共存：共存观察 pan 才能在拦截认了
     // 之后继续按严门槛追踪发面板信号；对 App 的识别器一律
     // 不同时，拦截一认 App 那路就失败（滚动/返回停住）。
-    // 观察 pan 维持原样全放行。
-    if (gestureRecognizer == _cancelPan) {
-        return otherGestureRecognizer == _observerPan;
+    // 观察 pan 维持原样全放行。身份按本窗挂的识别器认。
+    UIWindow *gestureWindow = (UIWindow *)gestureRecognizer.view;
+    CZFEdgeCancelRecognizer *cancelPan = [gestureWindow isKindOfClass:[UIWindow class]] ? objc_getAssociatedObject(gestureWindow, kCZFDockGestureCancelKey) : nil;
+    UIPanGestureRecognizer *observerPan = [gestureWindow isKindOfClass:[UIWindow class]] ? objc_getAssociatedObject(gestureWindow, kCZFDockGesturePanKey) : nil;
+    if (gestureRecognizer == cancelPan) {
+        return otherGestureRecognizer == observerPan;
     }
     return YES;
 }
@@ -699,6 +708,14 @@ static void CZFDockGestureInstall(void) {
         CZFInstallSendEventHook();
         CZFKeyboardDismissOnMinimizeInstall();
         [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeKeyNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+            if ([note.object isKindOfClass:[UIWindow class]]) {
+                [[CZFDockGestureHandler shared] installOnWindow:(UIWindow *)note.object];
+            }
+        }];
+        // 窗口出现触发点：只成 key 不够——有些窗口出现时并不成
+        // key（例如先出现的非 key 窗），DidBecomeKey 永远等不到；
+        // 出现即装，装过的不重复装（installed 标志幂等）。
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeVisibleNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             if ([note.object isKindOfClass:[UIWindow class]]) {
                 [[CZFDockGestureHandler shared] installOnWindow:(UIWindow *)note.object];
             }

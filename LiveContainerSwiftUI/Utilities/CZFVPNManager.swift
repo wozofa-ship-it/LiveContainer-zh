@@ -379,7 +379,44 @@ public final class CZFVPNManager {
         if name.isEmpty {
             name = detail.isEmpty ? "节点" : detail
         }
+        // 行内显示 scheme：节点行一眼看出协议；支不支持由
+        // isSupportedNodeScheme 按转换器清单再分级（未测到的
+        // 不支持节点行内直接标“不支持”，不等人测完才知道）。
+        let scheme = nodeScheme(for: link)
+        if !scheme.isEmpty {
+            detail = detail.isEmpty ? scheme : "\(scheme) · \(detail)"
+        }
         return (name, detail)
+    }
+
+    /// 节点链接的协议 scheme（小写；原始 Xray JSON 出站记
+    /// 为 json；无 :// 的纯文本行记为空串）。取原文链接，
+    /// 不取归一化后的（老格式 vless 归一化后 scheme 不变，
+    /// 但原文才是用户贴进来的协议）。
+    public static func nodeScheme(for link: String) -> String {
+        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("{") {
+            return "json"
+        }
+        guard let range = trimmed.range(of: "://") else {
+            return ""
+        }
+        return String(trimmed[..<range.lowerBound]).lowercased()
+    }
+
+    /// 转换器清单分级：libXray convertShareLinksToXrayJson 只
+    /// 认这些协议族（VMessAEAD/VLESS/Hysteria2/SS/SOCKS/
+    /// Trojan）+ 原始 JSON 出站绕法；其余（ssr、hysteria v1、
+    /// tuic、wireguard 链接、naive/ssh/juicity、http 节点、
+    /// 无 scheme 的纯文本）一律不支持。注意这是静态分级：
+    /// 清单内的节点仍可能因老格式、allowInsecure 等参数被
+    /// 转换器拒收，那种以实测的 conversionFailed 为准。
+    public static func isSupportedNodeScheme(_ scheme: String) -> Bool {
+        // hy2 = Hysteria2 的标准别名，socks5 = SOCKS 的标准链接
+        // scheme；静态分级宁可多认别名——真不认的节点实测时
+        // conversionFailed 会纠回“不支持”，反过来漏标却要等
+        // 实测才知道它是好的。
+        ["vmess", "vless", "hysteria2", "hy2", "ss", "socks", "socks5", "trojan", "json"].contains(scheme)
     }
 
     public static func isEnabled(for appInfo: LCAppInfo) -> Bool {
@@ -725,10 +762,18 @@ public final class CZFVPNManager {
 
     /// 一个节点的延迟测试结果：success 时 delay 是真实毫秒；
     /// 失败时 delay 是核心给的码（10000 出错 / 11000 超时），
-    /// 界面别当毫秒显示
+    /// 界面别当毫秒显示。conversionFailed 区分两种失败：转换
+    /// 器拒收（协议不在清单里）与网络不通——前者界面显示
+    /// “不支持”而非“不通”，“清理不通”也不会误删它。
     public struct CZFNodePingResult {
         public let success: Bool
         public let delay: Int
+        public let conversionFailed: Bool
+        public init(success: Bool, delay: Int, conversionFailed: Bool = false) {
+            self.success = success
+            self.delay = delay
+            self.conversionFailed = conversionFailed
+        }
     }
 
     /// 测全部节点的延迟（libXray 的 pingBatch：临时实例并发
@@ -937,7 +982,9 @@ public final class CZFVPNManager {
                 conversionCache[normalized] = jsonStr
                 pending.append((i, jsonStr))
             } else {
-                items[i] = CZFNodePingResult(success: false, delay: 10000)
+                // 转换失败单记：不是网络不通，是协议不在转换器
+                // 清单里——界面据此显示“不支持”，清理不删。
+                items[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
             }
         }
         var start = 0

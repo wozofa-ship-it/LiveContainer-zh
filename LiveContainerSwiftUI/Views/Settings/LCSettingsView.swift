@@ -205,9 +205,11 @@ struct LCSettingsView: View {
     
     /// 测完后有没有批量操作可做（切到最快/清理不通/按延迟排序
     /// 任一出现）：批量操作行只在此时才出现，平时不占一行。
+    /// 清理只认网络失败——转换失败（不支持）的不算，避免只剩
+    /// 不支持节点时出现一行空按钮。
     private var hasVPNBatchActions: Bool {
         vpnPingResults.contains(where: { $0.value.success && $0.key != vpnActiveIndex })
-            || vpnPingResults.contains(where: { !$0.value.success && $0.key != vpnActiveIndex })
+            || vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex })
             || vpnPingResults.count > 1
     }
 
@@ -773,6 +775,13 @@ struct LCSettingsView: View {
                             Text("测速中")
                                 .font(.caption)
                                 .foregroundStyle(.gray)
+                        } else if vpnPingResults[index] == nil, !CZFVPNManager.isSupportedNodeScheme(CZFVPNManager.nodeScheme(for: link)) {
+                            // 未测到的不支持节点：按转换器清单静态分级，
+                            // 直接标“不支持”（橙色，与实测失败的红色区分），
+                            // 不等人测完才知道它跑不了。
+                            Text("不支持")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
                         } else if let ping = vpnPingResults[index] {
                             // 超 24 小时的缓存结果：灰色加“·旧”，
                             // 别按新鲜延迟的颜色误导切节点。
@@ -782,7 +791,9 @@ struct LCSettingsView: View {
                                     .font(.caption)
                                     .foregroundStyle(isStale ? .gray : (ping.delay < 300 ? .green : (ping.delay < 800 ? .orange : .red)))
                             } else {
-                                Text((ping.delay == 11000 ? "超时" : "不通") + (isStale ? "·旧" : ""))
+                                // 转换失败与网络失败分开显示：转换器拒收
+                                // 是协议不支持，不是网络不通。
+                                Text((ping.conversionFailed ? "不支持" : (ping.delay == 11000 ? "超时" : "不通")) + (isStale ? "·旧" : ""))
                                     .font(.caption)
                                     .foregroundStyle(isStale ? .gray : .red)
                             }
@@ -873,14 +884,17 @@ struct LCSettingsView: View {
                     .buttonStyle(.borderless)
                 }
                 // 测完后一键清理不通的节点：只删明确测
-                // 出不通的、且不是当前在用节点的——在用
+                // 出网络不通的、且不是当前在用节点的——在用
                 // 节点即使某次测速失败也不删（核心在跑且
-                // 实际能上网是更强的证据，见上面「在用」
-                // 的例外）。用 replaceAllNodes 一次替换，
-                // 活动节点按内容跟随、不重启核心。
-                if vpnPingResults.contains(where: { !$0.value.success && $0.key != vpnActiveIndex }) {
+                // 实际上网是更强的证据，见上面「在用」
+                // 的例外）；转换失败（不支持）的也不删——
+                // 它们不是网络不通，删了等于删协议，留着等
+                // 换协议或走原始 JSON 出站绕法。用
+                // replaceAllNodes 一次替换，活动节点按内容
+                // 跟随、不重启核心。
+                if vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }) {
                     Button("清理不通") {
-                        let failed = Set(vpnPingResults.filter { !$0.value.success && $0.key != vpnActiveIndex }.map { $0.key })
+                        let failed = Set(vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }.map { $0.key })
                         let kept = CZFVPNManager.shared.nodeLinks.enumerated().filter { !failed.contains($0.offset) }.map { $0.element }
                         // 清理不碰核心：只换列表，核心在跑继续用
                         // 在用节点、停着继续停着；再清掉内存结果、
@@ -1016,7 +1030,7 @@ struct LCSettingsView: View {
                 .font(.footnote)
                 .buttonStyle(.plain)
                 if showVPNHelp {
-                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2 等）；转换器只认这几类，ssr、hysteria v1、tuic、wireguard 链接、naive/ssh、http 节点会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：WireGuard 这类核心有、链接解析器没有的协议，可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。")
                 }
             }
         }
@@ -1388,7 +1402,7 @@ struct LCSettingsView: View {
     // MARK: - 测速结果持久化（打磨：以前只存内存，增删/导入任一
     // 节点就整表清零、重启也没了，而测速要停一次核心，代价不小。
     // 按节点链接内容存：增删别的节点不影响已有结果，重排后按
-    // 内容对回新下标。编码：≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时）
+    // 内容对回新下标。编码：≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时；-3 = 不支持（转换失败）
     // 新格式每条带时间戳（v = 延迟码，t = 测于何时的秒时间戳）：
     // 超 24 小时的结果界面灰色显示“·旧”，别按旧延迟误切节点。
     // 旧格式（直接存 Int）兼容读，时间戳按 0 计、即直接算旧。
@@ -1424,7 +1438,7 @@ struct LCSettingsView: View {
         let now = Date().timeIntervalSince1970
         for (index, result) in vpnPingResults {
             guard vpnNodes.indices.contains(index) else { continue }
-            merged[vpnNodes[index]] = (code: result.success ? result.delay : (result.delay == 11000 ? -2 : -1), time: now)
+            merged[vpnNodes[index]] = (code: result.success ? result.delay : (result.conversionFailed ? -3 : (result.delay == 11000 ? -2 : -1)), time: now)
         }
         writePingCache(merged)
     }
@@ -1442,6 +1456,8 @@ struct LCSettingsView: View {
                 map[index] = CZFVPNManager.CZFNodePingResult(success: true, delay: v)
             } else if v == -2 {
                 map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 11000)
+            } else if v == -3 {
+                map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
             } else {
                 map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 10000)
             }
