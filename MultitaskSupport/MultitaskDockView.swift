@@ -982,10 +982,14 @@ class AppInfoProvider {
         guard !bundlePath.isEmpty else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             // 跳错修复：重启不再走只带包名的 URL（那边按包名
-            // 取首个模型，重启第 2 个实例会拉起第 1 个），改走
-            // 模型直启被关掉的这个实例。
-            Task {
-                try? await app.runApp(containerFolderName: app.appInfo?.dataUUID ?? uuid)
+            // 取首个模型，重启第 2 个实例会拉起第 1 个）；但
+            // restartApp 手里只有 DockAppModel（无 runApp），
+            // 直启走不通，改走 URL 但补 container-folder-name
+            //（launchAppWithBundleId 已支持，直达被关实例的容器）。
+            if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundlePath)&container-folder-name=\(uuid)") {
+                #if !os(visionOS)
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                #endif
             }
         }
     }
