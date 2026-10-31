@@ -83,6 +83,14 @@ struct LCDataManagementView : View {
     @State private var showRestoreScopeDialog = false
     @State private var pendingRestoreURL: URL? = nil
     @State private var pendingRestoreAll = false
+    // 选择性多选恢复：多选 sheet 里勾中的文件夹 URL 原值
+    // （与 mergedBackupFolders() 返回的同一批 URL 比对；
+    // @State 不落盘，不新开 UserDefaults 键；勾选态跨次
+    // 打开保留，与备份侧 backupSelectedIDs 同款）
+    @State private var showRestoreMultiSelect = false
+    @State private var restoreSelectedFolderURLs = Set<URL>()
+    @State private var restoreMultiSelectFolders: [URL] = []
+    @State private var pendingRestoreFolders: [URL] = []
     @State private var pendingBackupApps: [LCAppModel] = []
     @State private var scheduleKeychainOnly = false
     @State private var showRestoreSelect = false
@@ -601,6 +609,11 @@ struct LCDataManagementView : View {
                                 Label("一键恢复全部", systemImage: "arrow.clockwise.circle")
                             }
                             Button {
+                                showRestoreMultiSelect = true
+                            } label: {
+                                Label("恢复已选…", systemImage: "checkmark.circle")
+                            }
+                            Button {
                                 presentExportPickerForAll()
                             } label: {
                                 Label("一键导出全部", systemImage: "square.and.arrow.up")
@@ -675,6 +688,67 @@ struct LCDataManagementView : View {
                                     }
                                 }
                                 .disabled(previewFolderURL == nil)
+                            }
+                        }
+                    }
+                }
+                // 选择性多选恢复：恢复 sheet 内再叠一层 sheet
+                // （与文件夹 picker、清单预览同款嵌套，不关恢复
+                // sheet；“恢复”走 pendingRestoreFolders + scope
+                // 弹窗路：关多选、关恢复 sheet、弹 scope 弹窗，
+                // 与清单预览的“恢复”同款；确认步骤就是 scope
+                // 弹窗本身（一键恢复全部同样只走 scope 弹窗，
+                // 不另做多文件夹预览，不静默覆盖）
+                .sheet(isPresented: $showRestoreMultiSelect) {
+                    NavigationView {
+                        List {
+                            if restoreMultiSelectFolders.isEmpty {
+                                Text("暂无备份")
+                                    .foregroundColor(.secondary)
+                            }
+                            ForEach(restoreMultiSelectFolders, id: \.self) { folderURL in
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(folderURL.lastPathComponent)
+                                            .font(.headline)
+                                        Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
+                                            .font(.caption)
+                                            .foregroundColor(.gray)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: restoreSelectedFolderURLs.contains(folderURL) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(.blue)
+                                }
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    if restoreSelectedFolderURLs.contains(folderURL) {
+                                        restoreSelectedFolderURLs.remove(folderURL)
+                                    } else {
+                                        restoreSelectedFolderURLs.insert(folderURL)
+                                    }
+                                }
+                            }
+                        }
+                        .navigationTitle("恢复已选备份")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .onAppear {
+                            restoreMultiSelectFolders = mergedBackupFolders()
+                        }
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("lc.common.cancel".loc) { showRestoreMultiSelect = false }
+                            }
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("恢复") {
+                                    pendingRestoreFolders = restoreMultiSelectFolders.filter { restoreSelectedFolderURLs.contains($0) }
+                                    pendingRestoreAll = false
+                                    pendingRestoreURL = nil
+                                    showRestoreMultiSelect = false
+                                    showRestoreSelect = false
+                                    showRestoreScopeDialog = true
+                                }
+                                .disabled(restoreMultiSelectFolders.filter { restoreSelectedFolderURLs.contains($0) }.isEmpty)
                             }
                         }
                     }
@@ -1875,7 +1949,8 @@ struct LCDataManagementView : View {
 
 
     /// 恢复范围弹窗选完后分发：单个恢复走 pendingRestoreURL，
-    /// 一键恢复全部走 pendingRestoreAll（同一个范围套全部）
+    /// 一键恢复全部走 pendingRestoreAll（同一个范围套全部），
+    /// 多选恢复走 pendingRestoreFolders（只恢复勾中的文件夹）
     func startPendingRestore(loginOnly: Bool) {
         // 后台持有：大文件恢复拷盘时切后台/锁屏，系统不会
         // 中途挂起；没它时主线程又被拷盘堵住，挂起不及时
@@ -1892,6 +1967,10 @@ struct LCDataManagementView : View {
         } else if let url = pendingRestoreURL {
             pendingRestoreURL = nil
             Task { await restoreFromBackup(at: url, loginOnly: loginOnly); UIApplication.shared.endBackgroundTask(bgID) }
+        } else if !pendingRestoreFolders.isEmpty {
+            let folders = pendingRestoreFolders
+            pendingRestoreFolders = []
+            Task { await restoreSelectedBackups(folders: folders, loginOnly: loginOnly); UIApplication.shared.endBackgroundTask(bgID) }
         } else {
             UIApplication.shared.endBackgroundTask(bgID)
         }
@@ -1921,6 +2000,40 @@ struct LCDataManagementView : View {
         }
         backupRestoreProgress = nil
         successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
+        successShow = true
+    }
+
+    /// 恢复已选：与一键恢复全部同一套聚合（逐个静默恢复、
+    /// 最后只弹一个总报告），只是集合是用户勾中的文件夹，
+    /// 不是全部；单个文件夹失败不 abort 整批
+    /// （restoreFromBackup(presentResult:false) 内已把失败
+    // 消化成行摘要，见 v213/v219 容错）
+    func restoreSelectedBackups(folders: [URL], loginOnly: Bool) async {
+        // v216 同款：一键恢复前清空无数据文件夹（逐个恢复时
+        // 追加，汇总弹窗里一次全给出来；不清空会把上次残留
+        // 带进来）
+        pendingNoDataFolders = []
+        var lines: [String] = []
+        for (index, folderURL) in folders.enumerated() {
+            backupRestoreProgress = "正在恢复已选备份：\(folderURL.lastPathComponent)（\(index + 1)/\(folders.count)）"
+            lines.append(await restoreFromBackup(at: folderURL, presentResult: false, loginOnly: loginOnly))
+        }
+        // 设置只做一次（与一键恢复全部同款：单个恢复在各自
+        // 报告里做，这里逐个调时 presentResult=false 不做，
+        // 免得重复写；只对第一个已选文件夹做）
+        if !loginOnly, let first = folders.first {
+            let s = Self.restoreCZFSettings(for: first)
+            if s.found {
+                lines.append("设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效")
+            } else {
+                lines.append("设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入")
+            }
+        }
+        backupRestoreProgress = nil
+        // 注意：这里用 folders.count，不照抄一键恢复全部的
+        // lines.count——后者把 settings 行也算进去了，设置
+        // 恢复成功时会把头数多算 1 个；已选报头只认勾中数
+        successInfo = "恢复已选完成（共 \(folders.count) 个备份）：\n\n" + lines.joined(separator: "\n")
         successShow = true
     }
 
