@@ -2056,14 +2056,19 @@ struct LCDataManagementView : View {
             let manifestURL = backupURL.appendingPathComponent("manifest.json")
             // iCloud 备份可能只同步了文件夹壳、内容元数据还没到本机：
             // 直接读会读到空文件夹，误报“成功 0 个”。先触发下载，
-            // 等 manifest 出现或子项出现再读；等不到才按空处理。
-            // 已同步好的文件夹第一次检查就通过，不多等。
+            // 等 manifest 出现且有非 manifest 子项再读（manifest 是
+            // 小 JSON、先到，单凭它跳出会撞上容器还没到的假 0）；
+            // 等不到才按空处理。已同步好的文件夹第一次检查就通过，
+            // 不多等。注意：无 manifest 的旧结构文件夹等不满这个
+            // 条件（15 秒走满才按原流程走，只是多等一次，不影响
+            // 结果——现备份必写 manifest，旧结构已是少数）。
             if let extURL = Self.externalBackupFolderURL(),
                backupURL.path.hasPrefix(extURL.path + "/") {
                 try? fm.startDownloadingUbiquitousItem(at: backupURL)
                 for _ in 0..<15 {
-                    if fm.fileExists(atPath: manifestURL.path) { break }
-                    if let children = try? fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil), !children.isEmpty { break }
+                    if fm.fileExists(atPath: manifestURL.path),
+                       let children = try? fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil),
+                       children.contains(where: { $0.lastPathComponent != "manifest.json" }) { break }
                     backupRestoreProgress = "正在从 iCloud 下载 \(folderName)…"
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
@@ -2530,8 +2535,9 @@ struct LCDataManagementView : View {
         try? fm.startDownloadingUbiquitousItem(at: url)
         // 整树枚举挪后台：大容器几万文件时逐个 resourceValues
         // 在主线程同样是秒级长堵；逻辑与原来一字不差（上限、
-        // 逐个触发下载），只换执行线程。轮询段本身是 1 秒一
-        // 睡 + 短 filter，留在调用方线程。
+        // 逐个触发下载），只换执行线程。轮询段 v222 起也挪
+        // 后台（见下面轮询段注释）——filter 的逐文件
+        // resourceValues 在大容器上同样是秒级长堵。
         let files: [URL] = await Task.detached {
             let fm = FileManager.default
             guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey, .ubiquitousItemDownloadingStatusKey], options: [.skipsHiddenFiles]) else { return [URL]() }
@@ -2553,17 +2559,32 @@ struct LCDataManagementView : View {
         // 文件一多就是几百万次 resourceValues；下完的移出本轮，越轮越少。
         // 语义跟原来一致：读不到状态按已下完处理（不卡住），状态
         // 为空或未下完继续等，超时照常拷。
-        var remaining = files
-        if !files.isEmpty { onProgress?(0, files.count) }
-        for _ in 0..<maxSeconds {
-            remaining = remaining.filter { file in
-                guard let status = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus else { return false }
-                return status != .current
+        // 轮询段也挪后台（v222）：filter 的逐文件 resourceValues
+        // 在主线程是秒级长堵（大容器 × 120 秒）；sleep 本身不占
+        // 线程，但跟 filter 同段、一起挪，调用方线程只剩一次
+        // detached 跳转。filter 用 URL.resourceValues，不碰
+        // FileManager，故 detached 只捕获 files（纯 URL）与进度
+        // 值；onProgress 必须回主线程发——调用方在主线程写文案
+        // （见 v216 注释），detached 内直接调会跑到后台线程。
+        // 本 target 是 Swift 5 mode（project.pbxproj，app target
+        // LiveContainerSwiftUI 的 SWIFT_VERSION = 5.0），捕获
+        // onProgress 闭包可编译；CI 为最终 verdict。
+        await Task.detached {
+            var remaining = files
+            if !files.isEmpty { await MainActor.run { onProgress?(0, files.count) } }
+            for _ in 0..<maxSeconds {
+                remaining = remaining.filter { file in
+                    guard let status = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus else { return false }
+                    return status != .current
+                }
+                if !files.isEmpty {
+                    let done = files.count - remaining.count
+                    await MainActor.run { onProgress?(done, files.count) }
+                }
+                if remaining.isEmpty { return }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            if !files.isEmpty { onProgress?(files.count - remaining.count, files.count) }
-            if remaining.isEmpty { return }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
+        }.value
     }
 
     /// 恢复拷盘三件套（只挪纯 FileManager 活，不动模型/@State）：
@@ -2805,7 +2826,7 @@ struct LCDataManagementView : View {
                 }
                 guard let data,
                       let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
-                let writeResult = Self.importKeychainItems(items, container: target)
+                let writeResult = await Self.importKeychainItems(items, container: target)
                 outcome.keychainImported += writeResult.imported
                 if writeResult.imported == 0 && writeResult.lastStatus != errSecSuccess {
                     outcome.keychainStatus = writeResult.lastStatus
@@ -3131,54 +3152,67 @@ struct LCDataManagementView : View {
     /// 错误整条拒绝。返回写进条数 + 最后一次失败的错误码，
     /// 失败不再静默
     @discardableResult
-    static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) -> (imported: Int, lastStatus: OSStatus) {
+    // v222 起 async：SecItemAdd/Delete 是同步跨进程 IPC，逐条
+    // 循环在主线程是长堵（快照条数多时）；整段放 Task.detached，
+    // 调用方只收结果、在调用方线程写回（调用点写的是
+    // outcome/restoredExtras 局部量，无 @State/模型写回）。
+    // 验查：本函数只读 container.keychainGroupId（Int）与
+    // container.folderName（String），不写模型；group 与
+    // folderName 先在调用方线程取成值再进 detached，不捕获
+    // container 对象（LCContainer 是 class、非 Sendable）。
+    // 本 target 是 Swift 5 mode，捕获 items（[[String: Any]]）
+    // 可编译；CI 为最终 verdict。
+    static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) async -> (imported: Int, lastStatus: OSStatus) {
         let group = keychainGroupString(groupId: container.keychainGroupId)
-        var imported = 0
-        var lastStatus: OSStatus = errSecSuccess
-        for item in items {
-            var attrs = item
-            attrs.removeValue(forKey: "cdat")
-            attrs.removeValue(forKey: "mdat")
-            attrs.removeValue(forKey: kSecAttrSynchronizable as String)
-            attrs[kSecAttrAccessGroup as String] = group
-            attrs["alis"] = container.folderName
-            var status = SecItemAdd(attrs as CFDictionary, nil)
-            if status == errSecDuplicateItem {
-                var query = attrs
-                query.removeValue(forKey: kSecValueData as String)
-                SecItemDelete(query as CFDictionary)
-                status = SecItemAdd(attrs as CFDictionary, nil)
-            }
-            if status != errSecSuccess {
-                let minimalKeys: [String] = [
-                    kSecClass as String, kSecAttrAccount as String,
-                    kSecAttrService as String, kSecAttrGeneric as String,
-                    kSecAttrLabel as String, kSecAttrAccessible as String,
-                    kSecValueData as String
-                ]
-                var minimal: [String: Any] = [
-                    kSecAttrAccessGroup as String: group,
-                    "alis": container.folderName
-                ]
-                for key in minimalKeys {
-                    if let value = attrs[key] {
-                        minimal[key] = value
+        let folderName = container.folderName
+        return await Task.detached {
+            var imported = 0
+            var lastStatus: OSStatus = errSecSuccess
+            for item in items {
+                var attrs = item
+                attrs.removeValue(forKey: "cdat")
+                attrs.removeValue(forKey: "mdat")
+                attrs.removeValue(forKey: kSecAttrSynchronizable as String)
+                attrs[kSecAttrAccessGroup as String] = group
+                attrs["alis"] = folderName
+                var status = SecItemAdd(attrs as CFDictionary, nil)
+                if status == errSecDuplicateItem {
+                    var query = attrs
+                    query.removeValue(forKey: kSecValueData as String)
+                    SecItemDelete(query as CFDictionary)
+                    status = SecItemAdd(attrs as CFDictionary, nil)
+                }
+                if status != errSecSuccess {
+                    let minimalKeys: [String] = [
+                        kSecClass as String, kSecAttrAccount as String,
+                        kSecAttrService as String, kSecAttrGeneric as String,
+                        kSecAttrLabel as String, kSecAttrAccessible as String,
+                        kSecValueData as String
+                    ]
+                    var minimal: [String: Any] = [
+                        kSecAttrAccessGroup as String: group,
+                        "alis": folderName
+                    ]
+                    for key in minimalKeys {
+                        if let value = attrs[key] {
+                            minimal[key] = value
+                        }
+                    }
+                    if minimal[kSecValueData as String] != nil {
+                        var deleteQuery = minimal
+                        deleteQuery.removeValue(forKey: kSecValueData as String)
+                        SecItemDelete(deleteQuery as CFDictionary)
+                        status = SecItemAdd(minimal as CFDictionary, nil)
                     }
                 }
-                if minimal[kSecValueData as String] != nil {
-                    var deleteQuery = minimal
-                    deleteQuery.removeValue(forKey: kSecValueData as String)
-                    SecItemDelete(deleteQuery as CFDictionary)
-                    status = SecItemAdd(minimal as CFDictionary, nil)
+                if status == errSecSuccess {
+                    imported += 1
+                } else {
+                    lastStatus = status
                 }
             }
-            if status == errSecSuccess {
-                imported += 1
-            } else {
-                lastStatus = status
-            }
-        }
-        return (imported, lastStatus)
+            return (imported, lastStatus)
+        }.value
     }
 
     /// #5 配套：已添加的源表一次拉全（恢复未装 App 时调用方

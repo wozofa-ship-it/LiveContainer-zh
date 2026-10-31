@@ -1095,6 +1095,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 没有就不弹窗。只在全新安装时调——覆盖更新时
     /// 数据本来就在，拿旧备份回滚反而会把新数据冲掉
     func autoRestoreBackupAfterInstall(app: LCAppModel) async {
+        // 后台持有（v222）：安装后自动恢复调 restoreOneApp，
+        // 拷盘是 GB 级同步活（v220 已挪后台，但本入口此前无
+        // 任何持有）；没它时切后台/锁屏会被挂起、看门狗杀进程
+        // （v220 同款根因，只是另一个入口）。begin + defer
+        // 必 end：函数内两处 guard early return 也走 defer，
+        // 不会漏；过期回调留空是故意的：拷盘已挪后台、主线程
+        // 响应，过期只干净挂起、回前台继续，不杀进程。
+        // UIApplication 本文件已在用（open 链接两处），无需新 import。
+        let bgID = UIApplication.shared.beginBackgroundTask { }
+        defer { UIApplication.shared.endBackgroundTask(bgID) }
         let fm = FileManager.default
         let bundleID = app.appInfo.bundleIdentifier() ?? ""
         let name = app.appInfo.displayName() ?? bundleID
