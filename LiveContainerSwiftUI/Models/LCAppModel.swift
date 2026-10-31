@@ -3,8 +3,8 @@ import Foundation
 protocol LCAppModelDelegate {
     func closeNavigationView()
     func changeAppVisibility(app : LCAppModel)
-    func jitLaunch(appName: String, classicMode: UInt) async
-    func jitLaunch(withScript script: String, appName: String, classicMode: UInt) async
+    func jitLaunch(appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async
+    func jitLaunch(withScript script: String, appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async
     func jitLaunch(withPID pid: Int, withScript script: String?, appName: String) async
     func showRunWhenMultitaskAlert() async -> Bool?
 }
@@ -493,16 +493,6 @@ class LCAppModel: ObservableObject, Hashable {
         try await signApp(force: false)
         await vpnCoreTask?.value
 
-        if let bundleIdOverride {
-            UserDefaults.standard.set(bundleIdOverride, forKey: "selected")
-        } else {
-            UserDefaults.standard.set(self.appInfo.relativeBundlePath, forKey: "selected")
-        }
-        if let urlStr {
-            UserDefaults.standard.setValue(urlStr, forKey: "launchAppUrlScheme")
-        }
-        UserDefaults.standard.set(uiSelectedContainer?.folderName, forKey: "selectedContainer")
-        
         var jitNeeded = appInfo.isJITNeeded || appInfo.is32bit
         if let forceJIT {
             jitNeeded = forceJIT
@@ -510,6 +500,29 @@ class LCAppModel: ObservableObject, Hashable {
 #if targetEnvironment(simulator)
         jitNeeded = false
 #endif
+        // 跳错修复：非多任务 JIT 的启动键不在这里写，改由
+        // delegate 在 JIT 确认后写（见 jitLaunch(withScript:)）；
+        // 多任务 JIT 与非 JIT 路仍在这里写（客启动在即，
+        // 无 pending 窗口；多任务 JIT 键时序一字不动）。
+        // delegate 路 = jitNeeded 且不走多任务 JIT 分支。
+        let jitDefersKeyWrite: Bool
+        if #available(iOS 17.4, *) {
+            jitDefersKeyWrite = jitNeeded && !multitask
+        } else {
+            jitDefersKeyWrite = jitNeeded
+        }
+        if !jitDefersKeyWrite {
+            if let bundleIdOverride {
+                UserDefaults.standard.set(bundleIdOverride, forKey: "selected")
+            } else {
+                UserDefaults.standard.set(self.appInfo.relativeBundlePath, forKey: "selected")
+            }
+            if let urlStr {
+                UserDefaults.standard.setValue(urlStr, forKey: "launchAppUrlScheme")
+            }
+            UserDefaults.standard.set(uiSelectedContainer?.folderName, forKey: "selectedContainer")
+        }
+
         if jitNeeded {
             if multitask, #available(iOS 17.4, *) {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -533,11 +546,13 @@ class LCAppModel: ObservableObject, Hashable {
                     }
                 }
             } else {
-                // Non-multitask JIT flow remains unchanged
+                // Non-multitask JIT：启动键由 delegate 在 JIT 确认后写
+                // （见 jitLaunch(withScript:)），这里只传值不写键；
+                // bundleIdOverride 为空时退回自身包路径，与旧写键一致。
                 if let scriptData = jitLaunchScriptJs, !scriptData.isEmpty {
-                    await delegate?.jitLaunch(withScript: scriptData, appName: self.appInfo.displayName(), classicMode: classicMode)
+                    await delegate?.jitLaunch(withScript: scriptData, appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr)
                 } else {
-                    await delegate?.jitLaunch(appName: self.appInfo.displayName(), classicMode: classicMode)
+                    await delegate?.jitLaunch(appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr)
                 }
             }
         } else if multitask, #available(iOS 16.0, *) {

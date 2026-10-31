@@ -981,10 +981,11 @@ class AppInfoProvider {
         closeAppWindow(uuid: uuid)
         guard !bundlePath.isEmpty else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundlePath)") {
-                #if !os(visionOS)
-                UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                #endif
+            // 跳错修复：重启不再走只带包名的 URL（那边按包名
+            // 取首个模型，重启第 2 个实例会拉起第 1 个），改走
+            // 模型直启被关掉的这个实例。
+            Task {
+                try? await app.runApp(containerFolderName: app.appInfo?.dataUUID ?? uuid)
             }
         }
     }
@@ -1038,11 +1039,11 @@ class AppInfoProvider {
             if defaults.string(forKey: "CZFSchedMinLastDate-\(bundleId)") == today { continue }
             let target = defaults.integer(forKey: "CZFSchedMinMinutes-\(bundleId)")
             if nowTotal < target { continue }
-            guard let dataUUID = app.appInfo.dataUUID,
-                  let bundlePath = app.appInfo.relativeBundlePath else { continue }
+            guard app.appInfo.dataUUID != nil,
+                  app.appInfo.relativeBundlePath != nil else { continue }
             // 先记账再打开，防同一天重复触发
             defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
-            czfMinimizeOpenApp(dataUUID: dataUUID, bundlePath: bundlePath)
+            czfMinimizeOpenApp(app: app)
             break
         }
         // 一个定时都没开：停掉定时器，不再每 30 秒空扫；
@@ -1075,17 +1076,18 @@ class AppInfoProvider {
     }
 
     // 与快捷栏面板的「最小化打开」同一套路：已在运行直接最小化窗口；
-    // 未运行先走 launch URL 拉起，再轮询等窗口出现后最小化。
-    private func czfMinimizeOpenApp(dataUUID: String, bundlePath: String) {
+    // 未运行先直启该实例，再轮询等窗口出现后最小化。
+    private func czfMinimizeOpenApp(app: LCAppModel) {
+        guard let dataUUID = app.appInfo.dataUUID else { return }
         czfMarkSchedMinOpened(uuid: dataUUID)
         if apps.contains(where: { $0.appUUID == dataUUID }) {
             minimizeWindow(uuid: dataUUID)
             return
         }
-        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundlePath)") {
-            #if !os(visionOS)
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
-            #endif
+        // 跳错修复：不再走只带包名的 URL（按包名取首个模型，
+        // 定时打开多开实例会拉起首个实例），改走模型直启。
+        Task {
+            try? await app.runApp(containerFolderName: dataUUID)
         }
         var attempts = 0
         Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
@@ -2694,7 +2696,6 @@ struct AllAppsListView: View {
     }
     
     private func launchApp(_ app: LCAppModel) {
-        let bundleId = app.appInfo.relativeBundlePath ?? ""
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == app.appInfo.dataUUID }) {
             // 窗口必须属于本条目：同包名别的条目若共用容器，
             // 按 dataUUID 找会把别人的窗口顶回来；归属对不上
@@ -2714,12 +2715,14 @@ struct AllAppsListView: View {
                 return
             }
         }
-        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
-            #if !os(visionOS)
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
-            #endif
-        }
+        // 跳错修复：非运行实例不再走只带包名的 URL（那边按包名
+        // 取首个模型，点第 2 个实例必开第 1 个），改走模型直启，
+        // 与 smallWindowOpenApp 同款；上面运行中实例的顶回
+        // 前台路径一字不动。
         closePanel()
+        Task {
+            try? await app.runApp(containerFolderName: app.appInfo.dataUUID)
+        }
     }
     
     private func minimizeOpenApp(_ app: LCAppModel) {
@@ -2734,11 +2737,12 @@ struct AllAppsListView: View {
             }
         }        // 未运行：先启动，延迟后最小化窗口
         closePanel()
-        let bundleId = app.appInfo.relativeBundlePath ?? ""
-        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundleId)") {
-            #if !os(visionOS)
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
-            #endif
+        // 跳错修复：未运行实例不再走只带包名的 URL（按包名取
+        // 首个模型，点的实例若非首个会被开错），改走模型直启；
+        // 下面按 dataUUID 轮询最小化的逻辑一字不动；上面运行
+        // 分支的归属守卫一字不动。
+        Task {
+            try? await app.runApp(containerFolderName: dataUUID)
         }
         // 主线程轮询等待窗口出现，找到后最小化
         var attempts = 0

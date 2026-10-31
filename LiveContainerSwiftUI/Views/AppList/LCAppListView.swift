@@ -1652,16 +1652,40 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
     
-    func jitLaunch(appName: String, classicMode: UInt) async {
-        await jitLaunch(withScript: "", appName: appName, classicMode: classicMode)
+    func jitLaunch(appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async {
+        await jitLaunch(withScript: "", appName: appName, classicMode: classicMode, selectedBundlePath: selectedBundlePath, selectedContainerFolder: selectedContainerFolder, launchURL: launchURL)
     }
 
-    func jitLaunch(withScript script: String, appName: String, classicMode: UInt) async {
+    func jitLaunch(withScript script: String, appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async {
         await MainActor.run {
             jitLog = ""
         }
-        let enableJITTask = Task {
-            
+        // 跳错修复：确认前不写启动键、不启动 JIT 任务。旧代码
+        // 两者都在确认前跑，弹框 pending 时面板窗点别的 App
+        // 会覆盖三键；且 TrollStore 分支确认前就提前启动，
+        // 所以写键与启动任务必须一起挪到确认后，缺一不可
+        // （只挪键会修坏 TrollStore，只挪任务则竞态仍在）。
+        guard let result = await jitAlert.open(), result else {
+            // 取消（含滑掉 sheet）：只删自己这次的键——当前
+            // selected/selectedContainer 仍等于本次启动值时
+            // 才删，否则那是别的启动写的键，一律不动；删时
+            // 成对删 selected 与 selectedContainer，不留一半。
+            if UserDefaults.standard.string(forKey: "selected") == selectedBundlePath,
+               UserDefaults.standard.string(forKey: "selectedContainer") == selectedContainerFolder {
+                UserDefaults.standard.removeObject(forKey: "selected")
+                UserDefaults.standard.removeObject(forKey: "selectedContainer")
+            }
+            return
+        }
+        // 确认后：先写键，再启动 JIT 任务（TrollStore 分支
+        // 此时提前启动读到的是新鲜键），最后走原有 launch。
+        // launchAppUrlScheme 只在有 url 时写，与旧写键一致。
+        UserDefaults.standard.set(selectedBundlePath, forKey: "selected")
+        if let launchURL {
+            UserDefaults.standard.setValue(launchURL, forKey: "launchAppUrlScheme")
+        }
+        UserDefaults.standard.set(selectedContainerFolder, forKey: "selectedContainer")
+        Task {
             let _ = await LCUtils.askForJIT(withScript: script, appName: appName, classicMode: classicMode) { newMsg in
                 Task { await MainActor.run {
                     self.jitLog += "\(newMsg)\n"
@@ -1670,11 +1694,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             guard let _ = JITEnablerType(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCJITEnablerType")) else {
                 return
             }
-        }
-        guard let result = await jitAlert.open(), result else {
-            UserDefaults.standard.removeObject(forKey: "selected")
-            enableJITTask.cancel()
-            return
         }
         LCSharedUtils.launchToGuestApp(withClassicMode: classicMode)
 
