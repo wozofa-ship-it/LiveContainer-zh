@@ -103,51 +103,59 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     @objc private func runButtonTapped() {
+        // 启动 = 大窗口（3.8.238 重修：3.8.237 只在 isUsing 门
+        // 内的带回路上拉满，门一关（isUsing 不同步、或归属
+        // 不明）就落到 runApp 空转、窗还是小的，用户看到的
+        // 就是没修）。现改走面板同款 dock+路径归属路（最小
+        // 化/小窗口按钮同款，已验证能顶回窗口）：dock 里有
+        // 本条目、路径对得上就带回并拉满；归属对不上才走
+        // runApp 拆容器起新窗。isUsing 门不再拦——dock 条目
+        // 本身就是窗口在跑的证据，面板两路同样不查它。
         if #available(iOS 16.0, *),
-           let currentDataFolder = configuration.model.uiSelectedContainer?.folderName,
-           MultitaskManager.isUsing(container: currentDataFolder) {
-            // 已有窗口必须属于本条目：同包名别的条目若共用容器，
-            // 这里按容器找会把别人的窗口顶回来；归属对不上就
-            // 不顶，直接走 runApp，runApp 里会拆共享容器、起新窗口。
-            let dockApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == currentDataFolder })
-            // dock 条目存在却无法证明归属（appInfo 缺失或路径为
-            // 空）时视为未知，一律不顶窗口，交给 runApp 去拆容器、
-            // 起新窗口；宁可多起一个窗口，不顶错别人的。dock 条目
-            // 根本不存在时不拦（带回尝试自然失败，同样走 runApp）。
-            let dockBelongsToOther: Bool
-            if let dockPath = dockApp?.appInfo?.relativeBundlePath, !dockPath.isEmpty {
-                dockBelongsToOther = dockPath != configuration.model.appInfo.relativeBundlePath
-            } else {
-                dockBelongsToOther = dockApp != nil
-            }
-            // 原生窗口模式下 dock 里可能没有这条记录，再按容器
-            // 本身判一次：选中容器若被同包名别的条目也在用，
-            // 这里按容器找同样会把别人的窗口顶回来，一律不顶。
-            let model = configuration.model
-            let sharedWithOther = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).contains { other in
-                other !== model && other.bundleIdentifier == model.bundleIdentifier && other.appInfo.relativeBundlePath != model.appInfo.relativeBundlePath && other.uiContainers.contains { $0.folderName == currentDataFolder }
-            }
-            let belongsToOther = dockBelongsToOther || sharedWithOther
-            if !belongsToOther {
-                var found = false
-                if #available(iOS 16.1, *) {
-                    found = MultitaskWindowManager.openExistingAppWindow(dataUUID: currentDataFolder)
+           let uuid = bannerInstanceUUID() {
+            let dockManager = MultitaskDockManager.shared
+            if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
+                let belongsToOther: Bool
+                if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                    belongsToOther = runningPath != configuration.model.appInfo.relativeBundlePath
+                } else {
+                    belongsToOther = true
                 }
-                if !found {
-                    found = MultitaskDockManager.shared.bringMultitaskViewToFront(uuid: currentDataFolder)
-                }
-                if found {
-                    // 启动 = 最大窗口（与全新启动一致）：带回的是
-                    // 小窗口时直接拉满，别只把小窗顶回来。
-                    // maximizeWindow 本身是切换式，必须先判
-                    // !isMaximized，否则已是最大窗会被反切回小窗。
-                    // 原生窗口模式下 dock 里可能没这条记录，
-                    // 找不到就跳过（best-effort，不拦带回）。
-                    if let view = dockApp?.view,
-                       let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController,
-                       !decoratedVC.isMaximized {
-                        decoratedVC.maximizeWindow()
+                if !belongsToOther {
+                    var brought = false
+                    if #available(iOS 16.1, *) {
+                        brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
                     }
+                    if !brought {
+                        brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
+                    }
+                    // 带回成功拉满；带回失败但条目还在且不是本次
+                    // C4 清掉的死窗（窗已在前台、只是 bring 没抬动）
+                    // 同样拉满，别再静默空转回小窗。
+                    let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == uuid
+                    let entryGone = !dockManager.apps.contains(where: { $0.appUUID == uuid })
+                    if brought || (!cleanedByC4 && !entryGone) {
+                        // maximizeWindow 是切换式，先判 !isMaximized，
+                        // 否则已是最大窗会被反切回小窗。
+                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
+                           !vc.isMaximized {
+                            vc.maximizeWindow()
+                        }
+                        return
+                    }
+                }
+            } else {
+                // 没有 dock 条目（原生窗口模式等）：保留旧行为，
+                // 只带回不拉满（没 decorated VC 可拉），带回失败
+                // 再落到 runApp。
+                var brought = false
+                if #available(iOS 16.1, *) {
+                    brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
+                }
+                if !brought {
+                    brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
+                }
+                if brought {
                     return
                 }
             }
