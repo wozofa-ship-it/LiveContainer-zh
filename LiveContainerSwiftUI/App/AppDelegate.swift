@@ -108,7 +108,16 @@ class SceneDelegate: NSObject, UIWindowSceneDelegate, ObservableObject { // Make
         if newOptions == nil {
             newOptions = UIScene.ActivationRequestOptions()
         }
-        newOptions!._setRequestFullscreen(UIScreen.main.bounds == self.keyWindow!.bounds)
+        // keyWindow 可为 nil（后台发起的激活请求到来时还没
+        // 有 key window），强解包会在系统钩子内闪退；取不到
+        // 按非全屏处理，钩子本身的转发逻辑不动。
+        let isFullscreen: Bool
+        if let keyWindow = self.keyWindow {
+            isFullscreen = UIScreen.main.bounds == keyWindow.bounds
+        } else {
+            isFullscreen = false
+        }
+        newOptions!._setRequestFullscreen(isFullscreen)
         self.hook_requestSceneSessionActivation(sceneSession, userActivity: userActivity, options: newOptions, errorHandler: errorHandler)
     }
     

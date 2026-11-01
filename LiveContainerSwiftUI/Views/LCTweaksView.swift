@@ -92,6 +92,22 @@ struct LCTweakFolderView : View {
 
     var body: some View {
         List {
+            if tweakItems.isEmpty {
+                // 空态：照源页格式（图标 + 一句文案）；
+                // 工具栏的导入/新建入口挂在 List 上，不受影响。
+                Section {
+                    VStack(spacing: 12) {
+                        Image(systemName: "building.columns.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.secondary)
+                        Text("暂无插件")
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
             Section {
                 ForEach(tweakItems, id:\.self) { tweakItem in
                     HStack {

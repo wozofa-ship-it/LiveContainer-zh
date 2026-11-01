@@ -255,8 +255,16 @@ struct LCContainerView : View {
     }
     
     func openDataFolder() {
-        let url = URL(string:"shareddocuments://\(LCPath.dataPath.path)/\(container.folderName)")
-        UIApplication.shared.open(url!)
+        // 文件夹名含空格时 URL(string:) 直接返回 nil，原来
+        // url! 强解包点一下就闪退；先 percent-encoding 再拼，
+        // 拼不出走现有错误提示通道，不强解包。
+        guard let encodedName = container.folderName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string:"shareddocuments://\(LCPath.dataPath.path)/\(encodedName)") else {
+            errorInfo = "无法打开数据文件夹"
+            errorShow = true
+            return
+        }
+        UIApplication.shared.open(url)
     }
     
     func setAsDefault() {

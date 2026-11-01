@@ -174,6 +174,15 @@ public final class DownloadHelper : ObservableObject {
     }
 }
 
+// 下载量格式化：弹窗与收起胶囊共用（原来是 DownloadAlert 的
+// 私有方法，胶囊在另一个 View 里用不上，提到文件级）。
+fileprivate func formatBytes(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.allowedUnits = [.useKB, .useMB, .useGB] // Allow KB, MB, and GB
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: bytes)
+}
+
 struct DownloadAlert : View {
     @StateObject var helper : DownloadHelper
     var body: some View {
@@ -186,12 +195,25 @@ struct DownloadAlert : View {
                 .font(.headline)
                 .padding(.top)
             
-            ProgressView(value: helper.downloadProgress, total: 1)
-                .padding()
+            // 总长度未知（服务器不发长度）时不用定值进度条，
+            // 也不显示“-1”总大小：进度条改不确定样式，只显已下载量。
+            if helper.totalSize > 0 {
+                ProgressView(value: helper.downloadProgress, total: 1)
+                    .padding()
+            } else {
+                ProgressView()
+                    .padding()
+            }
             
-            Text("\(formatBytes(helper.downloadedSize)) / \(formatBytes(helper.totalSize))")
-                .font(.subheadline)
-                .padding(.bottom)
+            if helper.totalSize > 0 {
+                Text("\(formatBytes(helper.downloadedSize)) / \(formatBytes(helper.totalSize))")
+                    .font(.subheadline)
+                    .padding(.bottom)
+            } else {
+                Text("已下载 \(formatBytes(helper.downloadedSize))")
+                    .font(.subheadline)
+                    .padding(.bottom)
+            }
 
             // 按钮与收起态胶囊、全 App 的胶囊按钮同一套语言：
             // 以前是纯文字钮，混在材质卡上像没做完
@@ -221,12 +243,6 @@ struct DownloadAlert : View {
         .padding()
     }
     
-    private func formatBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useKB, .useMB, .useGB] // Allow KB, MB, and GB
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
-    }
     
     func cancelDownload() {
         helper.cancel()
@@ -255,10 +271,18 @@ public struct DownloadAlertModifier: ViewModifier {
                             helper.minimized = false
                         } label: {
                             HStack(spacing: 6) {
-                                ProgressView(value: helper.downloadProgress, total: 1)
-                                    .progressViewStyle(.circular)
-                                Text("下载中 \(Int(helper.downloadProgress * 100))%")
-                                    .font(.caption.bold())
+                                // 总长度未知时不显示百分比，只显已下载量。
+                                if helper.totalSize > 0 {
+                                    ProgressView(value: helper.downloadProgress, total: 1)
+                                        .progressViewStyle(.circular)
+                                    Text("下载中 \(Int(helper.downloadProgress * 100))%")
+                                        .font(.caption.bold())
+                                } else {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                    Text("下载中 \(formatBytes(helper.downloadedSize))")
+                                        .font(.caption.bold())
+                                }
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
@@ -291,7 +315,16 @@ class DownloadDelegate: NSObject, URLSessionDownloadDelegate {
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        let progress = Float(totalBytesWritten) / Float(totalBytesExpectedToWrite)
+        // 服务器不发长度时 totalBytesExpectedToWrite 是 -1
+        // （NSURLSessionTransferSizeUnknown），直接除会得到负
+        // 进度，界面就显示负百分比和“-1”总大小；未知长度传
+        // -1 作标记，界面按 totalSize <= 0 走未知长度分支。
+        let progress: Float
+        if totalBytesExpectedToWrite > 0 {
+            progress = Float(totalBytesWritten) / Float(totalBytesExpectedToWrite)
+        } else {
+            progress = -1
+        }
         progressCallback(progress, totalBytesWritten, totalBytesExpectedToWrite)
     }
 

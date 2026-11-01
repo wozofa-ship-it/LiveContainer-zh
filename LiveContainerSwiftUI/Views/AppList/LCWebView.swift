@@ -318,7 +318,9 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
     }
     
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        self.pageTitle.wrappedValue = webView.title!
+        // WKWebView.title 是 String?，无标题页（空白页、纯文件页）
+        // 时为 nil，强解包直接闪退。
+        self.pageTitle.wrappedValue = webView.title ?? ""
     }
     
     
@@ -339,34 +341,49 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
             URL(string: "https://\(host)/.well-known/apple-app-site-association")!
             ]
 
-        await withTaskGroup(of: Void.self) { group in
+        // 两份 association 文件并发拉取，各任务只返回自己的 ID，
+        // 不在任务内写字典：原来每个任务先 dict[host] = [] 再
+        // append，后完成的会清空先完成的，还并发改同一个字典。
+        let mergedIDs = await withTaskGroup(of: [String].self) { group in
             for siteAssociationURL in appleAppSiteAssociationURLs {
                 group.addTask {
                     await withUnsafeContinuation { c in
                         let task = URLSession.shared.dataTask(with: siteAssociationURL) { data, response, error in
                             do {
                                 guard let data = data else {
-                                    c.resume()
+                                    c.resume(returning: [])
                                     return
                                 }
                                 let siteAssociationObj = try JSONDecoder().decode(SiteAssociation.self, from: data)
                                 guard let detailItems = siteAssociationObj.applinks?.details else {
-                                    c.resume()
+                                    c.resume(returning: [])
                                     return
                                 }
-                                self.domainBundleIdDict[host] = []
+                                var ids: [String] = []
                                 for item in detailItems {
-                                    self.domainBundleIdDict[host]!.append(contentsOf: item.getBundleIds())
+                                    ids.append(contentsOf: item.getBundleIds())
                                 }
+                                c.resume(returning: ids)
                             } catch {
-                                
+                                c.resume(returning: [])
                             }
-                            c.resume()
                         }
-                        
                         task.resume()
                     }
                 }
+            }
+            var merged: [String] = []
+            for await ids in group {
+                merged.append(contentsOf: ids)
+            }
+            return merged
+        }
+        // WebViewDelegate 不是 @MainActor，字典合并放主 actor 上，
+        // 不在并发任务里碰它。只缓存非空结果：两份都拉不到时
+        // 保持 nil，下次导航仍会重试，与原来语义一致。
+        await MainActor.run {
+            if !mergedIDs.isEmpty {
+                self.domainBundleIdDict[host] = mergedIDs
             }
         }
 
