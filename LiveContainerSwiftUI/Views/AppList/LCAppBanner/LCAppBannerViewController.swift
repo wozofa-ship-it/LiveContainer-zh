@@ -137,6 +137,17 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                     found = MultitaskDockManager.shared.bringMultitaskViewToFront(uuid: currentDataFolder)
                 }
                 if found {
+                    // 启动 = 最大窗口（与全新启动一致）：带回的是
+                    // 小窗口时直接拉满，别只把小窗顶回来。
+                    // maximizeWindow 本身是切换式，必须先判
+                    // !isMaximized，否则已是最大窗会被反切回小窗。
+                    // 原生窗口模式下 dock 里可能没这条记录，
+                    // 找不到就跳过（best-effort，不拦带回）。
+                    if let view = dockApp?.view,
+                       let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController,
+                       !decoratedVC.isMaximized {
+                        decoratedVC.maximizeWindow()
+                    }
                     return
                 }
             }

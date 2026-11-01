@@ -114,6 +114,14 @@ struct LCSettingsView: View {
     @State var pendingDeleteIndices: [Int] = []
     @State var vpnPinging = false
     @State var vpnPingRejected = false
+    // 单测被核心占用拒写过的节点链接（CZF，3.8.237）：
+    // 核心在跑时 pingBatch 被 libXray 生命周期锁拒掉，
+    // 旧值与·旧都保留、用户在行上看不出任何变化；
+    // 用链接集合标记（不用下标，删/排/导都不错位），
+    // 行上直接显示“核心占用”，不再让用户猜。
+    // 单测成功写回时清该条、整表成功时全清；只存会话，
+    // 不落盘、不参与清理/排序判定（绝不冒充测速结果）。
+    @State var vpnSingleRejectedLinks: Set<String> = []
     @State var vpnPingDone = 0
     @State var vpnPingTotal = 0
     @State var vpnPingPhase = "测速"
@@ -792,6 +800,13 @@ struct LCSettingsView: View {
                             Text("测速中")
                                 .font(.caption)
                                 .foregroundStyle(.gray)
+                        } else if vpnSingleRejectedLinks.contains(link) {
+                            // 核心在跑时单测被拒：旧值原样保留，
+                            // 行上直接写“核心占用”，别让用户对着
+                            // 不变的数字猜；真测用下方“停核心重测”。
+                            Text("核心占用")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
                         } else if vpnPingResults[index] == nil, !CZFVPNManager.isSupportedNodeScheme(CZFVPNManager.nodeScheme(for: link)) {
                             // 未测到的不支持节点：按转换器清单静态分级，
                             // 直接标“不支持”（橙色，与实测失败的红色区分），
@@ -1385,6 +1400,7 @@ struct LCSettingsView: View {
                 for (i, r) in results.enumerated() { map[i] = r }
                 vpnPingResults = map
                 vpnPingStaleIndices = []
+                vpnSingleRejectedLinks = []
                 vpnPingRejected = false
                 savePingResults()
             }
@@ -1413,9 +1429,11 @@ struct LCSettingsView: View {
             vpnSinglePingIndex = nil
             if rejected {
                 vpnPingRejected = true
+                vpnSingleRejectedLinks.insert(link)
             } else if let result, let currentIndex = vpnNodes.firstIndex(of: link) {
                 vpnPingResults[currentIndex] = result
                 vpnPingStaleIndices.remove(currentIndex)
+                vpnSingleRejectedLinks.remove(link)
                 savePingResults()
             }
             refreshVPNState()
