@@ -253,10 +253,14 @@
 
 - (NSDictionary *)generateWebClipConfigWithContainerId:(NSString*)containerId iconStyle:(GeneratedIconStyle)style{
     NSString* appClipUrl;
+    // .app 文件夹名可能含空格，直接拼出的 Web Clip 链接点开就断；
+    // 先 percent-encoding，接收侧 URLComponents queryItems 会解回原名。
+    NSString *encodedName = [self.bundlePath.lastPathComponent stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    if (!encodedName) { encodedName = self.bundlePath.lastPathComponent; }
     if(containerId) {
-        appClipUrl = [NSString stringWithFormat:@"livecontainer://livecontainer-launch?bundle-name=%@&container-folder-name=%@", self.bundlePath.lastPathComponent, containerId];
+        appClipUrl = [NSString stringWithFormat:@"livecontainer://livecontainer-launch?bundle-name=%@&container-folder-name=%@", encodedName, containerId];
     } else {
-        appClipUrl = [NSString stringWithFormat:@"livecontainer://livecontainer-launch?bundle-name=%@", self.bundlePath.lastPathComponent];
+        appClipUrl = [NSString stringWithFormat:@"livecontainer://livecontainer-launch?bundle-name=%@", encodedName];
     }
     
     UIImage* icon = [self generateLiveContainerWrappedIconWithStyle:style];

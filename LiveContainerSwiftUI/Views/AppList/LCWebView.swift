@@ -362,10 +362,22 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
         }
         
         // download and read apple-app-site-association
-        let appleAppSiteAssociationURLs = [
-            URL(string: "https://\(host)/apple-app-site-association")!,
-            URL(string: "https://\(host)/.well-known/apple-app-site-association")!
-            ]
+        // host 直接拼字符串在 IPv6 字面量时会拼出 nil 而强解包闪退
+        //（url.host 返回去括号的 ::1，"https://::1/..." 不是合法 URL）；
+        // 走 URLComponents（host 字段会正确加方括号），拼不出就跳过
+        // ——association 只是 best-effort，不值得为它闪退。
+        func associationURL(path: String) -> URL? {
+            var comps = URLComponents()
+            comps.scheme = "https"
+            comps.host = host
+            comps.path = path
+            return comps.url
+        }
+        guard let firstURL = associationURL(path: "/apple-app-site-association"),
+              let secondURL = associationURL(path: "/.well-known/apple-app-site-association") else {
+            return
+        }
+        let appleAppSiteAssociationURLs = [firstURL, secondURL]
 
         // 两份 association 文件并发拉取，各任务只返回自己的 ID，
         // 不在任务内写字典：原来每个任务先 dict[host] = [] 再

@@ -1064,7 +1064,10 @@ extension Notification.Name {
             // restartApp 手里只有 DockAppModel（无 runApp），
             // 直启走不通，改走 URL 但补 container-folder-name
             //（launchAppWithBundleId 已支持，直达被关实例的容器）。
-            if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(bundlePath)&container-folder-name=\(uuid)") {
+            // bundlePath 是 .app 文件夹名，可能含空格；直接拼 URL(string:)
+            // 会返回 nil，重启就变成只关不开。先 percent-encoding 再拼。
+            let encodedBundlePath = bundlePath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? bundlePath
+            if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(encodedBundlePath)&container-folder-name=\(uuid)") {
                 #if !os(visionOS)
                 UIApplication.shared.open(url, options: [:], completionHandler: nil)
                 #endif

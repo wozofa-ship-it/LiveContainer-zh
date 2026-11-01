@@ -1315,6 +1315,23 @@
         }
       }
     },
+    "lc.appBanner.running": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行中"
+          }
+        }
+      }
+    },
     "lc.appBanner.saveAppIcon": {
       "extractionState": "manual",
       "localizations": {
