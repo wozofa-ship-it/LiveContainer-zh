@@ -1468,7 +1468,7 @@ extension Notification.Name {
             czfEdgeSwipeLatched = false
         case .changed:
             guard globalSwipeStartEdge == 0 || globalSwipeStartInBand, !czfEdgeSwipeLatched else { return }
-            if processGlobalSwipe(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width) {
+            if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, translation: translation, endX: endX, width: width) {
                 czfEdgeSwipeLatched = true
             }
         case .ended, .cancelled:
@@ -1507,9 +1507,11 @@ extension Notification.Name {
 
     // 手势判定核心：宿主窗口手势与悬浮边条窗共用。
     // startEdge：0=任意位置 1=左边缘 2=右边缘；往外滑门槛低（手指很快滑出屏幕）。
+    // startInBand：起手是否落在启用带内；任意位置起手拖到右边缘切 App 也要带内
+    // 才触发（2026-11-01 用户定：右边跟左边一样，只认带内）。
     // 返回 true 表示本次判定触发了动作（边条 handler 据此做一次性触发）
     @discardableResult
-    private func processGlobalSwipe(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
+    private func processGlobalSwipe(startEdge: Int, startInBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
         let draggingRight = translation.x > 0
         // 往外弹（左缘左移/右缘右移）物理行程就只有起手那几十
         // 点：手指几毫米就出屏，拇指走的还是弧线、纵向分量大，
@@ -1546,9 +1548,11 @@ extension Notification.Name {
             }
             return true
         } else {
-            // 任意位置起手：拖到屏幕边缘、位移 >50 才算隐藏
+            // 任意位置起手：拖到屏幕边缘、位移 >50 才算隐藏；
+            // 拖到右边缘切 App 也要起手在带内（跟左边一样），
+            // 带外起手往右拖到边不切；往左拖到边藏栏维持原样
             guard abs(translation.x) > 50 else { return false }
-            if draggingRight && endX >= width - 30 {
+            if draggingRight && startInBand && endX >= width - 30 {
                 fireDockAction { self.czfEdgeRightOutward() }
                 return true
             } else if !draggingRight && endX <= 30 {

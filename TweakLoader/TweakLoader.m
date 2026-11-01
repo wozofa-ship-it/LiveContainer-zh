@@ -457,9 +457,11 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
             selectorName = @"czfOpenSourcesPanel";
         }
     } else {
-        // 任意位置起手：只有拖到屏幕边缘、位移够大才算隐藏（防误触）
+        // 任意位置起手：只有拖到屏幕边缘、位移够大才算隐藏（防误触）；
+        // 拖到右边缘切 App 也要起手在带内（跟左边一样，gCZFStartInBand
+        // 由 shouldReceiveTouch 对观察 pan 写好）；往左拖到边藏栏维持原样
         if (absX <= 50) return;
-        if (draggingRight && endX >= width - 30) {
+        if (draggingRight && gCZFStartInBand && endX >= width - 30) {
             notificationName = @"czf.dock.rightOutward";
             selectorName = @"czfEdgeRightOutward";
         } else if (!draggingRight && endX <= 30) {
