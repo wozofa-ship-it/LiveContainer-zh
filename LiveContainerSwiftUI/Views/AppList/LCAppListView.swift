@@ -133,7 +133,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } else {
             return apps.filter { app in
                 app.appInfo.displayName().localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
-                app.appInfo.bundleIdentifier()!.localizedCaseInsensitiveContains(searchContext.debouncedQuery)
+                (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery)
             }
         }
     }
@@ -145,7 +145,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } else {
             return apps.filter { app in
                 app.appInfo.displayName().localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
-                app.appInfo.bundleIdentifier()!.localizedCaseInsensitiveContains(searchContext.debouncedQuery)
+                (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery)
             }
         }
     }
@@ -880,16 +880,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             throw "lc.appList.infoPlistCannotReadError".loc
         }
 
-        var appRelativePath = "\(newAppInfo.bundleIdentifier()!.sanitizeNonACSII()).app"
+        // 包名是安装流程的根基（落盘目录名、同款比对都靠它）：
+        // Info.plist 里读不到包名（残留/损坏包）时走上面同款
+        // “Info.plist 读不出来”的报错通道，不再往下用 ! 解包。
+        // 正常包的包名一定非空，下面五处都复用这一个绑定值。
+        guard let newBundleId = newAppInfo.bundleIdentifier(), !newBundleId.isEmpty else {
+            throw "lc.appList.infoPlistCannotReadError".loc
+        }
+
+        var appRelativePath = "\(newBundleId.sanitizeNonACSII()).app"
         var outputFolder = LCPath.bundlePath.appendingPathComponent(appRelativePath)
         var appToReplace : LCAppModel? = nil
         // Folder exist! show alert for user to choose which bundle to replace
         var sameBundleIdApp = sharedModel.apps.filter { app in
-            return app.appInfo.bundleIdentifier()! == newAppInfo.bundleIdentifier()
+            return app.appInfo.bundleIdentifier() == newBundleId
         }
         if sameBundleIdApp.count == 0 {
             sameBundleIdApp = sharedModel.hiddenApps.filter { app in
-                return app.appInfo.bundleIdentifier()! == newAppInfo.bundleIdentifier()
+                return app.appInfo.bundleIdentifier() == newBundleId
             }
             
             // we found a hidden app, we need to authenticate before proceeding
@@ -913,7 +921,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 块内 var 会出不了作用域（构建 #209 唯一红字就是这个）。
         var czfCustomDisplayName: String? = nil
         if fm.fileExists(atPath: outputFolder.path) || sameBundleIdApp.count > 0 {
-            appRelativePath = "\(newAppInfo.bundleIdentifier()!)_\(Int(CFAbsoluteTimeGetCurrent())).app"
+            appRelativePath = "\(newBundleId)_\(Int(CFAbsoluteTimeGetCurrent())).app"
             
             self.installOptions = [AppReplaceOption(isReplace: false, nameOfFolderToInstall: appRelativePath)]
             
@@ -933,7 +941,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 只有残留文件夹、没有 App 记录：删掉残留，按
                 // 默认文件夹名全新安装（效果等于覆盖）
                 try? fm.removeItem(at: outputFolder)
-                installOptionChosen = AppReplaceOption(isReplace: false, nameOfFolderToInstall: "\(newAppInfo.bundleIdentifier()!.sanitizeNonACSII()).app")
+                installOptionChosen = AppReplaceOption(isReplace: false, nameOfFolderToInstall: "\(newBundleId.sanitizeNonACSII()).app")
             } else {
                 installOptionChosen = await installReplaceAlert.open()
             }

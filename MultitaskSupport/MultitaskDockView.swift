@@ -2777,6 +2777,27 @@ struct AllAppsListView: View {
     }
     @ObservedObject var sortManager = LCAppSortManager.shared
 
+    // 面板启动失败提示：原来三条启动路全是 try? 吞错，面板又
+    // 已关掉，失败时只剩“点了没反应”。手势覆盖层常驻窗口
+    // （只改可见性不销毁），这个 @State alert 在覆盖层路能
+    // 正常弹出；蓝图标 sheet 路 dismiss 后视图销毁，仍会静默，
+    // 那是 sheet 机制所限，不是本次回归。JIT 取消不抛错，
+    // 不会误弹。
+    @State private var launchError: String?
+
+    // 面板搜索：不用 .searchable（原来绑常量空串根本不筛选，
+    // iOS 26 还把它渲染成悬浮条压住最后一行才被拆掉），改用
+    // 普通 TextField 按名字/Bundle ID 过滤。
+    @State private var searchText = ""
+
+    private var filteredPanelApps: [LCAppModel] {
+        if searchText.isEmpty { return sortManager.sortedApps }
+        return sortManager.sortedApps.filter { app in
+            app.appInfo.displayName().localizedCaseInsensitiveContains(searchText) ||
+            (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
     var body: some View {
         // 不用 NavigationView：空标题的导航栏白占一条高度，面板
         // 本来就只有半屏多；原来挂的 .searchable 绑的是常量空串
@@ -2798,9 +2819,29 @@ struct AllAppsListView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
                     .padding(.bottom, 10)
+                // 搜索框：固定在运行条下方，不随列表滚动。
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("搜索", text: $searchText)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(UIColor.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    ForEach(sortManager.sortedApps, id: \.self) { app in
+                    ForEach(filteredPanelApps, id: \.self) { app in
                         AppCardRow(app: app, dockManager: dockManager, onLaunch: {
                             launchApp(app)
                         }, onMinimizeOpen: {
@@ -2817,10 +2858,18 @@ struct AllAppsListView: View {
             }
             .onChange(of: dockManager.czfAppPanelOpenCounter) { _ in
                 // 每次调出回到初始状态：滚回最顶部（用户定，
-                // 不留上次滑动的位置）
+                // 不留上次滑动的位置），搜索也一并清空。
                 proxy.scrollTo("czfAppPanelTop", anchor: .top)
+                searchText = ""
             }
             }
+        }
+        // 启动失败提示（源面板同款写法）：面板已关、启动在后台
+        // Task 里抛错时，把原因弹出来，不再“点了没反应”。
+        .alert("提示", isPresented: Binding(get: { launchError != nil }, set: { if !$0 { launchError = nil } })) {
+            Button("好") { launchError = nil }
+        } message: {
+            Text(launchError ?? "")
         }
     }
     
@@ -2850,7 +2899,11 @@ struct AllAppsListView: View {
         // 前台路径一字不动。
         closePanel()
         Task {
-            try? await app.runApp(containerFolderName: app.appInfo.dataUUID)
+            do {
+                try await app.runApp(containerFolderName: app.appInfo.dataUUID)
+            } catch {
+                await MainActor.run { launchError = error.localizedDescription }
+            }
         }
     }
     
@@ -2871,7 +2924,11 @@ struct AllAppsListView: View {
         // 下面按 dataUUID 轮询最小化的逻辑一字不动；上面运行
         // 分支的归属守卫一字不动。
         Task {
-            try? await app.runApp(containerFolderName: dataUUID)
+            do {
+                try await app.runApp(containerFolderName: dataUUID)
+            } catch {
+                await MainActor.run { launchError = error.localizedDescription }
+            }
         }
         // 主线程轮询等待窗口出现，找到后最小化
         var attempts = 0
@@ -2933,7 +2990,11 @@ struct AllAppsListView: View {
             }
         }
         Task {
-            try? await app.runApp(multitask: true, containerFolderName: dataUUID)
+            do {
+                try await app.runApp(multitask: true, containerFolderName: dataUUID)
+            } catch {
+                await MainActor.run { launchError = error.localizedDescription }
+            }
         }
     }
 
@@ -3344,20 +3405,11 @@ private struct RunningAppsStripView: View {
             if dockManager.apps.isEmpty {
                 HStack {
                     Spacer()
-                    fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
-                        dockManager.toggleDockCollapse()
-                        onSwitch()
-                    }
+                    collapseStripButton
                     Spacer()
-                    fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
-                        dockManager.minimizeAllWindows()
-                        onSwitch()
-                    }
+                    minimizeAllStripButton
                     Spacer()
-                    fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
-                        dockManager.closeAllWindows()
-                        onSwitch()
-                    }
+                    closeAllStripButton
                     Spacer()
                 }
                 .padding(.horizontal, 10)
@@ -3365,18 +3417,9 @@ private struct RunningAppsStripView: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
-                        fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
-                            dockManager.toggleDockCollapse()
-                            onSwitch()
-                        }
-                        fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
-                            dockManager.minimizeAllWindows()
-                            onSwitch()
-                        }
-                        fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
-                            dockManager.closeAllWindows()
-                            onSwitch()
-                        }
+                        collapseStripButton
+                        minimizeAllStripButton
+                        closeAllStripButton
                         // 分隔线定死 64 高（46 图标+4 间距+约
                         // 14 文字行高）：原来 50 比图标+文字矮
                         // 一截看着断开；改随内容撑满后高度成环
@@ -3404,6 +3447,28 @@ private struct RunningAppsStripView: View {
         .frame(minHeight: 78)
         .background(Color(UIColor.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+    }
+
+    // 三个固定按钮：两态共用同一份定义，改一处即两态一致
+    // （原来两边各写一遍，改漏一边就两态不一致）。布局
+    // （均分 Spacer / 横滑间距）仍是各分支自己的事。
+    private var collapseStripButton: some View {
+        fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
+            dockManager.toggleDockCollapse()
+            onSwitch()
+        }
+    }
+    private var minimizeAllStripButton: some View {
+        fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
+            dockManager.minimizeAllWindows()
+            onSwitch()
+        }
+    }
+    private var closeAllStripButton: some View {
+        fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
+            dockManager.closeAllWindows()
+            onSwitch()
+        }
     }
 
     // 固定按钮：浅底 + 深色图标（原来整块实心灰/红加白描边太

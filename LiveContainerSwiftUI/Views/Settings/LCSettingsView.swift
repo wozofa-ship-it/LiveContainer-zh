@@ -175,6 +175,23 @@ struct LCSettingsView: View {
             }
         }
     }
+    // 去 Seal 更新：照抄 openSideInstallerInstall，只换 scheme。
+    // Seal 注册了 seal 和 sidestore 两个 scheme，用户定用
+    // sidestore://install?url= 这个格式，不要自创 seal://。
+    private func openSealInstall() {
+        guard let info = updateInfo else { return }
+        var components = URLComponents()
+        components.scheme = "sidestore"
+        components.host = "install"
+        components.queryItems = [URLQueryItem(name: "url", value: info.downloadURL.absoluteString)]
+        guard let url = components.url else { return }
+        UIApplication.shared.open(url, options: [:]) { success in
+            if !success {
+                errorInfo = "没能打开 Seal，请确认它已安装"
+                errorShow = true
+            }
+        }
+    }
     private var notificationAuthText: String {
         switch notificationAuthStatus {
         case .authorized: return "已开启"
@@ -1065,9 +1082,9 @@ struct LCSettingsView: View {
 
     @ViewBuilder private var updateSection: some View {
         // App 内更新检查：只查 fork 自己的 nightly，不查
-        // 上游源（会丢 fork 改动）。有新版时下面多一行
-        // “去 SideInstaller 更新”，点它直接跳 SideInstaller 🅥
-        // 的 install 链接下载安装，不用再去聊天里拿直链。
+        // 上游源（会丢 fork 改动）。有新版时下面多两行
+        // “去 SideInstaller 更新”和“去 Seal 更新”，点它直接跳
+        // 对应 App 的 install 链接下载安装，不用再去聊天里拿直链。
         Section {
             Button {
                 startUpdateCheck()
@@ -1089,6 +1106,14 @@ struct LCSettingsView: View {
                     HStack {
                         LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
                         Text("去 SideInstaller 更新")
+                    }
+                }
+                Button {
+                    openSealInstall()
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
+                        Text("去 Seal 更新")
                     }
                 }
                 Text("点更新会跳到 SideInstaller 🅥 下载安装，安装时会关闭 LiveContainer，装好后重新打开；更新前建议先在数据管理里备份一次。")

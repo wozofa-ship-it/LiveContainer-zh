@@ -33,6 +33,14 @@ struct LCTweakFolderView : View {
     @State private var errorShow = false
     @State private var errorInfo = ""
     
+    // 待确认删除：presentConfirmation 是 UIViewController 扩展，
+    // 插件页是纯 SwiftUI View 挂不上，改用普通 alert（单删带名，
+    // 左滑批量带数量），确认后才调 deleteTweakItem。
+    @State private var pendingDeleteItem: LCTweakItem?
+    @State private var showDeleteItemConfirm = false
+    @State private var pendingDeleteIndexSet: IndexSet?
+    @State private var showDeleteIndexSetConfirm = false
+
     @StateObject private var newFolderInput = InputHelper()
     
     @StateObject private var renameFileInput = InputHelper()
@@ -139,14 +147,16 @@ struct LCTweakFolderView : View {
                         }
 
                         Button(role: .destructive) {
-                            deleteTweakItem(tweakItem: tweakItem)
+                            pendingDeleteItem = tweakItem
+                            showDeleteItemConfirm = true
                         } label: {
                             Label("lc.common.delete".loc, systemImage: "trash")
                         }
                     }
 
                 }.onDelete { indexSet in
-                    deleteTweakItem(indexSet: indexSet)
+                    pendingDeleteIndexSet = indexSet
+                    showDeleteIndexSetConfirm = true
                 }
             } footer: {
                 if isRoot {
@@ -207,6 +217,26 @@ struct LCTweakFolderView : View {
             })
         } message: {
             Text(errorInfo)
+        }
+        // 单删确认：沙盒删除不进废纸篓，插件很可能只有这一份。
+        .alert("删除插件？", isPresented: $showDeleteItemConfirm) {
+            Button("lc.common.delete".loc, role: .destructive) {
+                if let item = pendingDeleteItem { deleteTweakItem(tweakItem: item) }
+                pendingDeleteItem = nil
+            }
+            Button("lc.common.cancel".loc, role: .cancel) { pendingDeleteItem = nil }
+        } message: {
+            Text("删除后无法恢复")
+        }
+        // 左滑批量确认，带数量。
+        .alert("删除所选 \(pendingDeleteIndexSet?.count ?? 0) 个插件？", isPresented: $showDeleteIndexSetConfirm) {
+            Button("lc.common.delete".loc, role: .destructive) {
+                if let indexSet = pendingDeleteIndexSet { deleteTweakItem(indexSet: indexSet) }
+                pendingDeleteIndexSet = nil
+            }
+            Button("lc.common.cancel".loc, role: .cancel) { pendingDeleteIndexSet = nil }
+        } message: {
+            Text("删除后无法恢复")
         }
         .sheet(isPresented: $showExportSheet) {
             if !exportItems.isEmpty {
