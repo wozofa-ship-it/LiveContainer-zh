@@ -6,6 +6,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import Combine
 
 struct LCAppBannerConfiguration {
     let model: LCAppModel
@@ -20,6 +21,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     private let bannerView = LCAppBannerRootView()
     private var configuration: LCAppBannerConfiguration
     private var exportTemporaryDirectory: URL?
+    // dock 条目变化时重绘画片（运行态角标读 dock 存活态，不订阅
+    // 的话角标只在模型变化时重绘、窗口开关后仍是旧态）。
+    private var dockAppsCancellable: AnyCancellable?
     
     init(delegate: LCAppBannerDelegate, config: LCAppBannerConfiguration) {
         self.delegate = delegate
@@ -46,6 +50,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             bannerView.smallWindowControl?.addTarget(self, action: #selector(smallWindowButtonTapped), for: .touchUpInside)
         }
         bannerView.addInteraction(UIContextMenuInteraction(delegate: self))
+
+        // dock 变化（窗口开关）即重绘画片，运行态角标才跟得上；
+        // 订阅即发一次当前值，多一次无害重绘。
+        if #available(iOS 16.0, *) {
+            dockAppsCancellable = MultitaskDockManager.shared.$apps
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.refreshView() }
+        }
 
         let doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(bannerDoubleTapped))
         doubleTapGesture.numberOfTapsRequired = 2
@@ -208,9 +220,22 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         vc.maximizeWindow()
     }
 
+    // 小窗口回落路专用（3.8.239）：czfOnWindowAppeared 是“同 uuid
+    // 条目已存在就立即回调”、不验归属——同容器被别的条目占着时，
+    // 回调会把别人的窗口还原成小窗。动作前再按路径复验一次，
+    // 对不上/验不出就什么都不做，别动别人的窗口。
+    @available(iOS 16.0, *)
+    private static func unmaximizeWindowIfOwned(uuid: String, expectedPath: String) {
+        guard let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
+              let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty,
+              runningPath == expectedPath else { return }
+        unmaximizeWindow(uuid: uuid)
+    }
+
     // 未运行分支的启动（含锁屏认证，与本卡 runApp 同款逻辑，
-    // 只多一个 containerFolderName 参数，面板两路都带它）。
-    private func launchForAux(multitask: Bool?, containerFolderName: String) async {
+    // 只多一个 containerFolderName 参数，面板两路都带它；
+    // 容器删光时传 nil，runApp 会重建容器，见 L14）。
+    private func launchForAux(multitask: Bool?, containerFolderName: String?) async {
         if configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked {
             do {
                 if !(try await LCUtils.authenticateUser()) {
@@ -230,28 +255,54 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func minimizeButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
-        guard let uuid = bannerInstanceUUID() else { return }
+        // 容器删光（L14）：先启动（runApp 会重建容器），容器一
+        // 出现就重走正常路；20 次内没出现就停（启动失败已由
+        // launch 侧 showError，不在这里重复报错）。
+        guard let uuid = bannerInstanceUUID() else {
+            Task { [weak self] in
+                await self?.launchForAux(multitask: nil, containerFolderName: nil)
+            }
+            var attempts = 0
+            Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+                attempts += 1
+                if self?.bannerInstanceUUID() != nil {
+                    timer.invalidate()
+                    self?.minimizeButtonTapped()
+                } else if attempts >= 20 {
+                    timer.invalidate()
+                }
+            }
+            return
+        }
         let dockManager = MultitaskDockManager.shared
         // 已在运行：归属对不上（共用容器的别的条目）不碰它，
-        // 落到下面启动分支起自己的窗口；归属不明按面板同款
-        // 视为不冲突（?? false），直接最小化。
+        // 落到下面启动分支起自己的窗口；归属不明按启动/小窗口
+        // 路同款视为别的条目（?? true），不再直接最小化。
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
-            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != configuration.model.appInfo.relativeBundlePath } ?? false
+            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != configuration.model.appInfo.relativeBundlePath } ?? true
             if !belongsToOther {
                 dockManager.minimizeWindow(uuid: uuid)
                 return
             }
         }
         // 未运行：先启动，面板同款 0.3 秒×20 次轮询等窗口出现
-        // 再最小化；启动失败只走 showError，轮询 20 次后自停。
+        // 再最小化；轮询只认归属对得上的条目，别人的窗口占着
+        // uuid 时直接停表、不碰它（自己的新窗若拆容器会换 uuid，
+        // 等这个 uuid 也等不来）。启动失败只走 showError，
+        // 轮询 20 次后自停——到期分不清失败还是拆容器换号，
+        // 不在这里误报错。
         Task { [weak self] in
             await self?.launchForAux(multitask: nil, containerFolderName: uuid)
         }
+        let expectedPath = configuration.model.appInfo.relativeBundlePath
         var attempts = 0
         Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
             attempts += 1
-            if MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == uuid }) {
-                MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
+            if let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) {
+                let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == expectedPath } ?? false
+                if owned {
+                    MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
+                }
                 timer.invalidate()
             } else if attempts >= 20 {
                 timer.invalidate()
@@ -261,7 +312,25 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func smallWindowButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
-        guard let uuid = bannerInstanceUUID() else { return }
+        // 容器删光（L14）：先启动（runApp 会重建容器），容器一
+        // 出现就重走正常路；20 次内没出现就停（启动失败已由
+        // launch 侧 showError）。
+        guard let uuid = bannerInstanceUUID() else {
+            Task { [weak self] in
+                await self?.launchForAux(multitask: true, containerFolderName: nil)
+            }
+            var attempts = 0
+            Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+                attempts += 1
+                if self?.bannerInstanceUUID() != nil {
+                    timer.invalidate()
+                    self?.smallWindowButtonTapped()
+                } else if attempts >= 20 {
+                    timer.invalidate()
+                }
+            }
+            return
+        }
         let dockManager = MultitaskDockManager.shared
         // 已在运行：归属不明一律视为别的条目（面板同款），不顶
         // 窗口、直接落到启动分支；带回成功还原小窗，带回失败
@@ -289,9 +358,13 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
         // 未运行：先注册窗口出现回调、再启动（面板 C6 同款顺序），
         // 窗出来 0.35 秒后还原为小窗；30 秒未出现放弃，不留野观察者。
+        // 回调动作前按路径复验归属（L5）：同 uuid 条目已存在时回调
+        // 立即触发、不验归属——占着 uuid 的若是别人的窗口，复验
+        // 拦住，别把别人的窗口还原成小窗。
+        let expectedPath = configuration.model.appInfo.relativeBundlePath
         dockManager.czfOnWindowAppeared(uuid: uuid, timeout: 30) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                Self.unmaximizeWindow(uuid: uuid)
+                Self.unmaximizeWindowIfOwned(uuid: uuid, expectedPath: expectedPath)
             }
         }
         Task { [weak self] in
@@ -500,11 +573,25 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             delegate.removeApp(app: configuration.model)
 
             if shouldRemoveAppFolders {
+                // 逐个删容器：原来循环里任一 removeItem 抛错就进
+                // catch，App 已从列表消失，剩下的容器和钥匙串留在
+                // 磁盘上且不再属于任何条目。现单步失败不中断：文件
+                // 夹删失败的容器跳过钥匙串与名单清理（文件夹还在，
+                // 钥匙串与名单留着才对得上），最后汇总报一次。
+                var failedContainers: [String] = []
                 for container in containers {
                     let dataUUID = container.folderName
-                    try fileManager.removeItem(at: LCPath.dataPath.appendingPathComponent(dataUUID))
+                    do {
+                        try fileManager.removeItem(at: LCPath.dataPath.appendingPathComponent(dataUUID))
+                    } catch {
+                        failedContainers.append(dataUUID)
+                        continue
+                    }
                     LCUtils.removeAppKeychain(dataUUID: dataUUID)
                     DataManager.shared.model.appDataFolderNames.removeAll { $0 == dataUUID }
+                }
+                if !failedContainers.isEmpty {
+                    showError("以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
                 }
             }
         } catch {

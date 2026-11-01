@@ -2655,12 +2655,33 @@ struct LCDataManagementView : View {
     /// startPendingRestore）。FileManager.default 在 detached
     /// 内取，不从外层捕获，避免 Sendable 问题。
     static func replaceContainerOffMain(from src: URL, to dest: URL) async throws {
+        // 先拷到临时目录再原子替换：原来先删 dest 再拷，拷失败
+        // （磁盘满、iCloud 占位未下完）直接 throw，原数据已丢；
+        // restoreOneApp 是 throws，抛错后整个函数提前退出，已
+        // 替换的前几个回不去、后几个没恢复、结尾清理和关窗口
+        // 都没跑。现：拷失败时 dest 原样不动；替换用
+        // replaceItemAt（失败时原位文件保留），成功后清 tmp。
+        // tmp 与 dest 同目录（同卷，rename 才成立）。
         try await Task.detached {
             let fm = FileManager.default
-            if fm.fileExists(atPath: dest.path) {
-                try fm.removeItem(at: dest)
+            let tmp = dest.deletingLastPathComponent()
+                .appendingPathComponent(".restore-tmp-\(UUID().uuidString)")
+            do {
+                try fm.copyItem(at: src, to: tmp)
+            } catch {
+                try? fm.removeItem(at: tmp)
+                throw error
             }
-            try fm.copyItem(at: src, to: dest)
+            do {
+                if fm.fileExists(atPath: dest.path) {
+                    _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+                } else {
+                    try fm.moveItem(at: tmp, to: dest)
+                }
+            } catch {
+                try? fm.removeItem(at: tmp)
+                throw error
+            }
         }.value
     }
 
@@ -2746,6 +2767,10 @@ struct LCDataManagementView : View {
         var mergedLoginFiles = 0
         var loginMergeFolderCount = 0
         var newDefaultContainer: LCContainer?
+        // 本次恢复动过的容器文件夹名（原地覆盖/登录合并/新恢复
+        // 全算）：结尾关窗口用，不只关 dataUUID——非默认容器
+        // 的窗口若在跑，恢复后它继续用内存旧数据跑。
+        var restoredFolderNames = Set<String>()
         for containerFolder in containerFolders {
             let folderName = containerFolder.lastPathComponent
             // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
@@ -2763,14 +2788,17 @@ struct LCDataManagementView : View {
                     mergedLoginFiles += merged
                     if merged > 0 {
                         restoredContainers += 1
+                        restoredFolderNames.insert(folderName)
                     }
                     continue
                 }
                 // 同名容器还在（没删过 App）：原地覆盖。
-                // 拷盘挪后台（见三件套注释），语义与原来
-                // 完全一致（存在先删再拷，失败照常 throw）。
+                // 拷盘挪后台（见三件套注释）；替换是原子的
+                // （见 replaceContainerOffMain），失败原数据保留、
+                // 照常 throw。
                 try await Self.replaceContainerOffMain(from: containerFolder, to: live.containerURL)
                 restoredContainers += 1
+                restoredFolderNames.insert(folderName)
                 continue
             }
             // 删后重装：新容器的文件夹名是新随机 UUID，和备份里的
@@ -2790,7 +2818,8 @@ struct LCDataManagementView : View {
             }
             let root = app.appInfo.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
             let destURL = root.appendingPathComponent(folderName)
-            // 拷盘挪后台（见三件套注释），语义与原来一致。
+            // 拷盘挪后台（见三件套注释）；替换是原子的，失败原
+            // 数据保留（见 replaceContainerOffMain）。
             try await Self.replaceContainerOffMain(from: containerFolder, to: destURL)
             let restoredName = (NSDictionary(contentsOf: destURL.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["name"] as? String ?? folderName
             let restored = LCContainer(infoDict: ["folderName": folderName, "name": restoredName], isShared: app.appInfo.isShared)
@@ -2799,15 +2828,22 @@ struct LCDataManagementView : View {
             app.uiContainers = containers
             app.appInfo.containers = containers
             restoredContainers += 1
+            restoredFolderNames.insert(folderName)
             if newDefaultContainer == nil || folderName == manifestDataUUID {
                 newDefaultContainer = restored
             }
         }
         if let newDefaultContainer {
-            // 恢复出来的容器设为默认选中，App 下次打开就用它
-            app.uiSelectedContainer = newDefaultContainer
-            app.uiDefaultDataFolder = newDefaultContainer.folderName
-            app.appInfo.dataUUID = newDefaultContainer.folderName
+            // 恢复出来的容器设为默认选中，App 下次打开就用它。
+            // 但必须以 manifest 默认容器为准：manifest 默认容器
+            // 若已在机上（走原地覆盖分支、没进 newDefaultContainer），
+            // 首个新容器不得占位，否则下次打开进的是备份里的非
+            // 默认容器、毫无提示；只有 manifest 默认容器不在机上
+            // 时，才用首个新容器作默认（原有回落）。
+            let finalDefault = app.uiContainers.first { $0.folderName == manifestDataUUID } ?? newDefaultContainer
+            app.uiSelectedContainer = finalDefault
+            app.uiDefaultDataFolder = finalDefault.folderName
+            app.appInfo.dataUUID = finalDefault.folderName
         }
         // 恢复模块选择：manifest 记着备份时的模块夹，写回；
         // 老备份没有这字段就不动（保持新装默认）
@@ -2882,6 +2918,7 @@ struct LCDataManagementView : View {
                 mergedLoginFiles += merged
                 if merged > 0 {
                     restoredExtras = true
+                    restoredFolderNames.insert(target.containerURL.lastPathComponent)
                 }
             }
         }
@@ -3018,7 +3055,13 @@ struct LCDataManagementView : View {
         // 必须用 #available 包住（2026-10-25 构建 #186 红字教训：
         // 不包就报 'only available in iOS 16.0 or newer'）。
         if #available(iOS 16.0, *) {
-            MultitaskDockManager.shared.closeAppWindow(uuid: app.appInfo.dataUUID)
+            // 关掉全部被恢复容器的在跑窗口，不只关 dataUUID：
+            // 非默认容器 B 的窗口若在跑，恢复后它继续用内存旧
+            // 数据跑，要手动关窗重开才生效；没在跑就是空操作。
+            // 只关本次动过的容器，没动过的不打扰。
+            for uuid in restoredFolderNames {
+                MultitaskDockManager.shared.closeAppWindow(uuid: uuid)
+            }
         }
         return outcome
     }

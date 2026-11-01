@@ -220,7 +220,18 @@ final class LCAppBannerRootView: UIView {
         bit32Badge.backgroundColor = .systemGray
         // 运行态角标（跟其他角标同款中性灰）：窗口在跑（含最小化）
         // 就亮，点 ▶ 把窗口带回前台（见控制器 runButtonTapped）。
-        runningBadge.isHidden = !model.isAppRunning
+        // 以前读 isAppRunning 启动瞬态（签名那几秒亮、真跑起来
+        // 反而灭）；现读 dock 条目存活态，16 以下无 dock 时回落
+        // 旧逻辑。dock 变化时控制器订阅刷新（见 viewDidLoad），
+        // 不然角标只在模型变化时才重绘、仍是旧态。
+        let isRunning: Bool
+        if #available(iOS 16.0, *) {
+            let uuid = model.uiSelectedContainer?.folderName ?? model.appInfo.dataUUID
+            isRunning = uuid.map { id in MultitaskDockManager.shared.apps.contains { $0.appUUID == id } } ?? false
+        } else {
+            isRunning = model.isAppRunning
+        }
+        runningBadge.isHidden = !isRunning
         runningBadge.backgroundColor = .systemGray
 
         visualBackgroundView.backgroundColor = dynamicColors

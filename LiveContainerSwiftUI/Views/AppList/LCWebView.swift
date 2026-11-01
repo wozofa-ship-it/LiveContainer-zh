@@ -96,8 +96,13 @@ struct LCWebView: View {
             webView
         }
         .onAppear(){
-            webView.loadURL(url: url)
+            // 只在首次出现时载入初始页（仿 didAppear 守卫）：原来
+            // 每次出现都 loadURL，页内进二级页面后切后台再回、
+            // 或经外链跳 App 再回，都会回到初始 URL、导航白走。
+            // url 是本视图的固定初始页，换页由页内导航/外链处理，
+            // 不在这里重载。
             if !didAppear {
+                webView.loadURL(url: url)
                 onViewAppear()
                 didAppear = true
             }
@@ -135,7 +140,7 @@ struct LCWebView: View {
     
     func onViewAppear() {
         let observer = WebViewLoadObserver(loadStatus: $loadStatus, canGoBack: $canGoBack, canGoForward: $canGoForward, webView: self.webView.webView)
-        let webViewDelegate = WebViewDelegate(pageTitle: $pageTitle, errorShow: $errorShow, errorInfo: $errorInfo, urlSchemeHandler:onURLSchemeDetected, universalLinkHandler: onUniversalLinkDetected,)
+        let webViewDelegate = WebViewDelegate(pageTitle: $pageTitle, errorShow: $errorShow, errorInfo: $errorInfo, loadStatus: $loadStatus, urlSchemeHandler:onURLSchemeDetected, universalLinkHandler: onUniversalLinkDetected,)
         webView.setDelegate(delegete: webViewDelegate)
         webView.setObserver(observer: observer)
     }
@@ -310,14 +315,16 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
     private var pageTitle: Binding<String>
     private var errorShow: Binding<Bool>
     private var errorInfo: Binding<String>
+    private var loadStatus: Binding<Double>
     private var urlSchemeHandler: (URL) async -> Void
     private var universalLinkHandler: (URL , [String]) async -> Void // url, [String] of all apps that can open this web page
     var domainBundleIdDict : [String:[String]] = [:]
     
-    init(pageTitle: Binding<String>, errorShow: Binding<Bool>, errorInfo: Binding<String>, urlSchemeHandler: @escaping (URL) async -> Void, universalLinkHandler: @escaping (URL , [String]) async -> Void) {
+    init(pageTitle: Binding<String>, errorShow: Binding<Bool>, errorInfo: Binding<String>, loadStatus: Binding<Double>, urlSchemeHandler: @escaping (URL) async -> Void, universalLinkHandler: @escaping (URL , [String]) async -> Void) {
         self.pageTitle = pageTitle
         self.errorShow = errorShow
         self.errorInfo = errorInfo
+        self.loadStatus = loadStatus
         self.urlSchemeHandler = urlSchemeHandler
         self.universalLinkHandler = universalLinkHandler
         super.init()
@@ -326,7 +333,10 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
     func webView(_ webView: WKWebView,
                    decidePolicyFor navigationAction: WKNavigationAction,
                    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        decisionHandler((WKNavigationActionPolicy)(rawValue: WKNavigationActionPolicy.allow.rawValue + 2)!)
+        // 原来传 rawValue 3（allow.rawValue + 2，公开枚举里没有）：
+        // 当前 WebKit 把它当允许处理才没出事，换 SDK 可能变脸，
+        // 直接写 .allow，行为不变、零成本。
+        decisionHandler(.allow)
         guard let url = navigationAction.request.url, let scheme = navigationAction.request.url?.scheme else {
             return
         }
@@ -355,13 +365,18 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
     // 导航失败（断网、DNS 失败、证书错误等）原来没有任何处理，页面空白、
     // 进度条停住；这里走现有 errorShow/errorInfo 通道弹错，重新加载走
     // 顶栏已有的 ↻ 按钮。用户主动取消（如点外链跳 App 时中断加载）不弹错。
+    // 失败/取消都把 loadStatus 置 1.0：进度条显隐条件是 loadStatus == 1.0
+    // 才隐藏，不重置就一直悬停到下一次成功加载；新导航的进度 KVO 会
+    // 重新驱动 loadStatus，不会被这次置位卡住。
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        self.loadStatus.wrappedValue = 1.0
         if (error as NSError).code == NSURLErrorCancelled { return }
         self.errorInfo.wrappedValue = error.localizedDescription
         self.errorShow.wrappedValue = true
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        self.loadStatus.wrappedValue = 1.0
         if (error as NSError).code == NSURLErrorCancelled { return }
         self.errorInfo.wrappedValue = error.localizedDescription
         self.errorShow.wrappedValue = true

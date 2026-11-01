@@ -159,9 +159,12 @@ public final class CZFVPNManager {
     // 启停核心；replaceAllNodes 会调 applyActiveNodeChange，
     // 清理不能走它。
     public func replaceNodesWithoutCoreChange(_ newLinks: [String]) {
+        // 保序去重：订阅自带重复链接时不进两行（单测按 firstIndex
+        // 写回会永远只写第一行），调用方（合并导入）已去重也无妨。
+        var seen = Set<String>()
         let cleaned = newLinks
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
         guard !cleaned.isEmpty else { return }
         let previousActive = nodeLink
         UserDefaults.standard.set(cleaned, forKey: Self.nodeListKey)
@@ -175,9 +178,10 @@ public final class CZFVPNManager {
     // 用一批新链接整体替换节点列表（订阅刷新用）：尽量保留
     // 当前活动节点（按内容找回），找不到就落到第一个
     public func replaceAllNodes(_ newLinks: [String]) {
+        var seen = Set<String>()
         let cleaned = newLinks
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
         guard !cleaned.isEmpty else { return }
         let previousActive = nodeLink
         UserDefaults.standard.set(cleaned, forKey: Self.nodeListKey)

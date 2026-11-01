@@ -2936,9 +2936,10 @@ struct AllAppsListView: View {
     
     private func minimizeOpenApp(_ app: LCAppModel) {
         guard let dataUUID = app.appInfo.dataUUID else { return }
-        // 如果已在运行，直接最小化它的窗口
+        // 如果已在运行，直接最小化它的窗口；归属不明按启动/
+        // 小窗口路同款视为别的条目（?? true），不再直接最小化。
         if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? false
+            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? true
             if !belongsToOther {
                 dockManager.minimizeWindow(uuid: runningApp.appUUID)
                 closePanel()
@@ -2957,12 +2958,18 @@ struct AllAppsListView: View {
                 await MainActor.run { reportLaunchError(error.localizedDescription) }
             }
         }
-        // 主线程轮询等待窗口出现，找到后最小化
+        // 主线程轮询等待窗口出现，找到后最小化；只认归属对得上
+        // 的条目，别人的窗口占着 uuid 时直接停表、不碰它（自己
+        // 的新窗若拆容器会换 uuid，等这个 uuid 也等不来）。
+        // 轮询到期分不清失败还是拆容器换号，不在这里误报错。
         var attempts = 0
         Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
             attempts += 1
-            if self.dockManager.apps.contains(where: { $0.appUUID == dataUUID }) {
-                self.dockManager.minimizeWindow(uuid: dataUUID)
+            if let entry = self.dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
+                let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == app.appInfo.relativeBundlePath } ?? false
+                if owned {
+                    self.dockManager.minimizeWindow(uuid: dataUUID)
+                }
                 timer.invalidate()
             } else if attempts >= 20 {
                 timer.invalidate()
@@ -3011,9 +3018,13 @@ struct AllAppsListView: View {
         // 追加）才还原为小窗，不再 0.3 秒×30 次轮询、9 秒过期；
         // 启动慢（签名/VPN/JIT）时窗出来仍能还原。30 秒未出现
         // 则放弃等，不留野观察者；还原前仍留 0.35 秒让窗落稳。
+        // 还原前按路径复验归属（L5）：同 uuid 条目已存在时回调
+        // 立即触发、不验归属——占着 uuid 的若是别人的窗口，复验
+        // 拦住，别把别人的窗口还原成小窗。
+        let expectedPath = app.appInfo.relativeBundlePath
         dockManager.czfOnWindowAppeared(uuid: dataUUID, timeout: 30) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                self.unmaximizeWindow(uuid: dataUUID)
+                self.unmaximizeWindowIfOwned(uuid: dataUUID, expectedPath: expectedPath)
             }
         }
         Task {
@@ -3030,6 +3041,14 @@ struct AllAppsListView: View {
               let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
               vc.isMaximized else { return }
         vc.maximizeWindow()
+    }
+
+    // 小窗口回落路专用（3.8.239）：见卡片同款 helper 注释。
+    private func unmaximizeWindowIfOwned(uuid: String, expectedPath: String) {
+        guard let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }),
+              let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty,
+              runningPath == expectedPath else { return }
+        unmaximizeWindow(uuid: uuid)
     }
 }
 

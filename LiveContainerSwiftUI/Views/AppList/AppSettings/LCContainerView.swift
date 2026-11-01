@@ -294,6 +294,16 @@ struct LCContainerView : View {
             errorShow = true
             return
         }
+        // 锁是客在 bootstrap 时才写：启动/签名进行中（宿主侧，
+        // 锁还没写）删容器，客会起进已删文件夹、报错或重建空
+        // 容器。宿主侧现成状态：模型正在启动或签名中，且选中的
+        // 正是本容器时拦住；删的是同 App 别的容器不拦（启动
+        // 只用选中那个）。不新造锁基础设施。
+        if isOwningAppLaunching() {
+            errorInfo = "App 正在启动或签名中，稍后再删。"
+            errorShow = true
+            return
+        }
         guard let ans = await removeContainerAlert.open(), ans else {
             return
         }
@@ -310,13 +320,32 @@ struct LCContainerView : View {
         delegate.unbindContainer(container: container)
     }
     
+    /// 本容器所属 App 是否正在用本容器启动/签名（S2 竞态口子）：
+    /// 宿主侧现成状态，不新造锁。isAppRunning 覆盖整个宿主侧启动
+    /// 窗口（含签名），isSigningInProgress 覆盖签名段；只认选中
+    /// 容器就是本容器的那一个模型，别的容器不误拦。
+    private func isOwningAppLaunching() -> Bool {
+        guard let app = sharedModel.apps.first(where: { $0.uiContainers.contains { $0.folderName == container.folderName } }) else {
+            return false
+        }
+        guard app.uiSelectedContainer?.folderName == container.folderName else {
+            return false
+        }
+        return app.isAppRunning || app.isSigningInProgress
+    }
+
     func unbindContainer() {
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
             errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
             errorShow = true
             return
         }
-        
+        if isOwningAppLaunching() {
+            errorInfo = "App 正在启动或签名中，稍后再操作。"
+            errorShow = true
+            return
+        }
+
         dismiss()
         delegate.unbindContainer(container: container)
     }
@@ -324,6 +353,11 @@ struct LCContainerView : View {
     func cleanUpKeychain() async {
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
             errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
+            errorShow = true
+            return
+        }
+        if isOwningAppLaunching() {
+            errorInfo = "App 正在启动或签名中，稍后再操作。"
             errorShow = true
             return
         }
@@ -337,6 +371,11 @@ struct LCContainerView : View {
     func deleteData() async {
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
             errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
+            errorShow = true
+            return
+        }
+        if isOwningAppLaunching() {
+            errorInfo = "App 正在启动或签名中，稍后再操作。"
             errorShow = true
             return
         }

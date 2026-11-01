@@ -1323,16 +1323,22 @@ struct LCSettingsView: View {
     /// 订阅导入的实际替换动作：导入按钮（列表为空时直达）和
     /// 替换确认框共用，避免两处逻辑漂移
     func applySubscriptionLinks(_ links: [String]) {
-        CZFVPNManager.shared.replaceAllNodes(links)
+        // 订阅自身含重复链接时先去重（保序），否则替换后出两行
+        // 相同节点、单测按 firstIndex 永远只写第一行。
+        var seen = Set<String>()
+        let deduped = links
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        CZFVPNManager.shared.replaceAllNodes(deduped)
         UserDefaults.standard.set(vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "CZFVPNSubscriptionURL")
         // 订阅导入时直接剪落盘缓存：以前只清内存结果，
         // 被替换掉的节点还留在缓存里，下次存结果时才剪；
         // 先按新列表剪掉，再刷新、再从缓存恢复，恢复的
         // 只会是新列表里还留着的节点。
-        writePingCache(readPingCache().filter { links.contains($0.key) })
+        writePingCache(readPingCache().filter { deduped.contains($0.key) })
         vpnPingResults = [:]
         refreshVPNState()
-        successInfo = "订阅导入完成：共 \(links.count) 个节点（节点列表已替换为订阅内容）"
+        successInfo = "订阅导入完成：共 \(deduped.count) 个节点（节点列表已替换为订阅内容）"
         successShow = true
     }
 
@@ -1340,9 +1346,13 @@ struct LCSettingsView: View {
     /// 节点和活动节点（追加在末尾不移位，活动节点不变，
     /// 核心在跑也不重启）。没有新节点时列表不动。
     func mergeSubscriptionLinks(_ links: [String]) {
+        // 先在订阅自身内去重（保序），再对原列表过滤：订阅自带
+        // [A, A] 时只追加一个，否则两行相同节点、单测永远只写
+        // 第一行，第二行永不更新。
+        var seen = Set<String>()
         let cleaned = links
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
         let existing = CZFVPNManager.shared.nodeLinks
         let fresh = cleaned.filter { !existing.contains($0) }
         UserDefaults.standard.set(vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "CZFVPNSubscriptionURL")
@@ -1379,8 +1389,12 @@ struct LCSettingsView: View {
             // 通的先显示：只合并通的节点，不通的
             // 留空继续显示“测速中”，等最终结果；
             // 不在这里 save，最终结果才落盘。
+            // 刚测通的节点同步清掉 stale 标记：别等整表
+            // completion，测速中先显示的通节点一直灰色“·旧”
+            // 是纯显示问题。
             for (i, r) in partial.enumerated() where r.success {
                 vpnPingResults[i] = r
+                vpnPingStaleIndices.remove(i)
             }
         }, onProgress: { done, total, phase in
             vpnPingDone = done
@@ -1434,7 +1448,8 @@ struct LCSettingsView: View {
                 vpnPingResults[currentIndex] = result
                 vpnPingStaleIndices.remove(currentIndex)
                 vpnSingleRejectedLinks.remove(link)
-                savePingResults()
+                // 只写该条缓存，别刷全表时间戳（见 savePingResult）。
+                savePingResult(link: link, result: result)
             }
             refreshVPNState()
         }
@@ -1442,6 +1457,10 @@ struct LCSettingsView: View {
 
     func refreshVPNState() {
         vpnNodes = CZFVPNManager.shared.nodeLinks
+        // 核心占用标记按当前列表剪枝：删节点/订阅替换后孤儿标记
+        // 自动掉，删掉重加同一条不会没测过就显示“核心占用”。
+        // 链接集合标记，删/排/导都不错位，剪枝只删不在列表的。
+        vpnSingleRejectedLinks = vpnSingleRejectedLinks.filter { vpnNodes.contains($0) }
         vpnActiveIndex = CZFVPNManager.shared.activeNodeIndex
         // 测速中不翻核心按钮：测速期间任何 onAppear/刷新
         // 都不该把按钮从停止翻成启动，核心状态以测速前为准，
@@ -1498,8 +1517,23 @@ struct LCSettingsView: View {
         let now = Date().timeIntervalSince1970
         for (index, result) in vpnPingResults {
             guard vpnNodes.indices.contains(index) else { continue }
-            merged[vpnNodes[index]] = (code: result.success ? result.delay : (result.conversionFailed ? -3 : (result.delay == 11000 ? -2 : -1)), time: now)
+            merged[vpnNodes[index]] = (code: Self.pingCacheCode(for: result), time: now)
         }
+        writePingCache(merged)
+    }
+
+    /// 测速结果落盘编码（与 restorePingResults 的解码对应）：
+    /// ≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时；-3 = 不支持。
+    private static func pingCacheCode(for result: CZFVPNManager.CZFNodePingResult) -> Int {
+        result.success ? result.delay : (result.conversionFailed ? -3 : (result.delay == 11000 ? -2 : -1))
+    }
+
+    /// 单测只写该条缓存：以前单测调全量 savePingResults，
+    /// 全表时间戳都被刷成“刚才”，几天前的旧结果杀掉重进后
+    /// “·旧”消失、冒充新鲜。整表测速仍走全量（确实全测了）。
+    private func savePingResult(link: String, result: CZFVPNManager.CZFNodePingResult) {
+        var merged = readPingCache().filter { vpnNodes.contains($0.key) }
+        merged[link] = (code: Self.pingCacheCode(for: result), time: Date().timeIntervalSince1970)
         writePingCache(merged)
     }
 
