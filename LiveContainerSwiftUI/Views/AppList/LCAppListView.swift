@@ -1715,13 +1715,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if let jitEnabler = JITEnablerType(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCJITEnablerType")) {
                 if jitEnabler == .StosDebug || jitEnabler == .StosDebugLC {
                     let encoded = encodedData.map { "&script=\($0)" } ?? ""
+                    // App 名含空格时 URL(string:) 直接返回 nil，旧代码静默失败；
+                    // 先 percent-encoding 再拼，拼不出给提示而不是无反应。
+                    let encodedAppName = appName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? appName
                     if jitEnabler == .StosDebugLC {
                         if let app = sharedModel.apps.first(where: { app in
                             return app.appInfo.urlSchemes().contains("stosdebug") &&
                             (sharedModel.multiLCStatus != 2 || app.appInfo.isShared)
                         }) {
-                            if var url = URL(string: "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(appName)&pid=\(pid)&relaunchApp=false& forcePID=true\(encoded)") {
+                            if var url = URL(string: "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(encodedAppName)&pid=\(pid)&relaunchApp=false&forcePID=true\(encoded)") {
                                 Task { await openWebView(urlString: url.absoluteString) }
+                            } else {
+                                errorInfo = "Failed to build JIT URL."
+                                errorShow = true
                             }
                         } else {
                             errorInfo = "StosDebug is not found. Please install it first and switch it to shared app."
@@ -1729,8 +1735,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             return
                         }
                     } else {
-                        if var url = URL(string: "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(appName)&pid=\(pid)&forcePID=true\(encoded)") {
+                        if var url = URL(string: "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(encodedAppName)&pid=\(pid)&forcePID=true\(encoded)") {
                             UIApplication.shared.open(url)
+                        } else {
+                            errorInfo = "Failed to build JIT URL."
+                            errorShow = true
                         }
                     }
                     return

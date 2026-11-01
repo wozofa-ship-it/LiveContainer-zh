@@ -309,8 +309,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     private func openDataFolder() {
+        // 容器名含空格时 URL(string:) 直接返回 nil；先 percent-encoding 再拼
+        //（与容器设置页同款），拼不出弹提示而不是静默 return。
         guard let folderName = configuration.model.uiSelectedContainer?.folderName,
-              let url = URL(string: "shareddocuments://\(LCPath.dataPath.path)/\(folderName)") else {
+              let encodedName = folderName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "shareddocuments://\(LCPath.dataPath.path)/\(encodedName)") else {
+            let alert = UIAlertController(title: nil, message: "无法打开数据文件夹", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "确定", style: .default))
+            present(alert, animated: true)
             return
         }
         UIApplication.shared.open(url)

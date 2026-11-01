@@ -131,7 +131,7 @@ struct LCWebView: View {
     
     func onViewAppear() {
         let observer = WebViewLoadObserver(loadStatus: $loadStatus, webView: self.webView.webView)
-        let webViewDelegate = WebViewDelegate(pageTitle: $pageTitle, urlSchemeHandler:onURLSchemeDetected, universalLinkHandler: onUniversalLinkDetected,)
+        let webViewDelegate = WebViewDelegate(pageTitle: $pageTitle, errorShow: $errorShow, errorInfo: $errorInfo, urlSchemeHandler:onURLSchemeDetected, universalLinkHandler: onUniversalLinkDetected,)
         webView.setDelegate(delegete: webViewDelegate)
         webView.setObserver(observer: observer)
     }
@@ -272,6 +272,13 @@ class WebViewLoadObserver : NSObject {
         self.webView.addObserver(self, forKeyPath: "estimatedProgress", options: .new, context: nil);
     }
     
+    // 观察者先于 WKWebView 释放时必须先注销，否则后续进度回调会发给已释放的
+    // 观察者而闪退；onViewAppear 多次调用产生多个观察者时，旧观察者释放同样
+    // 走这里注销，不残留（webView 是强引用，释放时它一定还活着）。
+    deinit {
+        self.webView.removeObserver(self, forKeyPath: "estimatedProgress")
+    }
+
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
         if keyPath == "estimatedProgress" {
             loadStatus.wrappedValue = self.webView.estimatedProgress
@@ -283,12 +290,16 @@ class WebViewLoadObserver : NSObject {
 
 class WebViewDelegate : NSObject,WKNavigationDelegate {
     private var pageTitle: Binding<String>
+    private var errorShow: Binding<Bool>
+    private var errorInfo: Binding<String>
     private var urlSchemeHandler: (URL) async -> Void
     private var universalLinkHandler: (URL , [String]) async -> Void // url, [String] of all apps that can open this web page
     var domainBundleIdDict : [String:[String]] = [:]
     
-    init(pageTitle: Binding<String>, urlSchemeHandler: @escaping (URL) async -> Void, universalLinkHandler: @escaping (URL , [String]) async -> Void) {
+    init(pageTitle: Binding<String>, errorShow: Binding<Bool>, errorInfo: Binding<String>, urlSchemeHandler: @escaping (URL) async -> Void, universalLinkHandler: @escaping (URL , [String]) async -> Void) {
         self.pageTitle = pageTitle
+        self.errorShow = errorShow
+        self.errorInfo = errorInfo
         self.urlSchemeHandler = urlSchemeHandler
         self.universalLinkHandler = universalLinkHandler
         super.init()
@@ -323,6 +334,21 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
         self.pageTitle.wrappedValue = webView.title ?? ""
     }
     
+    // 导航失败（断网、DNS 失败、证书错误等）原来没有任何处理，页面空白、
+    // 进度条停住；这里走现有 errorShow/errorInfo 通道弹错，重新加载走
+    // 顶栏已有的 ↻ 按钮。用户主动取消（如点外链跳 App 时中断加载）不弹错。
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        self.errorInfo.wrappedValue = error.localizedDescription
+        self.errorShow.wrappedValue = true
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        self.errorInfo.wrappedValue = error.localizedDescription
+        self.errorShow.wrappedValue = true
+    }
+
     
     func loadDomainAssociations(url: URL) async {
         if url.scheme != "https" || url.host == nil {

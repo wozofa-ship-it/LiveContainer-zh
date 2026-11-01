@@ -487,10 +487,13 @@ extension LCUtils {
             }
         } else if jitEnabler == .StosDebug || jitEnabler == .StosDebugLC {
             guard let appName else { onServerMessage?("Unable to get App Name, Please try again."); return false }
-            var launchURLStr = "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(appName)"
+            // App 名/脚本含空格或特殊字符时直接拼出的 URL 为 nil，旧代码强解包即闪退；
+            // 先 percent-encoding 再拼，LC 中转分支（走 base64）不受影响。
+            let encodedAppName = appName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? appName
+            var launchURLStr = "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(encodedAppName)"
             
             if let script = script, !script.isEmpty {
-                launchURLStr += "&script=\(script)"
+                launchURLStr += "&script=\(script.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? script)"
             }
             
             if jitEnabler == .StosDebugLC {
@@ -542,16 +545,20 @@ extension LCUtils {
                 
                 await UIApplication.shared.open(launchURL)
             } else {
+                guard let directURL = URL(string: launchURLStr) else {
+                    onServerMessage?("Failed to build JIT URL, please try again.")
+                    return false
+                }
                 onServerMessage?("JIT acquisition will continue in StosDebug.")
                 
-                await UIApplication.shared.open(URL(string: launchURLStr)!)
+                await UIApplication.shared.open(directURL)
             }
             
         } else if jitEnabler == .StikJIT || jitEnabler == .StikJITLC {
             var launchURLStr = "stikjit://enable-jit?bundle-id=\(Bundle.main.bundleIdentifier!)"
 
             if let script = script, !script.isEmpty {
-                launchURLStr += "&script-data=\(script)"
+                launchURLStr += "&script-data=\(script.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? script)"
             }
             let launchURL : URL
             if jitEnabler == .StikJITLC {
@@ -602,7 +609,11 @@ extension LCUtils {
                 onServerMessage?("JIT acquisition will continue in another LiveContainer.")
                 
             } else {
-                launchURL = URL(string: launchURLStr)!
+                guard let directURL = URL(string: launchURLStr) else {
+                    onServerMessage?("Failed to build JIT URL, please try again.")
+                    return false
+                }
+                launchURL = directURL
                 onServerMessage?("JIT acquisition will continue in StikDebug.")
             }
             await UIApplication.shared.open(launchURL)
