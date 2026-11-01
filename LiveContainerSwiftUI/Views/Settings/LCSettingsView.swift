@@ -830,6 +830,19 @@ struct LCSettingsView: View {
                     }
                     .disabled(vpnPinging || vpnSinglePinging)
                 }
+                // 右滑测速：整表测速太慢时只测这一条，
+                // 与长按菜单的复测同一入口；左滑删除不动。
+                // allowsFullSwipe 关掉：测速要占 isPinging、
+                // 挡核心切换，滑满就触发太容易误触。
+                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                    Button {
+                        startSinglePing(index)
+                    } label: {
+                        Label("测速", systemImage: "speedometer")
+                    }
+                    .tint(.blue)
+                    .disabled(vpnPinging || vpnSinglePinging)
+                }
             }
             .onDelete { offsets in
                 // 测速中左滑也禁删：.disabled 不一定挡得住
@@ -1388,6 +1401,10 @@ struct LCSettingsView: View {
     // 对回下标，测速中列表变了也不错位。
     func startSinglePing(_ index: Int) {
         guard vpnNodes.indices.contains(index) else { return }
+        // 滑动动作的 .disabled 不一定挡得住 List 行动作
+        //（左滑删除已有同款教训、动作里另守一次），
+        // 入口再守一次：测速中不叠加开第二轮单测。
+        guard !vpnPinging && !vpnSinglePinging else { return }
         let link = vpnNodes[index]
         vpnSinglePingIndex = index
         vpnSinglePinging = true

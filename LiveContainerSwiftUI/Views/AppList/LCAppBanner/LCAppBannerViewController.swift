@@ -40,6 +40,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
         preferredContentSize = CGSize(width: 0, height: LCAppBannerRootView.bannerHeight)
         bannerView.runControl.addTarget(self, action: #selector(runButtonTapped), for: .touchUpInside)
+        // 面板同款次级按钮（16+ 才建，见 RootView；16 以下为 nil，不挂）。
+        if #available(iOS 16.0, *) {
+            bannerView.minimizeControl?.addTarget(self, action: #selector(minimizeButtonTapped), for: .touchUpInside)
+            bannerView.smallWindowControl?.addTarget(self, action: #selector(smallWindowButtonTapped), for: .touchUpInside)
+        }
         bannerView.addInteraction(UIContextMenuInteraction(delegate: self))
 
         let doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(bannerDoubleTapped))
@@ -84,8 +89,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     @objc private func bannerDoubleTapped(_ gestureRecognizer: UITapGestureRecognizer) {
-        let location = gestureRecognizer.location(in: bannerView.runControl)
-        guard !bannerView.runControl.bounds.contains(location) else {
+        // 双击按钮区不进设置：原来只排除了启动 pill，两个新按钮
+        // 同样排除（按钮是 bannerView 的直接子视图，frame 就是
+        // bannerView 坐标系，不用逐个转坐标；16 以下新按钮为 nil，
+        // 后两项恒为 false，行为与原来一致）。
+        let location = gestureRecognizer.location(in: bannerView)
+        guard !bannerView.runControl.frame.contains(location),
+              !(bannerView.minimizeControl?.frame.contains(location) ?? false),
+              !(bannerView.smallWindowControl?.frame.contains(location) ?? false) else {
             return
         }
         openSettings()
@@ -152,6 +163,120 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             try await configuration.model.runApp(multitask: multitask)
         } catch {
             showError(error.localizedDescription)
+        }
+    }
+
+    // MARK: - 面板同款：最小化 / 小窗口（主列表卡片）
+    // 面板行是 AppCardRow（LCAppModel）配三个闭包，本卡是 UIKit
+    // banner，入口不同但语义照抄面板的 minimizeOpenApp /
+    // smallWindowOpenApp：已在运行按实例 UUID 找 dock 条目、
+    // 验相对路径归属；未运行先启动再最小化/还原小窗。
+    // 实例 UUID 取选中容器的 folderName（与 runButtonTapped 的
+    // currentDataFolder 同款），dataUUID 作回落。
+
+    private func bannerInstanceUUID() -> String? {
+        configuration.model.uiSelectedContainer?.folderName ?? configuration.model.appInfo.dataUUID
+    }
+
+    // 面板 private 的 unmaximizeWindow 同款（那边是 AllAppsListView
+    // 私有方法，本卡调不到，照抄三行）：窗口已最大化时点一下
+    // 还原成小窗；静态方法，不捕获 self，回调里可直接调。
+    @available(iOS 16.0, *)
+    private static func unmaximizeWindow(uuid: String) {
+        guard let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
+              let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
+              vc.isMaximized else { return }
+        vc.maximizeWindow()
+    }
+
+    // 未运行分支的启动（含锁屏认证，与本卡 runApp 同款逻辑，
+    // 只多一个 containerFolderName 参数，面板两路都带它）。
+    private func launchForAux(multitask: Bool?, containerFolderName: String) async {
+        if configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked {
+            do {
+                if !(try await LCUtils.authenticateUser()) {
+                    return
+                }
+            } catch {
+                showError(error.localizedDescription)
+                return
+            }
+        }
+        do {
+            try await configuration.model.runApp(multitask: multitask, containerFolderName: containerFolderName)
+        } catch {
+            showError(error.localizedDescription)
+        }
+    }
+
+    @objc private func minimizeButtonTapped() {
+        guard #available(iOS 16.0, *) else { return }
+        guard let uuid = bannerInstanceUUID() else { return }
+        let dockManager = MultitaskDockManager.shared
+        // 已在运行：归属对不上（共用容器的别的条目）不碰它，
+        // 落到下面启动分支起自己的窗口；归属不明按面板同款
+        // 视为不冲突（?? false），直接最小化。
+        if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
+            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != configuration.model.appInfo.relativeBundlePath } ?? false
+            if !belongsToOther {
+                dockManager.minimizeWindow(uuid: uuid)
+                return
+            }
+        }
+        // 未运行：先启动，面板同款 0.3 秒×20 次轮询等窗口出现
+        // 再最小化；启动失败只走 showError，轮询 20 次后自停。
+        Task { [weak self] in
+            await self?.launchForAux(multitask: nil, containerFolderName: uuid)
+        }
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+            attempts += 1
+            if MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == uuid }) {
+                MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
+                timer.invalidate()
+            } else if attempts >= 20 {
+                timer.invalidate()
+            }
+        }
+    }
+
+    @objc private func smallWindowButtonTapped() {
+        guard #available(iOS 16.0, *) else { return }
+        guard let uuid = bannerInstanceUUID() else { return }
+        let dockManager = MultitaskDockManager.shared
+        // 已在运行：归属不明一律视为别的条目（面板同款），不顶
+        // 窗口、直接落到启动分支；带回成功还原小窗，带回失败
+        // 且条目不是本次清掉的死窗、也没消失时同样只还原不重起。
+        if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
+            let belongsToOther: Bool
+            if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                belongsToOther = runningPath != configuration.model.appInfo.relativeBundlePath
+            } else {
+                belongsToOther = true
+            }
+            if !belongsToOther {
+                let brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
+                if brought {
+                    Self.unmaximizeWindow(uuid: uuid)
+                    return
+                }
+                let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == uuid
+                let entryGone = !dockManager.apps.contains(where: { $0.appUUID == uuid })
+                if !cleanedByC4 && !entryGone {
+                    Self.unmaximizeWindow(uuid: uuid)
+                    return
+                }
+            }
+        }
+        // 未运行：先注册窗口出现回调、再启动（面板 C6 同款顺序），
+        // 窗出来 0.35 秒后还原为小窗；30 秒未出现放弃，不留野观察者。
+        dockManager.czfOnWindowAppeared(uuid: uuid, timeout: 30) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                Self.unmaximizeWindow(uuid: uuid)
+            }
+        }
+        Task { [weak self] in
+            await self?.launchForAux(multitask: true, containerFolderName: uuid)
         }
     }
 

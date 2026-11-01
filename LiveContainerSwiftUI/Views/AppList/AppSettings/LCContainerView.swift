@@ -231,6 +231,23 @@ struct LCContainerView : View {
             runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName)
             inUse = runningLC != nil
         }
+        .onDisappear {
+            // 离开页面时把未按回车的改动存回去（两个输入框原来
+            // 只在 onSubmit 写回，直接返回改动就丢了）。
+            // 写回就是 onSubmit 调的同款轻量保存（只写容器元数据、
+            // 不改目录名），进偏好设置子页面时也会触发，幂等、无害。
+            // IDFV 只在改过且是合法 UUID 时存：非法输入在离开时
+            // 静默丢弃（提交时的报错通道还在），免得在正在消失的
+            // 视图上弹 alert；在用容器时 saveContainer 会拒存，
+            // 报错 alert 同样可能弹不出，改动丢弃，与原来一致。
+            if typingContainerName != container.name {
+                container.name = typingContainerName
+                saveContainer()
+            }
+            if !typingIDFV.isEmpty, typingIDFV != (container.spoofedIdentifier ?? ""), UUID(uuidString: typingIDFV) != nil {
+                saveIDFV()
+            }
+        }
         
     }
     

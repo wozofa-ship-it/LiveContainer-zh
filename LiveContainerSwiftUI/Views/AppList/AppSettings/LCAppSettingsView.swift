@@ -271,7 +271,7 @@ struct LCAppSettingsView: View {
                             Text("lc.appSettings.tweakFolder".loc)
                                 .foregroundColor(.primary)
                             Spacer()
-                            Text(model.uiTweakFolders.isEmpty ? "None" : (model.uiTweakFolders.count == 1 ? model.uiTweakFolders[0] : "\(model.uiTweakFolders.count) 个"))
+                            Text(model.uiTweakFolders.isEmpty ? "lc.common.none".loc : (model.uiTweakFolders.count == 1 ? model.uiTweakFolders[0] : "\(model.uiTweakFolders.count) 个"))
                                 .multilineTextAlignment(.trailing)
                         }
                     }

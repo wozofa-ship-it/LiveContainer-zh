@@ -92,6 +92,16 @@ struct LCTweakFolderView : View {
 
     var body: some View {
         List {
+            // 无证书密码时工具栏签名按钮直接消失、用户不知道缺什么：
+            // 这里留一行提示（按钮本身不动，只加提示一种），指到
+            // 设置页导入证书。证书密码在设置页导入证书时一并设置。
+            if LCSharedUtils.certificatePassword() == nil {
+                Section {
+                    Text("未设置证书密码，无法签名插件：去设置页导入证书并设置密码")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             if tweakItems.isEmpty {
                 // 空态：照源页格式（图标 + 一句文案）；
                 // 工具栏的导入/新建入口挂在 List 上，不受影响。

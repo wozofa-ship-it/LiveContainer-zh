@@ -2290,6 +2290,10 @@ public struct MultitaskDockSwiftView: View {
     @State private var dragOffset = CGSize.zero
     @State private var isMoving: Bool = false
     @State private var showAllApps = false
+    // sheet 路面板启动失败回传到这里弹：sheet dismiss 后面板
+    // 视图已销毁，本地 alert 弹不出，只能宿主弹（见 AllAppsListView
+    // 的 onLaunchError；覆盖层路不走这里，行为不动）。
+    @State private var sheetLaunchError: String?
     @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
     
     // Calculate dynamic padding based on user settings
@@ -2337,10 +2341,17 @@ public struct MultitaskDockSwiftView: View {
             }
             .padding(dynamicPadding)
             .sheet(isPresented: $showAllApps) {
-                AllAppsListView()
+                AllAppsListView(onLaunchError: { sheetLaunchError = $0 })
                     // 只留一个半屏档位：两个档位时系统会先拉高抽屉、列表滚不动
                     .presentationDetents([.fraction(0.6)])
                     .presentationDragIndicator(.visible)
+            }
+            // sheet 路面板启动失败提示（与面板本地 alert 同款文案）：
+            // 宿主视图不随 sheet 销毁，错误回传到这里才能弹出来。
+            .alert("提示", isPresented: Binding(get: { sheetLaunchError != nil }, set: { if !$0 { sheetLaunchError = nil } })) {
+                Button("好") { sheetLaunchError = nil }
+            } message: {
+                Text(sheetLaunchError ?? "")
             }
             .onReceive(NotificationCenter.default.publisher(for: .czfOpenAllAppsPanel)) { _ in
                 showAllApps = true
@@ -2783,10 +2794,23 @@ struct AllAppsListView: View {
     // 面板启动失败提示：原来三条启动路全是 try? 吞错，面板又
     // 已关掉，失败时只剩“点了没反应”。手势覆盖层常驻窗口
     // （只改可见性不销毁），这个 @State alert 在覆盖层路能
-    // 正常弹出；蓝图标 sheet 路 dismiss 后视图销毁，仍会静默，
-    // 那是 sheet 机制所限，不是本次回归。JIT 取消不抛错，
-    // 不会误弹。
+    // 正常弹出；蓝图标 sheet 路 dismiss 后视图销毁，本地 alert
+    // 弹不出——所以 sheet 路把错误经 onLaunchError 回传给
+    // 弹出 sheet 的宿主视图弹（宿主不传回调时仍走本地 alert，
+    // 手势路行为一字不动）。JIT 取消不抛错，不会误弹。
     @State private var launchError: String?
+
+    // sheet 路启动失败回传通道（宿主弹 alert 用）：覆盖层路
+    // 不传，仍走上面本地 launchError；只在 Task 报错时调一次。
+    var onLaunchError: ((String) -> Void)? = nil
+
+    private func reportLaunchError(_ message: String) {
+        if let onLaunchError {
+            onLaunchError(message)
+        } else {
+            launchError = message
+        }
+    }
 
     // 面板搜索：不用 .searchable（原来绑常量空串根本不筛选，
     // iOS 26 还把它渲染成悬浮条压住最后一行才被拆掉），改用
@@ -2905,7 +2929,7 @@ struct AllAppsListView: View {
             do {
                 try await app.runApp(containerFolderName: app.appInfo.dataUUID)
             } catch {
-                await MainActor.run { launchError = error.localizedDescription }
+                await MainActor.run { reportLaunchError(error.localizedDescription) }
             }
         }
     }
@@ -2930,7 +2954,7 @@ struct AllAppsListView: View {
             do {
                 try await app.runApp(containerFolderName: dataUUID)
             } catch {
-                await MainActor.run { launchError = error.localizedDescription }
+                await MainActor.run { reportLaunchError(error.localizedDescription) }
             }
         }
         // 主线程轮询等待窗口出现，找到后最小化
@@ -2996,7 +3020,7 @@ struct AllAppsListView: View {
             do {
                 try await app.runApp(multitask: true, containerFolderName: dataUUID)
             } catch {
-                await MainActor.run { launchError = error.localizedDescription }
+                await MainActor.run { reportLaunchError(error.localizedDescription) }
             }
         }
     }

@@ -16,6 +16,8 @@ struct LCWebView: View {
     @State private var loadStatus = 0.0
     @State private var uiLoadStatus = 0.0
     @State private var pageTitle = ""
+    @State private var canGoBack = false
+    @State private var canGoForward = false
     
     @State private var runAppAlert = YesNoHelper()
     @State private var runAppAlertMsg = ""
@@ -47,12 +49,14 @@ struct LCWebView: View {
                     }, label: {
                         Image(systemName: "chevron.backward")
                     })
+                    .disabled(!canGoBack)
                     
                     Button(action: {
                         webView.goForward()
                     }, label: {
                         Image(systemName: "chevron.forward")
                     }).padding(.horizontal)
+                    .disabled(!canGoForward)
                 }
                 
                 Spacer()
@@ -130,7 +134,7 @@ struct LCWebView: View {
     }
     
     func onViewAppear() {
-        let observer = WebViewLoadObserver(loadStatus: $loadStatus, webView: self.webView.webView)
+        let observer = WebViewLoadObserver(loadStatus: $loadStatus, canGoBack: $canGoBack, canGoForward: $canGoForward, webView: self.webView.webView)
         let webViewDelegate = WebViewDelegate(pageTitle: $pageTitle, errorShow: $errorShow, errorInfo: $errorInfo, urlSchemeHandler:onURLSchemeDetected, universalLinkHandler: onUniversalLinkDetected,)
         webView.setDelegate(delegete: webViewDelegate)
         webView.setObserver(observer: observer)
@@ -263,13 +267,21 @@ struct LCWebView: View {
 
 class WebViewLoadObserver : NSObject {
     private var loadStatus: Binding<Double>
+    private var canGoBack: Binding<Bool>
+    private var canGoForward: Binding<Bool>
     private var webView: WKWebView
     
-    init(loadStatus: Binding<Double>, webView: WKWebView) {
+    init(loadStatus: Binding<Double>, canGoBack: Binding<Bool>, canGoForward: Binding<Bool>, webView: WKWebView) {
         self.loadStatus = loadStatus
+        self.canGoBack = canGoBack
+        self.canGoForward = canGoForward
         self.webView = webView
         super.init()
         self.webView.addObserver(self, forKeyPath: "estimatedProgress", options: .new, context: nil);
+        // 前进/后退可走状态走同一套 KVO（WKWebView 对这两个属性
+        // 同样发 KVO，导航历史一变就推新值，不另起状态同步）。
+        self.webView.addObserver(self, forKeyPath: "canGoBack", options: .new, context: nil);
+        self.webView.addObserver(self, forKeyPath: "canGoForward", options: .new, context: nil);
     }
     
     // 观察者先于 WKWebView 释放时必须先注销，否则后续进度回调会发给已释放的
@@ -277,11 +289,17 @@ class WebViewLoadObserver : NSObject {
     // 走这里注销，不残留（webView 是强引用，释放时它一定还活着）。
     deinit {
         self.webView.removeObserver(self, forKeyPath: "estimatedProgress")
+        self.webView.removeObserver(self, forKeyPath: "canGoBack")
+        self.webView.removeObserver(self, forKeyPath: "canGoForward")
     }
 
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
         if keyPath == "estimatedProgress" {
             loadStatus.wrappedValue = self.webView.estimatedProgress
+        } else if keyPath == "canGoBack" {
+            canGoBack.wrappedValue = self.webView.canGoBack
+        } else if keyPath == "canGoForward" {
+            canGoForward.wrappedValue = self.webView.canGoForward
         }
     }
     
