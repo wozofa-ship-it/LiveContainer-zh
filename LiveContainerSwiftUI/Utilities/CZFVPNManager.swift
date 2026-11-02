@@ -41,6 +41,31 @@ public final class CZFVPNManager {
     // 启动时间"+ 30 分钟延迟双保险，避免 App 重启时反复启停
     private var pendingStopWork: DispatchWorkItem?
     private var lastFlaggedLaunchAt = Date.distantPast
+    // 节点自动轮换：核心在跑时每 30 秒读归属 App 的插件统计，
+    // 窗口内失败一直涨、成功代理一条不涨，就判定当前节点对该
+    // App 已死，按列表顺序切下一个支持协议的节点并重启核心。
+    // 归属 App 与 coreOwnerBundleId 同步记、同步清。
+    private var coreOwnerAppInfo: LCAppInfo?
+    private var pendingRotateWork: DispatchWorkItem?
+    private var rotateLastFailed: Int64?
+    private var rotateLastProxied: Int64?
+    private var rotateBaselineLink: String?
+    private var rotateCooldownUntil = Date.distantPast
+    private var rotateTriedLinks = Set<String>()
+    private static let autoRotateKey = "CZFVPNAutoRotate"
+    // 轮换开关：键不存在 = 开（用户亲令要轮换，默认开着，随时可关）
+    public static var isAutoRotateEnabled: Bool {
+        guard let v = UserDefaults.standard.object(forKey: autoRotateKey) as? Bool else { return true }
+        return v
+    }
+    public static func setAutoRotate(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: autoRotateKey)
+        if enabled {
+            shared.scheduleRotateCheck()
+        } else {
+            shared.cancelRotateCheck()
+        }
+    }
     // 核心状态串行化：start/stop/开 App 预热原来在
     // 主线程、detached Task、测速后台队列三处同时改
     // isRunning/runningLink/coreOwnerBundleId，测速中途开 App
@@ -609,6 +634,8 @@ public final class CZFVPNManager {
             if let bid = appInfo?.bundleIdentifier() {
                 coreOwnerBundleId = bid
             }
+            coreOwnerAppInfo = appInfo
+            scheduleRotateCheck()
             return
         }
         // 养号保护（2）：核心已经归另一个 App 所有（那个 App
@@ -627,6 +654,8 @@ public final class CZFVPNManager {
             if let bid = appInfo?.bundleIdentifier() {
                 coreOwnerBundleId = bid
             }
+            coreOwnerAppInfo = appInfo
+            scheduleRotateCheck()
         }
     }
 
@@ -666,6 +695,7 @@ public final class CZFVPNManager {
         // 手动 / 宿主 / 预热起核心：不归某个 App 所有，清掉
         // 养号归属，之后 App 自动启动才可以重新抢核心
         coreOwnerBundleId = nil
+        coreOwnerAppInfo = nil
         return start(withLink: nodeLink)
     }
 
@@ -757,9 +787,143 @@ public final class CZFVPNManager {
         isRunning = false
         runningLink = nil
         coreOwnerBundleId = nil
+        coreOwnerAppInfo = nil
+        cancelRotateCheck()
         // 停核心后状态行不再显示上次启动失败的旧报错，
         // 改回“核心未启动”；启动失败时 start() 会重写它。
         lastError = nil
+    }
+
+    // MARK: - 节点自动轮换
+
+    // 排一次 30 秒后的轮换检查：已排的先取消再重排，保证
+    // 同一时刻只有一个巡检在跑；核心没在跑、开关关着、
+    // 没有归属 App 时不排（下次起核心 / 开开关时再排）。
+    private func scheduleRotateCheck() {
+        pendingRotateWork?.cancel()
+        pendingRotateWork = nil
+        vpnCoreLock.lock()
+        let running = isRunning
+        let owner = coreOwnerAppInfo
+        vpnCoreLock.unlock()
+        guard running, Self.isAutoRotateEnabled, owner != nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.rotateCheck()
+        }
+        pendingRotateWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: work)
+    }
+
+    private func cancelRotateCheck() {
+        pendingRotateWork?.cancel()
+        pendingRotateWork = nil
+    }
+
+    // 一轮检查：读归属 App 的插件统计，窗口内失败增量 ≥ 10
+    // 且成功代理增量为 0，说明这 30 秒里被拦的连接全失败、
+    // App 一条数据没拿到，当前节点对它已死 → 轮换。
+    // 成功代理只要涨了，就说明节点通路还活着（个别域名失败
+    // 是常态），不轮换，免得正常 App 被来回换 IP 折腾。
+    private func rotateCheck() {
+        pendingRotateWork = nil
+        vpnCoreLock.lock()
+        let running = isRunning
+        let pinging = isPinging
+        let link = runningLink
+        let owner = coreOwnerAppInfo
+        vpnCoreLock.unlock()
+        guard running, Self.isAutoRotateEnabled, !pinging,
+              let appInfo = owner,
+              let dict = Self.proxyStatsDict(for: appInfo),
+              let failed = Int64(dict["failed"] ?? ""),
+              let proxied = Int64(dict["proxied"] ?? "") else {
+            // 读不到统计（插件还没写文件等）：基线不动，下轮再看
+            scheduleRotateCheck()
+            return
+        }
+        // 核心换节点了（手动切或上次轮换）：基线重置，不拿旧数比
+        if rotateBaselineLink != link {
+            rotateBaselineLink = link
+            rotateLastFailed = failed
+            rotateLastProxied = proxied
+            rotateTriedLinks = []
+            scheduleRotateCheck()
+            return
+        }
+        let failedDelta = failed - (rotateLastFailed ?? failed)
+        let proxiedDelta = proxied - (rotateLastProxied ?? proxied)
+        rotateLastFailed = failed
+        rotateLastProxied = proxied
+        if Date() < rotateCooldownUntil {
+            scheduleRotateCheck()
+            return
+        }
+        if failedDelta >= 10 && proxiedDelta == 0 {
+            rotateToNextNode()
+        }
+        scheduleRotateCheck()
+    }
+
+    // 按列表顺序切下一个支持协议的节点并重启核心：归属 App
+    // 钉死过就改它的 override（轮换后仍钉死在新节点，不回落
+    // 全局），跟随全局就改全局活动节点。起不来的节点继续往
+    // 下一个切，一圈都起不来就停轮换、写原因，不再无限重启。
+    private func rotateToNextNode() {
+        guard let appInfo = coreOwnerAppInfo else { return }
+        let links = nodeLinks
+        guard links.count >= 2 else { return }
+        var current = effectiveLink(for: appInfo)
+        for _ in 0..<links.count {
+            guard let target = nextSupportedNode(after: current, links: links) else {
+                cancelRotateCheck()
+                lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
+                return
+            }
+            rotateTriedLinks.insert(current)
+            rotateTriedLinks.insert(target)
+            if Self.nodeOverride(for: appInfo) != nil {
+                Self.setNodeOverride(target, for: appInfo)
+            } else if let idx = links.firstIndex(of: target) {
+                UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+            }
+            vpnCoreLock.lock()
+            coreOwnerBundleId = nil
+            vpnCoreLock.unlock()
+            if start(withLink: target) {
+                vpnCoreLock.lock()
+                if let bid = appInfo.bundleIdentifier() {
+                    coreOwnerBundleId = bid
+                }
+                coreOwnerAppInfo = appInfo
+                vpnCoreLock.unlock()
+                rotateCooldownUntil = Date().addingTimeInterval(60)
+                rotateBaselineLink = target
+                rotateLastFailed = nil
+                rotateLastProxied = nil
+                return
+            }
+            current = target
+        }
+        cancelRotateCheck()
+        lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
+    }
+
+    // 从 current 往后找下一个没试过、协议支持的节点；
+    // 钉死的链接不在列表里时，从全局活动下标往后找。
+    private func nextSupportedNode(after current: String, links: [String]) -> String? {
+        var startIdx = 0
+        if let idx = links.firstIndex(of: current) {
+            startIdx = idx + 1
+        } else {
+            startIdx = activeNodeIndex + 1
+        }
+        for offset in 0..<links.count {
+            let cand = links[(startIdx + offset) % links.count]
+            if cand == current || rotateTriedLinks.contains(cand) { continue }
+            if !Self.isSupportedNodeScheme(Self.nodeScheme(for: cand)) { continue }
+            return cand
+        }
+        return nil
     }
 
     // MARK: - 节点延迟测试

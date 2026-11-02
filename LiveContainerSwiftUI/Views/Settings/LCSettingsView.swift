@@ -104,6 +104,7 @@ struct LCSettingsView: View {
     @State var vpnNodes: [String] = []
     @State var vpnHostProxy = false
     @AppStorage("CZFVPNPrewarm") var vpnPrewarm = true
+    @AppStorage("CZFVPNAutoRotate") var vpnAutoRotate = true
     @AppStorage("CZFVPNAutoStopMinutes") var vpnAutoStopMinutes = 10
     @State var vpnActiveIndex = 0
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -1028,6 +1029,16 @@ struct LCSettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.orange)
             }
+            Toggle(isOn: $vpnAutoRotate) {
+                HStack {
+                    LCSettingsIcon(systemName: "arrow.triangle.2.circlepath", color: .blue.opacity(0.85))
+                    Text("节点自动轮换")
+                }
+            }
+            .onChange(of: vpnAutoRotate) { newValue in
+                CZFVPNManager.setAutoRotate(newValue)
+                refreshVPNState()
+            }
             Toggle(isOn: $vpnHostProxy) {
                 HStack {
                     // 原来是 arrow.down.circle：带圈轮廓的符号在实心
@@ -1075,7 +1086,7 @@ struct LCSettingsView: View {
                 .font(.footnote)
                 .buttonStyle(.plain)
                 if showVPNHelp {
-                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2 等）；转换器只认这几类，ssr、hysteria v1、tuic、wireguard 链接、naive/ssh、http 节点会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：WireGuard 这类核心有、链接解析器没有的协议，可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2 等）；转换器只认这几类，ssr、hysteria v1、tuic、wireguard 链接、naive/ssh、http 节点会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：WireGuard 这类核心有、链接解析器没有的协议，可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。\n节点自动轮换开着时，核心在跑的 App 连续失败就自动按列表顺序换下一个支持的节点并重启核心，一圈都不通就停下来等手动处理。")
                 }
             }
         }
