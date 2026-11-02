@@ -301,6 +301,23 @@ class LCAppModel: ObservableObject, Hashable {
                 if !myStamped && otherStamped { return }
             }
         }
+        // 已有不共享的容器时直接切过去，不再新建（容器越生越多根因之二）：
+        // 共享容器被重选（旧备份恢复把 dataUUID 指回旧容器、菜单点回旧容器）
+        // 时，原来每次都要造一个新 UUID，列表只增不减；本条目自己的容器
+        // （上次拆出来的、最新那个）数据就是本条目的，复用它隔离性不变，
+        // 还保住了数据。取最后一个：多次拆分留下的孤儿在前面，最新在最后。
+        // 本条目一个不共享的容器都没有时，才走下面新建。
+        let others = czfOtherSameBundleApps()
+        if let own = uiContainers.filter({ folder in
+            !others.contains { other in
+                other.uiContainers.contains { $0.folderName == folder.folderName }
+            }
+        }).last {
+            uiSelectedContainer = own
+            uiDefaultDataFolder = own.folderName
+            appInfo.dataUUID = own.folderName
+            return
+        }
         let newName = NSUUID().uuidString
         let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
         newContainer.isolateAppGroup = true
@@ -377,13 +394,16 @@ class LCAppModel: ObservableObject, Hashable {
                 UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolated-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
             }
         }
-        czfSplitSharedContainerIfNeeded()
         czfIsolateMultiOpenContainersIfNeeded()
         if let containerFolderName {
             uiSelectedContainer = uiContainers.first { $0.folderName == containerFolderName } ?? uiSelectedContainer
         }
-        // 显式指定容器后也要再拆一次：指定那个若是共享容器，
-        // 不拆的话下面按容器找窗口仍会把别人的窗口顶回来。
+        // 拆分只做一次、且只在最终选中定下来后做（容器越生越多根因之一）：
+        // 原来选前先拆一次、选后再拆一次，面板传 dataUUID 时若选前已是
+        // 共享容器，第一次拆出的新容器会被随后的指定选中覆盖、直接成
+        // 孤儿留在列表里，第二次又拆一个——一次启动多两个容器。
+        // 只留这一次：containerFolderName 为空时选中没变，等同于原来
+        // 的第一次；指定了容器时拆的就是最终那个，不造孤儿。
         // 拆完选中已是新容器，当前文件夹就以选中为准，不再
         // 用旧的 containerFolderName，否则拆了也白拆。
         czfSplitSharedContainerIfNeeded()
