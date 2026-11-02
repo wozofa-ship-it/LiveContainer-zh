@@ -175,6 +175,63 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
         Task { [weak self] in
             await self?.runApp()
+            // 新开路拉满（3.8.240）：App 没在跑时启动只管起新窗、
+            // 起完没人拉满——上次关时是小窗就还是小窗，3.8.238
+            // 只修了在跑的带回拉满。起完等新窗进 dock 再拉满一次，
+            // 不管上次关时大小；小窗/最小化按钮不走这里。
+            await MainActor.run {
+                if #available(iOS 16.0, *) {
+                    self?.pollAndMaximizeFreshWindow()
+                }
+            }
+        }
+    }
+
+    // 启动新开路拉满（3.8.240）：runApp 起完新窗可能还没进
+    // dock（签名耗时），0.3 秒×20 次轮询等它出现；归属按路径
+    // 验，别人的窗口占着 uuid 就停表不碰；vc 没就绪继续等；
+    // 拉满动画重入守卫吞掉的那次下个 tick 重试（isMaximized
+    // 没翻就说明没拉上），20 次后停。启动失败已有 launch 侧
+    // showError，这里到期不重复报错。
+    @available(iOS 16.0, *)
+    private func pollAndMaximizeFreshWindow() {
+        let expectedPath = configuration.model.appInfo.relativeBundlePath
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+            attempts += 1
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            guard let uuid = self.bannerInstanceUUID(),
+                  let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
+                if attempts >= 20 {
+                    timer.invalidate()
+                }
+                return
+            }
+            let owned: Bool
+            if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                owned = runningPath == expectedPath
+            } else {
+                owned = false
+            }
+            if !owned {
+                timer.invalidate()
+                return
+            }
+            guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
+                if attempts >= 20 {
+                    timer.invalidate()
+                }
+                return
+            }
+            if !vc.isMaximized {
+                vc.maximizeWindow()
+            }
+            if vc.isMaximized || attempts >= 20 {
+                timer.invalidate()
+            }
         }
     }
 

@@ -2928,8 +2928,54 @@ struct AllAppsListView: View {
         Task {
             do {
                 try await app.runApp(containerFolderName: app.appInfo.dataUUID)
+                // 新开路拉满（3.8.240）：面板启动同款，起完等窗进
+                // dock 再拉满一次，不管上次关时大小；在跑的顶回
+                // 前台那条路（上面）不动，不改面板点按聚焦行为。
+                await MainActor.run {
+                    self.pollAndMaximizeFreshWindow(app: app)
+                }
             } catch {
                 await MainActor.run { reportLaunchError(error.localizedDescription) }
+            }
+        }
+    }
+
+    // 启动新开路拉满（3.8.240，面板版）：与卡片同款逻辑，
+    // 0.3 秒×20 次轮询等新窗进 dock，归属按路径验。
+    private func pollAndMaximizeFreshWindow(app: LCAppModel) {
+        let expectedPath = app.appInfo.relativeBundlePath
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+            attempts += 1
+            let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID
+            guard let uuid = uuid,
+                  let entry = self.dockManager.apps.first(where: { $0.appUUID == uuid }) else {
+                if attempts >= 20 {
+                    timer.invalidate()
+                }
+                return
+            }
+            let owned: Bool
+            if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                owned = runningPath == expectedPath
+            } else {
+                owned = false
+            }
+            if !owned {
+                timer.invalidate()
+                return
+            }
+            guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
+                if attempts >= 20 {
+                    timer.invalidate()
+                }
+                return
+            }
+            if !vc.isMaximized {
+                vc.maximizeWindow()
+            }
+            if vc.isMaximized || attempts >= 20 {
+                timer.invalidate()
             }
         }
     }
