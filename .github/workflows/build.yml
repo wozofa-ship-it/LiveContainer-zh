@@ -72,7 +72,11 @@ jobs:
           go get -tool golang.org/x/mobile/cmd/gobind
           go mod tidy
           mkdir -p ../Vendor
-          gomobile bind -target ios -tags "with_quic with_wireguard with_naive_outbound" -o ../Vendor/Libbox.xcframework ./libbox
+          # 只编真机 arm64：-target ios 会自动加 iossimulator 切片，
+          # 而 naive 拉进来的 cronet-go/all 其模拟器文件要求 iossimulator
+          # 这个 tag，gomobile 从不给模拟器传它（只传 ios），Intel 模拟器
+          # 切片永远编不过；本工程只编真机 arm64 包，模拟器切片用不上。
+          gomobile bind -target ios/arm64 -tags "with_quic with_wireguard with_naive_outbound" -o ../Vendor/Libbox.xcframework ./libbox
           ls ../Vendor/Libbox.xcframework
       - name: Archive
         env:
