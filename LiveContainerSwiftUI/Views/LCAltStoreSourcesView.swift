@@ -1701,28 +1701,70 @@ private struct LCSourceAppDetailView: View {
     }
 }
 
-private struct SourceIconView: View {
-    let url: URL?
-    
-    var body: some View {
-        if let url {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .empty:
-                    placeholder
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .failure:
-                    placeholder
-                @unknown default:
-                    placeholder
-                }
-            }
-        } else {
-            placeholder
+// 源图标磁盘缓存：裸 AsyncImage 没有落盘，源页每次
+// 重建、每行图标都重新联网下载。内存（NSCache，
+// 200 个上限）+ Caches/CZFSourceIcons 落盘，文件名
+// 是链接的 base64url（跨启动稳定，不用 hashValue），
+// 失败仍回占位图，行为与原来一致。
+private final class CZFSourceIconCache {
+    static let shared = CZFSourceIconCache()
+    private let memory = NSCache<NSString, UIImage>()
+    private let ioQueue = DispatchQueue(label: "czf.sourceicon.cache", qos: .utility)
+    private init() { memory.countLimit = 200 }
+    private func diskURL(for url: URL) -> URL? {
+        let name = Data(url.absoluteString.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("CZFSourceIcons", isDirectory: true)
+            .appendingPathComponent(name)
+    }
+    private func diskData(for url: URL) async -> Data? {
+        guard let dest = diskURL(for: url) else { return nil }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            ioQueue.async { cont.resume(returning: try? Data(contentsOf: dest)) }
         }
     }
-    
+    func load(url: URL) async -> UIImage? {
+        let key = url.absoluteString as NSString
+        if let hit = memory.object(forKey: key) { return hit }
+        if let data = await diskData(for: url), let img = UIImage(data: data) {
+            memory.setObject(img, forKey: key)
+            return img
+        }
+        guard let (data, _) = try? await URLSession.shared.data(from: url),
+              let img = UIImage(data: data) else { return nil }
+        memory.setObject(img, forKey: key)
+        if let dest = diskURL(for: url) {
+            ioQueue.async {
+                try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? data.write(to: dest, options: .atomic)
+            }
+        }
+        return img
+    }
+}
+
+private struct SourceIconView: View {
+    let url: URL?
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                placeholder
+            }
+        }
+        .task(id: url) {
+            guard let url else { image = nil; return }
+            image = await CZFSourceIconCache.shared.load(url: url)
+        }
+    }
+
     private var placeholder: some View {
         Image("DefaultIcon")
             .resizable()

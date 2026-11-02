@@ -112,6 +112,10 @@ struct LCSettingsView: View {
     @State var vpnSinglePinging = false
     @State var vpnSinglePingIndex: Int?
     @State var showDeleteActiveConfirm = false
+    // 节点多选删除：长按行进多选（链接作键，导入换列表不错位），
+    // 全选/删除选中/取消在这组状态上跑，删在用节点走已有确认框。
+    @State var vpnNodeSelecting = false
+    @State var vpnSelectedNodeLinks: Set<String> = []
     @State var pendingDeleteIndices: [Int] = []
     @State var vpnPinging = false
     @State var vpnPingRejected = false
@@ -287,6 +291,8 @@ struct LCSettingsView: View {
                         CZFVPNManager.shared.removeNode(at: i)
                     }
                     pendingDeleteIndices = []
+                    vpnSelectedNodeLinks = []
+                    vpnNodeSelecting = false
                     vpnPingResults = [:]
                     refreshVPNState()
                 }
@@ -718,6 +724,88 @@ struct LCSettingsView: View {
         }
     }
 
+// 节点行显示部分：只负责名字/详情/延迟状态/勾，
+// 切换、复测、删除动作留在父视图。行显示与
+// vpnSection 解耦后，无关设置项变化不再重建
+// 整行显示树。
+private struct CZFVPNNodeLabel: View {
+    let link: String
+    let ping: CZFVPNManager.CZFNodePingResult?
+    let isActive: Bool
+    let coreRunning: Bool
+    let pinging: Bool
+    let isSinglePingTarget: Bool
+    let isRejected: Bool
+    let isStale: Bool
+
+    var body: some View {
+        HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(CZFVPNManager.nodeDisplay(for: link).name)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(CZFVPNManager.nodeDisplay(for: link).detail)
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                        .lineLimit(1)
+                }
+                Spacer()
+                // 延迟测试结果（点下面的「测延迟」
+                // 后显示）：绿 <300ms、橙 <800ms、
+                // 红 ≥800ms；失败显示 超时/不通。
+                // 例外：在用节点且核心在跑时，测速失败
+                // 不显示不通——核心在跑且实际能上网
+                // 是比一次测速样本更强的证据，显示
+                // 不通只会逼用户误换 IP（养号大忌）
+                if let ping, !ping.success, isActive, coreRunning {
+                    Text("在用")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else if (pinging || isSinglePingTarget) && ping == nil {
+                    Text("测速中")
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                } else if isSinglePingTarget {
+                    Text("测速中")
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                } else if isRejected {
+                    // 核心在跑时单测被拒：旧值原样保留，
+                    // 行上直接写“核心占用”，别让用户对着
+                    // 不变的数字猜；真测用下方“停核心重测”。
+                    Text("核心占用")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if ping == nil, !CZFVPNManager.isSupportedNodeScheme(CZFVPNManager.nodeScheme(for: link)) {
+                    // 未测到的不支持节点：按转换器清单静态分级，
+                    // 直接标“不支持”（橙色，与实测失败的红色区分），
+                    // 不等人测完才知道它跑不了。
+                    Text("不支持")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if let ping {
+                    // 超 24 小时的缓存结果：灰色加“·旧”，
+                    // 别按新鲜延迟的颜色误导切节点。
+                    if ping.success {
+                        Text(isStale ? "\(ping.delay)ms·旧" : "\(ping.delay)ms")
+                            .font(.caption)
+                            .foregroundStyle(isStale ? .gray : (ping.delay < 300 ? .green : (ping.delay < 800 ? .orange : .red)))
+                    } else {
+                        // 转换失败与网络失败分开显示：转换器拒收
+                        // 是协议不支持，不是网络不通。
+                        Text((ping.conversionFailed ? "不支持" : (ping.delay == 11000 ? "超时" : "不通")) + (isStale ? "·旧" : ""))
+                            .font(.caption)
+                            .foregroundStyle(isStale ? .gray : .red)
+                    }
+                }
+                if isActive {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.blue)
+                }
+        }
+    }
+}
+
     @ViewBuilder private var vpnSection: some View {
         Section {
             HStack {
@@ -768,86 +856,45 @@ struct LCSettingsView: View {
             }
             ForEach(Array(vpnNodes.enumerated()), id: \.offset) { index, link in
                 Button {
-                    CZFVPNManager.shared.setActiveNode(at: index)
-                    refreshVPNState()
+                    if vpnNodeSelecting {
+                        if vpnSelectedNodeLinks.contains(link) {
+                            vpnSelectedNodeLinks.remove(link)
+                        } else {
+                            vpnSelectedNodeLinks.insert(link)
+                        }
+                    } else {
+                        CZFVPNManager.shared.setActiveNode(at: index)
+                        refreshVPNState()
+                    }
                 } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(CZFVPNManager.nodeDisplay(for: link).name)
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            Text(CZFVPNManager.nodeDisplay(for: link).detail)
-                                .font(.caption)
-                                .foregroundStyle(.gray)
-                                .lineLimit(1)
+                    HStack(spacing: 8) {
+                        if vpnNodeSelecting {
+                            Image(systemName: vpnSelectedNodeLinks.contains(link) ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(vpnSelectedNodeLinks.contains(link) ? Color.blue : Color.secondary)
                         }
-                        Spacer()
-                        // 延迟测试结果（点下面的「测延迟」
-                        // 后显示）：绿 <300ms、橙 <800ms、
-                        // 红 ≥800ms；失败显示 超时/不通。
-                        // 例外：在用节点且核心在跑时，测速失败
-                        // 不显示不通——核心在跑且实际能上网
-                        // 是比一次测速样本更强的证据，显示
-                        // 不通只会逼用户误换 IP（养号大忌）
-                        if let ping = vpnPingResults[index], !ping.success, index == vpnActiveIndex, vpnCoreRunning {
-                            Text("在用")
-                                .font(.caption)
-                                .foregroundStyle(.green)
-                        } else if (vpnPinging || vpnSinglePingIndex == index) && vpnPingResults[index] == nil {
-                            Text("测速中")
-                                .font(.caption)
-                                .foregroundStyle(.gray)
-                        } else if vpnSinglePingIndex == index {
-                            Text("测速中")
-                                .font(.caption)
-                                .foregroundStyle(.gray)
-                        } else if vpnSingleRejectedLinks.contains(link) {
-                            // 核心在跑时单测被拒：旧值原样保留，
-                            // 行上直接写“核心占用”，别让用户对着
-                            // 不变的数字猜；真测用下方“停核心重测”。
-                            Text("核心占用")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        } else if vpnPingResults[index] == nil, !CZFVPNManager.isSupportedNodeScheme(CZFVPNManager.nodeScheme(for: link)) {
-                            // 未测到的不支持节点：按转换器清单静态分级，
-                            // 直接标“不支持”（橙色，与实测失败的红色区分），
-                            // 不等人测完才知道它跑不了。
-                            Text("不支持")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        } else if let ping = vpnPingResults[index] {
-                            // 超 24 小时的缓存结果：灰色加“·旧”，
-                            // 别按新鲜延迟的颜色误导切节点。
-                            let isStale = vpnPingStaleIndices.contains(index)
-                            if ping.success {
-                                Text(isStale ? "\(ping.delay)ms·旧" : "\(ping.delay)ms")
-                                    .font(.caption)
-                                    .foregroundStyle(isStale ? .gray : (ping.delay < 300 ? .green : (ping.delay < 800 ? .orange : .red)))
-                            } else {
-                                // 转换失败与网络失败分开显示：转换器拒收
-                                // 是协议不支持，不是网络不通。
-                                Text((ping.conversionFailed ? "不支持" : (ping.delay == 11000 ? "超时" : "不通")) + (isStale ? "·旧" : ""))
-                                    .font(.caption)
-                                    .foregroundStyle(isStale ? .gray : .red)
-                            }
-                        }
-                        if index == vpnActiveIndex {
-                            Image(systemName: "checkmark")
-                                .foregroundStyle(.blue)
-                        }
+                        CZFVPNNodeLabel(
+                            link: link,
+                            ping: vpnPingResults[index],
+                            isActive: index == vpnActiveIndex,
+                            coreRunning: vpnCoreRunning,
+                            pinging: vpnPinging,
+                            isSinglePingTarget: vpnSinglePingIndex == index,
+                            isRejected: vpnSingleRejectedLinks.contains(link),
+                            isStale: vpnPingStaleIndices.contains(index)
+                        )
                     }
                 }
-                // 单节点复测：长按行出菜单，只测这一条，
-                // 不清整表、不测全部。行内再嵌 Button 会
-                // 和整行切换按钮抢点击，用菜单最稳。
-                .contextMenu {
-                    Button("复测这个节点") {
-                        startSinglePing(index)
+                // 长按行进多选删除：原来长按菜单的复测与右滑
+                // 测速同一入口（startSinglePing），复测仍可右滑；
+                // 长按现在进多选，点行勾选、全选、删除选中。
+                .onLongPressGesture {
+                    if !vpnNodeSelecting {
+                        vpnNodeSelecting = true
                     }
-                    .disabled(vpnPinging || vpnSinglePinging)
+                    vpnSelectedNodeLinks.insert(link)
                 }
                 // 右滑测速：整表测速太慢时只测这一条，
-                // 与长按菜单的复测同一入口；左滑删除不动。
+                // 与原长按复测同一入口；左滑删除不动。
                 // allowsFullSwipe 关掉：测速要占 isPinging、
                 // 挡核心切换，滑满就触发太容易误触。
                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
@@ -884,6 +931,32 @@ struct LCSettingsView: View {
             // 像切了其实还没切；置灰后测速中点不动，
             // 测完再点才是真切。单节点复测同理。
             .disabled(vpnPinging || vpnSinglePinging)
+            // 多选删除操作条：只在长按进多选后出现；全选按链接集合算，
+            // 删选中走 deleteSelectedVPNNodeLinks（在用节点走确认框）。
+            if vpnNodeSelecting {
+                HStack {
+                    Button(vpnSelectedNodeLinks == Set(vpnNodes) && !vpnNodes.isEmpty ? "取消全选" : "全选") {
+                        if vpnSelectedNodeLinks == Set(vpnNodes) {
+                            vpnSelectedNodeLinks = []
+                        } else {
+                            vpnSelectedNodeLinks = Set(vpnNodes)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    Spacer()
+                    Button("删除选中 (\(vpnSelectedNodeLinks.count))") {
+                        deleteSelectedVPNNodeLinks()
+                    }
+                    .disabled(vpnSelectedNodeLinks.isEmpty)
+                    .foregroundStyle(Color.red)
+                    .buttonStyle(.borderless)
+                    Button("取消") {
+                        vpnNodeSelecting = false
+                        vpnSelectedNodeLinks = []
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
             HStack {
                 Button(vpnCoreRunning ? "停止核心" : "启动核心") {
                     CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
@@ -1462,6 +1535,26 @@ struct LCSettingsView: View {
                 // 只写该条缓存，别刷全表时间戳（见 savePingResult）。
                 savePingResult(link: link, result: result)
             }
+            refreshVPNState()
+        }
+    }
+
+    // 多选删除：按链接换算下标（删时现算，导入换列表不错位）；
+    // 含在用节点走已有确认框，确认后退出多选；不含直接删。
+    func deleteSelectedVPNNodeLinks() {
+        guard !vpnPinging && !vpnSinglePinging else { return }
+        let indices = vpnNodes.enumerated().compactMap { vpnSelectedNodeLinks.contains($0.element) ? $0.offset : nil }
+        guard !indices.isEmpty else { return }
+        if indices.contains(vpnActiveIndex) {
+            pendingDeleteIndices = indices.sorted()
+            showDeleteActiveConfirm = true
+        } else {
+            for i in indices.sorted(by: >) {
+                CZFVPNManager.shared.removeNode(at: i)
+            }
+            vpnSelectedNodeLinks = []
+            vpnNodeSelecting = false
+            vpnPingResults = [:]
             refreshVPNState()
         }
     }

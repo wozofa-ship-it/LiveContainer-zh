@@ -185,10 +185,11 @@ static BOOL gCZFStartInBand = YES;
 static BOOL gCZFStartInOutwardBand = YES;
 // 起手是否真正碰到左边缘（用户 2026-11-02 亲令“面板碰到边缘
 // 才调出来”）：两个面板方向（App 面板与源面板）只认起手
-// x ≤ 16pt 的滑动；App 内从 20pt 开外的横滑（视频切集、
-// 横向滚动）一律不触发，治误触。16pt 与终结兜底“落点贴边
-// 12”同量级；右边缘切 App 不走面板，不用它。
-static const CGFloat kCZFEdgeTouchMax = 16;
+// x ≤ 20pt 的滑动（2026-11-02 用户让往边缘里面放宽一点，
+// 16→20pt）；App 内从 20pt 开外的横滑（视频切集、
+// 横向滚动）一律不触发，治误触。终结兜底“落点贴边
+// 12”不动；右边缘切 App 不走面板，不用它。
+static const CGFloat kCZFEdgeTouchMax = 20;
 static BOOL gCZFStartAtEdge = NO;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;

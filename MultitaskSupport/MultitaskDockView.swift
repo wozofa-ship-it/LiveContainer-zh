@@ -3823,29 +3823,21 @@ struct AppCardRow: View {
 }
 
 // MARK: - Icon Cache Manager
+// 面板图标缓存：原来是无上限字典，清理函数从没被
+// 调过，图标只进不出。换 NSCache（200 个上限，
+// 内存紧张时系统自动清），调用点一字不动。
 class IconCacheManager {
     static let shared = IconCacheManager()
-    private var cache: [String: UIImage] = [:]
-    private let cacheQueue = DispatchQueue(label: "icon.cache.queue", attributes: .concurrent)
-    
-    private init() {}
-    
+    private let cache = NSCache<NSString, UIImage>()
+    private init() { cache.countLimit = 200 }
     func getIcon(for key: String) -> UIImage? {
-        return cacheQueue.sync {
-            return cache[key]
-        }
+        cache.object(forKey: key as NSString)
     }
-    
     func setIcon(_ icon: UIImage, for key: String) {
-        cacheQueue.async(flags: .barrier) {
-            self.cache[key] = icon
-        }
+        cache.setObject(icon, forKey: key as NSString)
     }
-    
     func clearCache() {
-        cacheQueue.async(flags: .barrier) {
-            self.cache.removeAll()
-        }
+        cache.removeAllObjects()
     }
 }
 // MARK: - App Icon View
