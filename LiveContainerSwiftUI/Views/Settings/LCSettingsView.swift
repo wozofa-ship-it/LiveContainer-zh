@@ -836,8 +836,7 @@ private struct CZFVPNNodeLabel: View {
             }
             .fileImporter(isPresented: $showWGConfImporter, allowedContentTypes: [UTType(filenameExtension: "conf") ?? .item]) { result in
                 switch result {
-                case .success(let urls):
-                    guard let url = urls.first else { return }
+                case .success(let url):
                     let accessing = url.startAccessingSecurityScopedResource()
                     defer { if accessing { url.stopAccessingSecurityScopedResource() } }
                     do {
