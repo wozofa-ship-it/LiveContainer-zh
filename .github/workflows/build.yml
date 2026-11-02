@@ -83,7 +83,14 @@ jobs:
           scheme: ${{ steps.scheme.outputs.scheme }}
           filetype_parameter: ${{ steps.filetype_parameter.outputs.filetype_parameter }}
           file_to_build: ${{ steps.file_to_build.outputs.file_to_build }}
-        run: xcodebuild archive -archivePath "$archive_path" -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -sdk iphoneos -arch arm64 -configuration Release | xcpretty && exit ${PIPESTATUS[0]}
+        run: xcodebuild archive -archivePath "$archive_path" -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -sdk iphoneos -arch arm64 -configuration Release 2>&1 | tee /tmp/xcodebuild-raw.log | xcpretty && exit ${PIPESTATUS[0]}
+      - name: Show undefined symbols on failure
+        if: failure()
+        run: |
+          echo "=== undefined symbols (raw log) ==="
+          grep -A 30 "Undefined symbols" /tmp/xcodebuild-raw.log | head -50
+          echo "=== ld errors (raw log) ==="
+          grep -B2 -A 5 "symbol(s) not found\|error: linker" /tmp/xcodebuild-raw.log | head -60
       - name: Build bundled keepalive tweak
         run: |
           clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
