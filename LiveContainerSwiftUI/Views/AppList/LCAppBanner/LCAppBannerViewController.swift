@@ -225,8 +225,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // 回调会把别人的窗口还原成小窗。动作前再按路径复验一次，
     // 对不上/验不出就什么都不做，别动别人的窗口。
     @available(iOS 16.0, *)
-    private static func unmaximizeWindowIfOwned(uuid: String, expectedPath: String) {
-        guard let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
+    private static func unmaximizeWindowIfOwned(uuid: String, expectedPath: String?) {
+        guard let expectedPath,
+              let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
               let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty,
               runningPath == expectedPath else { return }
         unmaximizeWindow(uuid: uuid)

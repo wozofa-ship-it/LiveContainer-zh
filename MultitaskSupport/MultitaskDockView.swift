@@ -3044,8 +3044,9 @@ struct AllAppsListView: View {
     }
 
     // 小窗口回落路专用（3.8.239）：见卡片同款 helper 注释。
-    private func unmaximizeWindowIfOwned(uuid: String, expectedPath: String) {
-        guard let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }),
+    private func unmaximizeWindowIfOwned(uuid: String, expectedPath: String?) {
+        guard let expectedPath,
+              let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }),
               let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty,
               runningPath == expectedPath else { return }
         unmaximizeWindow(uuid: uuid)
