@@ -1400,6 +1400,20 @@ extension Notification.Name {
     private static var czfEdgeSensitivity: Int {
         UserDefaults.standard.object(forKey: "CZFEdgeSensitivity") as? Int ?? 1
     }
+    // 往外弹专用启用带：只放宽往外弹（左缘左移→源面板），
+    // 往里拖仍认上面的普通带。顶部留出上半屏（导航/控件
+    // 区），底部留出 Home 指示条区，不放满全高；往外弹
+    // 物理上滑出屏幕、没有 App 手势同轨，放宽不抢东西。
+    // 插件侧写死中档，取这里的中档值（0.55–0.93）保持一致。
+    private static var czfEdgeOutwardBandValues: (top: CGFloat, bottom: CGFloat) {
+        switch czfEdgeSensitivity {
+        case 0: return (0.65, 0.90)
+        case 2: return (0.50, 0.95)
+        default: return (0.55, 0.93)
+        }
+    }
+    private static var czfEdgeOutwardBandTop: CGFloat { czfEdgeOutwardBandValues.top }
+    private static var czfEdgeOutwardBandBottom: CGFloat { czfEdgeOutwardBandValues.bottom }
     // 触发距离系数：低档要拖得更远才认、高档拖一点就认
     private static var czfThresholdScale: CGFloat {
         switch czfEdgeSensitivity {
@@ -1414,6 +1428,9 @@ extension Notification.Name {
         return d.object(forKey: "CZFEdgeGesturesEnabled") == nil || d.bool(forKey: "CZFEdgeGesturesEnabled")
     }
     private var globalSwipeStartInBand: Bool = true
+    // 起手是否落在往外弹专用带内（比普通带宽，只给往外弹用；
+    // 往里拖与右边缘一律不认它，见下方两个判定函数）。
+    private var globalSwipeStartInOutwardBand: Bool = true
     private var globalSwipeObserversInstalled = false
     // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
     // 不闩住会在 .changed 里连震好几下）
@@ -1470,14 +1487,14 @@ extension Notification.Name {
         case .began:
             czfEdgeSwipeLatched = false
         case .changed:
-            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand, !czfEdgeSwipeLatched else { return }
-            if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, translation: translation, endX: endX, width: width) {
+            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
+            if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width) {
                 czfEdgeSwipeLatched = true
             }
         case .ended, .cancelled:
             defer { czfEdgeSwipeLatched = false }
-            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand, !czfEdgeSwipeLatched else { return }
-            processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, translation: translation, endX: endX, width: width)
+            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
+            processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width)
         default:
             break
         }
@@ -1485,7 +1502,7 @@ extension Notification.Name {
 
     // 终结兜底判定：与 TweakLoader 内手势触摸漏斗的终结规则同参。
     // 只认边缘起手；任意位置起手不兜底（防误触设计不变）。
-    private func processGlobalSwipeFallback(startEdge: Int, translation: CGPoint, endX: CGFloat, width: CGFloat) {
+    private func processGlobalSwipeFallback(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat) {
         let dx = translation.x
         let dy = translation.y
         let s = Self.czfThresholdScale
@@ -1494,15 +1511,18 @@ extension Notification.Name {
             // = App 面板，往外弹（手指左移）= 源面板。门槛跟着动作
             // 的物理方向走，不跟面板走（往里拖与 App 内横滑同轨，
             // 门槛保持严；往外弹空间小，门槛保持松）
-            if dx <= -8 * s, endX <= 12, abs(dx) > 0.4 * abs(dy) {
+            // 往外弹带放宽后：往外弹认普通带或往外弹带，往里拖
+            // 只认普通带——往外弹带起手的往里拖到这里照样不触发。
+            if dx <= -8 * s, endX <= 12, abs(dx) > 0.4 * abs(dy), startInBand || startInOutwardBand {
                 fireDockAction { self.czfOpenSourcesPanel() }
-            } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy) {
+            } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
                 fireDockAction { self.czfOpenAppPanel() }
             }
         } else if startEdge == 2 {
-            if dx >= 8 * s, endX >= width - 12, abs(dx) > 0.4 * abs(dy) {
+            // 右边缘不放宽：两个方向都只认普通带。
+            if dx >= 8 * s, endX >= width - 12, abs(dx) > 0.4 * abs(dy), startInBand {
                 fireDockAction { self.czfEdgeRightOutward() }
-            } else if dx <= -44 * s, abs(dx) > 0.8 * abs(dy) {
+            } else if dx <= -44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
                 fireDockAction { self.czfEdgeRightInward() }
             }
         }
@@ -1514,7 +1534,7 @@ extension Notification.Name {
     // 才触发（2026-11-01 用户定：右边跟左边一样，只认带内）。
     // 返回 true 表示本次判定触发了动作（边条 handler 据此做一次性触发）
     @discardableResult
-    private func processGlobalSwipe(startEdge: Int, startInBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
+    private func processGlobalSwipe(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
         let draggingRight = translation.x > 0
         // 往外弹（左缘左移/右缘右移）物理行程就只有起手那几十
         // 点：手指几毫米就出屏，拇指走的还是弧线、纵向分量大，
@@ -1526,6 +1546,9 @@ extension Notification.Name {
         guard abs(translation.x) > (isOutward ? 0.9 : 1.5) * abs(translation.y) else { return false }
         let s = Self.czfThresholdScale
         if startEdge == 2 {
+            // 右边缘不放宽：两个方向都只认普通带（调用点门槛
+            // 放宽后，往外弹带起手的右边缘滑动到这里照样不触发）。
+            guard startInBand else { return false }
             // 右边缘改派：往左/往右的动作在入口判定（切换已打开
             // App：往左上一个、往右下一个）；门槛乘灵敏度系数（设置页三档）
             if draggingRight {
@@ -1542,10 +1565,15 @@ extension Notification.Name {
             // = 源面板。与插件侧判定保持一致；门槛跟着物理方向
             // 走：往里拖与 App 内横滑同轨，30 的门槛只认边缘起手
             // 的决断横拖，不抢 App 自己的滑动。
+            // 往外弹带放宽后：往外弹认普通带或往外弹带，往里拖
+            // 只认普通带——往外弹带起手的往里拖到这里返回 false
+            // 不闩锁，之后改往外弹仍能触发。
             if draggingRight {
+                guard startInBand else { return false }
                 guard translation.x > 30 * s else { return false }
                 fireDockAction { self.czfOpenAppPanel() }
             } else {
+                guard startInBand || startInOutwardBand else { return false }
                 guard abs(translation.x) > 6 * s else { return false }
                 fireDockAction { self.czfOpenSourcesPanel() }
             }
@@ -1613,6 +1641,7 @@ extension Notification.Name {
         let loc = touch.location(in: window)
         let height = window.bounds.height
         globalSwipeStartInBand = loc.y >= height * Self.czfEdgeBandTop && loc.y <= height * Self.czfEdgeBandBottom
+        globalSwipeStartInOutwardBand = loc.y >= height * Self.czfEdgeOutwardBandTop && loc.y <= height * Self.czfEdgeOutwardBandBottom
         if loc.x >= window.bounds.width - 44 {
             globalSwipeStartEdge = 2
         } else if loc.x <= 44 {
@@ -2915,7 +2944,14 @@ struct AllAppsListView: View {
                 belongsToOther = true
             }
             if !belongsToOther {
-                let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                let brought = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                // 面板带回也拉满（卡片 3.8.238 同款语义，启动=
+                // 大窗口）：带回成功且窗口未最大化时拉满；带回
+                // 失败照原样关面板返回，不改落空路径；新开路
+                // 在 3.8.240 已拉满，这里不动。
+                if brought, let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController, !vc.isMaximized {
+                    vc.maximizeWindow()
+                }
                 closePanel()
                 return
             }

@@ -179,6 +179,10 @@ static NSInteger gCZFStartEdge = 0;
 //（=距底部 10%–30%，2026-10-24 用户红圈定，别再放中间，
 // 与宿主中档同值；上下两段不调防误触）
 static BOOL gCZFStartInBand = YES;
+// 起手高度是否在往外弹专用带内（宿主中档往外弹带同值
+// 0.55–0.93）：只给左缘往外弹（→源面板）用，往里拖与右
+// 边缘一律不认它；往里拖的启用带仍是上面 70%–90% 不动。
+static BOOL gCZFStartInOutwardBand = YES;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;
 
@@ -270,7 +274,10 @@ static BOOL CZFTouchOnControlOrSlider(UITouch *touch) {
 // flick 被 App 仲裁取消、或全程方向比过不了严判时，只看物理
 // 结果——净位移方向 + 落点贴边。右边缘此前没有兜底（触摸漏斗
 // 只管左边缘），轻扫经常被取消导致不跟手，本次补齐。
-static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat endX, CGFloat width, NSString **outName, NSString **outSelector) {
+// startInBand：起手是否在普通启用带内——往外弹带放宽后，
+// 左缘往外弹（→源面板）不要求它（调用点门槛保证普通带或
+// 往外弹带其一），左缘往里拖与右边缘两个方向都要求它。
+static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat endX, CGFloat width, BOOL startInBand, NSString **outName, NSString **outSelector) {
     CGFloat dx = translation.x;
     CGFloat dy = translation.y;
     if (startEdge == 1) {
@@ -281,18 +288,18 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
             *outSelector = @"czfOpenSourcesPanel";
             return YES;
         }
-        if (dx >= 44 && fabs(dx) > 0.8 * fabs(dy)) {
+        if (startInBand && dx >= 44 && fabs(dx) > 0.8 * fabs(dy)) {
             *outName = @"czf.dock.openPanel";
             *outSelector = @"czfOpenAppPanel";
             return YES;
         }
     } else if (startEdge == 2) {
-        if (dx >= 8 && endX >= width - 12 && fabs(dx) > 0.4 * fabs(dy)) {
+        if (startInBand && dx >= 8 && endX >= width - 12 && fabs(dx) > 0.4 * fabs(dy)) {
             *outName = @"czf.dock.rightOutward";
             *outSelector = @"czfEdgeRightOutward";
             return YES;
         }
-        if (dx <= -44 && fabs(dx) > 0.8 * fabs(dy)) {
+        if (startInBand && dx <= -44 && fabs(dx) > 0.8 * fabs(dy)) {
             *outName = @"czf.dock.rightInward";
             *outSelector = @"czfEdgeRightInward";
             return YES;
@@ -356,6 +363,10 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         return inBand && (loc.x <= 44 || loc.x >= width - 44);
     }
     gCZFStartInBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
+    // 往外弹专用带（宿主中档同值 0.55–0.93）：只给左缘往外弹用；
+    // 拦截器分支（上面）仍只认普通带——放宽取消区会误取消 App
+    // 触摸，往外弹不需要取消 App 触摸，故不动它。
+    gCZFStartInOutwardBand = (loc.y >= height * 0.55 && loc.y <= height * 0.93);
     // 全部接收、只记录起手位置；是否触发在 handler 按起手+位移判定
     if (loc.x >= width - 44) {
         gCZFStartEdge = 2;
@@ -392,11 +403,12 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     }
     if (gesture.state == UIGestureRecognizerStateCancelled) {
         // 被 App 仲裁"没收"不等于没滑：走终结兜底判定（见
-        // CZFPanFallback），判完清状态
-        if (!gCZFFired && gCZFStartEdge != 0 && gCZFStartInBand) {
+        // CZFPanFallback），判完清状态；往外弹带起手的取消也
+        // 走兜底，往里拖/右边缘仍要求普通带（见函数内）。
+        if (!gCZFFired && gCZFStartEdge != 0 && (gCZFStartInBand || gCZFStartInOutwardBand)) {
             NSString *name = nil;
             NSString *selector = nil;
-            if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, &name, &selector)) {
+            if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, gCZFStartInBand, &name, &selector)) {
                 [self czfPostNotification:name selectorName:selector];
             }
         }
@@ -405,8 +417,9 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     }
     if (gCZFFired) return;
     if (gesture.state != UIGestureRecognizerStateChanged && gesture.state != UIGestureRecognizerStateEnded) return;
-    // 启用带外起手的边缘滑动不调（任意位置起手不受此限）
-    if (gCZFStartEdge != 0 && !gCZFStartInBand) return;
+    // 启用带外起手的边缘滑动不调（任意位置起手不受此限）；
+    // 往外弹带起手的也放行，方向分支里再拦往里拖/右边缘。
+    if (gCZFStartEdge != 0 && !gCZFStartInBand && !gCZFStartInOutwardBand) return;
     CGPoint translation = [gesture translationInView:gesture.view];
     CGFloat endX = [gesture locationInView:gesture.view].x;
     CGFloat width = gesture.view.bounds.size.width;
@@ -415,7 +428,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // 留给滑动中的提前触发
         NSString *name = nil;
         NSString *selector = nil;
-        if (CZFPanFallback(gCZFStartEdge, translation, endX, width, &name, &selector)) {
+        if (CZFPanFallback(gCZFStartEdge, translation, endX, width, gCZFStartInBand, &name, &selector)) {
             gCZFFired = YES;
             [self czfPostNotification:name selectorName:selector];
             return;
@@ -433,6 +446,8 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     if (gCZFStartEdge == 2) {
         // 起手在右边缘：往左=上一个已打开 App，往右=下一个已打开
         // App（门槛往左24、往右6，往外滑手指很快出屏）；宿主侧改派
+        // 右边缘不放宽：往外弹带起手的右边缘滑动到这里直接返回。
+        if (!gCZFStartInBand) return;
         if (draggingRight) {
             if (absX <= 6) return;
             notificationName = @"czf.dock.rightOutward";
@@ -447,7 +462,10 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // （手指右移，门槛30）= App 面板——往里是 App 内常用
         // 方向，门槛保持严，宁可多滑一点也不抢 App 的指令；
         // 往外弹（手指左移，门槛6）= 源面板
+        // 往外弹带放宽后：往里拖仍只认普通带，往外弹带起手
+        // 的往里拖到这里直接返回；往外弹不要求普通带。
         if (draggingRight) {
+            if (!gCZFStartInBand) return;
             if (absX <= 30) return;
             notificationName = @"czf.dock.openPanel";
             selectorName = @"czfOpenAppPanel";
@@ -529,12 +547,14 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                 }
                 gCZFTapStarts[key] = @[ @(loc.x), @(loc.y) ];
                 // 记录带放宽到 96：抬手兜底规则需要它；移动中的提前
-                // 触发仍只认 64 带内起手（见 Moved 分支）。另加启用
-                // 带（与宿主中档同值）：带外起手不记录，手势只认
-                // 屏幕高度下段（距底部 10%–30%）。
+                // 触发仍只认 64 带内起手（见 Moved 分支）。高度带：
+                // 往外弹带（宿主中档同值 0.55–0.93）起手的也记录，
+                // 但第 4 位记起手是否在普通带（0.70–0.90）内——
+                // 往里拖分支只认普通带，往外弹分支认放宽后的带。
                 CGFloat winHeight = window.bounds.size.height;
-                if (loc.x <= 96 && loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90) {
-                    gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO ];
+                if (loc.x <= 96 && loc.y >= winHeight * 0.55 && loc.y <= winHeight * 0.93) {
+                    BOOL inOldBand = (loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90);
+                    gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO, @(inOldBand) ];
                 }
                 break;
             }
@@ -558,7 +578,7 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         if ([state[0] doubleValue] <= 64 && dx <= -8 && fabs(dx) > 0.9 * fabs(dy)) {
                             fireName = @"czf.dock.openSources";
                             fireSelector = @"czfOpenSourcesPanel";
-                        } else if ([state[0] doubleValue] <= 36 && dx >= 36 && fabs(dx) > 1.5 * fabs(dy)) {
+                        } else if ([state[0] doubleValue] <= 36 && dx >= 36 && fabs(dx) > 1.5 * fabs(dy) && [state[3] boolValue]) {
                             // 往里拖（右移）= App 面板（2026-10-23
                             // 对调后）：全屏下与 App 的边缘返回/横滑
                             // 共用这条轨迹，防冲突全靠收紧——起手只认
@@ -580,7 +600,7 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         if (dx <= -8 && loc.x <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
                             fireName = @"czf.dock.openSources";
                             fireSelector = @"czfOpenSourcesPanel";
-                        } else if ([state[0] doubleValue] <= 64 && dx >= 44 && fabs(dx) > 0.8 * fabs(dy)) {
+                        } else if ([state[0] doubleValue] <= 64 && dx >= 44 && fabs(dx) > 0.8 * fabs(dy) && [state[3] boolValue]) {
                             // 往里拖（右移）终结兜底 = App 面板
                             // （2026-10-23 对调后）：起手 ≤64 带内、
                             // 净位移 ≥44、方向比 ≥0.8。比 Moved 提前
@@ -592,7 +612,7 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         }
                     }
                     if (fireName) {
-                        gCZFTouchStates[key] = @[ state[0], state[1], @YES ];
+                        gCZFTouchStates[key] = @[ state[0], state[1], @YES, state[3] ];
                         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
                         if (now - gCZFLastFunnelFire >= 0.6) {
                             gCZFLastFunnelFire = now;
