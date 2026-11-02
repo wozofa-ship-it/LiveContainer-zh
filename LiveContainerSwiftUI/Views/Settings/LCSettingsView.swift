@@ -7,6 +7,7 @@
 
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 import UserNotifications
 
 enum JITEnablerType : Int, CaseIterable, Identifiable {
@@ -97,6 +98,7 @@ struct LCSettingsView: View {
     @State var vpnCoreRunning = false
     @State var vpnStatusMessage: String?
     @State var vpnNewNodeText = ""
+    @State var showWGConfImporter = false
     @State var vpnSubURL: String = UserDefaults.standard.string(forKey: "CZFVPNSubscriptionURL") ?? ""
     @State var vpnSubBusy = false
     @State var showSubReplaceConfirm = false
@@ -824,6 +826,39 @@ private struct CZFVPNNodeLabel: View {
                     }
                 }
                 .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging || vpnSinglePinging)
+                // WireGuard .conf 文件导入：读文件 → INI 转
+                // wireguard:// 链接 → 走同一 addNode（成功分
+                // 支与“已存在”提示与上面手填一致；解析 throw
+                // 只带字段名，进同一 errorInfo）。
+                Button("导入 .conf") {
+                    showWGConfImporter = true
+                }
+            }
+            .fileImporter(isPresented: $showWGConfImporter, allowedContentTypes: [UTType(filenameExtension: "conf") ?? .item]) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    let accessing = url.startAccessingSecurityScopedResource()
+                    defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let text = try String(contentsOf: url, encoding: .utf8)
+                        let name = url.deletingPathExtension().lastPathComponent
+                        let link = try CZFWireGuardConf.link(from: text, name: name)
+                        if CZFVPNManager.shared.addNode(link) {
+                            vpnPingResults = [:]
+                            refreshVPNState()
+                        } else {
+                            errorInfo = "节点已存在，未重复添加"
+                            errorShow = true
+                        }
+                    } catch {
+                        errorInfo = error.localizedDescription
+                        errorShow = true
+                    }
+                case .failure(let error):
+                    errorInfo = error.localizedDescription
+                    errorShow = true
+                }
             }
             HStack {
                 TextField("粘贴订阅地址（https://…）", text: $vpnSubURL)

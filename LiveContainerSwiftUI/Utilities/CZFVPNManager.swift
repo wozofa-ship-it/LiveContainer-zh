@@ -31,6 +31,10 @@ public final class CZFVPNManager {
 
     public private(set) var isRunning = false
     private var runningLink: String?
+    // 当前在跑的是哪个核心（nil = 没在跑）：双核心单活切换
+    // 的唯一事实来源——start 成功时记、stop 时清；测速分流
+    // 与停核心都读它，绝不凭 isRunning 猜核心种类。
+    private var runningCore: CZFCoreKind?
     // 核心当前归哪个 App 所有（ensureRunning 起核心时记下）：
     // 养号 App 在跑时，别的 App 自动启动不准抢核心换节点，
     // 手动在设置里切节点、停核心时会清掉这个归属
@@ -284,6 +288,19 @@ public final class CZFVPNManager {
                decodedText.contains("://") {
                 text = decodedText
             }
+            // Clash YAML 订阅：内容含顶层 proxies: 时走最小 YAML
+            // 解析（只认 proxies 数组，groups/rules 不进单节点
+            // 模型）；解析出链接就直接返回，空则落到现有 ://
+            // 路径（保持 code -3 语义）。YAML 可能是 base64 后
+            // 的明文，上面整体解码已处理；误触发时解析返回空，
+            // 不影响现有路径。
+            if text.contains("proxies:") {
+                let parsed = CZFClashYAML.parse(text)
+                if !parsed.links.isEmpty {
+                    completion(.success(parsed.links))
+                    return
+                }
+            }
             let links = text.components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { $0.contains("://") }
@@ -415,6 +432,13 @@ public final class CZFVPNManager {
         if !scheme.isEmpty {
             detail = detail.isEmpty ? scheme : "\(scheme) · \(detail)"
         }
+        // 不验证书标记：含 allowInsecure 且配置里真的会写
+        // tls.insecure=true 的节点才标（判定在
+        // CZFSingBoxRouting.showsInsecureMark，ss/snell/ssh/
+        // wireguard 无 TLS 块、三撞走不通的不标）。
+        if CZFSingBoxRouting.showsInsecureMark(for: link) {
+            detail = detail.isEmpty ? "不验证书" : "\(detail) · 不验证书"
+        }
         return (name, detail)
     }
 
@@ -433,19 +457,23 @@ public final class CZFVPNManager {
         return String(trimmed[..<range.lowerBound]).lowercased()
     }
 
-    /// 转换器清单分级：libXray convertShareLinksToXrayJson 只
-    /// 认这些协议族（VMessAEAD/VLESS/Hysteria2/SS/SOCKS/
-    /// Trojan）+ 原始 JSON 出站绕法；其余（ssr、hysteria v1、
-    /// tuic、wireguard 链接、naive/ssh/juicity、http 节点、
-    /// 无 scheme 的纯文本）一律不支持。注意这是静态分级：
-    /// 清单内的节点仍可能因老格式、allowInsecure 等参数被
-    /// 转换器拒收，那种以实测的 conversionFailed 为准。
+    /// 双核心分级：任一核心能跑的协议都算支持——Xray 侧
+    /// （VMessAEAD/VLESS/Hysteria2/SS/SOCKS/Trojan）+ 原始
+    /// JSON 出站绕法 + sing-box 侧（TUIC/Hysteria v1/WireGuard/
+    /// Naive/SSH/HTTP/AnyTLS/ShadowTLS/Snell）+ 老 vmess 与
+    /// 老 SS（按参数分流到 sing-box，见 CZFSingBoxRouting）。
+    /// 仍不支持：ssr、mieru、juicity；无 scheme 的纯文本也
+    /// 不支持。注意这是静态分级（只看 scheme）：参数级拒收
+    /// （VLESS+XHTTP+allowInsecure 三撞）由
+    /// CZFSingBoxRouting.unsupportedReason 在起核心与轮换
+    /// 时再挡，不在这里展开。
     public static func isSupportedNodeScheme(_ scheme: String) -> Bool {
         // hy2 = Hysteria2 的标准别名，socks5 = SOCKS 的标准链接
         // scheme；静态分级宁可多认别名——真不认的节点实测时
         // conversionFailed 会纠回“不支持”，反过来漏标却要等
         // 实测才知道它是好的。
-        ["vmess", "vless", "hysteria2", "hy2", "ss", "socks", "socks5", "trojan", "json"].contains(scheme)
+        ["vmess", "vless", "hysteria2", "hy2", "ss", "socks", "socks5", "trojan", "json",
+         "tuic", "hysteria", "wireguard", "naive", "ssh", "http", "anytls", "shadowtls", "snell"].contains(scheme)
     }
 
     public static func isEnabled(for appInfo: LCAppInfo) -> Bool {
@@ -712,6 +740,28 @@ public final class CZFVPNManager {
         if isRunning && runningLink == link { return true }
         if isRunning { stop() }
 
+        // 临时探针在跑时拒绝起主核心（Xray 与 sing-box 两路都挡）：
+        // 探针与主核心同进程只能活一个，探针起在前、主核心后起
+        // 就是双运行时；探针几秒就完，拒绝后重试即可。stop()
+        // 后 flag 仍为真只可能是探针（stop 成败都清 flag），
+        // 所以这句报错只会在测速进行中出现。
+        if CZFSingBoxCore.isServiceRunning {
+            lastError = "测速进行中，稍后再试"
+            return false
+        }
+
+        // 双核心分流：先查不可路由原因（ssr/mieru/juicity、
+        // 三撞、纯文本），再按 coreKind 走对应核心；Xray 侧
+        // 转换与启动原样不动。分流前已停掉旧核心（先停后起，
+        // 同一时刻只活一个核心，端口 10827/10828 复用）。
+        if let reason = CZFSingBoxRouting.unsupportedReason(for: link) {
+            lastError = reason
+            return false
+        }
+        if CZFSingBoxRouting.coreKind(for: link) == .singBox {
+            return startSingBox(withLink: link)
+        }
+
         let conv = invoke(method: "convertShareLinksToXrayJson", payload: ["text": Self.normalizedShareLink(link)])
         guard let conv,
               conv["success"] as? Bool == true,
@@ -773,6 +823,36 @@ public final class CZFVPNManager {
         }
         isRunning = true
         runningLink = link
+        runningCore = .xray
+        lastError = nil
+        return true
+    }
+
+    // sing-box 核心启动（调用方 start(withLink:) 已持锁且已
+    // 停掉旧核心，这里不再重复加锁）。配置端口与 Xray 侧复用
+    // 同一对回环端口（SOCKS 10827 / HTTP 10828），插件侧的
+    // 代理指向不用改。启动失败时 isRunning 保持 false、
+    // runningCore 保持 nil，不碰严格标记：钉死节点的 App
+    // 插件读到 CZFProxyStrict 标记仍断网不直连（fail-closed），
+    // 跟随全局的 App 维持既有 fail-open——失败本身绝不
+    // 偷偷改成直连或改标记。
+    private func startSingBox(withLink link: String) -> Bool {
+        let config: String
+        do {
+            config = try CZFSingBoxConfig.configJSON(for: link, socksPort: Self.socksPort, httpPort: 10828)
+        } catch {
+            lastError = "节点配置生成失败：\(error.localizedDescription)"
+            return false
+        }
+        do {
+            try CZFSingBoxCore.start(configJSON: config)
+        } catch {
+            lastError = "sing-box 启动失败：\(error.localizedDescription)"
+            return false
+        }
+        isRunning = true
+        runningLink = link
+        runningCore = .singBox
         lastError = nil
         return true
     }
@@ -783,9 +863,18 @@ public final class CZFVPNManager {
         // 旧测速延迟重试链接的清理：只读版测速不再写它，
         // 这里只在非测速窗口内清掉残留，免得事后起回来。
         if !isPinging { pingRetryLink = nil }
-        _ = invoke(method: "stopXray", payload: [:])
+        // 按在跑的核心种类停对应核心（runningCore 是唯一事实
+        // 来源；nil 时走老 stopXray 路，与旧行为一致）。
+        // sing-box 的 stop 失败也吞掉（S1 语义：失败也置 false），
+        // 状态照常清干净，不留半吊子在跑态。
+        if runningCore == .singBox {
+            try? CZFSingBoxCore.stop()
+        } else {
+            _ = invoke(method: "stopXray", payload: [:])
+        }
         isRunning = false
         runningLink = nil
+        runningCore = nil
         coreOwnerBundleId = nil
         coreOwnerAppInfo = nil
         cancelRotateCheck()
@@ -910,6 +999,9 @@ public final class CZFVPNManager {
 
     // 从 current 往后找下一个没试过、协议支持的节点；
     // 钉死的链接不在列表里时，从全局活动下标往后找。
+    // 两遍：第一遍 TCP 系优先（省电，QUIC 系手动选），
+    // 第二遍放宽到全部支持协议；json 原始出站传输未知，
+    // 归第二遍。
     private func nextSupportedNode(after current: String, links: [String]) -> String? {
         var startIdx = 0
         if let idx = links.firstIndex(of: current) {
@@ -917,11 +1009,19 @@ public final class CZFVPNManager {
         } else {
             startIdx = activeNodeIndex + 1
         }
-        for offset in 0..<links.count {
-            let cand = links[(startIdx + offset) % links.count]
-            if cand == current || rotateTriedLinks.contains(cand) { continue }
-            if !Self.isSupportedNodeScheme(Self.nodeScheme(for: cand)) { continue }
-            return cand
+        let tcpSchemes: Set<String> = ["vmess", "vless", "trojan", "ss", "socks", "socks5", "http", "ssh", "naive", "anytls", "shadowtls", "snell"]
+        for pass in 0..<2 {
+            for offset in 0..<links.count {
+                let cand = links[(startIdx + offset) % links.count]
+                if cand == current || rotateTriedLinks.contains(cand) { continue }
+                let scheme = Self.nodeScheme(for: cand)
+                if !Self.isSupportedNodeScheme(scheme) { continue }
+                // 参数级不可路由的（三撞等）直接跳过，起核心
+                // 时还会再挡一层，不靠单层过滤。
+                if CZFSingBoxRouting.unsupportedReason(for: cand) != nil { continue }
+                if pass == 0 && !tcpSchemes.contains(scheme) { continue }
+                return cand
+            }
         }
         return nil
     }
@@ -985,6 +1085,10 @@ public final class CZFVPNManager {
             // 测速只读，不停车重测、不重试（重试同样会被拒，
             // 只会白白拖时间），直接把被拒结果交给界面提示。
             let pingRejected = coreRunningAtStart && outcome.batchRejected
+            // 轮末复核（双核心探针竞态）：测速中途刚起的核心
+            // 也会让探针记被拒，completion 用起止任一时刻在跑
+            // 且被拒才算占用，见末尾 finalRejected；重试门只
+            // 看起时状态（重试失败不覆写成功项，无害）。
             if let onPartial {
                 let firstItems = outcome.items
                 DispatchQueue.main.async { onPartial(firstItems) }
@@ -1052,8 +1156,12 @@ public final class CZFVPNManager {
             if deferredHost {
                 self.ensureRunningForHost()
             }
+            self.vpnCoreLock.lock()
+            let coreRunningAtEnd = self.isRunning
+            self.vpnCoreLock.unlock()
+            let finalRejected = (coreRunningAtStart || coreRunningAtEnd) && outcome.batchRejected
             let items = outcome.items
-            DispatchQueue.main.async { completion(items, pingRejected) }
+            DispatchQueue.main.async { completion(items, finalRejected) }
         }
     }
 
@@ -1118,8 +1226,13 @@ public final class CZFVPNManager {
             if deferredHost {
                 self.ensureRunningForHost()
             }
+            self.vpnCoreLock.lock()
+            let coreRunningAtEnd = self.isRunning
+            self.vpnCoreLock.unlock()
+            // 轮末复核：与 pingAllNodes 同理，中途起的核心也算占用。
+            let finalRejected = (coreRunningAtStart || coreRunningAtEnd) && outcome.batchRejected
             let item = outcome.items.first
-            DispatchQueue.main.async { completion(item, pingRejected) }
+            DispatchQueue.main.async { completion(item, finalRejected) }
         }
     }
 
@@ -1133,9 +1246,45 @@ public final class CZFVPNManager {
     private func runPingBatches(links: [String], url: String, phase: String = "", onProgress: ((Int, Int, String) -> Void)? = nil, conversionCache: inout [String: String]) -> (items: [CZFNodePingResult], batchRejected: Bool) {
         var items = [CZFNodePingResult?](repeating: nil, count: links.count)
         var batchRejected = false
+        // 双核心分流（测速只读，不动主核心）：
+        // - sing-box 节点：先只做配置解析校验（不启动服务），
+        //   解析失败记 conversionFailed（界面“不支持”，清理
+        //   不删）；解析成功走临时实例探针（端口 10927，
+        //   同一时刻只起一个，串行）。
+        // - 双运行时硬规则：主核心在跑（任何一种）时，临时实
+        //   例不起；主核心是 sing-box 时，连 Xray pingBatch
+        //   也不调（整轮 rejected，复用“核心占用保留旧结果”
+        //   语义）。主核心是 Xray 时 pingBatch 照常（现有行
+        //   为：被生命周期锁拒则 batchRejected）。
+        // - 探针目标 host 取本轮测速 URL 的 host（Cloudflare /
+        //   gstatic / Apple 三轮各不相同），端口 80 明文 HTTP；
+        //   成功节点只探一次（重试只传失败下标），失败节点随
+        //   重试轮次重探（最坏 3×5 秒，文档化代价）。
+        // 占用判定在函数入口抓一次（不包整段测速，见字段注释）。
+        vpnCoreLock.lock()
+        let mainRunning = isRunning
+        let mainCore = runningCore
+        vpnCoreLock.unlock()
+        let singBoxMainRunning = mainRunning && mainCore == .singBox
         // 先把每个链接转成出站 JSON，转不动的直接记失败
         var pending: [(index: Int, xrayJson: String)] = []
+        var singBoxPending: [(index: Int, link: String)] = []
         for (i, link) in links.enumerated() {
+            // 参数级不可路由的（三撞、ssr 等）直接记“不支持”，
+            // 不进任何一侧的转换/解析。
+            if CZFSingBoxRouting.unsupportedReason(for: link) != nil {
+                items[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                continue
+            }
+            // sing-box 节点：只做配置解析校验，不启动服务。
+            if CZFSingBoxRouting.coreKind(for: link) == .singBox {
+                if (try? CZFSingBoxConfig.configJSON(for: link, socksPort: 10927, httpPort: nil)) != nil {
+                    singBoxPending.append((i, link))
+                } else {
+                    items[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                }
+                continue
+            }
             let normalized = Self.normalizedShareLink(link)
             if let cached = conversionCache[normalized] {
                 pending.append((i, cached))
@@ -1155,36 +1304,123 @@ public final class CZFVPNManager {
                 items[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
             }
         }
-        var start = 0
-        while start < pending.count {
-            let batch = Array(pending[start..<min(start + 5, pending.count)])
-            let resp = invoke(method: "pingBatch", payload: [
-                "configs": batch.map { ["xrayJson": $0.xrayJson] },
-                "timeout": 5,
-                "url": url,
-            ])
-            if let resp, resp["success"] as? Bool == true,
-               let data = resp["data"] as? [String: Any],
-               let results = data["results"] as? [[String: Any]] {
-                for (j, item) in results.enumerated() where j < batch.count {
-                    let ok = item["success"] as? Bool ?? false
-                    let delay = (item["delay"] as? NSNumber)?.intValue ?? 10000
-                    items[batch[j].index] = CZFNodePingResult(success: ok, delay: delay)
-                }
-            } else {
-                batchRejected = true
-            }
-            for entry in batch where items[entry.index] == nil {
+        if singBoxMainRunning {
+            // sing-box 主核心在跑：Xray pingBatch 不与它同进程
+            // 跑，整批记被拒（调用方按“核心占用”保留旧结果）。
+            if !pending.isEmpty { batchRejected = true }
+            for entry in pending {
                 items[entry.index] = CZFNodePingResult(success: false, delay: 10000)
             }
-            if let onProgress {
-                let done = items.compactMap { $0 }.count
-                let total = links.count
-                DispatchQueue.main.async { onProgress(done, total, phase) }
+        } else {
+            var start = 0
+            while start < pending.count {
+                let batch = Array(pending[start..<min(start + 5, pending.count)])
+                let resp = invoke(method: "pingBatch", payload: [
+                    "configs": batch.map { ["xrayJson": $0.xrayJson] },
+                    "timeout": 5,
+                    "url": url,
+                ])
+                if let resp, resp["success"] as? Bool == true,
+                   let data = resp["data"] as? [String: Any],
+                   let results = data["results"] as? [[String: Any]] {
+                    for (j, item) in results.enumerated() where j < batch.count {
+                        let ok = item["success"] as? Bool ?? false
+                        let delay = (item["delay"] as? NSNumber)?.intValue ?? 10000
+                        items[batch[j].index] = CZFNodePingResult(success: ok, delay: delay)
+                    }
+                } else {
+                    batchRejected = true
+                }
+                for entry in batch where items[entry.index] == nil {
+                    items[entry.index] = CZFNodePingResult(success: false, delay: 10000)
+                }
+                if let onProgress {
+                    let done = items.compactMap { $0 }.count
+                    let total = links.count
+                    DispatchQueue.main.async { onProgress(done, total, phase) }
+                }
+                start += 5
             }
-            start += 5
+        }
+        // sing-box 临时探针（串行；主核心在跑时跳过，记被拒）。
+        if !singBoxPending.isEmpty {
+            if mainRunning {
+                batchRejected = true
+                for entry in singBoxPending {
+                    items[entry.index] = CZFNodePingResult(success: false, delay: 10000)
+                }
+            } else {
+                let probeHost = URLComponents(string: url)?.host ?? ""
+                for entry in singBoxPending {
+                    if let result = probeSingBoxNode(link: entry.link, host: probeHost) {
+                        items[entry.index] = result
+                    } else {
+                        // 起探针时主核心刚跑起来：记被拒，调用方
+                        // 按“核心占用”保留旧结果（pingAllNodes /
+                        // pingSingleNode 的 pingRejected 含轮末复核）。
+                        batchRejected = true
+                        items[entry.index] = CZFNodePingResult(success: false, delay: 10000)
+                    }
+                    if let onProgress {
+                        let done = items.compactMap { $0 }.count
+                        let total = links.count
+                        DispatchQueue.main.async { onProgress(done, total, phase) }
+                    }
+                }
+            }
         }
         return (items.map { $0 ?? CZFNodePingResult(success: false, delay: 10000) }, batchRejected)
+    }
+
+    /// sing-box 节点临时探针（只在无主核心时调用；起实例前
+    /// 再复核一次占用，占用竞态时返回 nil，由调用方记被拒）。
+    /// 生成临时配置（端口 10927，不建 http 入站）→ 起临时
+    /// 实例 → 探针（host 取本轮测速 URL 的 host，端口 80，
+    /// 超时 5 秒）→ defer 里停实例。start 成功才注册 defer；
+    /// start 失败直接记失败，不留实例。绝不碰主核心状态
+    /// （isRunning/runningLink 不动，只动
+    /// CZFSingBoxCore.isServiceRunning）。延迟码与 Xray 侧
+    /// 对齐：被拒记 10000（界面“不通”，清理可删），超时
+    /// 或失败记 11000（界面“超时”，实际含义是超时或失败，
+    /// 不是已证实的超时——v1 已知局限，见汇报）。
+    private func probeSingBoxNode(link: String, host: String) -> CZFNodePingResult? {
+        vpnCoreLock.lock()
+        // 主核心在跑，或上个临时实例泄漏未停（崩溃才可能），
+        // 都算占用：不与任何已跑实例同进程起第二个。
+        let occupied = isRunning || CZFSingBoxCore.isServiceRunning
+        vpnCoreLock.unlock()
+        if occupied { return nil }
+        let config: String
+        do {
+            config = try CZFSingBoxConfig.configJSON(for: link, socksPort: 10927, httpPort: nil)
+        } catch {
+            return CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+        }
+        // 拿着锁起临时实例：起完（flag 已置 true）再放锁，
+        // 主核心的 start 拿不到锁就进不来，不可能插进
+        // “检查完还没起”的窗口。只锁起实例这一下，不锁
+        // 整个探针（探针要几秒，锁全程会冻住起核心）。
+        vpnCoreLock.lock()
+        if isRunning || CZFSingBoxCore.isServiceRunning {
+            vpnCoreLock.unlock()
+            return nil
+        }
+        do {
+            try CZFSingBoxCore.start(configJSON: config)
+        } catch {
+            vpnCoreLock.unlock()
+            return CZFNodePingResult(success: false, delay: 11000)
+        }
+        vpnCoreLock.unlock()
+        defer { try? CZFSingBoxCore.stop() }
+        let probe = CZFSingBoxProbe.probe(port: 10927, host: host, timeout: 5)
+        if probe.success {
+            return CZFNodePingResult(success: true, delay: probe.delayMs)
+        }
+        if probe.rejected {
+            return CZFNodePingResult(success: false, delay: 10000)
+        }
+        return CZFNodePingResult(success: false, delay: 11000)
     }
 
     // MARK: - 老格式链接翻译

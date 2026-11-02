@@ -17,6 +17,7 @@
 		17554B732DA16988004C6D90 /* OpenSSL.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 17554B712DA16988004C6D90 /* OpenSSL.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		17554B742DA169AA004C6D90 /* OpenSSL.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 17554B712DA16988004C6D90 /* OpenSSL.xcframework */; };
 		4459ED061C424CF79B4343B0 /* LibXray.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D59BEE15A1454ABDBFD6D5EC /* LibXray.xcframework */; };
+		B70547605860B60600FA4792 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 581B765A2EFF17A233A2216F /* Libbox.xcframework */; };
 		632A4EF81BC04C03BADF6EF2 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = D0DE5359A4284189A2E68E22 /* libresolv.tbd */; };
 		228C38C9B1A54F77929F282C /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C005B99B4141465597AE1E9A /* Security.framework */; };
 		17CAE6262F230548008B1977 /* LiveContainerShared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E1292BD62DCA3B660065E12D /* LiveContainerShared.framework */; };
@@ -178,6 +179,7 @@
 		174140D52D9C176700F3F928 /* libarchive.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libarchive.tbd; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.2.sdk/usr/lib/libarchive.tbd; sourceTree = DEVELOPER_DIR; };
 		17554B712DA16988004C6D90 /* OpenSSL.xcframework */ = {isa = PBXFileReference; expectedSignature = "AppleDeveloperProgram:67RAULRX93:Marcin Krzyzanowski"; lastKnownFileType = wrapper.xcframework; name = OpenSSL.xcframework; path = OpenSSL/Frameworks/OpenSSL.xcframework; sourceTree = "<group>"; };
 		D59BEE15A1454ABDBFD6D5EC /* LibXray.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = LibXray.xcframework; path = Vendor/LibXray.xcframework; sourceTree = "<group>"; };
+		581B765A2EFF17A233A2216F /* Libbox.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libbox.xcframework; path = Vendor/Libbox.xcframework; sourceTree = "<group>"; };
 		D0DE5359A4284189A2E68E22 /* libresolv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
 		C005B99B4141465597AE1E9A /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		17CAE6172F230449008B1977 /* LaunchAppExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = LaunchAppExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -350,6 +352,7 @@
 				E16D95752E1CD2B90068EB63 /* LiveContainerShared.framework in Frameworks */,
 				174140D62D9C176F00F3F928 /* libarchive.tbd in Frameworks */,
 				4459ED061C424CF79B4343B0 /* LibXray.xcframework in Frameworks */,
+				B70547605860B60600FA4792 /* Libbox.xcframework in Frameworks */,
 				632A4EF81BC04C03BADF6EF2 /* libresolv.tbd in Frameworks */,
 				228C38C9B1A54F77929F282C /* Security.framework in Frameworks */,
 			);
@@ -447,6 +450,7 @@
 				E1946AD63041BFDD005CBEDD /* IOKit.framework */,
 				17554B712DA16988004C6D90 /* OpenSSL.xcframework */,
 				D59BEE15A1454ABDBFD6D5EC /* LibXray.xcframework */,
+				581B765A2EFF17A233A2216F /* Libbox.xcframework */,
 				174140D52D9C176700F3F928 /* libarchive.tbd */,
 				D0DE5359A4284189A2E68E22 /* libresolv.tbd */,
 				C005B99B4141465597AE1E9A /* Security.framework */,

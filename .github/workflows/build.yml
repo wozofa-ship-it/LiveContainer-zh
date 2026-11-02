@@ -55,11 +55,25 @@ jobs:
           echo "file_to_build=$file_to_build" >> $GITHUB_OUTPUT
       - name: Fetch LibXray (for per-app VPN core)
         run: |
-          curl -L -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.17/libxray-apple-cgo.zip
+          curl -L -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.31/libxray-apple-cgo.zip
           unzip -o -q /tmp/libxray.zip -d /tmp/libxray
           mkdir -p Vendor
           cp -R /tmp/libxray/libxray-apple-cgo/LibXray.xcframework Vendor/
           ls Vendor/LibXray.xcframework
+      - name: Setup Go (for sing-box Libbox build)
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build Libbox.xcframework (for sing-box VPN core)
+        run: |
+          cd SingBoxGo
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          go get -tool golang.org/x/mobile/cmd/gobind
+          go mod tidy
+          mkdir -p ../Vendor
+          gomobile bind -target ios -tags "with_quic with_wireguard with_naive_outbound" -o ../Vendor/Libbox.xcframework ./libbox
+          ls ../Vendor/Libbox.xcframework
       - name: Archive
         env:
           scheme: ${{ steps.scheme.outputs.scheme }}
