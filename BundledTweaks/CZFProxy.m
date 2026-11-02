@@ -1034,6 +1034,9 @@ static NSURLSessionConfiguration *CZFStampConfig(NSURLSessionConfiguration *conf
     NSMutableDictionary *merged = [config.connectionProxyDictionary mutableCopy] ?: [NSMutableDictionary dictionary];
     [merged addEntriesFromDictionary:CZFProxyDict()];
     config.connectionProxyDictionary = merged;
+    // 会话配置真盖上代理字典，同样证明钩子层活着，自检翻成 1
+    //（只走会话、不走 getaddrinfo 的 App，全靠这一路翻正）。
+    gStatSelfTest = 1;
     __sync_add_and_fetch(isFactory ? &gStatCfg : &gStatSwizzled, 1);
     CZFWriteStats(NO);
     return config;
@@ -1162,6 +1165,10 @@ static int CZFGetAddrInfo(const char *node, const char *service, const struct ad
     // 节点逐个 free，正好对得上（POSIX 布局）。
     *res = ai;
     __sync_add_and_fetch(&gStatGaiFake, 1);
+    // 真实发过一次假 IP，就说明钩子在本进程活着：构造器里的自调
+    // 只在加载时测一次，之后再多真实流量也不改自检值，旧逻辑下
+    // 自检会恒为 0 误报“钩子没装上”。这里一有真实拦截就翻成 1。
+    gStatSelfTest = 1;
     CZFWriteStats(NO);
     return 0;
 }
@@ -1240,6 +1247,9 @@ static void CZFProxyInit(void) {
     // 自检：钩子装完立刻自调一次解析——计数涨了说明本进程的
     // 符号重绑真的活着（区分"钩子失效"与"App 不走这些接口"）。
     // 查的是不存在的域名，我的钩子会同步发假 IP，不碰真网络。
+    // 注意：这只是初值。构造器里这次自调若没经过钩子会测出 0，
+    // 之后真实流量一到（发假 IP 或盖会话配置），自检就翻成 1，
+    // 不再留陈旧的 0 误报“钩子没装上”。
     int64_t gaiBefore = gStatGaiFake;
     struct addrinfo *selfRes = NULL;
     getaddrinfo("czf-selftest.invalid", "443", NULL, &selfRes);
