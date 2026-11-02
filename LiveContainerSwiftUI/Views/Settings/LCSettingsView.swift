@@ -137,7 +137,7 @@ struct LCSettingsView: View {
     // 通知就会静默丢掉；这行就是让用户一眼看到授权状态、
     // 点一下补申请或跳系统设置。
     @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
-    // App 内更新检查（CZF，2026-10-29）：查 fork 自己的 nightly
+    // App 内更新检查（CZF，2026-10-29）：查 fork 自己的 update release
     // release，对比本机 LCVersionInfo 里的短提交号；有新版不
     // 自己下载安装（侧载 App 换不了自己的包），而是跳
     // sideinstaller://install?url=，由 SideInstaller 🅥 下载、
@@ -1193,7 +1193,7 @@ private struct CZFVPNNodeLabel: View {
     }
 
     @ViewBuilder private var updateSection: some View {
-        // App 内更新检查：只查 fork 自己的 nightly，不查
+        // App 内更新检查：只查 fork 自己的 update release，不查
         // 上游源（会丢 fork 改动）。有新版时下面多两行
         // “去 SideInstaller 更新”和“去 Seal 更新”，点它直接跳
         // 对应 App 的 install 链接下载安装，不用再去聊天里拿直链。
