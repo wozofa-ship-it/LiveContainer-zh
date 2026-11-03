@@ -1969,15 +1969,16 @@ extension Notification.Name {
         dismissPanelOverlay()
     }
 
-    // 面板下滑关闭的起手限制：App 面板认固定栏整条（约 88pt，
-    // 取 92：顶边 16 + 标题行约 20 + 间距 8 + 图标 40 + 底边 2；
-    // 再往下是运行条，不扩到它），用户 2026-11-03 定固定栏
-    // 往下滑动隐藏面板；源面板没有固定栏，仍只认顶部 52pt
-    // 标题区。面板内的列表滚动一点不受影响；其余手势一律放行。
+    // 面板下滑关闭的起手限制：App 面板认固定栏整条（标题行
+    // 已去掉后约 58pt，取 64：顶边 16 + 图标 40 + 底边 2；
+    // 再往下是运行条（约 66 起），不扩到它），用户 2026-11-03
+    // 定固定栏往下滑动隐藏面板；源面板没有固定栏，仍只认
+    // 顶部 52pt 标题区。面板内的列表滚动一点不受影响；其余
+    // 手势一律放行。
     public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if let hostView = gestureRecognizer.view {
             if hostView === czfPanelOverlayHost?.view {
-                return gestureRecognizer.location(in: hostView).y < 92
+                return gestureRecognizer.location(in: hostView).y < 64
             }
             if hostView === czfSourcesOverlayHost?.view {
                 return gestureRecognizer.location(in: hostView).y < 52
@@ -2791,7 +2792,6 @@ struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
     @ObservedObject var pinnedStore = CZFPinnedAppsStore.shared
     let onLaunch: (LCAppModel) -> Void
-    let onClose: () -> Void
 
     // 固定区顺序跟固定顺序走（不再跟列表排序走）：按住拖动
     // 换位改的就是这个顺序；已删 App 的残留键自然掉。
@@ -2806,21 +2806,9 @@ struct PinnedAppsStripView: View {
         // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
         // 点名"太丑"的主因）；图标 40pt / 圆角 12（用户定小点），
         // 运行区 46pt、列表行 52pt，左边缘对齐即可
+        // 标题行已去掉（用户 2026-11-03 令去最顶部图钉与 ✕）：
+        // 面板改由固定栏往下滑动隐藏，关面板走遮罩点按与下滑。
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 4) {
-                // “固定”俩字已去掉（用户定）：只留图钉标示，
-                // 标题行不占字，看着干净
-                Image(systemName: "pin.fill")
-                    .font(.caption2)
-                Spacer()
-                // 关闭钮并进这一行（原来单独占一整行顶栏，顶部
-                // 一层叠一层，用户点名挤）；动作与原 ✕ 相同
-                Button { onClose() } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
-                }
-            }
-            .foregroundColor(.secondary)
             if pinnedApps.isEmpty {
                 Text("长按下面的 App 可以固定到这里")
                     .font(.caption)
@@ -2933,15 +2921,14 @@ struct AllAppsListView: View {
                 // 顶部固定区（用户定）：不要"App"标题，换成可固定
                 // 的 App 小图标横排（长按下面列表行固定/取消），
                 // 固定区不随列表滚动
-                PinnedAppsStripView(onLaunch: { app in launchApp(app) }, onClose: { closePanel() })
-                // 状态栏条固定在顶部，不随列表滚动；没运行 App
-                // 时不渲染（三个固定按钮已去掉，空条没意义）
-                if !dockManager.apps.isEmpty {
-                    RunningAppsStripView { closePanel() }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                        .padding(.bottom, 10)
-                }
+                PinnedAppsStripView(onLaunch: { app in launchApp(app) })
+                // 状态栏条固定在顶部，不随列表滚动（原来在
+                // ScrollView 里，往下翻卡片后收起/最小化/
+                // 关闭全部就没了，得翻回顶部）
+                RunningAppsStripView { closePanel() }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
                 // 搜索框：固定在运行条下方，不随列表滚动。
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
@@ -3228,14 +3215,11 @@ struct SourcesPanelView: View {
         NavigationView {
             ScrollViewReader { proxy in
             VStack(spacing: 0) {
-                // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）；
-                // 没运行 App 时不渲染
-                if !dockManager.apps.isEmpty {
-                    RunningAppsStripView { closePanel() }
-                        .padding(.horizontal)
-                        .padding(.top, 8)
-                        .padding(.bottom, 10)
-                }
+                // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）
+                RunningAppsStripView { closePanel() }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     // 滚回顶部锚点（条子已挪到 ScrollView 外面，
@@ -3587,12 +3571,9 @@ private struct SourcePanelRow: View {
     }
 }
 
-// 顶部状态栏（App 面板与源面板共用）：只剩横排已打开的
-// App（点按最大化打开，长按小窗口打开，用户定）；三个固定
-// 按钮（收起/最小化/关闭全部）用户 2026-11-03 令去掉，面板
-// 改由固定栏往下滑动隐藏（见面板宿主下滑手势的起手区），
-// 最小化全部/关闭全部随之没了（浮动坞那侧的按钮不动）。
-// 没运行 App 时调用方不渲染本条。
+// 顶部状态栏（App 面板与源面板共用）：最前面是与快捷栏同款
+// 的三个固定按钮（收起/最小化/关闭全部，用户要求加的），后面
+// 横排已打开的 App：点按最大化打开，长按小窗口打开（用户定）。
 // 整条放在浅色圆角底板上，与下面的列表卡片区分开（UI 美化）。
 @available(iOS 16.0, *)
 private struct RunningAppsStripView: View {
@@ -3600,26 +3581,99 @@ private struct RunningAppsStripView: View {
     let onSwitch: () -> Void
 
     var body: some View {
-        // 只有运行 App 横滑（三个固定按钮已去掉，见文件头）；
-        // 没运行 App 时调用方不渲染本条，不留空灰条。
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                ForEach(dockManager.apps) { runningApp in
-                    runningAppItem(runningApp)
+        // 没运行 App 时三个按钮均分整行：原来横滑布局里三个
+        // 按钮全挤左边、右边空一大截，怎么看怎么偏；有运行
+        // App 时仍走横滑，不影响
+        Group {
+            if dockManager.apps.isEmpty {
+                HStack {
+                    Spacer()
+                    collapseStripButton
+                    Spacer()
+                    minimizeAllStripButton
+                    Spacer()
+                    closeAllStripButton
+                    Spacer()
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        collapseStripButton
+                        minimizeAllStripButton
+                        closeAllStripButton
+                        // 分隔线定死 64 高（46 图标+4 间距+约
+                        // 14 文字行高）：原来 50 比图标+文字矮
+                        // 一截看着断开；改随内容撑满后高度成环
+                        // 形依赖，横滑条把整条撑到约 200 高
+                        // （用户点名“这么大”的根因），定死即破环
+                        Divider()
+                            .frame(height: 64)
+                        ForEach(dockManager.apps) { runningApp in
+                            runningAppItem(runningApp)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                }
+                // 横滑条锁死内容高：不锁的话高度一含糊就
+                // 跟着面板往上撑（与分隔线是同一类毛病）
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
         }
-        // 横滑条锁死内容高：不锁的话高度一含糊就
-        // 跟着面板往上撑
-        .fixedSize(horizontal: false, vertical: true)
-        // 高度：46 图标+4 间距+caption2 一行+上下各 6 ≈ 75；
-        // 下限钉 78，列表不跟着伸缩；只钉下限，大字号
+        // 两态同高：没运行 App 是均分 HStack、有运行 App
+        // 是横滑 ScrollView，量出来都是 46 图标+4 间距+
+        // caption2 一行+上下各 6 ≈ 75；下限钉 78，两态
+        // 一分不差，列表不跟着伸缩；只钉下限，大字号
         // 下内容长高仍能撑开，不裁字
         .frame(minHeight: 78)
         .background(Color(UIColor.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+    }
+
+    // 三个固定按钮：两态共用同一份定义，改一处即两态一致
+    // （原来两边各写一遍，改漏一边就两态不一致）。布局
+    // （均分 Spacer / 横滑间距）仍是各分支自己的事。
+    private var collapseStripButton: some View {
+        fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
+            dockManager.toggleDockCollapse()
+            onSwitch()
+        }
+    }
+    private var minimizeAllStripButton: some View {
+        fixedButton(systemImage: "rectangle.stack.badge.minus", tile: Color(.systemGray5), glyph: .primary, label: "最小化") {
+            dockManager.minimizeAllWindows()
+            onSwitch()
+        }
+    }
+    private var closeAllStripButton: some View {
+        fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
+            dockManager.closeAllWindows()
+            onSwitch()
+        }
+    }
+
+    // 固定按钮：浅底 + 深色图标（原来整块实心灰/红加白描边太
+    // 重，用户点名丑）；关闭全部保留红色语义，但改浅红底红图标
+    private func fixedButton(systemImage: String, tile: Color, glyph: Color, label: String, action: @escaping () -> Void) -> some View {
+        VStack(spacing: 4) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(tile)
+                    .frame(width: 46, height: 46)
+                Image(systemName: systemImage)
+                    .foregroundColor(glyph)
+                    .font(.system(size: 18, weight: .semibold))
+            }
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .frame(width: 60)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { action() }
     }
 
     // 已打开的 App：点按切前台并最大化，长按切前台并小窗口
