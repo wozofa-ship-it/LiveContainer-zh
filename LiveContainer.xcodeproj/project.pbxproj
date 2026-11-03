@@ -42,6 +42,7 @@
 		1E897DA065C48F4AD87C3077 /* CZFSingBoxProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 989F31049DE845756C8F8A85 /* CZFSingBoxProbe.swift */; };
 		4BC2C78E5F0B4AF044A63C1D /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C005B99B4141465597AE1E9A /* Security.framework */; };
 		2F5054A546B6CC02E86866C7 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8DB7510961810EA66D691F6 /* SystemConfiguration.framework */; };
+		72F55252E5C1D7EB473276F1 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = D0DE5359A4284189A2E68E22 /* libresolv.tbd */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -426,6 +427,7 @@
 				B70547605860B60600FA4792 /* Libbox.xcframework in Frameworks */,
 				4BC2C78E5F0B4AF044A63C1D /* Security.framework in Frameworks */,
 				2F5054A546B6CC02E86866C7 /* SystemConfiguration.framework in Frameworks */,
+				72F55252E5C1D7EB473276F1 /* libresolv.tbd in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
