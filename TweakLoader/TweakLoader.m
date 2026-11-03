@@ -279,15 +279,19 @@ static BOOL CZFTouchOnControlOrSlider(UITouch *touch) {
 @end
 
 // 左缘往外 flick 判据（灵敏修法，不动 20pt 宽度与高度带）：
-// 贴边起手 + 净左移 ≥8pt + 横向速度 ≥300pt/s。往外 flick
-// 手指很快离屏、横向行程天然只有 20pt，拇指弧线纵向分量
-// 大，方向比（0.9/0.4）会把 flick 判掉；速度是 flick 与慢
-// 速竖滑漂移的分界（竖滑横向速度不够）。落点贴边 12 不用
-// 另写：起手 ≤20 + 左移 ≥8 ⇒ 落点 ≤12 恒成立。
+// 贴边起手 + 净左移（仅作方向确认，≥2pt）+ 左向速度
+// ≥300pt/s。旧判据 dx ≤ -8 是写错的根因：手指起于边缘、
+// 往外没有行程——拇指贴边时质心本来就在 15–20pt，往左
+// 一共只能移几 pt 就离屏，8pt 行程根本凑不齐，纯左滑
+// 全被判掉（右滑再左滑才活：右滑先腾出 room，左扫净
+// 位移才够 8pt）。速度才是 flick 的信号：300pt/s 左向
+// 快扫不是 App 内容操作（竖滑横向速度不够、慢拖速度
+// 不够）；velX 必须带符号（≤ -300）：只认左向速度，
+// 右向折返（净位移仍为负、速度已转正）不得误触发。
 // velX 来源：pan 路用 velocityInView（瞬时速度），漏斗路
 // 用最后一段位移除以时间（见 CZFFunnelObserve）。
 static BOOL CZFIsOutwardFlick(NSInteger startEdge, BOOL startAtEdge, CGFloat dx, CGFloat velX) {
-    return startEdge == 1 && startAtEdge && dx <= -8 && fabs(velX) >= 300;
+    return startEdge == 1 && startAtEdge && dx <= -2 && velX <= -300;
 }
 
 // 终结时贴边往外判据（漏斗 Ended 与 pan Cancelled 共用）：
@@ -513,7 +517,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // 起手在左边缘（2026-10-23 真机纠正后对调）：往里拖
         // （手指右移，门槛30）= App 面板——往里是 App 内常用
         // 方向，门槛保持严，宁可多滑一点也不抢 App 的指令；
-        // 往外弹（手指左移，门槛6）= 源面板
+        // 往外弹（手指左移，门槛6，flick 不走位移门槛）= 源面板
         // 往外弹带放宽后：往里拖仍只认普通带，往外弹带起手
         // 的往里拖到这里直接返回；往外弹不要求普通带。
         if (draggingRight) {
@@ -522,7 +526,10 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
             notificationName = @"czf.dock.openPanel";
             selectorName = @"czfOpenAppPanel";
         } else {
-            if (absX <= 6) return;
+            // flick 不走位移门槛：速度已证明是快扫，边缘起手
+            // 的 flick 行程只有几 pt，6pt 门槛会把它判掉（纯
+            // 左滑死的根因之二）；非 flick 仍要 >6pt 防误触。
+            if (!czfOutwardFlick && absX <= 6) return;
             notificationName = @"czf.dock.openSources";
             selectorName = @"czfOpenSourcesPanel";
         }
