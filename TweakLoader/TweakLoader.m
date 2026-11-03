@@ -278,6 +278,18 @@ static BOOL CZFTouchOnControlOrSlider(UITouch *touch) {
 - (void)czfPostNotification:(NSString *)notificationName selectorName:(NSString *)selectorName;
 @end
 
+// 左缘往外 flick 判据（灵敏修法，不动 20pt 宽度与高度带）：
+// 贴边起手 + 净左移 ≥8pt + 横向速度 ≥300pt/s。往外 flick
+// 手指很快离屏、横向行程天然只有 20pt，拇指弧线纵向分量
+// 大，方向比（0.9/0.4）会把 flick 判掉；速度是 flick 与慢
+// 速竖滑漂移的分界（竖滑横向速度不够）。落点贴边 12 不用
+// 另写：起手 ≤20 + 左移 ≥8 ⇒ 落点 ≤12 恒成立。
+// velX 来源：pan 路用 velocityInView（瞬时速度），漏斗路
+// 用最后一段位移除以时间（见 CZFFunnelObserve）。
+static BOOL CZFIsOutwardFlick(NSInteger startEdge, BOOL startAtEdge, CGFloat dx, CGFloat velX) {
+    return startEdge == 1 && startAtEdge && dx <= -8 && fabs(velX) >= 300;
+}
+
 // 终结兜底判定（与宿主 processGlobalSwipeFallback 同参）：贴边
 // flick 被 App 仲裁取消、或全程方向比过不了严判时，只看物理
 // 结果——净位移方向 + 落点贴边。右边缘此前没有兜底（触摸漏斗
@@ -421,7 +433,13 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         if (!gCZFFired && gCZFStartEdge != 0 && (gCZFStartInBand || gCZFStartInOutwardBand)) {
             NSString *name = nil;
             NSString *selector = nil;
-            if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, gCZFStartInBand, gCZFStartAtEdge, &name, &selector)) {
+            // 被仲裁取消的往外 flick：方向比兜底同样会被弧线
+            // 判掉，速度先判一次（见 CZFIsOutwardFlick），再走
+            // 原兜底；慢速滑动速度不够，仍走原兜底。
+            CGPoint czfCancelVelocity = [gesture velocityInView:gesture.view];
+            if (CZFIsOutwardFlick(gCZFStartEdge, gCZFStartAtEdge, [gesture translationInView:gesture.view].x, czfCancelVelocity.x)) {
+                [self czfPostNotification:@"czf.dock.openSources" selectorName:@"czfOpenSourcesPanel"];
+            } else if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, gCZFStartInBand, gCZFStartAtEdge, &name, &selector)) {
                 [self czfPostNotification:name selectorName:selector];
             }
         }
@@ -451,7 +469,12 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     // 弧线纵向分量大，1.5 倍会把大半次弹滑判掉（用户真机反馈
     // 左缘往左弹很不灵敏），往外方向放宽到 0.9；其余维持 1.5
     BOOL czfOutward = (gCZFStartEdge == 1 && translation.x < 0) || (gCZFStartEdge == 2 && translation.x > 0);
-    if (fabs(translation.x) < (czfOutward ? 0.9 : 1.5) * fabs(translation.y)) return;
+    // 往外 flick 不走方向比（见 CZFIsOutwardFlick）：拇指弧线
+    // 纵向分量大，方向比会把离屏 flick 判掉；慢速竖滑漂移
+    // 速度不够，不会误触。只放行左缘往外，其余方向照旧。
+    CGPoint czfVelocity = [gesture velocityInView:gesture.view];
+    BOOL czfOutwardFlick = CZFIsOutwardFlick(gCZFStartEdge, gCZFStartAtEdge, translation.x, czfVelocity.x);
+    if (!czfOutwardFlick && fabs(translation.x) < (czfOutward ? 0.9 : 1.5) * fabs(translation.y)) return;
     BOOL draggingRight = translation.x > 0;
     CGFloat absX = fabs(translation.x);
     NSString *notificationName = nil;
@@ -570,7 +593,9 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                 CGFloat winHeight = window.bounds.size.height;
                 if (loc.x <= 96 && loc.y >= winHeight * 0.55 && loc.y <= winHeight * 0.93) {
                     BOOL inOldBand = (loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90);
-                    gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO, @(inOldBand) ];
+                    // 后三位记最后一段位移的起点（终结时算 flick
+                    // 速度用）：起手时最后一段就是起手本身。
+                    gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO, @(inOldBand), @(loc.x), @(loc.y), @(touch.timestamp) ];
                 }
                 break;
             }
@@ -582,6 +607,12 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                 // 的是 Cancelled 而非 Ended——终结事件（含取消）必须
                 // 一视同仁地判，判完再清状态。
                 NSArray *state = gCZFTouchStates[key];
+                if (touch.phase == UITouchPhaseMoved && state && ![state[2] boolValue]) {
+                    // 记最后一段位移的起点（终结时算 flick 速度
+                    // 用）：只改后三位，起手与 fired 标志不动，
+                    // 判定仍用起手算的净位移。
+                    gCZFTouchStates[key] = @[ state[0], state[1], state[2], state[3], @(loc.x), @(loc.y), @(touch.timestamp) ];
+                }
                 if (state && ![state[2] boolValue]) {
                     CGFloat dx = loc.x - [state[0] doubleValue];
                     CGFloat dy = loc.y - [state[1] doubleValue];
@@ -613,7 +644,14 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         // 十几 pt、大半次滑够不着，真机反馈不灵敏）。
                         // 方向比只留 0.4 的底线挡纯竖滑（竖滑
                         // 被取消时落点不在边缘，也进不来）。
-                        if ([state[0] doubleValue] <= kCZFEdgeTouchMax && dx <= -8 && loc.x <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
+                        // 终结 flick 速度（见 CZFIsOutwardFlick）：最后
+                        // 一段位移除以时间，dt ≤ 0 时记 0（只走方
+                        // 向比那条）；起手贴边已由外层条件保证，
+                        // 这里直接复用同一判据，不另写门槛。
+                        NSTimeInterval czfFunnelDt = touch.timestamp - [state[6] doubleValue];
+                        CGFloat czfFunnelVelX = (czfFunnelDt > 0) ? ((loc.x - [state[4] doubleValue]) / czfFunnelDt) : 0;
+                        BOOL czfFunnelAtEdge = ([state[0] doubleValue] <= kCZFEdgeTouchMax);
+                        if (czfFunnelAtEdge && dx <= -8 && loc.x <= 12 && (fabs(dx) > 0.4 * fabs(dy) || CZFIsOutwardFlick(1, czfFunnelAtEdge, dx, czfFunnelVelX))) {
                             fireName = @"czf.dock.openSources";
                             fireSelector = @"czfOpenSourcesPanel";
                         } else if ([state[0] doubleValue] <= kCZFEdgeTouchMax && dx >= 44 && fabs(dx) > 0.8 * fabs(dy) && [state[3] boolValue]) {
@@ -628,7 +666,7 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         }
                     }
                     if (fireName) {
-                        gCZFTouchStates[key] = @[ state[0], state[1], @YES, state[3] ];
+                        gCZFTouchStates[key] = @[ state[0], state[1], @YES, state[3], state[4], state[5], state[6] ];
                         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
                         if (now - gCZFLastFunnelFire >= 0.6) {
                             gCZFLastFunnelFire = now;
