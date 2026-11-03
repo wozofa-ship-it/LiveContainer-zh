@@ -1401,17 +1401,11 @@ extension Notification.Name {
     private static var czfEdgeSensitivity: Int {
         UserDefaults.standard.object(forKey: "CZFEdgeSensitivity") as? Int ?? 1
     }
-    // 往外弹专用启用带：只放宽往外弹（左缘左移→源面板），
-    // 往里拖仍认上面的普通带。顶部留出上半屏（导航/控件
-    // 区），底部留出 Home 指示条区，不放满全高；往外弹
-    // 物理上滑出屏幕、没有 App 手势同轨，放宽不抢东西。
-    // 插件侧写死中档，取这里的中档值（0.55–0.93）保持一致。
+    // 往外弹启用带：用户 2026-11-03 令往外弹高度跟 App 面板
+    // 一样——即上面的普通带（原放宽值中档 0.55–0.93 已废）。
+    // 插件侧写死中档普通带值（0.70–0.90），与这里中档一致。
     private static var czfEdgeOutwardBandValues: (top: CGFloat, bottom: CGFloat) {
-        switch czfEdgeSensitivity {
-        case 0: return (0.65, 0.90)
-        case 2: return (0.50, 0.95)
-        default: return (0.55, 0.93)
-        }
+        czfEdgeBandValues
     }
     private static var czfEdgeOutwardBandTop: CGFloat { czfEdgeOutwardBandValues.top }
     private static var czfEdgeOutwardBandBottom: CGFloat { czfEdgeOutwardBandValues.bottom }
@@ -1512,8 +1506,8 @@ extension Notification.Name {
             // = App 面板，往外弹（手指左移）= 源面板。门槛跟着动作
             // 的物理方向走，不跟面板走（往里拖与 App 内横滑同轨，
             // 门槛保持严；往外弹空间小，门槛保持松）
-            // 往外弹带放宽后：往外弹认普通带或往外弹带，往里拖
-            // 只认普通带——往外弹带起手的往里拖到这里照样不触发。
+            // 往外弹带已与普通带同值（用户 2026-11-03 令）：往外弹
+            // 与往里拖都只认普通带。
             if dx <= -8 * s, endX <= 12, abs(dx) > 0.4 * abs(dy), startInBand || startInOutwardBand {
                 fireDockAction { self.czfOpenSourcesPanel() }
             } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
@@ -1566,8 +1560,8 @@ extension Notification.Name {
             // = 源面板。与插件侧判定保持一致；门槛跟着物理方向
             // 走：往里拖与 App 内横滑同轨，30 的门槛只认边缘起手
             // 的决断横拖，不抢 App 自己的滑动。
-            // 往外弹带放宽后：往外弹认普通带或往外弹带，往里拖
-            // 只认普通带——往外弹带起手的往里拖到这里返回 false
+            // 往外弹带已与普通带同值（用户 2026-11-03 令）：往外弹
+            // 与往里拖都只认普通带——带外起手的往里拖到这里返回 false
             // 不闩锁，之后改往外弹仍能触发。
             if draggingRight {
                 guard startInBand else { return false }

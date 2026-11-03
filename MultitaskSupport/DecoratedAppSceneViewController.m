@@ -553,11 +553,9 @@
         } completion:^(BOOL finished) {
             self.czfMaximizeAnimating = NO;
             [self czfSaveWindowState];
-            // 还原成小窗口后必须重算标题栏显隐：最大化时若快捷栏是
-            // 收起的，栏被自动藏了（沉浸全屏）；不重算的话还原后栏
-            // 永久卡在隐藏——拖动和最大/最小化按钮都在栏上，窗口
-            // 就成了拖不动、关不掉的死窗。最大化分支有重算，还原
-            // 分支漏了，这里补上。
+            // 还原成小窗口后重算标题栏布局：2026-11-03 起标题栏
+            // 不再随收起 + 最大化自动藏，最大化分支与还原分支
+            // 都重算，布局与按钮图标保持同步。
             [self updateVerticalConstraints];
             UIImage *maximizeImage = [UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right.circle"];
             UIImageConfiguration *maximizeConfig = [UIImageSymbolConfiguration configurationWithPointSize:16.0 weight:UIImageSymbolWeightMedium];
@@ -823,7 +821,11 @@
     [self.view layoutIfNeeded];
     [UIView animateWithDuration:0.3 animations:^{
         BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
-        BOOL hideWindowBar = MultitaskDockManager.shared.isCollapsed && self.isMaximized;
+        // 用户 2026-11-03 令：最大化最小化栏恢复回来——标题栏
+        // 不再随快捷栏收起 + 最大化自动藏（原上游沉浸全屏规则
+        // 已废）；收起只收快捷栏本身，不再连带藏标题栏，最大
+        // 化时最小化/最大化/关闭按钮一直在。
+        BOOL hideWindowBar = NO;
         CGFloat navBarHeight = hideWindowBar ? 0 : 44;
         self.navigationBar.alpha = hideWindowBar ? 0 : 1;
         self.navigationBar.hidden = hideWindowBar;
