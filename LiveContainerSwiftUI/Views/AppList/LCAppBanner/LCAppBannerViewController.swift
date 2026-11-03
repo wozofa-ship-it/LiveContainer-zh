@@ -21,8 +21,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     private let bannerView = LCAppBannerRootView()
     private var configuration: LCAppBannerConfiguration
     private var exportTemporaryDirectory: URL?
-    // dock 条目变化时重绘画片（运行态角标读 dock 存活态，不订阅
-    // 的话角标只在模型变化时重绘、窗口开关后仍是旧态）。
+    // dock 条目变化时重绘画片（卡片状态读 dock 存活态，不订阅
+    // 的话只在模型变化时重绘、窗口开关后仍是旧态）。
     private var dockAppsCancellable: AnyCancellable?
     // 长按启动调面板的时间戳：长按后抬手会顺带触发一次
     // touchUpInside，1.5 秒内的这次点按要吞掉，否则长按
@@ -61,7 +61,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
         bannerView.addInteraction(UIContextMenuInteraction(delegate: self))
 
-        // dock 变化（窗口开关）即重绘画片，运行态角标才跟得上；
+        // dock 变化（窗口开关）即重绘画片，卡片状态才跟得上；
         // 订阅即发一次当前值，多一次无害重绘。
         if #available(iOS 16.0, *) {
             dockAppsCancellable = MultitaskDockManager.shared.$apps

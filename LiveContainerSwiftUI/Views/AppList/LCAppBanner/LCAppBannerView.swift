@@ -27,7 +27,6 @@ final class LCAppBannerRootView: UIView {
     private let jitBadge = LCAppBannerBadgeView(symbolName: "bolt.fill")
     private let lockBadge = LCAppBannerBadgeView(symbolName: "lock.fill")
     private let bit32Badge = LCAppBannerBadgeView(text: "32")
-    private let runningBadge = LCAppBannerBadgeView(text: "lc.appBanner.running".loc)
     private let nameSpacer = UIView()
     private let nameStack = UIStackView()
     private let detailStack = UIStackView()
@@ -82,7 +81,6 @@ final class LCAppBannerRootView: UIView {
         nameStack.addArrangedSubview(jitBadge)
         nameStack.addArrangedSubview(bit32Badge)
         nameStack.addArrangedSubview(lockBadge)
-        nameStack.addArrangedSubview(runningBadge)
         nameStack.addArrangedSubview(nameSpacer)
 
         detailStack.translatesAutoresizingMaskIntoConstraints = false
@@ -218,21 +216,6 @@ final class LCAppBannerRootView: UIView {
         lockBadge.backgroundColor = .systemGray
         bit32Badge.isHidden = !model.uiIs32bit
         bit32Badge.backgroundColor = .systemGray
-        // 运行态角标（跟其他角标同款中性灰）：窗口在跑（含最小化）
-        // 就亮，点 ▶ 把窗口带回前台（见控制器 runButtonTapped）。
-        // 以前读 isAppRunning 启动瞬态（签名那几秒亮、真跑起来
-        // 反而灭）；现读 dock 条目存活态，16 以下无 dock 时回落
-        // 旧逻辑。dock 变化时控制器订阅刷新（见 viewDidLoad），
-        // 不然角标只在模型变化时才重绘、仍是旧态。
-        let isRunning: Bool
-        if #available(iOS 16.0, *) {
-            let uuid = model.uiSelectedContainer?.folderName ?? model.appInfo.dataUUID
-            isRunning = uuid.map { id in MultitaskDockManager.shared.apps.contains { $0.appUUID == id } } ?? false
-        } else {
-            isRunning = model.isAppRunning
-        }
-        runningBadge.isHidden = !isRunning
-        runningBadge.backgroundColor = .systemGray
 
         visualBackgroundView.backgroundColor = dynamicColors
             ? mainColor.withAlphaComponent(0.5)
