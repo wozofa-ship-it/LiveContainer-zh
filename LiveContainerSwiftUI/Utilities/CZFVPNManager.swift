@@ -667,6 +667,13 @@ public final class CZFVPNManager {
             }
             coreOwnerAppInfo = appInfo
             scheduleRotateCheck()
+        } else {
+            // 启动时节点起不来就地往下一个切：之前是起不来
+            // 就停在死节点上，App 一直不通；轮换要等 10 次
+            // 失败才触发，根本等不到。排序与轮换同款（新鲜
+            // 测速从快到慢，没测速排最后），钉死的改 override，
+            // 跟随全局的改全局活动节点；一圈都不通就停。
+            startFallback(from: link, for: appInfo)
         }
     }
 
@@ -935,6 +942,37 @@ public final class CZFVPNManager {
     // 钉死过就改它的 override（轮换后仍钉死在新节点，不回落
     // 全局），跟随全局就改全局活动节点。起不来的节点继续往
     // 下一个切，一圈都起不来就停轮换、写原因，不再无限重启。
+    // 启动失败时的就地切节点（ensureRunning 专用）：候选按
+    // 新鲜测速从快到慢（与轮换同款排序），跳过刚失败的那条；
+    // 成功后按轮换同款改钉死/全局，并接管归属、排轮换检查；
+    // 一圈都不通就停，lastError 留最后一次失败原因。
+    private func startFallback(from failedLink: String, for appInfo: LCAppInfo?) {
+        let links = nodeLinks
+        guard links.count >= 2 else { return }
+        var cands: [(link: String, idx: Int, delay: Int)] = []
+        for (idx, cand) in links.enumerated() {
+            if cand == failedLink { continue }
+            if !Self.isSupportedNodeScheme(Self.nodeScheme(for: cand)) { continue }
+            cands.append((cand, idx, Self.freshPingDelay(for: cand) ?? Int.max))
+        }
+        cands.sort { ($0.delay, $0.idx) < ($1.delay, $1.idx) }
+        for cand in cands {
+            if start(withLink: cand.link) {
+                if Self.nodeOverride(for: appInfo) != nil {
+                    Self.setNodeOverride(cand.link, for: appInfo)
+                } else {
+                    UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
+                }
+                if let bid = appInfo?.bundleIdentifier() {
+                    coreOwnerBundleId = bid
+                }
+                coreOwnerAppInfo = appInfo
+                scheduleRotateCheck()
+                return
+            }
+        }
+    }
+
     private func rotateToNextNode() {
         guard let appInfo = coreOwnerAppInfo else { return }
         let links = nodeLinks

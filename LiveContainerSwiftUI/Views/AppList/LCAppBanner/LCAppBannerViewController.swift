@@ -24,6 +24,10 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // dock 条目变化时重绘画片（运行态角标读 dock 存活态，不订阅
     // 的话角标只在模型变化时重绘、窗口开关后仍是旧态）。
     private var dockAppsCancellable: AnyCancellable?
+    // 长按启动调面板的时间戳：长按后抬手会顺带触发一次
+    // touchUpInside，1.5 秒内的这次点按要吞掉，否则长按
+    // 又出面板又启动，面板会被盖住。
+    private var runControlLongPressAt: Date?
     
     init(delegate: LCAppBannerDelegate, config: LCAppBannerConfiguration) {
         self.delegate = delegate
@@ -44,6 +48,12 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
         preferredContentSize = CGSize(width: 0, height: LCAppBannerRootView.bannerHeight)
         bannerView.runControl.addTarget(self, action: #selector(runButtonTapped), for: .touchUpInside)
+        // 长按启动调手势面板（全部卡片通用）：边缘手势在客
+        // App 里有时不灵，长按启动是宿主侧的可靠触发；点按
+        // 仍是启动（大窗口）。行菜单已排除 runControl 区域，
+        // 长按不会同时弹出行菜单。
+        let runLongPress = UILongPressGestureRecognizer(target: self, action: #selector(runControlLongPressed(_:)))
+        bannerView.runControl.addGestureRecognizer(runLongPress)
         // 面板同款次级按钮（16+ 才建，见 RootView；16 以下为 nil，不挂）。
         if #available(iOS 16.0, *) {
             bannerView.minimizeControl?.addTarget(self, action: #selector(minimizeButtonTapped), for: .touchUpInside)
@@ -114,7 +124,19 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         openSettings()
     }
 
+    // 长按启动只调面板、不启动：.began 只发一次；抬手那下
+    // 的 touchUpInside 由 runButtonTapped 里的时间戳吞掉。
+    @objc private func runControlLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        runControlLongPressAt = Date()
+        MultitaskDockManager.shared.czfOpenAppPanel()
+    }
+
     @objc private func runButtonTapped() {
+        if let pressedAt = runControlLongPressAt, Date().timeIntervalSince(pressedAt) < 1.5 {
+            runControlLongPressAt = nil
+            return
+        }
         // 启动 = 大窗口（3.8.238 重修：3.8.237 只在 isUsing 门
         // 内的带回路上拉满，门一关（isUsing 不同步、或归属
         // 不明）就落到 runApp 空转、窗还是小的，用户看到的

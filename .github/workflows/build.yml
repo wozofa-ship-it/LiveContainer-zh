@@ -74,7 +74,7 @@ jobs:
           mkdir -p ../Vendor
           # 只编真机 arm64：-target ios 会自动加 iossimulator 切片，
           # 本工程只编真机包，模拟器切片用不上。
-          gomobile bind -target ios/arm64 -tags "with_quic" -o ../Vendor/Libbox.xcframework ./libbox
+          gomobile bind -ldflags "-s -w" -target ios/arm64 -tags "with_quic" -o ../Vendor/Libbox.xcframework ./libbox  # 去符号+Dwarf：给包瘦身（行为不变）
           ls -lh ../Vendor/Libbox.xcframework/ios-arm64/Libbox.framework/Libbox
           ls ../Vendor/Libbox.xcframework
       - name: Archive
