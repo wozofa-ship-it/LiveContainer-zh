@@ -1070,9 +1070,9 @@ private struct CZFVPNNodeLabel: View {
                     Text("上次测速被在跑的核心占用，结果没更新：先停核心再测更准，清理/排序按上次真测结果")
                         .font(.footnote)
                         .foregroundStyle(.orange)
+                    // startVPNPing 已包办停核心→测速→重启，
+                    // 这里不用再手动 stop（原来两处停逻辑漂移）。
                     Button("停核心重测") {
-                        CZFVPNManager.shared.stop()
-                        refreshVPNState()
                         startVPNPing()
                     }
                     .buttonStyle(.borderless)
@@ -1159,7 +1159,7 @@ private struct CZFVPNNodeLabel: View {
                 .font(.footnote)
                 .buttonStyle(.plain)
                 if showVPNHelp {
-                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2/tuic 等）；转换器只认这几类，未列出的链接会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。\n节点自动轮换开着时，核心在跑的 App 连续失败就自动按列表顺序换下一个支持的节点并重启核心，一圈都不通就停下来等手动处理。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；测延迟会在核心在跑时先停核心、测完重启原来那条；核心没在跑时直接测、不启动。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2/tuic 等）；转换器只认这几类，未列出的链接会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。\n节点自动轮换开着时，核心在跑的 App 连续失败就自动按列表顺序换下一个支持的节点并重启核心，一圈都不通就停下来等手动处理。")
                 }
             }
         }
@@ -1464,6 +1464,11 @@ private struct CZFVPNNodeLabel: View {
         // 测速中界面是空的、要等整轮测完才回来；现在旧
         // 结果先留着（按钮进度另行显示“测速 3/10”），
         // 测完由 completion 整表替换，被拒也不覆写。
+        // 用户 2026-11-03 定的“停止测速启动”：核心在跑时
+        // 先停、测完重启原来那条；核心没在跑时直接测、
+        // 测完不启动。停核心在测速标志立起来之前做，免得
+        // 测速窗口内起停被 deferred 逻辑插队。
+        let pingStoppedCore = CZFVPNManager.shared.stopCoreForPing()
         vpnPinging = true
         vpnPingRejected = false
         vpnPingDone = 0
@@ -1501,6 +1506,11 @@ private struct CZFVPNNodeLabel: View {
                 vpnSingleRejectedLinks = []
                 vpnPingRejected = false
                 savePingResults()
+            }
+            // 停过的核心测完重启原来那条（没停过就不启动）；
+            // 放 refresh 之前，状态行直接显示重启后的状态。
+            if pingStoppedCore {
+                CZFVPNManager.shared.restartCoreAfterPing()
             }
             vpnPinging = false
             vpnPingDone = 0

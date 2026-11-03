@@ -87,6 +87,11 @@ public final class CZFVPNManager {
     // 的 deferredEnsure / 切节点跟随），否则测速结果会被
     // 插队的核心启停打乱（pingBatch 被拒）。
     private var isPinging = false
+    // 测延迟自动停核心的恢复快照：startVPNPing 在核心在跑
+    // 时先停、测完凭它重启原来那条（归属原样）；核心没在
+    // 跑时不写，测完不启动。一次性的，restart 读完即清。
+    private var pingStoppedLink: String?
+    private var pingStoppedOwner: LCAppInfo?
     // 测速窗口内被挡下的开 App 请求：只记最后一个，测速完
     // 再给它 ensureRunning（游客启动时等核心，见 LCAppModel
     // 的 vpnCoreTask；挡下不等于丢掉）。
@@ -1071,6 +1076,59 @@ public final class CZFVPNManager {
             self.delay = delay
             self.conversionFailed = conversionFailed
         }
+    }
+
+    /// 测延迟前停核心（用户 2026-11-03 定的“停止测速启动”）：
+    /// 核心在跑就先记下在跑的链接与归属 App 再停，返回 true；
+    /// 核心没在跑就不动，返回 false（测完也不启动）。
+    /// 快照与停核心同一把递归锁下做，免得抓到的在跑态
+    /// 是另一路 stop/start 做到一半的中间态。stop() 会清
+    /// 掉归属，所以快照必须在 stop() 之前抓。
+    @discardableResult
+    public func stopCoreForPing() -> Bool {
+        vpnCoreLock.lock()
+        defer { vpnCoreLock.unlock() }
+        guard isRunning, let link = runningLink else {
+            pingStoppedLink = nil
+            pingStoppedOwner = nil
+            return false
+        }
+        pingStoppedLink = link
+        pingStoppedOwner = coreOwnerAppInfo
+        stop()
+        return true
+    }
+
+    /// 测延迟完重启原来那条（只在 stopCoreForPing 停过时
+    /// 起作用）：归属 App 的有效链接没变才重启（测速中途
+    /// 用户亲手换了节点就不抢，免得盖掉用户的新选择）；
+    /// 重启走 ensureRunning，归属与轮换巡检原样恢复，起
+    /// 不来走 250 的就地切下一个，不停在死节点上。快照
+    /// 读完即清，重复调用不会二次启动。养号另有 ensureRunning
+    /// 自己的占用守卫兜底（中途别的 App 起了核心就拒绝）。
+    public func restartCoreAfterPing() {
+        vpnCoreLock.lock()
+        let link = pingStoppedLink
+        let owner = pingStoppedOwner
+        pingStoppedLink = nil
+        pingStoppedOwner = nil
+        vpnCoreLock.unlock()
+        guard let link = link else { return }
+        // 测速中途换了目标就不重启旧的：收尾已按用户的新
+        // 选择处理过，旧快照作废。
+        guard effectiveLink(for: owner).trimmingCharacters(in: .whitespacesAndNewlines) == link.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+        ensureRunning(for: owner)
+        // 重启成功后清掉测速收尾置的预热抑制：收尾时核心
+        // 是停的（抑制置真），现在核心又在跑了，抑制前提
+        // 已不存在；重启失败则留着，不让预热去起刚起不来
+        // 的核心。归属 App 的重启已由 ensureRunning 清过，
+        // 这里只补全局（owner 为 nil）那一路。isRunning 与
+        // 清抑制同一把锁下读改，与测速收尾的读法一致。
+        vpnCoreLock.lock()
+        if isRunning {
+            prewarmSuppressedAfterPing = false
+        }
+        vpnCoreLock.unlock()
     }
 
     /// 测全部节点的延迟（libXray 的 pingBatch：临时实例并发
