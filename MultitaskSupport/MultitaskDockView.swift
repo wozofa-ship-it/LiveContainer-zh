@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import Combine
 
 // MARK: - App Info Provider
@@ -2705,6 +2706,17 @@ final class CZFPinnedAppsStore: ObservableObject {
         }
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
     }
+    /// 固定区拖动换位（用户 2026-11-03 定：按住图标拖到目标
+    /// 位置松手）：to 是换位后该项应占的下标（先删后插，
+    /// 与 SwiftUI List 的 move 语义一致）；顺序即时落盘。
+    func movePinned(from source: Int, to destination: Int) {
+        guard source != destination,
+              pinnedIds.indices.contains(source),
+              destination >= 0, destination < pinnedIds.count else { return }
+        let key = pinnedIds.remove(at: source)
+        pinnedIds.insert(key, at: destination)
+        LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+    }
     /// 旧版按包名存的固定项迁移（只跑一次）：单实例的包名直转
     /// 成该实例的键（用户的固定保留）；多实例的包名无法断定
     /// 当初固定的是哪一个，丢弃（用户重固定一次即可，点一下），
@@ -2738,6 +2750,35 @@ final class CZFPinnedAppsStore: ObservableObject {
 // 对齐到 26（外 16 + 内 10，与运行条、列表行图标列同线）、
 // 段间距统一 10；固定区图标行单独内缩 10，标题行不动
 // （标题对齐卡片背景边，图标对齐图标列）。
+// 固定区拖动换位的 DropDelegate：拖过目标图标即换位（松手
+// 即定，不用等放下才动）；拖的键用 @State 传，不读 provider
+// 的异步加载——dropEntered 是同步回调，读 provider 来不及。
+// 拖出目标外取消时不调 performDrop，键残留无害：下一次拖
+// 动起拖即覆盖，dropEntered 只在拖动进行中才触发。
+@available(iOS 16.0, *)
+private struct CZFPinnedReorderDelegate: DropDelegate {
+    let targetIndex: Int
+    let store: CZFPinnedAppsStore
+    @Binding var draggedKey: String?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedKey = draggedKey,
+              store.pinnedIds.indices.contains(targetIndex),
+              store.pinnedIds[targetIndex] != draggedKey,
+              let from = store.pinnedIds.firstIndex(of: draggedKey) else { return }
+        store.movePinned(from: from, to: targetIndex)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedKey = nil
+        return true
+    }
+}
+
 @available(iOS 16.0, *)
 struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
@@ -2745,9 +2786,14 @@ struct PinnedAppsStripView: View {
     let onLaunch: (LCAppModel) -> Void
     let onClose: () -> Void
 
+    // 固定区顺序跟固定顺序走（不再跟列表排序走）：按住拖动
+    // 换位改的就是这个顺序；已删 App 的残留键自然掉。
     private var pinnedApps: [LCAppModel] {
-        sortManager.sortedApps.filter { pinnedStore.isPinned($0) }
+        pinnedStore.pinnedIds.compactMap { id in
+            sortManager.sortedApps.first { CZFPinnedAppsStore.pinKey(for: $0) == id }
+        }
     }
+    @State private var draggedPinKey: String?
 
     var body: some View {
         // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
@@ -2775,15 +2821,28 @@ struct PinnedAppsStripView: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 14) {
-                        ForEach(pinnedApps, id: \.self) { app in
+                        // id 跟 App 走（不用下标）：换位时 SwiftUI 按
+                        // App 身份做移动画，不会把图标内容错位互换。
+                        ForEach(Array(pinnedApps.enumerated()), id: \.element) { pair in
+                            let index = pair.offset
+                            let app = pair.element
                             // 固定区只留图标、不要名字（用户定）：名字
-                            // 字号小又挤，图标本身已够认；点按仍打开
+                            // 字号小又挤，图标本身已够认；点按仍打开。
+                            // 按住拖动换位（用户 2026-11-03 定）：iOS
+                            // 的 onDrag 本来就要按住才起拖，与点按不
+                            // 冲突；拖过目标即换位，松手即定。
                             RunningAppIcon(appInfo: app.appInfo)
                                 .frame(width: 40, height: 40)
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                                 .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 .contentShape(Rectangle())
                                 .onTapGesture { onLaunch(app) }
+                                .onDrag {
+                                    let key = CZFPinnedAppsStore.pinKey(for: app)
+                                    draggedPinKey = key
+                                    return NSItemProvider(object: key as NSString)
+                                }
+                                .onDrop(of: [.text], delegate: CZFPinnedReorderDelegate(targetIndex: index, store: pinnedStore, draggedKey: $draggedPinKey))
                         }
                     }
                     // 图标列对齐：固定区图标左边缘与运行条、列表行
