@@ -949,16 +949,10 @@ public final class CZFVPNManager {
     private func startFallback(from failedLink: String, for appInfo: LCAppInfo?) {
         let links = nodeLinks
         guard links.count >= 2 else { return }
-        var cands: [(link: String, idx: Int, delay: Int)] = []
-        for (idx, cand) in links.enumerated() {
-            if cand == failedLink { continue }
-            if !Self.isSupportedNodeScheme(Self.nodeScheme(for: cand)) { continue }
-            cands.append((cand, idx, Self.freshPingDelay(for: cand) ?? Int.max))
-        }
-        cands.sort { ($0.delay, $0.idx) < ($1.delay, $1.idx) }
+        let cands = Self.sortedSupportedCandidates(links: links, excluding: [failedLink])
         for cand in cands {
             if start(withLink: cand.link) {
-                if Self.nodeOverride(for: appInfo) != nil {
+                if let appInfo = appInfo, Self.nodeOverride(for: appInfo) != nil {
                     Self.setNodeOverride(cand.link, for: appInfo)
                 } else {
                     UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
@@ -1041,15 +1035,24 @@ public final class CZFVPNManager {
     // 仍按列表顺序），而不是按列表顺序——轮换后落在最快的
     // 可用节点上，不会从 465ms 的 TUIC 切到 1791ms 的 VLESS。
     // 没测速数据时退化为原来的列表顺序，行为与之前一致。
-    private func nextSupportedNode(after current: String, links: [String]) -> String? {
+    // 候选节点排序（轮换与启动 fallback 共用）：按新鲜测速从快
+    // 到慢（没测速排最后，仍按列表顺序）；exclude 之外的才进
+    // 候选。抽出来是去重——两边之前各写了一份同样的循环。
+    private static func sortedSupportedCandidates(links: [String], excluding: Set<String>) -> [(link: String, idx: Int, delay: Int)] {
         var cands: [(link: String, idx: Int, delay: Int)] = []
         for (idx, cand) in links.enumerated() {
-            if cand == current || rotateTriedLinks.contains(cand) { continue }
+            if excluding.contains(cand) { continue }
             if !Self.isSupportedNodeScheme(Self.nodeScheme(for: cand)) { continue }
             cands.append((cand, idx, Self.freshPingDelay(for: cand) ?? Int.max))
         }
         cands.sort { ($0.delay, $0.idx) < ($1.delay, $1.idx) }
-        return cands.first?.link
+        return cands
+    }
+
+    private func nextSupportedNode(after current: String, links: [String]) -> String? {
+        var excluding = rotateTriedLinks
+        excluding.insert(current)
+        return Self.sortedSupportedCandidates(links: links, excluding: excluding).first?.link
     }
 
     // MARK: - 节点延迟测试

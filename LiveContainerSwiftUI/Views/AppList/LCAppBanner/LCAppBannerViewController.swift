@@ -128,8 +128,10 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // 的 touchUpInside 由 runButtonTapped 里的时间戳吞掉。
     @objc private func runControlLongPressed(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
-        runControlLongPressAt = Date()
-        MultitaskDockManager.shared.czfOpenAppPanel()
+        if #available(iOS 16.0, *) {
+            runControlLongPressAt = Date()
+            MultitaskDockManager.shared.czfOpenAppPanel()
+        }
     }
 
     @objc private func runButtonTapped() {
