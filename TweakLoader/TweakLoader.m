@@ -290,6 +290,17 @@ static BOOL CZFIsOutwardFlick(NSInteger startEdge, BOOL startAtEdge, CGFloat dx,
     return startEdge == 1 && startAtEdge && dx <= -8 && fabs(velX) >= 300;
 }
 
+// 终结时贴边往外判据（漏斗 Ended 与 pan Cancelled 共用）：
+// 手指起于贴边、净左移 ≥6pt、落点仍在贴边（≤12）且横向
+// 分量过 0.2 底线。终结态才有落点信息，比实时门槛
+// （0.9）宽松是合理的：纯竖滑落点不在贴边，进不来；
+// 拇指弧线纵向分量大的慢速往外滑，0.2 能接住、0.4 接
+// 不住（251 的 flick 只接快速的，慢速仍漏）。实时门槛
+// 不动，免得中途抢滚动。
+static BOOL CZFIsOutwardEnded(NSInteger startEdge, BOOL startAtEdge, CGFloat dx, CGFloat dy, CGFloat endX) {
+    return startEdge == 1 && startAtEdge && dx <= -6 && endX <= 12 && fabs(dx) > 0.2 * fabs(dy);
+}
+
 // 终结兜底判定（与宿主 processGlobalSwipeFallback 同参）：贴边
 // flick 被 App 仲裁取消、或全程方向比过不了严判时，只看物理
 // 结果——净位移方向 + 落点贴边。右边缘此前没有兜底（触摸漏斗
@@ -433,11 +444,13 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         if (!gCZFFired && gCZFStartEdge != 0 && (gCZFStartInBand || gCZFStartInOutwardBand)) {
             NSString *name = nil;
             NSString *selector = nil;
-            // 被仲裁取消的往外 flick：方向比兜底同样会被弧线
-            // 判掉，速度先判一次（见 CZFIsOutwardFlick），再走
-            // 原兜底；慢速滑动速度不够，仍走原兜底。
+            // 被仲裁取消的往外滑：flick（快速）与终结贴边
+            // （慢速弧线，见 CZFIsOutwardEnded）各判一次，
+            // 再走原兜底；三路都不中才是真没滑。
             CGPoint czfCancelVelocity = [gesture velocityInView:gesture.view];
             if (CZFIsOutwardFlick(gCZFStartEdge, gCZFStartAtEdge, [gesture translationInView:gesture.view].x, czfCancelVelocity.x)) {
+                [self czfPostNotification:@"czf.dock.openSources" selectorName:@"czfOpenSourcesPanel"];
+            } else if (CZFIsOutwardEnded(gCZFStartEdge, gCZFStartAtEdge, [gesture translationInView:gesture.view].x, [gesture translationInView:gesture.view].y, [gesture locationInView:gesture.view].x)) {
                 [self czfPostNotification:@"czf.dock.openSources" selectorName:@"czfOpenSourcesPanel"];
             } else if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, gCZFStartInBand, gCZFStartAtEdge, &name, &selector)) {
                 [self czfPostNotification:name selectorName:selector];
@@ -642,16 +655,18 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         // ≥8，就是一次滑出左边缘 = 源面板（2026-10-23
                         // 对调后；门槛原为 15，起手贴边时物理行程总共就
                         // 十几 pt、大半次滑够不着，真机反馈不灵敏）。
-                        // 方向比只留 0.4 的底线挡纯竖滑（竖滑
-                        // 被取消时落点不在边缘，也进不来）。
+                        // 终结判据（见 CZFIsOutwardEnded）：落点在
+                        // 贴边 + 横向分量过 0.2 底线（纯竖滑落点
+                        // 不在贴边，进不来）；0.4 接不住拇指弧线
+                        // 大的慢速往外滑，251 的 flick 只接快速的。
                         // 终结 flick 速度（见 CZFIsOutwardFlick）：最后
-                        // 一段位移除以时间，dt ≤ 0 时记 0（只走方
-                        // 向比那条）；起手贴边已由外层条件保证，
+                        // 一段位移除以时间，dt ≤ 0 时记 0（只走终
+                        // 结判据那条）；起手贴边已由外层条件保证，
                         // 这里直接复用同一判据，不另写门槛。
                         NSTimeInterval czfFunnelDt = touch.timestamp - [state[6] doubleValue];
                         CGFloat czfFunnelVelX = (czfFunnelDt > 0) ? ((loc.x - [state[4] doubleValue]) / czfFunnelDt) : 0;
                         BOOL czfFunnelAtEdge = ([state[0] doubleValue] <= kCZFEdgeTouchMax);
-                        if (czfFunnelAtEdge && dx <= -8 && loc.x <= 12 && (fabs(dx) > 0.4 * fabs(dy) || CZFIsOutwardFlick(1, czfFunnelAtEdge, dx, czfFunnelVelX))) {
+                        if (CZFIsOutwardEnded(1, czfFunnelAtEdge, dx, dy, loc.x) || CZFIsOutwardFlick(1, czfFunnelAtEdge, dx, czfFunnelVelX)) {
                             fireName = @"czf.dock.openSources";
                             fireSelector = @"czfOpenSourcesPanel";
                         } else if ([state[0] doubleValue] <= kCZFEdgeTouchMax && dx >= 44 && fabs(dx) > 0.8 * fabs(dy) && [state[3] boolValue]) {
