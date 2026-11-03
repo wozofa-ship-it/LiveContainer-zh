@@ -770,9 +770,10 @@ private struct CZFVPNNodeLabel: View {
                         .font(.caption)
                         .foregroundStyle(.gray)
                 } else if isRejected {
-                    // 核心在跑时单测被拒：旧值原样保留，
-                    // 行上直接写“核心占用”，别让用户对着
-                    // 不变的数字猜；真测用下方“停核心重测”。
+                    // 单测被拒：只剩测速中途核心又被起起来的竞
+                    // 态（单测与批量一样先停核心再测，见
+                    // startSinglePing）；旧值原样保留，行上直接
+                    // 写“核心占用”，别让用户对着不变的数字猜。
                     Text("核心占用")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -1530,6 +1531,12 @@ private struct CZFVPNNodeLabel: View {
         // 入口再守一次：测速中不叠加开第二轮单测。
         guard !vpnPinging && !vpnSinglePinging else { return }
         let link = vpnNodes[index]
+        // 单测与批量同规则（251 只修了批量，行长按复测仍
+        // 是老逻辑、核心在跑就拒，TUIC 行一直挂“核心占用”
+        // 就是这么来的）：核心在跑先停、测完重启原来那条；
+        // 没在跑直接测、测完不启动。停核心在测速标志立
+        // 起来之前做，免得测速窗口内起停被 deferred 逻辑插队。
+        let pingStoppedCore = CZFVPNManager.shared.stopCoreForPing()
         vpnSinglePingIndex = index
         vpnSinglePinging = true
         CZFVPNManager.shared.pingSingleNode(at: index) { result, rejected in
@@ -1544,6 +1551,11 @@ private struct CZFVPNNodeLabel: View {
                 vpnSingleRejectedLinks.remove(link)
                 // 只写该条缓存，别刷全表时间戳（见 savePingResult）。
                 savePingResult(link: link, result: result)
+            }
+            // 停过的核心测完重启原来那条（没停过就不启动）；
+            // 放 refresh 之前，状态行直接显示重启后的状态。
+            if pingStoppedCore {
+                CZFVPNManager.shared.restartCoreAfterPing()
             }
             refreshVPNState()
         }
