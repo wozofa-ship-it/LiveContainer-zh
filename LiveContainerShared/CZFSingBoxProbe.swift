@@ -133,16 +133,12 @@ public enum CZFSingBoxProbe {
         }
         let conn = NWConnection(host: "127.0.0.1", port: endpointPort, using: .tcp)
         let sem = DispatchSemaphore(value: 0)
-        var readyError: Error?
+        // Swift 6：stateUpdateHandler 是 @Sendable 闭包，里面不能改捕获的 var。
+        // 改为只发信号，成败在 wait 返回后直接读 conn.state（信号发在状态变更之后，
+        // wait 返回时状态已可见；ready 以外一律按失败处理，语义与原来一致）。
         conn.stateUpdateHandler = { state in
             switch state {
-            case .ready:
-                sem.signal()
-            case .failed(let error):
-                readyError = error
-                sem.signal()
-            case .cancelled:
-                readyError = CZFSingBoxProbeError.tcpFailed("tcp")
+            case .ready, .failed, .cancelled:
                 sem.signal()
             default:
                 break
@@ -154,9 +150,7 @@ public enum CZFSingBoxProbe {
             throw CZFSingBoxProbeError.timeout
         }
         conn.stateUpdateHandler = nil
-        if readyError != nil {
-            // 错误原因只记阶段名，不把底层错误的描述串进结果，
-            // 避免描述里夹带地址以外的信息。
+        guard case .ready = conn.state else {
             throw CZFSingBoxProbeError.tcpFailed("tcp")
         }
         return conn

@@ -25,11 +25,11 @@ import Libbox
 public enum CZFSingBoxCore {
     /// 核心是否在跑。start 成功置 true；stop 成功置 false，
     /// stop 失败也置 false（核心已不可信，调用方按抛错处理）。
-    public static var isServiceRunning = false
+    nonisolated(unsafe) public static var isServiceRunning = false
 
     /// libbox 进程级初始化是否已做过。只做一次，stop 不重置：
     /// Setup 是进程级状态，重起服务不需要、也不应该重做 Setup。
-    private static var setupDone = false
+    nonisolated(unsafe) private static var setupDone = false
 
     /// 一次性初始化：basePath 必须是 Documents 根目录，
     /// 不是 Documents/singbox。libbox 把命令服务绑在
