@@ -7,7 +7,6 @@
 
 import Foundation
 import SwiftUI
-import UniformTypeIdentifiers
 import UserNotifications
 
 enum JITEnablerType : Int, CaseIterable, Identifiable {
@@ -98,7 +97,6 @@ struct LCSettingsView: View {
     @State var vpnCoreRunning = false
     @State var vpnStatusMessage: String?
     @State var vpnNewNodeText = ""
-    @State var showWGConfImporter = false
     @State var vpnSubURL: String = UserDefaults.standard.string(forKey: "CZFVPNSubscriptionURL") ?? ""
     @State var vpnSubBusy = false
     @State var showSubReplaceConfirm = false
@@ -826,38 +824,6 @@ private struct CZFVPNNodeLabel: View {
                     }
                 }
                 .disabled(vpnNewNodeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging || vpnSinglePinging)
-                // WireGuard .conf 文件导入：读文件 → INI 转
-                // wireguard:// 链接 → 走同一 addNode（成功分
-                // 支与“已存在”提示与上面手填一致；解析 throw
-                // 只带字段名，进同一 errorInfo）。
-                Button("导入 .conf") {
-                    showWGConfImporter = true
-                }
-            }
-            .fileImporter(isPresented: $showWGConfImporter, allowedContentTypes: [UTType(filenameExtension: "conf") ?? .item]) { result in
-                switch result {
-                case .success(let url):
-                    let accessing = url.startAccessingSecurityScopedResource()
-                    defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-                    do {
-                        let text = try String(contentsOf: url, encoding: .utf8)
-                        let name = url.deletingPathExtension().lastPathComponent
-                        let link = try CZFWireGuardConf.link(from: text, name: name)
-                        if CZFVPNManager.shared.addNode(link) {
-                            vpnPingResults = [:]
-                            refreshVPNState()
-                        } else {
-                            errorInfo = "节点已存在，未重复添加"
-                            errorShow = true
-                        }
-                    } catch {
-                        errorInfo = error.localizedDescription
-                        errorShow = true
-                    }
-                case .failure(let error):
-                    errorInfo = error.localizedDescription
-                    errorShow = true
-                }
             }
             HStack {
                 TextField("粘贴订阅地址（https://…）", text: $vpnSubURL)
@@ -1193,7 +1159,7 @@ private struct CZFVPNNodeLabel: View {
                 .font(.footnote)
                 .buttonStyle(.plain)
                 if showVPNHelp {
-                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2 等）；转换器只认这几类，ssr、hysteria v1、tuic、wireguard 链接、naive/ssh、http 节点会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：WireGuard 这类核心有、链接解析器没有的协议，可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。\n节点自动轮换开着时，核心在跑的 App 连续失败就自动按列表顺序换下一个支持的节点并重启核心，一圈都不通就停下来等手动处理。")
+                    Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；核心在跑时测可能不准，先停再测。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2/tuic 等）；转换器只认这几类，未列出的链接会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。\n节点自动轮换开着时，核心在跑的 App 连续失败就自动按列表顺序换下一个支持的节点并重启核心，一圈都不通就停下来等手动处理。")
                 }
             }
         }

@@ -1,7 +1,7 @@
 # sing-box 核心授权说明
 
 LiveContainer 内嵌 sing-box 核心（版本 v1.14.4，SagerNet/sing-box，
-GPLv3 协议），仅用于跑 TUIC 等 sing-box 出站协议，与原有 libXray
+GPLv3 协议），仅用于跑 TUIC 出站协议，与原有 libXray
 核心并存、同一时刻只起一个核心。
 
 本仓库不含 sing-box 源码。源码获取口径：

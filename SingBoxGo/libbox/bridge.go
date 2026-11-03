@@ -1,8 +1,8 @@
 // Package libbox 是 LiveContainer 侧 sing-box 核心的通用 gomobile 桥。
 //
-// 与 TUIC Demo 的 libbox 桥同源，但不再只服务某一个配置：
-// S2/S3 传入任意合法的 sing-box JSON 配置，本桥只负责校验并起停核心，
-// 不解析、不改写配置内容，不区分出站协议（TUIC、WireGuard 等一视同仁）。
+// 与 TUIC Demo 的 libbox 桥同源：
+// Swift 侧传入 sing-box JSON 配置，本桥只负责校验并起停核心，
+// 不解析、不改写配置内容（本工程只传 TUIC 配置）。
 //
 // 为什么要包一层：gomobile bind 只能把 string/数字/error 类型暴露给 Swift，
 // libbox 自身的 API 拿的是结构体与接口（SetupOptions、PlatformInterface、

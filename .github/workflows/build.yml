@@ -55,7 +55,7 @@ jobs:
           echo "file_to_build=$file_to_build" >> $GITHUB_OUTPUT
       - name: Fetch LibXray (for per-app VPN core)
         run: |
-          curl -L -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.31/libxray-apple-cgo.zip
+          curl -L -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.17/libxray-apple-cgo.zip
           unzip -o -q /tmp/libxray.zip -d /tmp/libxray
           mkdir -p Vendor
           cp -R /tmp/libxray/libxray-apple-cgo/LibXray.xcframework Vendor/
@@ -73,15 +73,8 @@ jobs:
           go mod tidy
           mkdir -p ../Vendor
           # 只编真机 arm64：-target ios 会自动加 iossimulator 切片，
-          # 而 naive 拉进来的 cronet-go/all 其模拟器文件要求 iossimulator
-          # 这个 tag，gomobile 从不给模拟器传它（只传 ios），Intel 模拟器
-          # 切片永远编不过；本工程只编真机 arm64 包，模拟器切片用不上。
-          gomobile bind -target ios/arm64 -tags "with_quic with_wireguard with_naive_outbound" -o ../Vendor/Libbox.xcframework ./libbox
-          # cronet-go 的 Cronet 预编译库不会被 gomobile 烘进 .a，最终链接必须自己提供：
-          # 把模块缓存里的 libcronet.a 用 libtool 合并进 framework 二进制（找不到就直接失败，别静默产出坏包）。
-          CRONET_DIR=$(ls -d $(go env GOMODCACHE)/github.com/sagernet/cronet-go/lib/ios_arm64@* | head -1)
-          test -f "$CRONET_DIR/libcronet.a" || { echo "libcronet.a not found under $CRONET_DIR"; exit 1; }
-          libtool -static -o ../Vendor/Libbox.xcframework/ios-arm64/Libbox.framework/Libbox ../Vendor/Libbox.xcframework/ios-arm64/Libbox.framework/Libbox "$CRONET_DIR/libcronet.a"
+          # 本工程只编真机包，模拟器切片用不上。
+          gomobile bind -target ios/arm64 -tags "with_quic" -o ../Vendor/Libbox.xcframework ./libbox
           ls -lh ../Vendor/Libbox.xcframework/ios-arm64/Libbox.framework/Libbox
           ls ../Vendor/Libbox.xcframework
       - name: Archive
@@ -89,14 +82,7 @@ jobs:
           scheme: ${{ steps.scheme.outputs.scheme }}
           filetype_parameter: ${{ steps.filetype_parameter.outputs.filetype_parameter }}
           file_to_build: ${{ steps.file_to_build.outputs.file_to_build }}
-        run: xcodebuild archive -archivePath "$archive_path" -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -sdk iphoneos -arch arm64 -configuration Release 2>&1 | tee /tmp/xcodebuild-raw.log | xcpretty && exit ${PIPESTATUS[0]}
-      - name: Show undefined symbols on failure
-        if: failure()
-        run: |
-          echo "=== undefined symbols (raw log) ==="
-          grep -A 30 "Undefined symbols" /tmp/xcodebuild-raw.log | head -50
-          echo "=== ld errors (raw log) ==="
-          grep -B2 -A 5 "symbol(s) not found\|error: linker" /tmp/xcodebuild-raw.log | head -60
+        run: xcodebuild archive -archivePath "$archive_path" -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -sdk iphoneos -arch arm64 -configuration Release | xcpretty && exit ${PIPESTATUS[0]}
       - name: Build bundled keepalive tweak
         run: |
           clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \

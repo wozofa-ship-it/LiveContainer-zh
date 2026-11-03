@@ -31,7 +31,7 @@ public final class CZFVPNManager {
 
     public private(set) var isRunning = false
     private var runningLink: String?
-    // 当前在跑的是哪个核心（nil = 没在跑）：双核心单活切换
+    // 当前在跑的是哪个核心（nil = 没在跑）：TUIC-only 单活切换
     // 的唯一事实来源——start 成功时记、stop 时清；测速分流
     // 与停核心都读它，绝不凭 isRunning 猜核心种类。
     private var runningCore: CZFCoreKind?
@@ -288,19 +288,6 @@ public final class CZFVPNManager {
                decodedText.contains("://") {
                 text = decodedText
             }
-            // Clash YAML 订阅：内容含顶层 proxies: 时走最小 YAML
-            // 解析（只认 proxies 数组，groups/rules 不进单节点
-            // 模型）；解析出链接就直接返回，空则落到现有 ://
-            // 路径（保持 code -3 语义）。YAML 可能是 base64 后
-            // 的明文，上面整体解码已处理；误触发时解析返回空，
-            // 不影响现有路径。
-            if text.contains("proxies:") {
-                let parsed = CZFClashYAML.parse(text)
-                if !parsed.links.isEmpty {
-                    completion(.success(parsed.links))
-                    return
-                }
-            }
             let links = text.components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { $0.contains("://") }
@@ -432,10 +419,9 @@ public final class CZFVPNManager {
         if !scheme.isEmpty {
             detail = detail.isEmpty ? scheme : "\(scheme) · \(detail)"
         }
-        // 不验证书标记：含 allowInsecure 且配置里真的会写
-        // tls.insecure=true 的节点才标（判定在
-        // CZFSingBoxRouting.showsInsecureMark，ss/snell/ssh/
-        // wireguard 无 TLS 块、三撞走不通的不标）。
+        // 不验证书标记：tuic 且含 allowInsecure 时标（判定在
+        // CZFSingBoxRouting.showsInsecureMark：tuic 出站一定
+        // 写 tls 块，insecure 参数真实生效才标）。
         if CZFSingBoxRouting.showsInsecureMark(for: link) {
             detail = detail.isEmpty ? "不验证书" : "\(detail) · 不验证书"
         }
@@ -457,23 +443,19 @@ public final class CZFVPNManager {
         return String(trimmed[..<range.lowerBound]).lowercased()
     }
 
-    /// 双核心分级：任一核心能跑的协议都算支持——Xray 侧
-    /// （VMessAEAD/VLESS/Hysteria2/SS/SOCKS/Trojan）+ 原始
-    /// JSON 出站绕法 + sing-box 侧（TUIC/Hysteria v1/WireGuard/
-    /// Naive/SSH/HTTP/AnyTLS/ShadowTLS/Snell）+ 老 vmess 与
-    /// 老 SS（按参数分流到 sing-box，见 CZFSingBoxRouting）。
-    /// 仍不支持：ssr、mieru、juicity；无 scheme 的纯文本也
-    /// 不支持。注意这是静态分级（只看 scheme）：参数级拒收
-    /// （VLESS+XHTTP+allowInsecure 三撞）由
-    /// CZFSingBoxRouting.unsupportedReason 在起核心与轮换
-    /// 时再挡，不在这里展开。
+    /// 转换器清单分级：libXray convertShareLinksToXrayJson 只
+    /// 认这些协议族（VMessAEAD/VLESS/Hysteria2/SS/SOCKS/
+    /// Trojan）+ 原始 JSON 出站绕法 + sing-box 的 TUIC；
+    /// 其余未列出的 scheme、无 scheme 的纯文本一律不支持。
+    /// 注意这是静态分级：
+    /// 清单内的节点仍可能因老格式、allowInsecure 等参数被
+    /// 转换器拒收，那种以实测的 conversionFailed 为准。
     public static func isSupportedNodeScheme(_ scheme: String) -> Bool {
         // hy2 = Hysteria2 的标准别名，socks5 = SOCKS 的标准链接
         // scheme；静态分级宁可多认别名——真不认的节点实测时
         // conversionFailed 会纠回“不支持”，反过来漏标却要等
         // 实测才知道它是好的。
-        ["vmess", "vless", "hysteria2", "hy2", "ss", "socks", "socks5", "trojan", "json",
-         "tuic", "hysteria", "wireguard", "naive", "ssh", "http", "anytls", "shadowtls", "snell"].contains(scheme)
+        ["vmess", "vless", "hysteria2", "hy2", "ss", "socks", "socks5", "trojan", "json", "tuic"].contains(scheme)
     }
 
     public static func isEnabled(for appInfo: LCAppInfo) -> Bool {
@@ -750,14 +732,9 @@ public final class CZFVPNManager {
             return false
         }
 
-        // 双核心分流：先查不可路由原因（ssr/mieru/juicity、
-        // 三撞、纯文本），再按 coreKind 走对应核心；Xray 侧
-        // 转换与启动原样不动。分流前已停掉旧核心（先停后起，
-        // 同一时刻只活一个核心，端口 10827/10828 复用）。
-        if let reason = CZFSingBoxRouting.unsupportedReason(for: link) {
-            lastError = reason
-            return false
-        }
+        // TUIC-only 分流：tuic 走 sing-box，其余走 245 原有
+        // Xray 转换与启动（原样不动）。分流前已停掉旧核心
+        // （先停后起，同一时刻只活一个核心，端口复用）。
         if CZFSingBoxRouting.coreKind(for: link) == .singBox {
             return startSingBox(withLink: link)
         }
@@ -999,9 +976,6 @@ public final class CZFVPNManager {
 
     // 从 current 往后找下一个没试过、协议支持的节点；
     // 钉死的链接不在列表里时，从全局活动下标往后找。
-    // 两遍：第一遍 TCP 系优先（省电，QUIC 系手动选），
-    // 第二遍放宽到全部支持协议；json 原始出站传输未知，
-    // 归第二遍。
     private func nextSupportedNode(after current: String, links: [String]) -> String? {
         var startIdx = 0
         if let idx = links.firstIndex(of: current) {
@@ -1009,19 +983,11 @@ public final class CZFVPNManager {
         } else {
             startIdx = activeNodeIndex + 1
         }
-        let tcpSchemes: Set<String> = ["vmess", "vless", "trojan", "ss", "socks", "socks5", "http", "ssh", "naive", "anytls", "shadowtls", "snell"]
-        for pass in 0..<2 {
-            for offset in 0..<links.count {
-                let cand = links[(startIdx + offset) % links.count]
-                if cand == current || rotateTriedLinks.contains(cand) { continue }
-                let scheme = Self.nodeScheme(for: cand)
-                if !Self.isSupportedNodeScheme(scheme) { continue }
-                // 参数级不可路由的（三撞等）直接跳过，起核心
-                // 时还会再挡一层，不靠单层过滤。
-                if CZFSingBoxRouting.unsupportedReason(for: cand) != nil { continue }
-                if pass == 0 && !tcpSchemes.contains(scheme) { continue }
-                return cand
-            }
+        for offset in 0..<links.count {
+            let cand = links[(startIdx + offset) % links.count]
+            if cand == current || rotateTriedLinks.contains(cand) { continue }
+            if !Self.isSupportedNodeScheme(Self.nodeScheme(for: cand)) { continue }
+            return cand
         }
         return nil
     }
@@ -1085,7 +1051,7 @@ public final class CZFVPNManager {
             // 测速只读，不停车重测、不重试（重试同样会被拒，
             // 只会白白拖时间），直接把被拒结果交给界面提示。
             let pingRejected = coreRunningAtStart && outcome.batchRejected
-            // 轮末复核（双核心探针竞态）：测速中途刚起的核心
+            // 轮末复核（TUIC 探针竞态）：测速中途刚起的核心
             // 也会让探针记被拒，completion 用起止任一时刻在跑
             // 且被拒才算占用，见末尾 finalRejected；重试门只
             // 看起时状态（重试失败不覆写成功项，无害）。
@@ -1246,8 +1212,8 @@ public final class CZFVPNManager {
     private func runPingBatches(links: [String], url: String, phase: String = "", onProgress: ((Int, Int, String) -> Void)? = nil, conversionCache: inout [String: String]) -> (items: [CZFNodePingResult], batchRejected: Bool) {
         var items = [CZFNodePingResult?](repeating: nil, count: links.count)
         var batchRejected = false
-        // 双核心分流（测速只读，不动主核心）：
-        // - sing-box 节点：先只做配置解析校验（不启动服务），
+        // TUIC-only 测速分流（测速只读，不动主核心）：
+        // - tuic 节点：先只做配置解析校验（不启动服务），
         //   解析失败记 conversionFailed（界面“不支持”，清理
         //   不删）；解析成功走临时实例探针（端口 10927，
         //   同一时刻只起一个，串行）。
@@ -1270,13 +1236,7 @@ public final class CZFVPNManager {
         var pending: [(index: Int, xrayJson: String)] = []
         var singBoxPending: [(index: Int, link: String)] = []
         for (i, link) in links.enumerated() {
-            // 参数级不可路由的（三撞、ssr 等）直接记“不支持”，
-            // 不进任何一侧的转换/解析。
-            if CZFSingBoxRouting.unsupportedReason(for: link) != nil {
-                items[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
-                continue
-            }
-            // sing-box 节点：只做配置解析校验，不启动服务。
+            // tuic 节点：只做配置解析校验，不启动服务。
             if CZFSingBoxRouting.coreKind(for: link) == .singBox {
                 if (try? CZFSingBoxConfig.configJSON(for: link, socksPort: 10927, httpPort: nil)) != nil {
                     singBoxPending.append((i, link))
