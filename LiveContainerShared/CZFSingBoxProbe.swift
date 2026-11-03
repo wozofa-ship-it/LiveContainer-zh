@@ -22,7 +22,7 @@ import Network
 ///   不含链接、密码、密钥、token；探针返回值里也不带任何此类信息。
 /// - 目标固定为 host:80 的 HTTP（不是 TLS）：问题只是“隧道通不通”，
 ///   拿到 HTTP 状态码即算通，与 Demo 的做法一致。
-enum CZFSingBoxProbeError: Error {
+public enum CZFSingBoxProbeError: Error {
     case tcpFailed(String)
     case socksFailed(String)
     case connectRejected(Int)
@@ -30,13 +30,13 @@ enum CZFSingBoxProbeError: Error {
     case timeout
 }
 
-struct CZFSingBoxProbeResult {
-    let success: Bool
-    let delayMs: Int
-    let rejected: Bool
+public struct CZFSingBoxProbeResult {
+    public let success: Bool
+    public let delayMs: Int
+    public let rejected: Bool
 }
 
-enum CZFSingBoxProbe {
+public enum CZFSingBoxProbe {
     /// 对本地 SOCKS 服务做一次阻塞式探测。
     ///
     /// - 参数 port：本地 SOCKS 监听端口（S2 集成传 10927）。
@@ -52,7 +52,7 @@ enum CZFSingBoxProbe {
     ///   注意：只有“真收到 rep != 0”才算被拒，CONNECT 阶段超时
     ///   不算被拒（Demo v07 教训：超时误记为被拒会误导诊断）。
     /// - 只能在后台队列调用，禁止主线程调用。
-    static func probe(port: Int, host: String, timeout: TimeInterval) -> CZFSingBoxProbeResult {
+    public static func probe(port: Int, host: String, timeout: TimeInterval) -> CZFSingBoxProbeResult {
         let start = Date()
         let target = host.trimmingCharacters(in: .whitespacesAndNewlines)
         // 入参非法直接返回失败，不 throw 穿透、不建连接。

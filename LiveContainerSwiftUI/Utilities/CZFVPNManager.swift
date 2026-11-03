@@ -15,6 +15,7 @@
 
 import Foundation
 import LibXray
+import LiveContainerShared
 
 public final class CZFVPNManager {
     public static let shared = CZFVPNManager()
