@@ -975,22 +975,43 @@ public final class CZFVPNManager {
         lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
     }
 
-    // 从 current 往后找下一个没试过、协议支持的节点；
-    // 钉死的链接不在列表里时，从全局活动下标往后找。
-    private func nextSupportedNode(after current: String, links: [String]) -> String? {
-        var startIdx = 0
-        if let idx = links.firstIndex(of: current) {
-            startIdx = idx + 1
+    // 测速缓存（与设置页同一份 UserDefaults，格式 link -> {v: code, t: time}；
+    // code >= 0 为通的延迟 ms，-1/-2/-3 为不通/超时/不支持；24h 后算旧数不用）。
+    private static let pingCacheKey = "CZFVPNPingCache"
+    private static let pingCacheStaleAfter: TimeInterval = 86400
+
+    private static func freshPingDelay(for link: String) -> Int? {
+        guard let raw = UserDefaults.standard.dictionary(forKey: pingCacheKey),
+              let value = raw[link] else { return nil }
+        let code: Int
+        let time: TimeInterval
+        if let dict = value as? [String: Any] {
+            code = (dict["v"] as? NSNumber)?.intValue ?? -1
+            time = (dict["t"] as? NSNumber)?.doubleValue ?? 0
+        } else if let num = value as? NSNumber {
+            code = num.intValue
+            time = 0
         } else {
-            startIdx = activeNodeIndex + 1
+            return nil
         }
-        for offset in 0..<links.count {
-            let cand = links[(startIdx + offset) % links.count]
+        guard code >= 0, time != 0,
+              Date().timeIntervalSince1970 - time <= pingCacheStaleAfter else { return nil }
+        return code
+    }
+
+    // 轮换候选：按新鲜测速延迟从快到慢（没测过/旧数排最后，
+    // 仍按列表顺序），而不是按列表顺序——轮换后落在最快的
+    // 可用节点上，不会从 465ms 的 TUIC 切到 1791ms 的 VLESS。
+    // 没测速数据时退化为原来的列表顺序，行为与之前一致。
+    private func nextSupportedNode(after current: String, links: [String]) -> String? {
+        var cands: [(link: String, idx: Int, delay: Int)] = []
+        for (idx, cand) in links.enumerated() {
             if cand == current || rotateTriedLinks.contains(cand) { continue }
             if !Self.isSupportedNodeScheme(Self.nodeScheme(for: cand)) { continue }
-            return cand
+            cands.append((cand, idx, Self.freshPingDelay(for: cand) ?? Int.max))
         }
-        return nil
+        cands.sort { ($0.delay, $0.idx) < ($1.delay, $1.idx) }
+        return cands.first?.link
     }
 
     // MARK: - 节点延迟测试

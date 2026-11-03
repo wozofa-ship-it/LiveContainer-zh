@@ -52,11 +52,19 @@ static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int (*orig_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
 static ssize_t (*orig_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
 static ssize_t (*orig_sendmsg)(int, const struct msghdr *, int);
+static ssize_t (*orig_send)(int, const void *, size_t, int);
+static ssize_t (*orig_recv)(int, void *, size_t, int);
 // connectx 的参数全是指针/32 位整数，用 ABI 等价的不透明
 // 签名声明，避免依赖系统头里冷门的 sa_endpoints_t 等 typedef
 static int (*orig_connectx)(int, const void *, uint32_t, unsigned int, const void *, unsigned int, size_t *, uint32_t *);
 
 static int CZFConnect(int, const struct sockaddr *, socklen_t);
+
+// 中继结构体在后面定义，这里先以前置声明供 connect 钩子调用
+// （建中继不需要发包，只做 SOCKS UDP ASSOCIATE）。
+struct CZFUDPRelay;
+static struct CZFUDPRelay *CZFUDPRelayGetOrCreate(int appFd, const struct sockaddr_in *dst);
+static BOOL CZFUDPRelayDstForFd(int fd, struct sockaddr_in *dstOut);
 
 // MARK: - 运行统计
 // 计数写到插件同目录的 CZFProxyStats.txt，宿主在该 App 的
@@ -322,7 +330,7 @@ static BOOL CZFSocksRequest(int fd, NSString *hostOrNil, uint32_t ipHostOrder, u
 // 做完恢复原 flags 与超时；失败时 fd 已连到 SOCKS 口、没法
 // 再改作直连，调用方必须如实返回失败（与原来 CZFConnect
 // 的语义完全一致，这里只是把原来内联的那段抽出来）。
-static int CZFDoSocksTCPConnect(int sockfd, NSString *host, uint32_t ipHostOrder, uint16_t portNetworkOrder, int *savedErrnoOut) {
+static int CZFDoSocksTCPConnect(int sockfd, NSString *host, uint32_t ipHostOrder, uint16_t portNetworkOrder, int *savedErrnoOut, BOOL *socksConnectFailedOut) {
     int flags = fcntl(sockfd, F_GETFL, 0);
     BOOL wasNonBlocking = (flags >= 0) && (flags & O_NONBLOCK);
     struct timeval oldRcv, oldSnd;
@@ -336,6 +344,7 @@ static int CZFDoSocksTCPConnect(int sockfd, NSString *host, uint32_t ipHostOrder
     setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     int result = -1;
     int savedErrno = ECONNREFUSED;
+    if (socksConnectFailedOut) *socksConnectFailedOut = NO;
     struct sockaddr_in socksAddr;
     memset(&socksAddr, 0, sizeof(socksAddr));
     socksAddr.sin_family = AF_INET;
@@ -347,6 +356,7 @@ static int CZFDoSocksTCPConnect(int sockfd, NSString *host, uint32_t ipHostOrder
         }
     } else {
         savedErrno = errno;
+        if (socksConnectFailedOut) *socksConnectFailedOut = YES;
     }
     if (hasOldRcv) setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &oldRcv, sizeof(oldRcv));
     if (hasOldSnd) setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &oldSnd, sizeof(oldSnd));
@@ -379,18 +389,29 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         __sync_add_and_fetch(&gStatConnPass, 1);
         return orig_connect(sockfd, addr, addrlen);
     }
-    // 只代理 TCP 流套接字：UDP 的 connect 只是给数据包定个默认
-    // 去向，拿去做 SOCKS 握手只会把它卡死。例外：发往公网
-    // 443 的 UDP 就是 QUIC（YouTube 等），直连必死还会拖住它
-    // 回退 TCP——当场拒掉，让它立刻改走 TCP 被代理接住。
+    // 只代理 TCP 流套接字。例外：发往公网 443 的 UDP 就是 QUIC
+    //（YouTube 等），直连必死还会拖住它。核心在时不再当场拒掉，
+    // 而是给这条已连接 UDP 建中继、假装已连接，之后的 send/recv
+    // 走中继真过节点；建中继失败才退回旧的快拒（促 TCP 回退）。
+    // 已知限制：用 kqueue/dispatch 源监听原 socket 的 App 读不到
+    // 中继回来的包，会超时后走 TCP 回退——比快拒慢，但不断网。
     int sockType = 0;
     socklen_t sockTypeLen = sizeof(sockType);
     if (getsockopt(sockfd, SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen) != 0 || sockType != SOCK_STREAM) {
         if (sockType == SOCK_DGRAM && ntohs(sin->sin_port) == 443) {
-            __sync_add_and_fetch(&gStatQuicBlocked, 1);
-            CZFWriteStats(NO);
-            errno = ECONNREFUSED;
-            return -1;
+            if (!CZFCoreAlive()) {
+                __sync_add_and_fetch(&gStatQuicBlocked, 1);
+                CZFWriteStats(NO);
+                errno = ECONNREFUSED;
+                return -1;
+            }
+            if (!CZFUDPRelayGetOrCreate(sockfd, sin)) {
+                __sync_add_and_fetch(&gStatQuicBlocked, 1);
+                CZFWriteStats(NO);
+                errno = ECONNREFUSED;
+                return -1;
+            }
+            return 0;
         }
         __sync_add_and_fetch(&gStatConnPass, 1);
         return orig_connect(sockfd, addr, addrlen);
@@ -418,7 +439,15 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
     }
 
     int savedErrno = ECONNREFUSED;
-    int result = CZFDoSocksTCPConnect(sockfd, host, ip, sin->sin_port, &savedErrno);
+    BOOL socksConnFailed = NO;
+    int result = CZFDoSocksTCPConnect(sockfd, host, ip, sin->sin_port, &savedErrno, &socksConnFailed);
+    if (result != 0 && socksConnFailed) {
+        // SOCKS 口瞬间没在听（核心重启/轮换窗口）：等 200ms 再试一次，
+        // 仍失败才如实计失败；请求阶段失败（fd 已连 SOCKS）不重试。
+        usleep(200 * 1000);
+        savedErrno = ECONNREFUSED;
+        result = CZFDoSocksTCPConnect(sockfd, host, ip, sin->sin_port, &savedErrno, NULL);
+    }
     if (result != 0) {
         // fd 已连到 SOCKS 口但请求失败时，这个 fd 没法再改作直连，
         // 如实返回失败（语义=经 VPN 不可达，与普通连接失败无异）。
@@ -515,7 +544,7 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
         host = CZFHostForFakeIP([NSString stringWithUTF8String:buf]);
     }
     int savedErrno = ECONNREFUSED;
-    int result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno);
+    int result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno, NULL);
     if (result != 0) {
         errno = savedErrno;
         __sync_add_and_fetch(&gStatConnFailed, 1);
@@ -633,6 +662,21 @@ static BOOL CZFSocksUDPAssociate(int tcpFd, struct sockaddr_in *relayOut) {
     }
     return NO;
 }
+// 读某 fd 已建中继的 connect 目标（只读不改）：已连接 UDP 的
+// send/sendmsg 不带地址时靠它找回目标。
+static BOOL CZFUDPRelayDstForFd(int fd, struct sockaddr_in *dstOut) {
+    if (!dstOut) return NO;
+    pthread_mutex_lock(&gUDPRelayLock);
+    CZFUDPRelay *r = CZFUDPRelayLookupLocked(fd);
+    if (!r) {
+        pthread_mutex_unlock(&gUDPRelayLock);
+        return NO;
+    }
+    *dstOut = r->dstAddr;
+    pthread_mutex_unlock(&gUDPRelayLock);
+    return YES;
+}
+
 static CZFUDPRelay *CZFUDPRelayGetOrCreate(int appFd, const struct sockaddr_in *dst) {
     if (!orig_connect) return NULL;
     pthread_mutex_lock(&gUDPRelayLock);
@@ -801,6 +845,19 @@ static BOOL CZFIsUDPSocket(int fd) {
     return getsockopt(fd, SOL_SOCKET, SO_TYPE, &t, &tl) == 0 && t == SOCK_DGRAM;
 }
 
+// 已连接 UDP 的 send：有中继就经中继发往 connect 目标；没中继
+// 保持原样（与改动前一致）。中继的 send 用 flags 0，本机回环
+// UDP 基本不阻塞，与现有中继一致。
+static ssize_t CZFSend(int fd, const void *buf, size_t len, int flags) {
+    if (buf && CZFIsUDPSocket(fd)) {
+        struct sockaddr_in dst;
+        if (CZFUDPRelayDstForFd(fd, &dst)) {
+            return CZFUDPRelaySend(fd, &dst, buf, len);
+        }
+    }
+    return orig_send(fd, buf, len, flags);
+}
+
 static ssize_t CZFSendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && CZFIsUDPSocket(fd)) {
         if (CZFIsQUICAddr(addr)) {
@@ -832,7 +889,8 @@ static ssize_t CZFSendto(int fd, const void *buf, size_t len, int flags, const s
 }
 
 static ssize_t CZFSendmsg(int fd, const struct msghdr *msg, int flags) {
-    if (msg && msg->msg_name && CZFIsUDPSocket(fd)) {
+    if (msg && CZFIsUDPSocket(fd)) {
+        if (msg->msg_name) {
         const struct sockaddr *addr = (const struct sockaddr *)msg->msg_name;
         if (CZFIsQUICAddr(addr)) {
             if (!CZFCoreAlive()) {
@@ -870,8 +928,40 @@ static ssize_t CZFSendmsg(int fd, const struct msghdr *msg, int flags) {
             errno = ECONNREFUSED;
             return -1;
         }
+        } else {
+            // 已连接 UDP（sendmsg 不带地址）：有中继就经中继发往 connect 目标，
+            // 没中继保持原样直传（与改动前一致）。
+            struct sockaddr_in dst;
+            if (CZFUDPRelayDstForFd(fd, &dst)) {
+                size_t total = 0;
+                for (int i = 0; i < msg->msg_iovlen; i++) total += msg->msg_iov[i].iov_len;
+                if (total > 65000) { errno = EMSGSIZE; return -1; }
+                unsigned char *flat = (unsigned char *)malloc(total ? total : 1);
+                if (!flat) { errno = ENOMEM; return -1; }
+                size_t off = 0;
+                for (int i = 0; i < msg->msg_iovlen; i++) {
+                    memcpy(flat + off, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
+                    off += msg->msg_iov[i].iov_len;
+                }
+                ssize_t r = CZFUDPRelaySend(fd, &dst, flat, total);
+                free(flat);
+                return r;
+            }
+        }
     }
     return orig_sendmsg(fd, msg, flags);
+}
+
+// 已连接 UDP 的 recv：有中继就从中继读回（拆 SOCKS UDP 头），
+// 没中继保持原样。srcAddr 传 NULL（recv 本来就不返回地址）。
+static ssize_t CZFRecv(int fd, void *buf, size_t len, int flags) {
+    pthread_mutex_lock(&gUDPRelayLock);
+    BOOL hasRelay = CZFUDPRelayLookupLocked(fd) != NULL;
+    pthread_mutex_unlock(&gUDPRelayLock);
+    if (hasRelay && buf && CZFIsUDPSocket(fd)) {
+        return CZFUDPRelayRecv(fd, buf, len, NULL, NULL, flags);
+    }
+    return orig_recv(fd, buf, len, flags);
 }
 
 static ssize_t CZFRecvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen) {
@@ -1221,6 +1311,14 @@ static void CZFProxyInit(void) {
     }
     if (orig_sendmsg) {
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_sendmsg, (void *)CZFSendmsg, NULL);
+    }
+    orig_send = (ssize_t (*)(int, const void *, size_t, int))dlsym(RTLD_DEFAULT, "send");
+    orig_recv = (ssize_t (*)(int, void *, size_t, int))dlsym(RTLD_DEFAULT, "recv");
+    if (orig_send) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_send, (void *)CZFSend, NULL);
+    }
+    if (orig_recv) {
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)orig_recv, (void *)CZFRecv, NULL);
     }
     orig_recvfrom = (ssize_t (*)(int, void *, size_t, int, struct sockaddr *, socklen_t *))dlsym(RTLD_DEFAULT, "recvfrom");
     orig_recvmsg = (ssize_t (*)(int, struct msghdr *, int))dlsym(RTLD_DEFAULT, "recvmsg");
