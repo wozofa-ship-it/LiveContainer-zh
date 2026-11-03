@@ -40,6 +40,8 @@
 		0143A949F3DA3A6BF6FC3E75 /* CZFSingBoxConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E3392A069FCE89880F6C32C /* CZFSingBoxConfig.swift */; };
 		4C66E5801B8FAD0F36AD234F /* CZFSingBoxCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA97903FB0578C703A57CA7A /* CZFSingBoxCore.swift */; };
 		1E897DA065C48F4AD87C3077 /* CZFSingBoxProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 989F31049DE845756C8F8A85 /* CZFSingBoxProbe.swift */; };
+		4BC2C78E5F0B4AF044A63C1D /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C005B99B4141465597AE1E9A /* Security.framework */; };
+		2F5054A546B6CC02E86866C7 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8DB7510961810EA66D691F6 /* SystemConfiguration.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -200,6 +202,7 @@
 		4E3392A069FCE89880F6C32C /* CZFSingBoxConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CZFSingBoxConfig.swift; sourceTree = "<group>"; };
 		EA97903FB0578C703A57CA7A /* CZFSingBoxCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CZFSingBoxCore.swift; sourceTree = "<group>"; };
 		989F31049DE845756C8F8A85 /* CZFSingBoxProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CZFSingBoxProbe.swift; sourceTree = "<group>"; };
+		C8DB7510961810EA66D691F6 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -421,6 +424,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				B70547605860B60600FA4792 /* Libbox.xcframework in Frameworks */,
+				4BC2C78E5F0B4AF044A63C1D /* Security.framework in Frameworks */,
+				2F5054A546B6CC02E86866C7 /* SystemConfiguration.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -460,6 +465,7 @@
 				174140D52D9C176700F3F928 /* libarchive.tbd */,
 				D0DE5359A4284189A2E68E22 /* libresolv.tbd */,
 				C005B99B4141465597AE1E9A /* Security.framework */,
+				C8DB7510961810EA66D691F6 /* SystemConfiguration.framework */,
 				E12928C92DCA38380065E12D /* UniformTypeIdentifiers.framework */,
 			);
 			name = Frameworks;
