@@ -175,6 +175,14 @@ public final class CZFVPNManager {
         return links[activeNodeIndex]
     }
 
+    // 节点变了就刷新设置备份：导入导出配置（CZFSettingsBackup.json）
+    // 本来只在手动导出 / 备份 App 时写，节点增删改后不刷就过期，
+    // 换机重装导入的还是旧节点；这里顺手刷一份，配置永远是最新节点。
+    // 只调 DataManagement 现成的静态写函数，不改那份文件。
+    private func refreshSettingsBackup() {
+        _ = LCDataManagementView.writeCZFSettingsBackup()
+    }
+
     // 返回 true 表示真的加进去了；空链接或已存在返回 false，
     // 界面据此提示“已存在”，不再静默失败（以前直接 return，
     // 界面还把输入框清空，看起来像加上了）。
@@ -186,6 +194,7 @@ public final class CZFVPNManager {
         if links.contains(trimmed) { return false }
         links.append(trimmed)
         UserDefaults.standard.set(links, forKey: Self.nodeListKey)
+        refreshSettingsBackup()
         return true
     }
 
@@ -208,6 +217,7 @@ public final class CZFVPNManager {
         } else {
             UserDefaults.standard.set(0, forKey: Self.activeNodeKey)
         }
+        refreshSettingsBackup()
     }
 
     // 用一批新链接整体替换节点列表（订阅刷新用）：尽量保留
@@ -226,6 +236,7 @@ public final class CZFVPNManager {
             UserDefaults.standard.set(0, forKey: Self.activeNodeKey)
         }
         applyActiveNodeChange()
+        refreshSettingsBackup()
     }
 
     /// 拉订阅内容并解析出节点链接：机场订阅通常是整段 base64
@@ -314,6 +325,7 @@ public final class CZFVPNManager {
         if let idx = newLinks.firstIndex(of: previousActive) {
             UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
         }
+        refreshSettingsBackup()
     }
 
     /// 预热：有 App 标了 VPN 且预热开关没关时，提前把核心
@@ -373,12 +385,14 @@ public final class CZFVPNManager {
         } else {
             applyActiveNodeChange()
         }
+        refreshSettingsBackup()
     }
 
     public func setActiveNode(at index: Int) {
         guard nodeLinks.indices.contains(index) else { return }
         UserDefaults.standard.set(index, forKey: Self.activeNodeKey)
         applyActiveNodeChange()
+        refreshSettingsBackup()
     }
 
     // 活动节点变了而核心在跑：立刻按新节点重启（改完即生效）；
