@@ -1514,8 +1514,9 @@ extension Notification.Name {
             // 2026-11-04 2 号机制修：位移门槛跟起手位置挂钩——
             // 贴边起手（≤20pt，与客侧 kCZFEdgeTouchMax 同值）
             // 只认 3pt，离边维持 8×s（灵敏度档照旧）。
+            // 256修：往外弹不再验落点贴边（同客侧理由）。
             let outwardNeed = startX <= 20 ? 3.0 : 8 * s
-            if dx <= -outwardNeed, endX <= 12, abs(dx) > 0.4 * abs(dy), startInBand || startInOutwardBand {
+            if dx <= -outwardNeed, abs(dx) > 0.4 * abs(dy), startInBand || startInOutwardBand {
                 fireDockAction { self.czfOpenSourcesPanel() }
             } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
                 fireDockAction { self.czfOpenAppPanel() }
