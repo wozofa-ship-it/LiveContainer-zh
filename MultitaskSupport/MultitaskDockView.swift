@@ -1956,9 +1956,24 @@ extension Notification.Name {
         czfPanelOverlayHost = host
     }
 
+    // 面板要进的窗口：台前 App 最大化时必须用它的窗口——
+    // 宿主窗（栏所在窗）会被全屏游客窗口盖住，面板在里面
+    // 开了也看不见（最大化根本用不了手势面板、没法调 App）。
+    // 非最大化时沿用宿主窗，不动原有行为。
+    private var czfPanelTargetWindow: UIWindow? {
+        if let front = czfFrontmostApp(),
+           let view = front.view,
+           let vc = view._viewDelegate() as? DecoratedAppSceneViewController,
+           vc.isMaximized,
+           let w = view.window {
+            return w
+        }
+        return hostingController?.view.window ?? keyWindow
+    }
+
     private func presentAllAppsPanel() {
         DispatchQueue.main.async {
-            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            guard let window = self.czfPanelTargetWindow else { return }
             // 两个面板互斥：开这个先关那个
             self.dismissSourcesOverlay()
             self.ensurePanelOverlay(in: window)
@@ -2114,7 +2129,7 @@ extension Notification.Name {
 
     private func presentSourcesPanel() {
         DispatchQueue.main.async {
-            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            guard let window = self.czfPanelTargetWindow else { return }
             // 两个面板互斥：开这个先关那个
             self.dismissPanelOverlay()
             self.ensureSourcesOverlay(in: window)
@@ -2150,7 +2165,7 @@ extension Notification.Name {
             let now = Date()
             guard now.timeIntervalSince(self.czfLastPanelActionAt) > 0.4 else { return }
             guard toSources ? self.isAppPanelOpen : self.isSourcesPanelOpen else { return }
-            guard let window = self.hostingController?.view.window ?? self.keyWindow else { return }
+            guard let window = self.czfPanelTargetWindow else { return }
             self.czfLastPanelActionAt = now
             self.edgeCallbackBuzz()
             if toSources {
