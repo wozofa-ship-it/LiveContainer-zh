@@ -1382,6 +1382,9 @@ extension Notification.Name {
     private var globalSwipeRecognizers: [UIPanGestureRecognizer] = []
     // 全窗口手势的起手位置：0=不在边缘 1=左边缘 2=右边缘
     private var globalSwipeStartEdge: Int = 0
+    // 起手 x：终结位移跟起手位置挂钩用（与客侧 gCZFStartX 同款，
+    // 用户 2026-11-04 令，2 号机制修）
+    private var globalSwipeStartX: CGFloat = 0
     // 边缘手势启用带：边缘起手的触摸只有落在屏幕高度的一段
     // 内才算数，上下不调（防误触）。2026-10-24 用户红圈定：
     // 调用带移到屏幕底部 10%–30% 一段（从顶算 70%–90%，
@@ -1489,7 +1492,7 @@ extension Notification.Name {
         case .ended, .cancelled:
             defer { czfEdgeSwipeLatched = false }
             guard globalSwipeStartEdge == 0 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
-            processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width)
+            processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width, startX: globalSwipeStartX)
         default:
             break
         }
@@ -1497,7 +1500,7 @@ extension Notification.Name {
 
     // 终结兜底判定：与 TweakLoader 内手势触摸漏斗的终结规则同参。
     // 只认边缘起手；任意位置起手不兜底（防误触设计不变）。
-    private func processGlobalSwipeFallback(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat) {
+    private func processGlobalSwipeFallback(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat, startX: CGFloat) {
         let dx = translation.x
         let dy = translation.y
         let s = Self.czfThresholdScale
@@ -1508,7 +1511,11 @@ extension Notification.Name {
             // 门槛保持严；往外弹空间小，门槛保持松）
             // 往外弹带已与普通带同值（用户 2026-11-03 令）：往外弹
             // 与往里拖都只认普通带。
-            if dx <= -8 * s, endX <= 12, abs(dx) > 0.4 * abs(dy), startInBand || startInOutwardBand {
+            // 2026-11-04 2 号机制修：位移门槛跟起手位置挂钩——
+            // 贴边起手（≤20pt，与客侧 kCZFEdgeTouchMax 同值）
+            // 只认 3pt，离边维持 8×s（灵敏度档照旧）。
+            let outwardNeed = startX <= 20 ? 3.0 : 8 * s
+            if dx <= -outwardNeed, endX <= 12, abs(dx) > 0.4 * abs(dy), startInBand || startInOutwardBand {
                 fireDockAction { self.czfOpenSourcesPanel() }
             } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
                 fireDockAction { self.czfOpenAppPanel() }
@@ -1644,6 +1651,7 @@ extension Notification.Name {
         } else {
             globalSwipeStartEdge = 0
         }
+        globalSwipeStartX = loc.x
         return true
     }
 

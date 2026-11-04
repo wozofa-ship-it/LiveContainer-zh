@@ -198,6 +198,10 @@ static const CGFloat kCZFEdgeTouchMax = 20;
 // 起手带；往里拖与拦截器仍用 20pt（不动）。
 static const CGFloat kCZFEdgeOutwardMax = 44;
 static BOOL gCZFStartAtEdge = NO;
+// 起手 x（shouldReceive 时记录）：终结位移跟起手位置挂钩用——
+// 贴边起手（≤20pt，见 kCZFEdgeTouchMax）左移行程物理上只有
+// 几 pt，终结门槛不能跟离边起手一样（用户 2026-11-04 令，2 号机制修）。
+static CGFloat gCZFStartX = 0;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;
 
@@ -301,6 +305,17 @@ static BOOL CZFIsOutwardFlick(NSInteger startEdge, BOOL startInOutwardZone, CGFl
     return startEdge == 1 && startInOutwardZone && dx <= -2 && velX <= -300;
 }
 
+// 取消即往外意图（只给 pan Cancelled 用，不给 Ended 用）：
+// 手指被 App 仲裁取消或滑出左边缘时，位移已无从再长——
+// 只要起于左缘、净左移 ≥2pt、落点仍在贴边（≤12）、横向
+// 过 0.2 底线，就认往外意图。误触代价只是一次面板开合
+// （可滑回），且去重（0.4/1.0s）兜底。漏斗 Ended/Cancelled
+// 共用同一分支，分不清取消与抬手，故漏斗不走这条，只走
+// 下面的终结判据（用户 2026-11-04 令，2 号机制修）。
+static BOOL CZFIsOutwardCancelled(NSInteger startEdge, CGFloat dx, CGFloat dy, CGFloat endX) {
+    return startEdge == 1 && dx <= -2 && endX <= 12 && fabs(dx) > 0.2 * fabs(dy);
+}
+
 // 终结时贴边往外判据（漏斗 Ended 与 pan Cancelled 共用）：
 // 手指起于往外弹带（≤44pt，见 kCZFEdgeOutwardMax）、净左移
 // ≥6pt、落点仍在贴边（≤12）且横向分量过 0.2 底线。终结态才
@@ -308,8 +323,12 @@ static BOOL CZFIsOutwardFlick(NSInteger startEdge, BOOL startInOutwardZone, CGFl
 // 不在贴边，进不来；拇指弧线纵向分量大的慢速往外滑，0.2
 // 能接住、0.4 接不住（251 的 flick 只接快速的，慢速仍漏）。
 // 实时门槛不动，免得中途抢滚动。
-static BOOL CZFIsOutwardEnded(NSInteger startEdge, BOOL startInOutwardZone, CGFloat dx, CGFloat dy, CGFloat endX) {
-    return startEdge == 1 && startInOutwardZone && dx <= -6 && endX <= 12 && fabs(dx) > 0.2 * fabs(dy);
+// 2026-11-04 2 号机制修：位移门槛跟起手位置挂钩——贴边起手
+// （≤20pt，见 kCZFEdgeTouchMax）左移行程物理上只有几 pt，
+// 只认 3pt 意图；离边起手维持 6pt（防误触不动）。
+static BOOL CZFIsOutwardEnded(NSInteger startEdge, BOOL startInOutwardZone, CGFloat dx, CGFloat dy, CGFloat endX, CGFloat startX) {
+    CGFloat need = (startX <= kCZFEdgeTouchMax) ? 3 : 6;
+    return startEdge == 1 && startInOutwardZone && dx <= -need && endX <= 12 && fabs(dx) > 0.2 * fabs(dy);
 }
 
 // 终结兜底判定（与宿主 processGlobalSwipeFallback 同参）：贴边
@@ -322,7 +341,7 @@ static BOOL CZFIsOutwardEnded(NSInteger startEdge, BOOL startInOutwardZone, CGFl
 // startAtEdge：起手是否贴边（≤20pt）——往里拖要求它，App 内
 // 滑动不触发；往外弹不要求它（进 startEdge==1 分支即 ≤44pt
 // 往外弹带，见 kCZFEdgeOutwardMax）；右边缘两个方向不用它。
-static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat endX, CGFloat width, BOOL startInBand, BOOL startAtEdge, NSString **outName, NSString **outSelector) {
+static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat endX, CGFloat width, BOOL startInBand, BOOL startAtEdge, CGFloat startX, NSString **outName, NSString **outSelector) {
     CGFloat dx = translation.x;
     CGFloat dy = translation.y;
     if (startEdge == 1) {
@@ -331,7 +350,10 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // 往外弹起手带已放宽到 44pt（见 kCZFEdgeOutwardMax）：
         // 进 startEdge==1 分支即 ≤44，不再另验 20pt 贴边；
         // 往里拖仍验 20pt 贴边（不动）。
-        if (dx <= -8 && endX <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
+        // 2026-11-04 2 号机制修：同终结判据，位移门槛跟起手
+        // 位置挂钩——贴边起手（≤20pt）只认 3pt，离边维持 8pt。
+        CGFloat outwardNeed = (startX <= kCZFEdgeTouchMax) ? 3 : 8;
+        if (dx <= -outwardNeed && endX <= 12 && fabs(dx) > 0.4 * fabs(dy)) {
             *outName = @"czf.dock.openSources";
             *outSelector = @"czfOpenSourcesPanel";
             return YES;
@@ -396,6 +418,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     // 不接就不会取消 App 触摸，进度条拖动完整归 App。
     if (CZFTouchOnControlOrSlider(touch)) {
         gCZFStartEdge = 0;
+        gCZFStartX = 0;
         return NO;
     }
     CGPoint loc = [touch locationInView:window];
@@ -427,6 +450,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     } else {
         gCZFStartEdge = 0;
     }
+    gCZFStartX = loc.x;
     return YES;
 }
 
@@ -466,10 +490,12 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
             CGPoint czfCancelVelocity = [gesture velocityInView:gesture.view];
             if (CZFIsOutwardFlick(gCZFStartEdge, gCZFStartEdge == 1, [gesture translationInView:gesture.view].x, czfCancelVelocity.x)) {
                 [self czfPostNotification:@"czf.dock.openSources" selectorName:@"czfOpenSourcesPanel"];
-            } else if (CZFIsOutwardEnded(gCZFStartEdge, gCZFStartEdge == 1, [gesture translationInView:gesture.view].x, [gesture translationInView:gesture.view].y, [gesture locationInView:gesture.view].x)) {
+            } else if (CZFIsOutwardEnded(gCZFStartEdge, gCZFStartEdge == 1, [gesture translationInView:gesture.view].x, [gesture translationInView:gesture.view].y, [gesture locationInView:gesture.view].x, gCZFStartX)) {
                 [self czfPostNotification:@"czf.dock.openSources" selectorName:@"czfOpenSourcesPanel"];
-            } else if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, gCZFStartInBand, gCZFStartAtEdge, &name, &selector)) {
+            } else if (CZFPanFallback(gCZFStartEdge, [gesture translationInView:gesture.view], [gesture locationInView:gesture.view].x, gesture.view.bounds.size.width, gCZFStartInBand, gCZFStartAtEdge, gCZFStartX, &name, &selector)) {
                 [self czfPostNotification:name selectorName:selector];
+            } else if (CZFIsOutwardCancelled(gCZFStartEdge, [gesture translationInView:gesture.view].x, [gesture translationInView:gesture.view].y, [gesture locationInView:gesture.view].x)) {
+                [self czfPostNotification:@"czf.dock.openSources" selectorName:@"czfOpenSourcesPanel"];
             }
         }
         gCZFFired = NO;
@@ -488,7 +514,7 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // 留给滑动中的提前触发
         NSString *name = nil;
         NSString *selector = nil;
-        if (CZFPanFallback(gCZFStartEdge, translation, endX, width, gCZFStartInBand, gCZFStartAtEdge, &name, &selector)) {
+        if (CZFPanFallback(gCZFStartEdge, translation, endX, width, gCZFStartInBand, gCZFStartAtEdge, gCZFStartX, &name, &selector)) {
             gCZFFired = YES;
             [self czfPostNotification:name selectorName:selector];
             return;
@@ -690,7 +716,7 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         NSTimeInterval czfFunnelDt = touch.timestamp - [state[6] doubleValue];
                         CGFloat czfFunnelVelX = (czfFunnelDt > 0) ? ((loc.x - [state[4] doubleValue]) / czfFunnelDt) : 0;
                         BOOL czfFunnelAtEdge = ([state[0] doubleValue] <= kCZFEdgeOutwardMax);
-                        if (CZFIsOutwardEnded(1, czfFunnelAtEdge, dx, dy, loc.x) || CZFIsOutwardFlick(1, czfFunnelAtEdge, dx, czfFunnelVelX)) {
+                        if (CZFIsOutwardEnded(1, czfFunnelAtEdge, dx, dy, loc.x, [state[0] doubleValue]) || CZFIsOutwardFlick(1, czfFunnelAtEdge, dx, czfFunnelVelX)) {
                             fireName = @"czf.dock.openSources";
                             fireSelector = @"czfOpenSourcesPanel";
                         } else if ([state[0] doubleValue] <= kCZFEdgeTouchMax && dx >= 44 && fabs(dx) > 0.8 * fabs(dy) && [state[3] boolValue]) {
