@@ -451,6 +451,23 @@ extension Notification.Name {
         let newFrame = CGRect(x: targetX, y: targetY, width: currentDockWidth, height: dockHeight)
         
         applyNewFrame(newFrame, for: hostingController, animated: animated)
+        // 收起后开关要能看见：台前 App 最大化时宿主窗会被全屏
+        // 游客窗口盖住，折叠栏（开关）在宿主窗里就看不见、没法
+        // 点回来；折叠且台前最大化时把栏搬到台前窗口，其余时
+        // 搬回宿主窗（只在窗口不对时搬，不重复挂）。
+        if isCollapsed,
+           let front = czfFrontmostApp(),
+           let view = front.view,
+           let vc = view._viewDelegate() as? DecoratedAppSceneViewController,
+           vc.isMaximized,
+           let frontWindow = view.window {
+            if hostingController.view.superview !== frontWindow {
+                frontWindow.addSubview(hostingController.view)
+                frontWindow.bringSubviewToFront(hostingController.view)
+            }
+        } else if let kw = keyWindow, hostingController.view.superview !== kw {
+            kw.addSubview(hostingController.view)
+        }
         // 隐藏折叠 Dock 开着且栏已折叠：整个宿主视图藏掉
         // （isHidden 才真不挡边缘手势，光透明还占着触摸区）
         hostingController.view.isHidden = LCUtils.appGroupUserDefault.bool(forKey: "LCHideCollapsedDock") && isCollapsed
@@ -3685,8 +3702,11 @@ private struct RunningAppsStripView: View {
     // （均分 Spacer / 横滑间距）仍是各分支自己的事。
     private var collapseStripButton: some View {
         fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
-            dockManager.toggleDockCollapse()
+            // 先最大化再折叠：两处都是 main 异步，最大化先入队、
+            // 标志先落位，折叠时的 updateDockFrame 才能认出台前
+            // 已最大化、把折叠栏（开关）搬到台前窗口露出来。
             dockManager.maximizeFrontmostWindow()
+            dockManager.toggleDockCollapse()
             onSwitch()
         }
     }
