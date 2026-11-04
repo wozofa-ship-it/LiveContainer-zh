@@ -10,6 +10,7 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 import Combine
+import ObjectiveC
 
 // MARK: - App Info Provider
 class AppInfoProvider {
@@ -1448,6 +1449,8 @@ extension Notification.Name {
     private var czfEdgeSwipeLatched = false
 
     private func setupGlobalSwipeRecognizer() {
+        // 宿主 sendEvent 直读只装一次（左滑出源面板专用，见下）。
+        _ = Self.czfHostSendEventInstalled
         // 游客 App 的窗口出现得晚：监听新窗口/新场景，一出现就补装
         if !globalSwipeObserversInstalled {
             globalSwipeObserversInstalled = true
@@ -1475,6 +1478,61 @@ extension Notification.Name {
             pan.delegate = self
             window.addGestureRecognizer(pan)
             globalSwipeRecognizers.append(pan)
+        }
+    }
+
+    // MARK: - 宿主 sendEvent 直读（左滑出源面板专用，2026-11-04）
+    // 宿主窗口 pan 在代码上全对、但真机左滑（往外弹）仍不可靠：
+    // 手指几毫米就出屏，识别器那步可能直接丢触摸。客侧漏斗
+    // 用 sendEvent 直读原始触摸才灵敏，宿主照抄同款机制：
+    // 只接左滑（往外弹）一路，右滑（往里拖）仍走原来好用的
+    // pan，一律不动；pan 的往外弹分支同步停用，避免两路重复。
+    // 钩子名用 czf_host_ 前缀，与客侧 czf_ 区分开，万一同进程
+    // 也不撞；只观察、绝不拦截/改事件，原实现先转发。
+    // 注意：extension 里的钩子方法必须加 dynamic，否则 Swift
+    // 静态分发会自递归（交换后调自己、栈溢出），切勿去掉。
+    private static let czfHostSendEventInstalled: Void = {
+        guard let original = class_getInstanceMethod(UIWindow.self, #selector(UIWindow.sendEvent(_:))),
+              let swizzled = class_getInstanceMethod(UIWindow.self, #selector(UIWindow.czf_host_sendEvent(_:))) else { return }
+        method_exchangeImplementations(original, swizzled)
+    }()
+    private static var czfHostOutwardTouches = [UITouch: CGPoint]()
+
+    static func czfHostOutwardObserve(window: UIWindow, event: UIEvent) {
+        guard let touches = event.allTouches, !touches.isEmpty else { return }
+        let height = window.bounds.height
+        guard height > 0 else { return }
+        let top = Self.czfEdgeOutwardBandTop
+        let bottom = Self.czfEdgeOutwardBandBottom
+        let s = Self.czfThresholdScale
+        for touch in touches {
+            let loc = touch.location(in: window)
+            switch touch.phase {
+            case .began:
+                if loc.x <= 44, loc.y >= height * top, loc.y <= height * bottom {
+                    czfHostOutwardTouches[touch] = loc
+                }
+            case .moved:
+                guard let start = czfHostOutwardTouches[touch] else { continue }
+                let dx = loc.x - start.x
+                let dy = loc.y - start.y
+                if dx <= -6 * s, abs(dx) > 0.9 * abs(dy) {
+                    czfHostOutwardTouches.removeValue(forKey: touch)
+                    Self.shared.czfOpenSourcesPanelFromFunnel()
+                }
+            case .ended, .cancelled:
+                if let start = czfHostOutwardTouches[touch] {
+                    let dx = loc.x - start.x
+                    let dy = loc.y - start.y
+                    let need: CGFloat = start.x <= 20 ? 3 : 8 * s
+                    if dx <= -need, abs(dx) > 0.4 * abs(dy) {
+                        Self.shared.czfOpenSourcesPanelFromFunnel()
+                    }
+                    czfHostOutwardTouches.removeValue(forKey: touch)
+                }
+            default:
+                break
+            }
         }
     }
 
@@ -1528,10 +1586,9 @@ extension Notification.Name {
             // 贴边起手（≤20pt，与客侧 kCZFEdgeTouchMax 同值）
             // 只认 3pt，离边维持 8×s（灵敏度档照旧）。
             // 256修：往外弹不再验落点贴边（同客侧理由）。
-            let outwardNeed = startX <= 20 ? 3.0 : 8 * s
-            if dx <= -outwardNeed, abs(dx) > 0.4 * abs(dy), startInBand || startInOutwardBand {
-                fireDockAction { self.czfOpenSourcesPanel() }
-            } else if dx >= 44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
+            // 2026-11-04 sendEvent 直读接管往外弹后，兜底不再
+            // 触发源面板，避免两路重复；往里拖（App 面板）不变。
+            if dx >= 44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
                 fireDockAction { self.czfOpenAppPanel() }
             }
         } else if startEdge == 2 {
@@ -1589,9 +1646,10 @@ extension Notification.Name {
                 guard translation.x > 30 * s else { return false }
                 fireDockAction { self.czfOpenAppPanel() }
             } else {
-                guard startInBand || startInOutwardBand else { return false }
-                guard abs(translation.x) > 6 * s else { return false }
-                fireDockAction { self.czfOpenSourcesPanel() }
+                // 往外弹已由宿主 sendEvent 直读接管（2026-11-04），
+                // pan 不再触发源面板，避免两路重复；返回 false
+                // 不闩锁，之后改往里拖仍能触发。
+                return false
             }
             return true
         } else {
@@ -4077,5 +4135,16 @@ struct LoadingIconView: View {
                 .progressViewStyle(CircularProgressViewStyle(tint: .white))
                 .scaleEffect(1.2)
         }
+    }
+}
+
+// MARK: - 宿主 sendEvent 直读钩子（左滑出源面板专用，2026-11-04）
+// 与客侧 TweakLoader 的 czf_sendEvent 同款：交换后本调用即原
+// 实现，先原样转发，再纯观察（绝不拦截/改事件）。dynamic 必
+// 须保留，否则 Swift 静态分发会自递归导致栈溢出。
+extension UIWindow {
+    @objc dynamic func czf_host_sendEvent(_ event: UIEvent) {
+        self.czf_host_sendEvent(event)
+        MultitaskDockManager.czfHostOutwardObserve(window: self, event: event)
     }
 }
