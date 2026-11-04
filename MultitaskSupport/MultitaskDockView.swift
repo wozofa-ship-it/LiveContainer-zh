@@ -1447,6 +1447,34 @@ extension Notification.Name {
     // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
     // 不闩住会在 .changed 里连震好几下）
     private var czfEdgeSwipeLatched = false
+    // 左边缘系统手势（2026-11-04 22:xx）：直接左滑被系统在落指时
+    // 就认领、App 侧触摸没动就死了，sendEvent 再松的阈值也接不住
+    // （272 改阈值零变化实证）。UIScreenEdgePanGestureRecognizer 是
+    // 系统认可的边缘手势，系统不会抢先认领它的触摸，专接左滑一路；
+    // 往里仍走原来好用的 pan，sendEvent 钩子留作 x 21–44 起手的后备。
+    private var czfLeftEdgePanRecognizers: [UIScreenEdgePanGestureRecognizer] = []
+    private var czfLeftEdgePanFired: Set<ObjectIdentifier> = []
+
+    @objc private func handleGlobalLeftEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        switch gesture.state {
+        case .ended, .cancelled, .failed:
+            czfLeftEdgePanFired.remove(ObjectIdentifier(gesture))
+            return
+        case .began, .changed:
+            break
+        default:
+            return
+        }
+        let id = ObjectIdentifier(gesture)
+        guard !czfLeftEdgePanFired.contains(id) else { return }
+        let t = gesture.translation(in: gesture.view)
+        let s = Self.czfThresholdScale
+        // 只接往外（左移）；往里（右移）不碰，走原来好用的 pan。
+        if t.x <= -6 * s, abs(t.x) > 0.9 * abs(t.y) {
+            czfLeftEdgePanFired.insert(id)
+            self.czfOpenSourcesPanelFromFunnel()
+        }
+    }
 
     private func setupGlobalSwipeRecognizer() {
         // 宿主 sendEvent 直读只装一次（左滑出源面板专用，见下）。
@@ -1462,6 +1490,7 @@ extension Notification.Name {
             }
         }
         globalSwipeRecognizers.removeAll { $0.view == nil }
+        czfLeftEdgePanRecognizers.removeAll { $0.view == nil }
         var windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
@@ -1478,6 +1507,14 @@ extension Notification.Name {
             pan.delegate = self
             window.addGestureRecognizer(pan)
             globalSwipeRecognizers.append(pan)
+            if !czfLeftEdgePanRecognizers.contains(where: { $0.view === window }) {
+                let edgePan = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleGlobalLeftEdgeSwipe(_:)))
+                edgePan.edges = .left
+                edgePan.cancelsTouchesInView = false
+                edgePan.delegate = self
+                window.addGestureRecognizer(edgePan)
+                czfLeftEdgePanRecognizers.append(edgePan)
+            }
         }
     }
 
@@ -1729,12 +1766,16 @@ extension Notification.Name {
 
     // 全部接收、只记录起手位置；触发判定在 handler 里按起手+落点做
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // 屏幕边缘识别器（栏隐藏时的 UIScreenEdgePan）：按启用带
-        // 放行，带外的触摸直接不让它识别。
+        // 屏幕边缘识别器：栏隐藏那支按普通带放行；左滑出源面板
+        // 那支（czfLeftEdgePanRecognizers）按往外弹带放行（比普通带宽），
+        // 带外的触摸直接不让它识别。
         if gestureRecognizer is UIScreenEdgePanGestureRecognizer,
            let window = gestureRecognizer.view as? UIWindow {
             let y = touch.location(in: window).y
             let height = window.bounds.height
+            if czfLeftEdgePanRecognizers.contains(where: { $0 === gestureRecognizer }) {
+                return y >= height * Self.czfEdgeOutwardBandTop && y <= height * Self.czfEdgeOutwardBandBottom
+            }
             return y >= height * Self.czfEdgeBandTop && y <= height * Self.czfEdgeBandBottom
         }
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
@@ -1772,7 +1813,7 @@ extension Notification.Name {
 
     // 全局甩动手势只观察、不同步拦截：与 App 自己的手势同时识别
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return globalSwipeRecognizers.contains { $0 === gestureRecognizer }
+        return globalSwipeRecognizers.contains { $0 === gestureRecognizer } || czfLeftEdgePanRecognizers.contains { $0 === gestureRecognizer }
     }
 
     // MARK: - 边缘手势入口（悬浮边条窗 / 宿主窗口手势共用）
