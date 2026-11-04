@@ -825,7 +825,10 @@
         // 不再随快捷栏收起 + 最大化自动藏（原上游沉浸全屏规则
         // 已废）；收起只收快捷栏本身，不再连带藏标题栏，最大
         // 化时最小化/最大化/关闭按钮一直在。
-        BOOL hideWindowBar = NO;
+        // 用户 2026-11-04 13:29 改回：视频为准，收起要全屏满屏
+        // （藏标题栏），再点一下显示右上角状态栏加全屏——即
+        // 245 的原规则：栏收起且最大化时藏标题栏。
+        BOOL hideWindowBar = MultitaskDockManager.shared.isCollapsed && self.isMaximized;
         CGFloat navBarHeight = hideWindowBar ? 0 : 44;
         self.navigationBar.alpha = hideWindowBar ? 0 : 1;
         self.navigationBar.hidden = hideWindowBar;
