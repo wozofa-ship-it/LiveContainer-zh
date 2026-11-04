@@ -1550,7 +1550,9 @@ extension Notification.Name {
             let loc = touch.location(in: window)
             switch touch.phase {
             case .began:
-                if loc.x <= 44, loc.y >= height * top, loc.y <= height * bottom {
+                // 用户 2026-11-04 22:43 令加宽测试：起手横向区由 44pt
+                // 放宽到 100pt（只动左滑一路，带/阈值/右滑一律不动）。
+                if loc.x <= 100, loc.y >= height * top, loc.y <= height * bottom {
                     czfHostOutwardTouches[touch] = loc
                 }
             case .moved:
