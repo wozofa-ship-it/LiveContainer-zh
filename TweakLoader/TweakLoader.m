@@ -87,13 +87,16 @@ static void TweakLoaderConstructor() {
     NSString *globalTweakFolder = @(tweakFolderC);
     unsetenv("LC_GLOBAL_TWEAKS_FOLDER");
     
+    // 手势是启动器自带功能，不是插件：禁注入的 App 也要装，
+    // 否则全屏（无标题栏、无栏）时没有任何手势入口，最小化
+    // 都没法做；禁注入只跳过下面第三方插件的加载，不动这里。
+    CZFDockGestureInstall();
+
     if([NSUserDefaults.guestAppInfo[@"dontInjectTweakLoader"] boolValue]) {
         // don't load any tweak since tweakloader is loaded after all initializers
         NSLog(@"Skip loading tweaks");
         return;
     }
-
-    CZFDockGestureInstall();
     
     NSMutableArray *errors = [NSMutableArray new];
     
@@ -844,8 +847,10 @@ static void CZFKeyboardDismissOnMinimizeInstall(void) {
 }
 
 // 由 TweakLoaderConstructor 调用（不是自己的 constructor）：
-// 这样禁注入的 App（dontInjectTweakLoader）不会装手势；且没选
-// 任何插件的游客也能用手势——手势是启动器自带功能，不是插件。
+// 手势是启动器自带功能，不是插件，故无条件安装——禁注入的
+// App 也要装（禁注入只跳过第三方插件的加载）；否则禁注入
+// App 全屏（无标题栏、无栏）时没有任何手势入口，最小化都
+// 没法做。且没选任何插件的游客也能用手势。
 static void CZFDockGestureInstall(void) {
     @autoreleasepool {
         CZFInstallSendEventHook();
