@@ -1550,9 +1550,9 @@ extension Notification.Name {
             let loc = touch.location(in: window)
             switch touch.phase {
             case .began:
-                // 用户 2026-11-04 22:43 令加宽测试：起手横向区由 44pt
-                // 放宽到 100pt（只动左滑一路，带/阈值/右滑一律不动）。
-                if loc.x <= 100, loc.y >= height * top, loc.y <= height * bottom {
+                // 用户 2026-11-04 23:16 令改成 65pt（80pt 仍嫌宽）：
+                // 起手横向区收窄到 65pt（只动左滑一路，带/阈值/右滑一律不动）。
+                if loc.x <= 65, loc.y >= height * top, loc.y <= height * bottom {
                     czfHostOutwardTouches[touch] = loc
                 }
             case .moved:
@@ -3667,7 +3667,7 @@ private struct SourcePanelRow: View {
                 } label: {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
+                        .frame(width: 25, height: 25)
                 }
                 .buttonStyle(BasicButtonStyle())
             }
@@ -3677,7 +3677,7 @@ private struct SourcePanelRow: View {
                 Text("下载")
                     .font(.system(size: 13)).bold()
                     .foregroundColor(.white)
-                    .frame(height: 30)
+                    .frame(height: 25)
                     .padding(.horizontal, 10)
             }
             .buttonStyle(BasicButtonStyle())
@@ -3687,7 +3687,7 @@ private struct SourcePanelRow: View {
                 Text("已安装")
                     .font(.system(size: 13)).bold()
                     .foregroundColor(.white)
-                    .frame(height: 30)
+                    .frame(height: 25)
                     .padding(.horizontal, 10)
                     .background(Capsule().fill(Color.green))
                     .clipShape(Capsule())
@@ -3698,7 +3698,7 @@ private struct SourcePanelRow: View {
                     Text("更新")
                         .font(.system(size: 13)).bold()
                         .foregroundColor(.white)
-                        .frame(height: 30)
+                        .frame(height: 25)
                         .padding(.horizontal, 10)
                 }
                 .buttonStyle(BasicButtonStyle())
@@ -3716,7 +3716,7 @@ private struct SourcePanelRow: View {
                     Text("打开")
                         .font(.system(size: 13)).bold()
                         .foregroundColor(.white)
-                        .frame(height: 30)
+                        .frame(height: 25)
                         .padding(.horizontal, 10)
                 }
                 .buttonStyle(BasicButtonStyle())
@@ -3729,7 +3729,7 @@ private struct SourcePanelRow: View {
                     Text("安装")
                         .font(.system(size: 13)).bold()
                         .foregroundColor(.white)
-                        .frame(height: 30)
+                        .frame(height: 25)
                         .padding(.horizontal, 10)
                 }
                 .buttonStyle(BasicButtonStyle())
