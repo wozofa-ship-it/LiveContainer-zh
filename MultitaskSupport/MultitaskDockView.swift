@@ -3669,7 +3669,6 @@ private struct RunningAppsStripView: View {
     private var collapseStripButton: some View {
         fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
             dockManager.toggleDockCollapse()
-            dockManager.maximizeFrontmostWindow()
             onSwitch()
         }
     }
