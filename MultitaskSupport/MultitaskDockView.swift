@@ -1411,11 +1411,17 @@ extension Notification.Name {
     private static var czfEdgeSensitivity: Int {
         UserDefaults.standard.object(forKey: "CZFEdgeSensitivity") as? Int ?? 1
     }
-    // 往外弹启用带：用户 2026-11-03 令往外弹高度跟 App 面板
-    // 一样——即上面的普通带（原放宽值中档 0.55–0.93 已废）。
-    // 插件侧写死中档普通带值（0.70–0.90），与这里中档一致。
+    // 往外弹启用带：用户 2026-11-04 令左往左滑根本不好用、检查
+    // 好修复——11-03 把往外弹带收窄到跟 App 面板一致（0.70–0.90）
+    // 后，左滑大半高度都认不出；恢复收窄前的好用值（中档
+    // 0.55–0.93，低 0.65–0.90、高 0.50–0.95），左滑带宽回
+    // 来才灵敏。App 面板往里拖仍用普通带，不动。
     private static var czfEdgeOutwardBandValues: (top: CGFloat, bottom: CGFloat) {
-        czfEdgeBandValues
+        switch czfEdgeSensitivity {
+        case 0: return (0.65, 0.90)
+        case 2: return (0.50, 0.95)
+        default: return (0.55, 0.93)
+        }
     }
     private static var czfEdgeOutwardBandTop: CGFloat { czfEdgeOutwardBandValues.top }
     private static var czfEdgeOutwardBandBottom: CGFloat { czfEdgeOutwardBandValues.bottom }
@@ -1632,6 +1638,21 @@ extension Notification.Name {
         return false
     }
 
+    // 只认滑块/进度条类（拖动会跟 pan 冲突的那种），普通按钮
+    // 不算——边缘按钮上的滑动要放行给全局手势。
+    private func czfTouchOnSliderOrProgress(_ touch: UITouch) -> Bool {
+        var view = touch.view
+        while let v = view {
+            if v is UISlider { return true }
+            let name = String(describing: type(of: v)).lowercased()
+            if name.contains("slider") || name.contains("scrub") || name.contains("seek") || name.contains("progress") {
+                return true
+            }
+            view = v.superview
+        }
+        return false
+    }
+
     // 全部接收、只记录起手位置；触发判定在 handler 里按起手+落点做
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         // 屏幕边缘识别器（栏隐藏时的 UIScreenEdgePan）：按启用带
@@ -1644,21 +1665,21 @@ extension Notification.Name {
         }
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
               let window = gestureRecognizer.view as? UIWindow else { return true }
-        // 快捷栏自身触摸不进边缘手势：只拦折叠后的蓝色滑块
-        // （09:07 用户报：滑块在左缘时往左一滑弹源面板）。
-        // 展开的栏不拦：栏在左缘展开时，左缘滑动起手落在栏上，
-        // 全拦就等于左缘手势全死（257 回归）；展开时栏上滑动
-        // 进全局手势，恢复 245 行为。面板手势仍可从 App 内容
-        // 区起手。
-        if isCollapsed, var v: UIView? = touch.view {
-            while let cur = v {
-                if cur === hostingController?.view { return false }
-                v = cur.superview
-            }
-        }
+        // 用户 2026-11-04 令：左往左滑根本不好用——折叠滑块
+        // 也不拦：收起后栏收成滑块贴在左缘，拦滑块就等于左
+        // 缘手势全死（左滑出源面板失灵的根因之一）；栏上滑
+        // 动一律进全局手势。
+        // 边缘起手且落在普通控件（App 行按钮、导航按钮等）上时
+        // 不拦：点按无位移不会触发 pan，不影响点按；滑动则进
+        // 全局手势——否则左缘被按钮盖住时左滑全死（根本不好
+        // 用的另一根因）。滑块/进度条仍拦（拖动会跟 pan 同时动）。
         if czfTouchOnControlOrSlider(touch) {
-            globalSwipeStartEdge = 0
-            return false
+            let edgeLoc = touch.location(in: window)
+            let atEdge = edgeLoc.x <= 44 || edgeLoc.x >= window.bounds.width - 44
+            if !(atEdge && !czfTouchOnSliderOrProgress(touch)) {
+                globalSwipeStartEdge = 0
+                return false
+            }
         }
         let loc = touch.location(in: window)
         let height = window.bounds.height

@@ -228,6 +228,22 @@ static BOOL CZFTouchOnControlOrSlider(UITouch *touch) {
     return NO;
 }
 
+// 只认滑块/进度条类（拖动会冲突的那种），普通按钮不算——
+// 边缘按钮上的滑动要放行（与宿主侧同款）。
+static BOOL CZFTouchOnSliderOrProgress(UITouch *touch) {
+    UIView *view = touch.view;
+    while (view) {
+        if ([view isKindOfClass:[UISlider class]]) return YES;
+        NSString *name = [NSStringFromClass([view class]) lowercaseString];
+        if ([name rangeOfString:@"slider"].location != NSNotFound ||
+            [name rangeOfString:@"scrub"].location != NSNotFound ||
+            [name rangeOfString:@"seek"].location != NSNotFound ||
+            [name rangeOfString:@"progress"].location != NSNotFound) return YES;
+        view = view.superview;
+    }
+    return NO;
+}
+
 // 边缘带拦截识别器（手势双触发修正）：只负责一件事——起手
 // 在边缘带（左 16pt / 右 44pt 内 + 高度 70%–90%，见 shouldReceiveTouch
 // 分支）且约 6pt 内横向占优时，立刻认是手势并取消 App 那路
@@ -421,10 +437,17 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     if (![window isKindOfClass:[UIWindow class]]) return NO;
     // 控件/进度条起手：观察 pan 与拦截器都不接——拦截器
     // 不接就不会取消 App 触摸，进度条拖动完整归 App。
+    // 但边缘起手且落在普通控件（按钮等）上时放行：点按无
+    // 位移不会触发，滑动则进手势——否则边缘被按钮盖住时
+    // 左滑全死；滑块/进度条仍拦。
     if (CZFTouchOnControlOrSlider(touch)) {
-        gCZFStartEdge = 0;
-        gCZFStartX = 0;
-        return NO;
+        CGPoint edgeLoc = [touch locationInView:window];
+        BOOL atEdge = (edgeLoc.x <= 44 || edgeLoc.x >= window.bounds.size.width - 44);
+        if (!(atEdge && !CZFTouchOnSliderOrProgress(touch))) {
+            gCZFStartEdge = 0;
+            gCZFStartX = 0;
+            return NO;
+        }
     }
     CGPoint loc = [touch locationInView:window];
     CGFloat width = window.bounds.size.width;
@@ -440,11 +463,12 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         return inBand && (loc.x <= kCZFEdgeTouchMax || loc.x >= width - 44);
     }
     gCZFStartInBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
-    // 往外弹带跟普通带同值（用户 2026-11-03 令：往外弹高度
-    // 跟 App 面板一样，原 0.55–0.93 已废）；拦截器分支（上
+    // 往外弹带恢复收窄前的好用值 0.55–0.93（用户 2026-11-04
+    // 令：左往左滑根本不好用，检查好修复；11-03 收窄到跟
+    // App 面板一致后左滑大半高度认不出）；拦截器分支（上
     // 面）仍只认普通带——放宽取消区会误取消 App 触摸，往外
     // 弹不需要取消 App 触摸，故不动它。
-    gCZFStartInOutwardBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
+    gCZFStartInOutwardBand = (loc.y >= height * 0.55 && loc.y <= height * 0.93);
     // 面板只认贴边起手（见文件头 kCZFEdgeTouchMax 注释）
     gCZFStartAtEdge = (loc.x <= kCZFEdgeTouchMax);
     // 全部接收、只记录起手位置；是否触发在 handler 按起手+位移判定
