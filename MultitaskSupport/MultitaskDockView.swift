@@ -1520,12 +1520,28 @@ extension Notification.Name {
                     czfHostOutwardTouches.removeValue(forKey: touch)
                     Self.shared.czfOpenSourcesPanelFromFunnel()
                 }
-            case .ended, .cancelled:
+            case .ended:
                 if let start = czfHostOutwardTouches[touch] {
                     let dx = loc.x - start.x
                     let dy = loc.y - start.y
-                    let need: CGFloat = start.x <= 20 ? 3 : 8 * s
-                    if dx <= -need, abs(dx) > 0.4 * abs(dy) {
+                    // 终结与客侧 CZFIsOutwardEnded 同参（贴边 3、离边 6、比 0.2）：
+                    // 271 原值离边 8*s、比 0.4 过严，慢速弧线接不住。
+                    let need: CGFloat = start.x <= 20 ? 3 : 6
+                    if dx <= -need, abs(dx) > 0.2 * abs(dy) {
+                        Self.shared.czfOpenSourcesPanelFromFunnel()
+                    }
+                    czfHostOutwardTouches.removeValue(forKey: touch)
+                }
+            case .cancelled:
+                if let start = czfHostOutwardTouches[touch] {
+                    let dx = loc.x - start.x
+                    let dy = loc.y - start.y
+                    // 取消即往外意图，与客侧 CZFIsOutwardCancelled 同参
+                    // （净左移 ≥2pt、比 0.2）：一次性左滑常被系统/ App
+                    // 仲裁早取消，取消时位移已无从再长，271 原值
+                    // （3/8*s、比 0.4）够不着才不出；右滑按住再左能出，
+                    // 正因触摸没被早取消、moved 路有机会触发。
+                    if dx <= -2, abs(dx) > 0.2 * abs(dy) {
                         Self.shared.czfOpenSourcesPanelFromFunnel()
                     }
                     czfHostOutwardTouches.removeValue(forKey: touch)
