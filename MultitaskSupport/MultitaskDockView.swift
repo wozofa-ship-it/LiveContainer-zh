@@ -1522,8 +1522,8 @@ extension Notification.Name {
             // = App 面板，往外弹（手指左移）= 源面板。门槛跟着动作
             // 的物理方向走，不跟面板走（往里拖与 App 内横滑同轨，
             // 门槛保持严；往外弹空间小，门槛保持松）
-            // 往外弹带已与普通带同值（用户 2026-11-03 令）：往外弹
-            // 与往里拖都只认普通带。
+            // 往外弹带已恢复 0.55–0.93（2026-11-04 左滑修复），
+            // 往里拖仍只认普通带。
             // 2026-11-04 2 号机制修：位移门槛跟起手位置挂钩——
             // 贴边起手（≤20pt，与客侧 kCZFEdgeTouchMax 同值）
             // 只认 3pt，离边维持 8×s（灵敏度档照旧）。
@@ -1581,9 +1581,9 @@ extension Notification.Name {
             // = 源面板。与插件侧判定保持一致；门槛跟着物理方向
             // 走：往里拖与 App 内横滑同轨，30 的门槛只认边缘起手
             // 的决断横拖，不抢 App 自己的滑动。
-            // 往外弹带已与普通带同值（用户 2026-11-03 令）：往外弹
-            // 与往里拖都只认普通带——带外起手的往里拖到这里返回 false
-            // 不闩锁，之后改往外弹仍能触发。
+            // 往外弹带已恢复 0.55–0.93（2026-11-04 左滑修复），
+            // 往里拖仍只认普通带——带外起手的往里拖到这里返回
+            // false 不闩锁，之后改往外弹仍能触发。
             if draggingRight {
                 guard startInBand else { return false }
                 guard translation.x > 30 * s else { return false }
@@ -1841,10 +1841,18 @@ extension Notification.Name {
     // 共用的 czfLastPanelActionAt，不走这两路。
     private var czfLastPanelActionAt = Date.distantPast
     private enum CZFPanelSignalSource { case host, funnel }
-    private var czfLastHostPanelActionAt = Date.distantPast
-    private var czfLastFunnelPanelActionAt = Date.distantPast
-    private var czfLastPanelOpenedAt = Date.distantPast
-    private var czfLastPanelOpenedSource: CZFPanelSignalSource?
+    // 节流按面板分开记（2026-11-04 左滑确定性修复）：两面板
+    // 共用一个节流时，右滑刚开完 App 面板、马上左滑会被吞掉，
+    // 看着像左滑失灵；分开后互不影响，关着时一次左滑必定开。
+    // 几何（带宽、边缘宽、门槛）一律不动。
+    private var czfLastHostAppPanelActionAt = Date.distantPast
+    private var czfLastFunnelAppPanelActionAt = Date.distantPast
+    private var czfLastAppPanelOpenedAt = Date.distantPast
+    private var czfLastAppPanelOpenedSource: CZFPanelSignalSource?
+    private var czfLastHostSourcesPanelActionAt = Date.distantPast
+    private var czfLastFunnelSourcesPanelActionAt = Date.distantPast
+    private var czfLastSourcesPanelOpenedAt = Date.distantPast
+    private var czfLastSourcesPanelOpenedSource: CZFPanelSignalSource?
 
     @objc public func czfOpenAppPanel() {
         czfToggleAppPanel(source: .host)
@@ -1862,13 +1870,13 @@ extension Notification.Name {
         let now = Date()
         switch source {
         case .host:
-            guard now.timeIntervalSince(czfLastHostPanelActionAt) > 0.4 else { return }
-            czfLastHostPanelActionAt = now
+            guard now.timeIntervalSince(czfLastHostAppPanelActionAt) > 0.4 else { return }
+            czfLastHostAppPanelActionAt = now
         case .funnel:
-            guard now.timeIntervalSince(czfLastFunnelPanelActionAt) > 0.4 else { return }
-            czfLastFunnelPanelActionAt = now
+            guard now.timeIntervalSince(czfLastFunnelAppPanelActionAt) > 0.4 else { return }
+            czfLastFunnelAppPanelActionAt = now
         }
-        if now.timeIntervalSince(czfLastPanelOpenedAt) < 1.0, czfLastPanelOpenedSource != source { return }
+        if now.timeIntervalSince(czfLastAppPanelOpenedAt) < 1.0, czfLastAppPanelOpenedSource != source { return }
         edgeCallbackBuzz()
         // 切换式（用户要求）：面板已打开再滑一次就关掉，
         // 不再是只能滑开、关还得点按钮/点遮罩。
@@ -1876,8 +1884,8 @@ extension Notification.Name {
             dismissPanelOverlay()
             return
         }
-        czfLastPanelOpenedAt = now
-        czfLastPanelOpenedSource = source
+        czfLastAppPanelOpenedAt = now
+        czfLastAppPanelOpenedSource = source
         presentAllAppsPanel()
     }
 
@@ -1899,20 +1907,20 @@ extension Notification.Name {
         let now = Date()
         switch source {
         case .host:
-            guard now.timeIntervalSince(czfLastHostPanelActionAt) > 0.4 else { return }
-            czfLastHostPanelActionAt = now
+            guard now.timeIntervalSince(czfLastHostSourcesPanelActionAt) > 0.4 else { return }
+            czfLastHostSourcesPanelActionAt = now
         case .funnel:
-            guard now.timeIntervalSince(czfLastFunnelPanelActionAt) > 0.4 else { return }
-            czfLastFunnelPanelActionAt = now
+            guard now.timeIntervalSince(czfLastFunnelSourcesPanelActionAt) > 0.4 else { return }
+            czfLastFunnelSourcesPanelActionAt = now
         }
-        if now.timeIntervalSince(czfLastPanelOpenedAt) < 1.0, czfLastPanelOpenedSource != source { return }
+        if now.timeIntervalSince(czfLastSourcesPanelOpenedAt) < 1.0, czfLastSourcesPanelOpenedSource != source { return }
         edgeCallbackBuzz()
         if isSourcesPanelOpen {
             dismissSourcesOverlay()
             return
         }
-        czfLastPanelOpenedAt = now
-        czfLastPanelOpenedSource = source
+        czfLastSourcesPanelOpenedAt = now
+        czfLastSourcesPanelOpenedSource = source
         presentSourcesPanel()
     }
 
