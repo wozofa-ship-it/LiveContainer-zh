@@ -4145,6 +4145,13 @@ struct LoadingIconView: View {
 extension UIWindow {
     @objc dynamic func czf_host_sendEvent(_ event: UIEvent) {
         self.czf_host_sendEvent(event)
-        MultitaskDockManager.czfHostOutwardObserve(window: self, event: event)
+        // MultitaskDockManager 带 @available(iOS 16.0, *)，文件级
+        // extension 在类外、没有可用性上下文，直接引用会报
+        // "'MultitaskDockManager' is only available in iOS 16.0 or
+        // newer"（270 构建 #314 唯一红字）。照抄仓库既有 pattern
+        // 包一层 #available，iOS 15 下跳过（管理器本身也不跑）。
+        if #available(iOS 16.0, *) {
+            MultitaskDockManager.czfHostOutwardObserve(window: self, event: event)
+        }
     }
 }
