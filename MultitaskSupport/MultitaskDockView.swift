@@ -451,12 +451,12 @@ extension Notification.Name {
         let newFrame = CGRect(x: targetX, y: targetY, width: currentDockWidth, height: dockHeight)
         
         applyNewFrame(newFrame, for: hostingController, animated: animated)
-        // 收起后开关要能看见：台前 App 最大化时宿主窗会被全屏
-        // 游客窗口盖住，折叠栏（开关）在宿主窗里就看不见、没法
-        // 点回来；折叠且台前最大化时把栏搬到台前窗口，其余时
-        // 搬回宿主窗（只在窗口不对时搬，不重复挂）。
-        if isCollapsed,
-           let front = czfFrontmostApp(),
+        // 收起开关两态都要能看见：台前 App 最大化时宿主窗会被全屏
+        // 游客窗口盖住，栏（折叠是开关、展开是状态栏）在宿主窗里
+        // 就看不见；台前最大化时把栏搬到台前窗口（两态都露出来，
+        // 按下只切栏显隐、App 一直全屏），其余时搬回宿主窗
+        // （只在窗口不对时搬，不重复挂）。
+        if let front = czfFrontmostApp(),
            let view = front.view,
            let vc = view._viewDelegate() as? DecoratedAppSceneViewController,
            vc.isMaximized,
