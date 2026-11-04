@@ -1470,7 +1470,11 @@ extension Notification.Name {
         let t = gesture.translation(in: gesture.view)
         let s = Self.czfThresholdScale
         // 只接往外（左移）；往里（右移）不碰，走原来好用的 pan。
-        if t.x <= -6 * s, abs(t.x) > 0.9 * abs(t.y) {
+        // 优化 1 号：实时比 0.9→0.4，斜滑中途就触发；
+        // 优化 3 号：补 flick 路（与客侧 CZFIsOutwardFlick 同参：
+        // 位移 −2 + 左向速度 ≤−300），短促快甩也接住。
+        let v = gesture.velocity(in: gesture.view)
+        if (t.x <= -6 * s && abs(t.x) > 0.4 * abs(t.y)) || (t.x <= -2 && v.x <= -300) {
             czfLeftEdgePanFired.insert(id)
             self.czfOpenSourcesPanelFromFunnel()
         }
@@ -1553,7 +1557,7 @@ extension Notification.Name {
                 guard let start = czfHostOutwardTouches[touch] else { continue }
                 let dx = loc.x - start.x
                 let dy = loc.y - start.y
-                if dx <= -6 * s, abs(dx) > 0.9 * abs(dy) {
+                if dx <= -6 * s, abs(dx) > 0.4 * abs(dy) {
                     czfHostOutwardTouches.removeValue(forKey: touch)
                     Self.shared.czfOpenSourcesPanelFromFunnel()
                 }
@@ -1951,7 +1955,7 @@ extension Notification.Name {
     // 分来源去重（行为底线不动：启用带、控件排除、切换式全不变）：
     // 同来源 0.4 秒内重复吞掉（各来源各算各的，不再互相吞掉对方
     // 的第二次滑动）；跨来源回声另防——任一面板刚由另一来源打开
-    // （1.0 秒内），本次就是同一物理滑动的第二路信号，直接吞掉，
+    // （0.4 秒内），本次就是同一物理滑动的第二路信号，直接吞掉，
     // 不开了又关、不多震。面板内互切（switchPanels）仍用下面
     // 共用的 czfLastPanelActionAt，不走这两路。
     private var czfLastPanelActionAt = Date.distantPast
@@ -1991,7 +1995,7 @@ extension Notification.Name {
             guard now.timeIntervalSince(czfLastFunnelAppPanelActionAt) > 0.4 else { return }
             czfLastFunnelAppPanelActionAt = now
         }
-        if now.timeIntervalSince(czfLastAppPanelOpenedAt) < 1.0, czfLastAppPanelOpenedSource != source { return }
+        if now.timeIntervalSince(czfLastAppPanelOpenedAt) < 0.4, czfLastAppPanelOpenedSource != source { return }
         edgeCallbackBuzz()
         // 切换式（用户要求）：面板已打开再滑一次就关掉，
         // 不再是只能滑开、关还得点按钮/点遮罩。
@@ -2028,7 +2032,7 @@ extension Notification.Name {
             guard now.timeIntervalSince(czfLastFunnelSourcesPanelActionAt) > 0.4 else { return }
             czfLastFunnelSourcesPanelActionAt = now
         }
-        if now.timeIntervalSince(czfLastSourcesPanelOpenedAt) < 1.0, czfLastSourcesPanelOpenedSource != source { return }
+        if now.timeIntervalSince(czfLastSourcesPanelOpenedAt) < 0.4, czfLastSourcesPanelOpenedSource != source { return }
         edgeCallbackBuzz()
         if isSourcesPanelOpen {
             dismissSourcesOverlay()
