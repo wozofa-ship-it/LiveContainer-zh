@@ -3722,9 +3722,7 @@ private struct RunningAppsStripView: View {
                 .frame(width: 60)
         }
         .contentShape(Rectangle())
-        // 高优先级点按：与运行条红 ✕ 同款，点按不许被面板
-        // 下滑手势抢走（收起点着没反应就是被抢）。
-        .highPriorityGesture(TapGesture().onEnded { action() })
+        .onTapGesture { action() }
     }
 
     // 已打开的 App：点按切前台并最大化，长按切前台并小窗口
