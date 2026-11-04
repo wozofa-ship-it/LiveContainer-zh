@@ -1644,11 +1644,13 @@ extension Notification.Name {
         }
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
               let window = gestureRecognizer.view as? UIWindow else { return true }
-        // 快捷栏自身触摸不进边缘手势：折叠后的蓝色滑块、展开的栏
-        // 都在 hostingController.view 里；滑块在左缘时往左一滑原来
-        // 直接触发往外弹（源面板）。栏上触摸只归栏自己（点按展开/
-        // 折叠、图标启动），面板手势仍可从 App 内容区起手。
-        if var v: UIView? = touch.view {
+        // 快捷栏自身触摸不进边缘手势：只拦折叠后的蓝色滑块
+        // （09:07 用户报：滑块在左缘时往左一滑弹源面板）。
+        // 展开的栏不拦：栏在左缘展开时，左缘滑动起手落在栏上，
+        // 全拦就等于左缘手势全死（257 回归）；展开时栏上滑动
+        // 进全局手势，恢复 245 行为。面板手势仍可从 App 内容
+        // 区起手。
+        if isCollapsed, var v: UIView? = touch.view {
             while let cur = v {
                 if cur === hostingController?.view { return false }
                 v = cur.superview
