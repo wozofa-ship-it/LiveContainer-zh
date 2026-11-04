@@ -1306,6 +1306,13 @@ extension Notification.Name {
         }
     }
 
+    // 收起专用：台前 App 未最大化就最大化，已最大化或没前台
+    // App 时空操作；与折叠栏、关面板一起达成图一全屏效果。
+    @objc public func maximizeFrontmostWindow() {
+        guard let front = czfFrontmostApp() else { return }
+        maximizeWindow(uuid: front.appUUID)
+    }
+
     // 小窗口打开指定 App（状态栏长按用，用户定：长按是小窗口
     // 不是最小化）：同样借切换式的 maximizeWindow()——已最大化
     // 时调一次正好还原成小窗口；本来就是小窗口的不动。
@@ -1637,6 +1644,16 @@ extension Notification.Name {
         }
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
               let window = gestureRecognizer.view as? UIWindow else { return true }
+        // 快捷栏自身触摸不进边缘手势：折叠后的蓝色滑块、展开的栏
+        // 都在 hostingController.view 里；滑块在左缘时往左一滑原来
+        // 直接触发往外弹（源面板）。栏上触摸只归栏自己（点按展开/
+        // 折叠、图标启动），面板手势仍可从 App 内容区起手。
+        if var v: UIView? = touch.view {
+            while let cur = v {
+                if cur === hostingController?.view { return false }
+                v = cur.superview
+            }
+        }
         if czfTouchOnControlOrSlider(touch) {
             globalSwipeStartEdge = 0
             return false
@@ -1979,13 +1996,19 @@ extension Notification.Name {
     // 顶部 52pt 标题区。面板内的列表滚动一点不受影响；其余
     // 手势一律放行。
     public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if let hostView = gestureRecognizer.view {
-            if hostView === czfPanelOverlayHost?.view {
-                return gestureRecognizer.location(in: hostView).y < 64
+        if let hostView = gestureRecognizer.view,
+           hostView === czfPanelOverlayHost?.view || hostView === czfSourcesOverlayHost?.view {
+            let topLimit: CGFloat = hostView === czfPanelOverlayHost?.view ? 64 : 52
+            guard gestureRecognizer.location(in: hostView).y < topLimit else { return false }
+            // 下滑关闭只认向下为主的初动：原来顶部区内任何方向
+            // 的移动都让下滑手势先认——横滑被它认走后全局手势
+            // 失效（面板上左滑有时不出），点按被它取消（收起
+            // 点着没反应）。横滑交给全局手势，点按不受影响。
+            if let pan = gestureRecognizer as? UIPanGestureRecognizer {
+                let t = pan.translation(in: hostView)
+                return t.y > abs(t.x) && t.y > 0
             }
-            if hostView === czfSourcesOverlayHost?.view {
-                return gestureRecognizer.location(in: hostView).y < 52
-            }
+            return true
         }
         return true
     }
@@ -2166,11 +2189,16 @@ extension Notification.Name {
 
     @objc private func czfAppPanelEdgeSwitched(_ gesture: UIScreenEdgePanGestureRecognizer) {
         guard gesture.state == .ended else { return }
+        // 左缘互切只认往右（向里）：注释定的方向，代码原来不验，
+        // 往外方向的滑动也会切到源面板。
+        guard gesture.translation(in: gesture.view).x > 0 else { return }
         switchPanels(toSources: true)
     }
 
     @objc private func czfSourcesPanelEdgeSwitched(_ gesture: UIScreenEdgePanGestureRecognizer) {
         guard gesture.state == .ended else { return }
+        // 右缘互切只认往左（向里）
+        guard gesture.translation(in: gesture.view).x < 0 else { return }
         switchPanels(toSources: false)
     }
 
@@ -3641,6 +3669,7 @@ private struct RunningAppsStripView: View {
     private var collapseStripButton: some View {
         fixedButton(systemImage: "chevron.down", tile: Color(.systemGray5), glyph: .primary, label: "收起") {
             dockManager.toggleDockCollapse()
+            dockManager.maximizeFrontmostWindow()
             onSwitch()
         }
     }
@@ -3676,7 +3705,9 @@ private struct RunningAppsStripView: View {
                 .frame(width: 60)
         }
         .contentShape(Rectangle())
-        .onTapGesture { action() }
+        // 高优先级点按：与运行条红 ✕ 同款，点按不许被面板
+        // 下滑手势抢走（收起点着没反应就是被抢）。
+        .highPriorityGesture(TapGesture().onEnded { action() })
     }
 
     // 已打开的 App：点按切前台并最大化，长按切前台并小窗口
