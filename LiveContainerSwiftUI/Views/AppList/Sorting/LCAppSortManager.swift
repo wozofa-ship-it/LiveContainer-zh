@@ -250,26 +250,44 @@ class LCAppSortManager: ObservableObject {
     // MARK: - Initialization
     
     init() {
-        self.customSortOrder = LCUtils.appGroupUserDefault.array(forKey: "LCCustomSortOrder") as? [String] ?? []
-        // 新1：方案首次用时从现有自定义顺序迁移出一套“常用”，
-        // 再补空的“游戏”“工作”两套示例方案；已有方案直接读。
-        // init 里 didSet 不触发，迁移完直接写回 defaults 落盘。
-        if let saved = LCUtils.appGroupUserDefault.dictionary(forKey: Self.schemesKey) as? [String: [String]], !saved.isEmpty {
-            self.schemes = saved
+        // 新1/新2（3.8.277）：init 里读 self 的属性前必须全部
+        // 存储属性都已赋值，迁移/回落先用局部变量算完，再一次
+        // 性赋值；didSet 在 init 里不触发，迁移结果直接写回
+        // defaults 落盘（只在真正迁移/回落时写，原语义不变）。
+        let savedOrder: [String] = LCUtils.appGroupUserDefault.array(forKey: "LCCustomSortOrder") as? [String] ?? []
+        let savedSchemes = LCUtils.appGroupUserDefault.dictionary(forKey: Self.schemesKey) as? [String: [String]]
+        let schemes: [String: [String]]
+        var writeSchemesBack = false
+        if let saved = savedSchemes, !saved.isEmpty {
+            schemes = saved
         } else {
-            self.schemes = [Self.defaultSchemeName: self.customSortOrder, "游戏": [], "工作": []]
-            LCUtils.appGroupUserDefault.set(self.schemes, forKey: Self.schemesKey)
+            // 方案首次用时从现有自定义顺序迁移出一套“常用”，
+            // 再补空的“游戏”“工作”两套示例方案；已有方案直接读。
+            schemes = [Self.defaultSchemeName: savedOrder, "游戏": [], "工作": []]
+            writeSchemesBack = true
         }
-        self.currentSchemeName = LCUtils.appGroupUserDefault.string(forKey: Self.currentSchemeKey) ?? Self.defaultSchemeName
-        if schemes[currentSchemeName] == nil {
-            currentSchemeName = schemes.keys.sorted().first ?? Self.defaultSchemeName
-            LCUtils.appGroupUserDefault.set(currentSchemeName, forKey: Self.currentSchemeKey)
+        var currentScheme = LCUtils.appGroupUserDefault.string(forKey: Self.currentSchemeKey) ?? Self.defaultSchemeName
+        var writeCurrentBack = false
+        if schemes[currentScheme] == nil {
+            currentScheme = schemes.keys.sorted().first ?? Self.defaultSchemeName
+            writeCurrentBack = true
         }
         // 新2：分组。归属里写着不存在的分组名（删分组后残留的
         // 旧数据）直接丢掉，App 回“未分组”。
-        let savedGroups = LCUtils.appGroupUserDefault.array(forKey: Self.groupsKey) as? [String] ?? []
+        let savedGroups: [String] = LCUtils.appGroupUserDefault.array(forKey: Self.groupsKey) as? [String] ?? []
+        let members = (LCUtils.appGroupUserDefault.dictionary(forKey: Self.groupMembersKey) as? [String: String] ?? [:]).filter { savedGroups.contains($0.value) }
+
+        self.customSortOrder = savedOrder
+        self.schemes = schemes
+        self.currentSchemeName = currentScheme
         self.groups = savedGroups
-        self.groupMembers = (LCUtils.appGroupUserDefault.dictionary(forKey: Self.groupMembersKey) as? [String: String] ?? [:]).filter { savedGroups.contains($0.value) }
+        self.groupMembers = members
+        if writeSchemesBack {
+            LCUtils.appGroupUserDefault.set(schemes, forKey: Self.schemesKey)
+        }
+        if writeCurrentBack {
+            LCUtils.appGroupUserDefault.set(currentScheme, forKey: Self.currentSchemeKey)
+        }
         
         DataManager.shared.model.$apps
             .sink { newValue in
