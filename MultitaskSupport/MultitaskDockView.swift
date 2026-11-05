@@ -2956,6 +2956,25 @@ final class CZFPinnedAppsStore: ObservableObject {
         }
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
     }
+    /// 3.8.291：源固定键——`"src:" + 包名`，与已装 App 的
+    /// “包名_dataUUID”键共存于同一 CZFPinnedPanelApps 列表
+    ///（288 的备份白名单已含此键，源固定项自动随导出备份，
+    /// 无需另加）。冒号不会出现在包名里，不会与已装键撞。
+    /// 源 App 无 dataUUID、无 LCAppModel，只能按包名记
+    ///（多开不适用，源 App 本来就没有实例概念）。
+    static func sourcePinKey(for app: AltStoreSourceApp) -> String {
+        "src:\(app.bundleIdentifier)"
+    }
+    func isSourcePinned(_ app: AltStoreSourceApp) -> Bool { pinnedIds.contains(Self.sourcePinKey(for: app)) }
+    func toggleSourcePin(_ app: AltStoreSourceApp) {
+        let key = Self.sourcePinKey(for: app)
+        if let idx = pinnedIds.firstIndex(of: key) {
+            pinnedIds.remove(at: idx)
+        } else {
+            pinnedIds.append(key)
+        }
+        LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+    }
     /// 固定区拖动换位（用户 2026-11-03 定：按住图标拖到目标
     /// 位置松手）：to 是换位后该项应占的下标（先删后插，
     /// 与 SwiftUI List 的 move 语义一致）；顺序即时落盘。
@@ -2977,6 +2996,13 @@ final class CZFPinnedAppsStore: ObservableObject {
         guard !models.isEmpty else { return }
         var migrated: [String] = []
         for entry in pinnedIds {
+            // 3.8.291：源固定项（"src:" 前缀）不参与旧键迁移，
+            // 原样保留——它本来就不是按包名存的旧键，模型表里
+            // 也永远查不到（否则下次开面板就被当残留清掉）。
+            if entry.hasPrefix("src:") {
+                if !migrated.contains(entry) { migrated.append(entry) }
+                continue
+            }
             if models.contains(where: { Self.pinKey(for: $0) == entry }) {
                 if !migrated.contains(entry) { migrated.append(entry) }
                 continue
@@ -3043,6 +3069,12 @@ struct PinnedAppsStripView: View {
     // initialized once`。默认值放下面 init 的参数上（调用
     // 方不传时走它），属性本身只声明不赋值。
     let emptyHint: String
+    // 3.8.291：源固定项的解析与安装。App 面板没有源数据，
+    // 不传（nil）时源固定项直接跳过渲染；源面板传 viewModel
+    // 的查找闭包 + installFromPanel。属性本身不带默认值
+    //（见上面 3.8.287 的教训），默认值只放 init 参数上。
+    let sourceAppResolver: ((String) -> AltStoreSourceApp?)?
+    let onInstallSourceApp: ((AltStoreSourceApp) -> Void)?
 
     // 3.8.286：显式 init——光加带默认值的存储属性不够，
     // 构建 333 报 `extra argument 'emptyHint' in call`：调
@@ -3050,16 +3082,62 @@ struct PinnedAppsStripView: View {
     // 捡进来）。直接把 init 写明，两处调用（App 面板只传
     // onLaunch、源面板传 onLaunch + emptyHint）都走它；
     // @ObservedObject/@State 照默认值走，不用在这里写。
-    init(onLaunch: @escaping (LCAppModel) -> Void, emptyHint: String = "长按下面的 App 可以固定到这里") {
+    init(onLaunch: @escaping (LCAppModel) -> Void, emptyHint: String = "长按下面的 App 可以固定到这里", sourceAppResolver: ((String) -> AltStoreSourceApp?)? = nil, onInstallSourceApp: ((AltStoreSourceApp) -> Void)? = nil) {
         self.onLaunch = onLaunch
         self.emptyHint = emptyHint
+        self.sourceAppResolver = sourceAppResolver
+        self.onInstallSourceApp = onInstallSourceApp
+    }
+
+    // 3.8.291：固定区统一项——已装 App 与源固定项按固定顺序
+    // 混排（同一 CZFPinnedPanelApps 列表）。源项按包名在各源
+    // 里找，找不到（源已删/还没加载完）就跳过，不崩不留坏块。
+    private enum PinnedStripItem {
+        case installed(LCAppModel)
+        case source(AltStoreSourceApp)
+
+        // 换位时 ForEach 的稳定身份：用固定键本身。源 App 每次
+        // 刷新都会生成新的 UUID id，按实例判等会抖。
+        var pinKey: String {
+            switch self {
+            case .installed(let app):
+                return CZFPinnedAppsStore.pinKey(for: app)
+            case .source(let app):
+                return CZFPinnedAppsStore.sourcePinKey(for: app)
+            }
+        }
     }
 
     // 固定区顺序跟固定顺序走（不再跟列表排序走）：按住拖动
     // 换位改的就是这个顺序；已删 App 的残留键自然掉。
-    private var pinnedApps: [LCAppModel] {
+    private var pinnedItems: [PinnedStripItem] {
         pinnedStore.pinnedIds.compactMap { id in
-            sortManager.sortedApps.first { CZFPinnedAppsStore.pinKey(for: $0) == id }
+            if id.hasPrefix("src:") {
+                guard let resolver = sourceAppResolver else { return nil }
+                guard let app = resolver(String(id.dropFirst(4))) else { return nil }
+                return .source(app)
+            }
+            if let app = sortManager.sortedApps.first(where: { CZFPinnedAppsStore.pinKey(for: $0) == id }) {
+                return .installed(app)
+            }
+            return nil
+        }
+    }
+    // 3.8.291：固定区图标——已装走 RunningAppIcon，源固定项
+    // 走 iconURL 的 AsyncImage（与源行同款写法）。
+    @ViewBuilder
+    private func pinnedIcon(for item: PinnedStripItem) -> some View {
+        switch item {
+        case .installed(let app):
+            RunningAppIcon(appInfo: app.appInfo)
+        case .source(let app):
+            AsyncImage(url: app.iconURL) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    Color.gray.opacity(0.25)
+                }
+            }
         }
     }
     @State private var draggedPinKey: String?
@@ -3071,33 +3149,43 @@ struct PinnedAppsStripView: View {
         // 标题行已去掉（用户 2026-11-03 令去最顶部图钉与 ✕）：
         // 面板改由固定栏往下滑动隐藏，关面板走遮罩点按与下滑。
         VStack(alignment: .leading, spacing: 8) {
-            if pinnedApps.isEmpty {
+            if pinnedItems.isEmpty {
                 Text(emptyHint)
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 14) {
-                        // id 跟 App 走（不用下标）：换位时 SwiftUI 按
-                        // App 身份做移动画，不会把图标内容错位互换。
-                        ForEach(Array(pinnedApps.enumerated()), id: \.element) { pair in
+                        // id 跟固定键走（不用下标，也不用实例本身）：
+                        // 换位时 SwiftUI 按固定键身份做移动画，不会
+                        // 把图标内容错位互换；源 App 每次刷新换 UUID，
+                        // 按实例判等会抖，只能认键。
+                        ForEach(Array(pinnedItems.enumerated()), id: \.element.pinKey) { pair in
                             let index = pair.offset
-                            let app = pair.element
+                            let item = pair.element
                             // 固定区只留图标、不要名字（用户定）：名字
                             // 字号小又挤，图标本身已够认；点按仍打开。
                             // 按住拖动换位（用户 2026-11-03 定）：iOS
                             // 的 onDrag 本来就要按住才起拖，与点按不
                             // 冲突；拖过目标即换位，松手即定。
-                            RunningAppIcon(appInfo: app.appInfo)
+                            pinnedIcon(for: item)
                                 .frame(width: 40, height: 40)
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                                 .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 .contentShape(Rectangle())
-                                .onTapGesture { onLaunch(app) }
+                                .onTapGesture {
+                                    switch item {
+                                    case .installed(let app):
+                                        onLaunch(app)
+                                    case .source(let app):
+                                        // 3.8.291：源固定项点按 = 直接安装
+                                        //（走源面板 installFromPanel 逻辑）。
+                                        onInstallSourceApp?(app)
+                                    }
+                                }
                                 .onDrag {
-                                    let key = CZFPinnedAppsStore.pinKey(for: app)
-                                    draggedPinKey = key
-                                    return NSItemProvider(object: key as NSString)
+                                    draggedPinKey = item.pinKey
+                                    return NSItemProvider(object: item.pinKey as NSString)
                                 }
                                 .onDrop(of: [.text], delegate: CZFPinnedReorderDelegate(targetIndex: index, store: pinnedStore, draggedKey: $draggedPinKey))
                         }
@@ -3572,7 +3660,16 @@ struct SourcesPanelView: View {
                 // 3.8.284：源面板与 App 面板一致——顶部固定区（复用
                 // PinnedAppsStripView，同一批固定 App）+ 搜索框，顺序
                 // 与 App 面板同款：固定区 → 运行条 → 搜索框 → 列表
-                PinnedAppsStripView(onLaunch: { app in launchPinnedApp(app) }, emptyHint: "在 App 面板长按 App 可固定到这里")
+                // 3.8.291：源面板把源数据传进固定区——源固定项按
+                // 包名在各源里找对应 App 解析，点按直接安装。
+                PinnedAppsStripView(
+                    onLaunch: { app in launchPinnedApp(app) },
+                    emptyHint: "在 App 面板长按 App 可固定到这里",
+                    sourceAppResolver: { bundleIdentifier in
+                        viewModel.sources.compactMap(\.source).flatMap(\.apps).first { $0.bundleIdentifier == bundleIdentifier }
+                    },
+                    onInstallSourceApp: { app in installFromPanel(app: app) }
+                )
                 // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）
                 RunningAppsStripView { closePanel() }
                     .padding(.horizontal)
@@ -3629,7 +3726,7 @@ struct SourcesPanelView: View {
                                         .font(.headline)
                                         .padding(.horizontal)
                                     ForEach(matchedApps(for: source)) { app in
-                                        SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) })
+                                        SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) }, onDownloadVersion: { version in downloadFromPanel(url: version.downloadURL) })
                                             .padding(.horizontal)
                                     }
                                 }
@@ -3725,10 +3822,16 @@ struct SourcesPanelView: View {
             errorMessage = "lc.sources.error.missingDownload".loc
             return
         }
+        downloadFromPanel(url: downloadURL)
+    }
+
+    // 3.8.291：历史版本下载——指定任意版本 URL 下载（不只 latest）。
+    @MainActor
+    private func downloadFromPanel(url: URL) {
         Task {
             do {
-                let (tempURL, _) = try await URLSession.shared.download(from: downloadURL)
-                let fileName = downloadURL.lastPathComponent
+                let (tempURL, _) = try await URLSession.shared.download(from: url)
+                let fileName = url.lastPathComponent
                 let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let destURL = docsURL.appendingPathComponent(fileName)
                 if FileManager.default.fileExists(atPath: destURL.path) {
@@ -3766,8 +3869,12 @@ private struct SourcePanelRow: View {
     let app: AltStoreSourceApp
     let onInstall: () -> Void
     let onDownload: () -> Void
+    // 3.8.291：历史版本下载——点版本行下载该版本的 URL。
+    let onDownloadVersion: (AltStoreSourceAppVersion) -> Void
     @ObservedObject private var sharedModel = DataManager.shared.model
+    @ObservedObject private var pinnedStore = CZFPinnedAppsStore.shared
     @State private var copied = false
+    @State private var showVersionSheet = false
     // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
     @State private var showInstancePicker = false
 
@@ -3960,6 +4067,82 @@ private struct SourcePanelRow: View {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("取消") { showInstancePicker = false }
                     }
+                }
+            }
+        }
+        .contextMenu {
+            // 3.8.291：长按菜单——固定/取消固定 + 历史版本。
+            // 行上原来没有长按手势，不冲任何现有手势；写法与
+            // 本文件已装行的固定菜单同款（Label + pin 图标）。
+            Button {
+                pinnedStore.toggleSourcePin(app)
+            } label: {
+                Label(pinnedStore.isSourcePinned(app) ? "取消固定" : "固定到面板",
+                      systemImage: pinnedStore.isSourcePinned(app) ? "pin.slash" : "pin")
+            }
+            Button {
+                showVersionSheet = true
+            } label: {
+                Label("历史版本…", systemImage: "clock.arrow.circlepath")
+            }
+        }
+        .sheet(isPresented: $showVersionSheet) {
+            SourceAppVersionsSheet(app: app, onDownloadVersion: onDownloadVersion)
+        }
+    }
+}
+
+// 3.8.291：源 App 历史版本单——逐行显版本/日期/大小/说明
+//（与源详情页“版本信息”同款格式），点行下载该版本。
+// versions 可能为空（源 JSON 无 versions 数组、顶层 downloadURL
+// 也缺时），空时给一行提示，不留空白单。
+@available(iOS 16.0, *)
+private struct SourceAppVersionsSheet: View {
+    let app: AltStoreSourceApp
+    let onDownloadVersion: (AltStoreSourceAppVersion) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if app.versions.isEmpty {
+                    Text("没有历史版本")
+                        .foregroundColor(.secondary)
+                } else {
+                    List(app.versions) { version in
+                        Button {
+                            // 先关版本单再下载：分享框从 rootVC 弹出，
+                            // 不与版本单叠在一起。
+                            dismiss()
+                            onDownloadVersion(version)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(version.version)
+                                    .font(.subheadline).bold()
+                                if let date = version.releaseDate {
+                                    Text(date, style: .date)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                if let size = version.size {
+                                    Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                if let vdesc = version.localizedDescription, !vdesc.isEmpty {
+                                    Text(vdesc)
+                                        .font(.caption)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(app.name)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
                 }
             }
         }
