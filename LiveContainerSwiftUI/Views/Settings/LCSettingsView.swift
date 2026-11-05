@@ -1147,6 +1147,9 @@ private struct CZFVPNNodeLabel: View {
             }
             } label: {
                 HStack {
+                    // 3.8.282：VPN 栏加美化图标（用户亲令）：跟数据管理、
+                    // 保活等行一样挂彩色图标，不然整行只有字、太素
+                    LCSettingsIcon(systemName: "shield.fill", color: .green)
                     Text("单App VPN")
                     Spacer()
                     Text(vpnCoreRunning ? "核心运行中" : "核心未启动")

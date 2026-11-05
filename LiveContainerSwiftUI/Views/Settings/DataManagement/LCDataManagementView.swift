@@ -83,14 +83,14 @@ struct LCDataManagementView : View {
     @State private var showRestoreScopeDialog = false
     @State private var pendingRestoreURL: URL? = nil
     @State private var pendingRestoreAll = false
-    // 选择性多选恢复：多选 sheet 里勾中的文件夹 URL 原值
-    // （与 mergedBackupFolders() 返回的同一批 URL 比对；
+    // 选择性多选删除（3.8.282：原多选恢复改成多选删除）：
+    // 多选 sheet 里勾中的文件夹 URL 原值（与
+    // mergedBackupFolders() 返回的同一批 URL 比对；
     // @State 不落盘，不新开 UserDefaults 键；勾选态跨次
     // 打开保留，与备份侧 backupSelectedIDs 同款）
-    @State private var showRestoreMultiSelect = false
-    @State private var restoreSelectedFolderURLs = Set<URL>()
-    @State private var restoreMultiSelectFolders: [URL] = []
-    @State private var pendingRestoreFolders: [URL] = []
+    @State private var showDeleteMultiSelect = false
+    @State private var deleteSelectedFolderURLs = Set<URL>()
+    @State private var deleteMultiSelectFolders: [URL] = []
     @State private var pendingBackupApps: [LCAppModel] = []
     @State private var scheduleKeychainOnly = false
     @State private var showRestoreSelect = false
@@ -155,6 +155,8 @@ struct LCDataManagementView : View {
     // 与 backupFolders() 无参版随之退役（sheet 直接调 fromExternal 版）
     @State private var showDeleteAllBackupsConfirm = false
     @State private var showDeleteBackupConfirm = false
+    // 3.8.282：多选删备份的确认框
+    @State private var showDeleteMultiSelectConfirm = false
     @State private var pendingDeleteBackupURL: URL? = nil
     
     @EnvironmentObject private var sharedModel : SharedModel
@@ -559,31 +561,15 @@ struct LCDataManagementView : View {
         .sheet(isPresented: $showRestoreSelect) {
             NavigationView {
                 // 恢复合一：本地 + iCloud 同屏两个区，不再先弹
-                // “选哪个文件夹”再进单源列表；iCloud 未设时
-                // 区里直接给选文件夹入口
+                // “选哪个文件夹”再进单源列表；文件夹选择与
+                // 换机迁移放最顶上（3.8.282）
                 List {
-                    Section("本地备份") {
-                        if backupFolderList.isEmpty {
-                            Text("暂无备份")
-                                .foregroundColor(.secondary)
-                        }
-                        ForEach(backupFolderList, id: \.self) { folderURL in
-                            restoreRow(for: folderURL)
-                        }
-                    }
-                    Section("iCloud 备份") {
+                    // 3.8.282：选文件夹与换机迁移都放最顶上
+                    //（用户 2026-11-06 亲令：文件夹选择原来在
+                    // iCloud 区最底下、迁移向导在 sheet 最底下，
+                    // 两个都挪到最前面）
+                    Section {
                         if Self.externalBackupFolderURL() != nil {
-                            if externalBackupFolderList.isEmpty {
-                                Text("暂无备份")
-                                    .foregroundColor(.secondary)
-                            }
-                            ForEach(externalBackupFolderList, id: \.self) { folderURL in
-                                restoreRow(for: folderURL)
-                            }
-                            // 已设文件夹也能重新选（3.8.279）：原来只在
-                            // 未设时给入口，设了就再也换不了，只能回
-                            // 数据管理页改。选完走同个 picker，存授权
-                            // + 刷新列表 + 体积，不用关 sheet 重进。
                             Button {
                                 showRestoreSheetFolderPicker = true
                             } label: {
@@ -601,10 +587,6 @@ struct LCDataManagementView : View {
                                 showRestoreSheetFolderPicker = true
                             }
                         }
-                    }
-                    Section {
-                        // 3.8.281：换机迁移向导搬到恢复 sheet 里（备份组只留
-                        // 4 行）；点开先关恢复 sheet 再开向导。
                         Button {
                             showRestoreSelect = false
                             beginMigrationWizard()
@@ -613,6 +595,24 @@ struct LCDataManagementView : View {
                                 LCSettingsIcon(systemName: "arrow.triangle.2.circlepath", color: .purple)
                                 Text("换机迁移向导")
                             }
+                        }
+                    }
+                    Section("本地备份") {
+                        if backupFolderList.isEmpty {
+                            Text("暂无备份")
+                                .foregroundColor(.secondary)
+                        }
+                        ForEach(backupFolderList, id: \.self) { folderURL in
+                            restoreRow(for: folderURL)
+                        }
+                    }
+                    Section("iCloud 备份") {
+                        if externalBackupFolderList.isEmpty {
+                            Text("暂无备份")
+                                .foregroundColor(.secondary)
+                        }
+                        ForEach(externalBackupFolderList, id: \.self) { folderURL in
+                            restoreRow(for: folderURL)
                         }
                     }
                 }
@@ -655,9 +655,9 @@ struct LCDataManagementView : View {
                                 Label("一键恢复全部", systemImage: "arrow.clockwise.circle")
                             }
                             Button {
-                                showRestoreMultiSelect = true
+                                showDeleteMultiSelect = true
                             } label: {
-                                Label("恢复已选…", systemImage: "checkmark.circle")
+                                Label("删除已选…", systemImage: "trash")
                             }
                             Button {
                                 presentExportPickerForAll()
@@ -738,21 +738,19 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
-                // 选择性多选恢复：恢复 sheet 内再叠一层 sheet
-                // （与文件夹 picker、清单预览同款嵌套，不关恢复
-                // sheet；“恢复”走 pendingRestoreFolders + scope
-                // 弹窗路：关多选、关恢复 sheet、弹 scope 弹窗，
-                // 与清单预览的“恢复”同款；确认步骤就是 scope
-                // 弹窗本身（一键恢复全部同样只走 scope 弹窗，
-                // 不另做多文件夹预览，不静默覆盖）
-                .sheet(isPresented: $showRestoreMultiSelect) {
+                // 选择性多选删除（3.8.282：原多选恢复）：恢复
+                // sheet 内再叠一层 sheet（与文件夹 picker、清
+                // 单预览同款嵌套，不关恢复 sheet；“删除”先弹
+                // 自己的确认框再删，锁了的跳过并报数；一键恢复
+                // 全部仍在工具栏菜单里，不受影响）
+                .sheet(isPresented: $showDeleteMultiSelect) {
                     NavigationView {
                         List {
-                            if restoreMultiSelectFolders.isEmpty {
+                            if deleteMultiSelectFolders.isEmpty {
                                 Text("暂无备份")
                                     .foregroundColor(.secondary)
                             }
-                            ForEach(restoreMultiSelectFolders, id: \.self) { folderURL in
+                            ForEach(deleteMultiSelectFolders, id: \.self) { folderURL in
                                 HStack {
                                     VStack(alignment: .leading) {
                                         HStack(spacing: 4) {
@@ -771,39 +769,46 @@ struct LCDataManagementView : View {
                                             .lineLimit(1)
                                     }
                                     Spacer()
-                                    Image(systemName: restoreSelectedFolderURLs.contains(folderURL) ? "checkmark.circle.fill" : "circle")
+                                    Image(systemName: deleteSelectedFolderURLs.contains(folderURL) ? "checkmark.circle.fill" : "circle")
                                         .foregroundColor(.blue)
                                 }
                                 .contentShape(Rectangle())
                                 .onTapGesture {
-                                    if restoreSelectedFolderURLs.contains(folderURL) {
-                                        restoreSelectedFolderURLs.remove(folderURL)
+                                    if deleteSelectedFolderURLs.contains(folderURL) {
+                                        deleteSelectedFolderURLs.remove(folderURL)
                                     } else {
-                                        restoreSelectedFolderURLs.insert(folderURL)
+                                        deleteSelectedFolderURLs.insert(folderURL)
                                     }
                                 }
                             }
                         }
-                        .navigationTitle("恢复已选备份")
+                        .navigationTitle("选择删除备份")
                         .navigationBarTitleDisplayMode(.inline)
                         .onAppear {
-                            restoreMultiSelectFolders = mergedBackupFolders()
+                            deleteMultiSelectFolders = mergedBackupFolders()
                         }
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
-                                Button("lc.common.cancel".loc) { showRestoreMultiSelect = false }
+                                Button("lc.common.cancel".loc) { showDeleteMultiSelect = false }
                             }
                             ToolbarItem(placement: .confirmationAction) {
-                                Button("恢复") {
-                                    pendingRestoreFolders = restoreMultiSelectFolders.filter { restoreSelectedFolderURLs.contains($0) }
-                                    pendingRestoreAll = false
-                                    pendingRestoreURL = nil
-                                    showRestoreMultiSelect = false
-                                    showRestoreSelect = false
-                                    showRestoreScopeDialog = true
+                                // 3.8.282：多选改成删备份（原多选恢复）：先确认
+                                // 再删，锁了的跳过并报数（见 deleteSelectedBackups）
+                                Button("删除", role: .destructive) {
+                                    showDeleteMultiSelectConfirm = true
                                 }
-                                .disabled(restoreMultiSelectFolders.filter { restoreSelectedFolderURLs.contains($0) }.isEmpty)
+                                .disabled(deleteMultiSelectFolders.filter { deleteSelectedFolderURLs.contains($0) }.isEmpty)
                             }
+                        }
+                        // 3.8.282：多选删备份的确认框（挂在多选 sheet 里，
+                        // 才能盖在它上面弹；已锁定的不会删，文案里先说清）
+                        .alert("确定删除所选备份？", isPresented: $showDeleteMultiSelectConfirm) {
+                            Button("删除", role: .destructive) {
+                                deleteSelectedBackups()
+                            }
+                            Button("lc.common.cancel".loc, role: .cancel) {}
+                        } message: {
+                            Text("将删除所选的 \(deleteMultiSelectFolders.filter { deleteSelectedFolderURLs.contains($0) }.count) 个备份，已锁定的不会删，此操作不可恢复")
                         }
                     }
                 }
@@ -1644,6 +1649,15 @@ struct LCDataManagementView : View {
                 }
             }
             Spacer()
+            // 3.8.282：锁开关放行上（不只左滑）：用户说“锁定备份
+            // 开关没看到”——左滑才有的入口太藏，行内直接给一个
+            // 锁钮（橙=已锁，灰=未锁），点一下即锁/解锁
+            Button {
+                toggleBackupLock(folderName: folderURL.lastPathComponent)
+            } label: {
+                Image(systemName: lockedBackupNames.contains(folderURL.lastPathComponent) ? "lock.fill" : "lock.open")
+                    .foregroundColor(lockedBackupNames.contains(folderURL.lastPathComponent) ? .orange : .secondary)
+            }
             Button {
                 showRestoreSelect = false
                 pendingRestoreURL = folderURL
@@ -1735,6 +1749,31 @@ struct LCDataManagementView : View {
         }
         backupFolderList = backupFolders(fromExternal: false)
         externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
+        restoreSheetNotice = "已删除 \(deleted) 个备份" + (lockedSkipped > 0 ? "，\(lockedSkipped) 个已锁定未删" : "")
+    }
+
+    // 3.8.282：多选删备份（原多选恢复改成多选删除，用户 2026-11-06
+    // 亲令）：锁了的不删，报数；删完刷新两张列表、清勾选、关 sheet，
+    // 结果写恢复 sheet 底部的提示行。换机向导的一键恢复不受影响，
+    // 它直接调 restoreSelectedBackups，不走这条。
+    func deleteSelectedBackups() {
+        let selected = deleteMultiSelectFolders.filter { deleteSelectedFolderURLs.contains($0) }
+        let fm = FileManager.default
+        var deleted = 0
+        var lockedSkipped = 0
+        for url in selected {
+            if lockedBackupNames.contains(url.lastPathComponent) {
+                lockedSkipped += 1
+                continue
+            }
+            if (try? fm.removeItem(at: url)) != nil {
+                deleted += 1
+            }
+        }
+        backupFolderList = backupFolders(fromExternal: false)
+        externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
+        deleteSelectedFolderURLs.removeAll()
+        showDeleteMultiSelect = false
         restoreSheetNotice = "已删除 \(deleted) 个备份" + (lockedSkipped > 0 ? "，\(lockedSkipped) 个已锁定未删" : "")
     }
 
@@ -2223,8 +2262,9 @@ struct LCDataManagementView : View {
     }
 
     /// 恢复范围弹窗选完后分发：单个恢复走 pendingRestoreURL，
-    /// 一键恢复全部走 pendingRestoreAll（同一个范围套全部），
-    /// 多选恢复走 pendingRestoreFolders（只恢复勾中的文件夹）
+    /// 一键恢复全部走 pendingRestoreAll（同一个范围套全部）。
+    /// 多选恢复（换机向导）直接调 restoreSelectedBackups，
+    /// 不走这个分发（3.8.282：多选 sheet 已改成多选删除）。
     func startPendingRestore(loginOnly: Bool) {
         // 后台持有：大文件恢复拷盘时切后台/锁屏，系统不会
         // 中途挂起；没它时主线程又被拷盘堵住，挂起不及时
@@ -2241,10 +2281,6 @@ struct LCDataManagementView : View {
         } else if let url = pendingRestoreURL {
             pendingRestoreURL = nil
             Task { await restoreFromBackup(at: url, loginOnly: loginOnly); UIApplication.shared.endBackgroundTask(bgID) }
-        } else if !pendingRestoreFolders.isEmpty {
-            let folders = pendingRestoreFolders
-            pendingRestoreFolders = []
-            Task { await restoreSelectedBackups(folders: folders, loginOnly: loginOnly); UIApplication.shared.endBackgroundTask(bgID) }
         } else {
             UIApplication.shared.endBackgroundTask(bgID)
         }

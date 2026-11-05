@@ -121,6 +121,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // ObservableObject，本地 @State 存一份，进页/点按后从
     // shared.isRunning 刷新，与设置页同款读法）。
     @State private var vpnCoreRunning = false
+    // 3.8.282：顶部盾牌长按菜单用的测速状态（只读测速，
+    // 核心在跑时可能被拒，见 toolbarPingNodes 的 rejected 处理）
+    @State private var vpnPinging = false
+    @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    @State private var vpnPingMessage: String?
     @State private var batchSelectedIDs: Set<String> = []
     @State private var batchDeleteConfirm = false
     @State private var batchBusy = false
@@ -152,6 +157,79 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             batchSelectedIDs.remove(id)
         } else {
             batchSelectedIDs.insert(id)
+        }
+    }
+
+    // 3.8.282：顶部盾牌的开关（点按与长按菜单共用同一套调用；
+    // 状态从 shared.isRunning 读，点按后刷新，不靠猜）
+    private func toggleVPNCore() {
+        CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
+        if vpnCoreRunning {
+            CZFVPNManager.shared.stop()
+        } else {
+            _ = CZFVPNManager.shared.start()
+        }
+        vpnCoreRunning = CZFVPNManager.shared.isRunning
+    }
+
+    // 3.8.282：长按菜单里节点行的字：当前节点打 ✓，测过延迟的
+    // 挂毫秒数（失败挂“失败”），一眼看出哪个在用、哪个最快
+    private func vpnNodeMenuLabel(idx: Int, link: String) -> String {
+        let name = CZFVPNManager.nodeDisplay(for: link).name
+        var suffix = ""
+        if let r = vpnPingResults[idx] {
+            suffix = r.success ? " · \(r.delay)ms" : " · 失败"
+        }
+        let mark = idx == CZFVPNManager.shared.activeNodeIndex ? "✓ " : ""
+        return mark + name + suffix
+    }
+
+    // 3.8.282：长按菜单的测延迟——直接调 manager 的只读测速
+    //（不像设置页那样先停核心）：核心在跑时可能整批被拒，
+    // completion 的 rejected 为真时如实提示，不谎报延迟
+    private func toolbarPingNodes(afterPing: (([CZFVPNManager.CZFNodePingResult]) -> Void)? = nil) {
+        guard !vpnPinging else { return }
+        let links = CZFVPNManager.shared.nodeLinks
+        guard !links.isEmpty else {
+            vpnPingMessage = "还没加节点"
+            return
+        }
+        vpnPinging = true
+        CZFVPNManager.shared.pingAllNodes { results, rejected in
+            self.vpnPinging = false
+            var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+            for (idx, r) in results.enumerated() { stored[idx] = r }
+            self.vpnPingResults = stored
+            if rejected {
+                self.vpnPingMessage = "核心在跑，测速被占用——先停核心再测"
+            } else if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }) {
+                let name = CZFVPNManager.nodeDisplay(for: links[best.offset]).name
+                self.vpnPingMessage = "最快：\(name)（\(best.element.delay)ms），共测了 \(results.count) 个节点"
+            } else {
+                self.vpnPingMessage = "全部节点测速失败"
+            }
+            afterPing?(results)
+        }
+    }
+
+    // 3.8.282：切到最快——有本轮测速结果直接切，没有就先测
+    // 再切；测速被拒或全失败时不乱切（提示已在测速里给了）。
+    // 索引先判界：测完后去设置页删过节点的话，旧下标可能
+    // 越界（setActiveNode 自带守卫，但下标取名字会崩）
+    private func switchToFastestNode() {
+        let links = CZFVPNManager.shared.nodeLinks
+        if let best = vpnPingResults.filter({ $0.value.success && $0.key < links.count }).min(by: { $0.value.delay < $1.value.delay }) {
+            CZFVPNManager.shared.setActiveNode(at: best.key)
+            let name = CZFVPNManager.nodeDisplay(for: links[best.key]).name
+            vpnPingMessage = "已切到最快节点：\(name)（\(best.value.delay)ms）"
+            return
+        }
+        toolbarPingNodes { results in
+            guard let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }),
+                  best.offset < CZFVPNManager.shared.nodeLinks.count else { return }
+            CZFVPNManager.shared.setActiveNode(at: best.offset)
+            let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[best.offset]).name
+            self.vpnPingMessage = "已切到最快节点：\(name)（\(best.element.delay)ms）"
         }
     }
 
@@ -633,17 +711,44 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
-                        if vpnCoreRunning {
-                            CZFVPNManager.shared.stop()
-                        } else {
-                            _ = CZFVPNManager.shared.start()
-                        }
-                        vpnCoreRunning = CZFVPNManager.shared.isRunning
+                        toggleVPNCore()
                     } label: {
                         Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
                     }
                     .foregroundStyle(vpnCoreRunning ? .green : .secondary)
+                    // 3.8.282：点按开关核心（不变）；长按弹出
+                    // VPN 核心功能菜单（启停、测延迟、选节点、
+                    // 切最快、去设置），节点行挂当前 ✓ 与延迟
+                    .contextMenu {
+                        Button(vpnCoreRunning ? "停止核心" : "启动核心") {
+                            toggleVPNCore()
+                        }
+                        Button(vpnPinging ? "测速中…" : "测延迟") {
+                            toolbarPingNodes()
+                        }
+                        .disabled(vpnPinging || CZFVPNManager.shared.nodeLinks.isEmpty)
+                        Menu("选择节点") {
+                            if CZFVPNManager.shared.nodeLinks.isEmpty {
+                                Button("暂无节点") {}
+                                    .disabled(true)
+                            } else {
+                                ForEach(Array(CZFVPNManager.shared.nodeLinks.enumerated()), id: \.offset) { idx, link in
+                                    Button {
+                                        CZFVPNManager.shared.setActiveNode(at: idx)
+                                    } label: {
+                                        Text(vpnNodeMenuLabel(idx: idx, link: link))
+                                    }
+                                }
+                            }
+                        }
+                        Button("切到最快") {
+                            switchToFastestNode()
+                        }
+                        .disabled(CZFVPNManager.shared.nodeLinks.isEmpty)
+                        Button("前往 VPN 设置") {
+                            sharedModel.selectedTab = .settings
+                        }
+                    }
                 }
 
                 // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
@@ -792,6 +897,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             })
         } message: {
             Text(installInfo)
+        }
+        // 3.8.282：顶部盾牌长按菜单的测速 / 切节点结果提示
+        .alert("测延迟", isPresented: Binding(get: { vpnPingMessage != nil }, set: { if !$0 { vpnPingMessage = nil } })) {
+            Button("lc.common.ok".loc, action: {
+            })
+        } message: {
+            Text(vpnPingMessage ?? "")
         }
         .alert("安装前预览", isPresented: $installPreviewShow){
             Button("安装", action: {

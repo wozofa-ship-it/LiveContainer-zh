@@ -127,6 +127,14 @@ public final class CZFVPNManager {
     public var isPrewarmSuppressedAfterPing: Bool {
         UserDefaults.standard.bool(forKey: "CZFVPNPrewarmSuppressedAfterPing")
     }
+    // 3.8.282：核心上次开/关（重启恢复用）：start() 成功写
+    // true，stop() 写 false；没写过（nil，从没动过开关）
+    // 时按老行为（只预热，不强制恢复）。测速的停→启走同
+    // 一对函数，净结果就是测速前后的真实状态，不会写错。
+    private var coreWasRunning: Bool? {
+        get { UserDefaults.standard.object(forKey: "CZFVPNCoreWasRunning") as? Bool }
+        set { UserDefaults.standard.set(newValue, forKey: "CZFVPNCoreWasRunning") }
+    }
     // 测速窗口内被挡下的源下载开关起核心请求：与
     // deferredEnsureApp 同理，测速收尾再补跑一次。
     private var deferredHostEnsure = false
@@ -353,6 +361,18 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
         if pinging { return }
         if suppressed && !ignoringSuppression { return }
+        // 3.8.282：重启恢复——上次亲手开着，宿主重启后起
+        // 回来（不要求有 App 标 VPN，核心开关本身就是全局
+        // 的；起成功后 start() 已把标志写回 true，起失败
+        // 下次进前台再试）；上次是关的就不预热，免得预热
+        // 把手动关的又起回来；没记过（nil，从没动过开关）
+        // 按老行为走预热。
+        if let wasRunning = coreWasRunning {
+            if wasRunning, !isRunning, !nodeLinks.isEmpty {
+                _ = start()
+            }
+            return
+        }
         if UserDefaults.standard.object(forKey: "CZFVPNPrewarm") != nil, !UserDefaults.standard.bool(forKey: "CZFVPNPrewarm") {
             return
         }
@@ -824,7 +844,11 @@ public final class CZFVPNManager {
         // 养号归属，之后 App 自动启动才可以重新抢核心
         coreOwnerBundleId = nil
         coreOwnerAppInfo = nil
-        return start(withLink: nodeLink)
+        let ok = start(withLink: nodeLink)
+        // 3.8.282：起成功了就记下“开着”，宿主重启后恢复
+        // 成开着；起失败不写（状态没变）。stop() 里对称写“关着”。
+        if ok { coreWasRunning = true }
+        return ok
     }
 
     // 用指定链接起核心：已在跑且正是这条链接就直接成功；
@@ -976,6 +1000,9 @@ public final class CZFVPNManager {
             _ = invoke(method: "stopXray", payload: [:])
         }
         isRunning = false
+        // 3.8.282：记下“关着”，宿主重启后保持关着（预热
+        // 也不再把它起回来，见 prewarmIfNeeded 的闸门）。
+        coreWasRunning = false
         runningLink = nil
         runningCore = nil
         coreOwnerBundleId = nil

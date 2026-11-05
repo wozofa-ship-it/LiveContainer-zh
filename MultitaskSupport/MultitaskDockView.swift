@@ -1231,9 +1231,18 @@ extension Notification.Name {
             return
         }
         // 自动关时长（CZF，可调）：设置页“最小化省电”里选
-        // 10 / 30 / 60 分钟，默认 30 分钟（以前写死 1800 秒）。
-        // integer(forKey:) 键不存在时返回 0，正好落到默认 30。
-        let closeMinutes = defaults.integer(forKey: "CZFMinAutoCloseMinutes")
+        // 10 / 30 / 60 分钟或“不关闭”，默认 30 分钟（以前写死
+        // 1800 秒）。键不存在时默认 30；显式选 0（不关闭）时
+        // 不自动关——跟关掉上面开关一个效果（3.8.282）。
+        // 注意：不能用 integer(forKey:) 的 0 兜底（键不存在也
+        // 返回 0，会把“从没选过”误读成“不关闭”），先判 object。
+        let closeMinutes = defaults.object(forKey: "CZFMinAutoCloseMinutes") as? Int ?? 30
+        if closeMinutes == 0 {
+            czfMinimizedSince.removeAll()
+            czfMinAutoCloseTimer?.invalidate()
+            czfMinAutoCloseTimer = nil
+            return
+        }
         let closeDelay = TimeInterval([10, 30, 60].contains(closeMinutes) ? closeMinutes : 30) * 60
         let now = Date()
         var toClose: [String] = []
