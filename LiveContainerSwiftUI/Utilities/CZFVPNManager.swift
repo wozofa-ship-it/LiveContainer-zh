@@ -777,6 +777,14 @@ public final class CZFVPNManager {
         }
         var node = outbounds[0]
         node["tag"] = "node"
+        // 多路复用：vmess/vless/trojan/shadowsocks 出站开 mux，并发 8，
+        // 多请求共用一条连接、省反复握手；direct/block、socks 及
+        // 用户自带 json 不动；转换结果自带 mux 时不覆盖。
+        if let proto = node["protocol"] as? String,
+           ["vmess", "vless", "trojan", "shadowsocks"].contains(proto),
+           node["mux"] == nil {
+            node["mux"] = ["enabled": true, "concurrency": 8] as [String: Any]
+        }
 
         let config: [String: Any] = [
             "log": ["loglevel": "warning"],

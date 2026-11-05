@@ -230,8 +230,8 @@ extension Notification.Name {
         }
         static let edgeSwipeThreshold: CGFloat = 30.0
         
-        static let standardAnimationDuration: TimeInterval = 0.3
-        static let longAnimationDuration: TimeInterval = 0.4
+        static let standardAnimationDuration: TimeInterval = 0.2
+        static let longAnimationDuration: TimeInterval = 0.3
         static let shortAnimationDuration1: TimeInterval = 0.15
         static let shortAnimationDuration2: TimeInterval = 0.1
         
@@ -1177,7 +1177,7 @@ extension Notification.Name {
             try? await app.runApp(containerFolderName: dataUUID)
         }
         var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
             attempts += 1
             guard let self else {
                 timer.invalidate()
@@ -1186,7 +1186,7 @@ extension Notification.Name {
             if self.apps.contains(where: { $0.appUUID == dataUUID }) {
                 self.minimizeWindow(uuid: dataUUID)
                 timer.invalidate()
-            } else if attempts >= 40 {
+            } else if attempts >= 120 {
                 timer.invalidate()
             }
         }
@@ -1266,7 +1266,7 @@ extension Notification.Name {
                 continue
             }
             // 只认真正藏起来的：动画中途 alpha 为 0 但 hidden 还没置位
-            // 时不算，避免 0.3 秒动画就开始计时。
+            // 时不算，避免 0.2 秒动画就开始计时。
             if view.isHidden {
                 if let since = czfMinimizedSince[app.appUUID] {
                     if now.timeIntervalSince(since) >= closeDelay {
@@ -3229,16 +3229,16 @@ struct AllAppsListView: View {
     }
 
     // 启动新开路拉满（3.8.240，面板版）：与卡片同款逻辑，
-    // 0.3 秒×20 次轮询等新窗进 dock，归属按路径验。
+    // 0.1 秒×60 次轮询等新窗进 dock，归属按路径验。
     private func pollAndMaximizeFreshWindow(app: LCAppModel) {
         let expectedPath = app.appInfo.relativeBundlePath
         var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             attempts += 1
             let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID
             guard let uuid = uuid,
                   let entry = self.dockManager.apps.first(where: { $0.appUUID == uuid }) else {
-                if attempts >= 20 {
+                if attempts >= 60 {
                     timer.invalidate()
                 }
                 return
@@ -3297,7 +3297,7 @@ struct AllAppsListView: View {
         // 的新窗若拆容器会换 uuid，等这个 uuid 也等不来）。
         // 轮询到期分不清失败还是拆容器换号，不在这里误报错。
         var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             attempts += 1
             if let entry = self.dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
                 let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == app.appInfo.relativeBundlePath } ?? false
@@ -3305,7 +3305,7 @@ struct AllAppsListView: View {
                     self.dockManager.minimizeWindow(uuid: dataUUID)
                 }
                 timer.invalidate()
-            } else if attempts >= 20 {
+            } else if attempts >= 60 {
                 timer.invalidate()
             }
         }
