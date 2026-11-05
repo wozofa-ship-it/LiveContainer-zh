@@ -3029,7 +3029,13 @@ struct PinnedAppsStripView: View {
     let onLaunch: (LCAppModel) -> Void
     // 3.8.284：空态提示文案可改——App 面板用默认句，源面板
     // 下面没有可固定的行，默认句会误导，调用方传自己的
-    let emptyHint: String = "长按下面的 App 可以固定到这里"
+    // 3.8.287：注意——属性这里不能带默认值。带默认值的 let
+    // 在 init 体跑起来时已经算初始化过一次，init 里再写
+    // self.emptyHint = emptyHint 就是第二次初始化，构建 334
+    // 原话 `immutable value 'self.emptyHint' may only be
+    // initialized once`。默认值放下面 init 的参数上（调用
+    // 方不传时走它），属性本身只声明不赋值。
+    let emptyHint: String
 
     // 3.8.286：显式 init——光加带默认值的存储属性不够，
     // 构建 333 报 `extra argument 'emptyHint' in call`：调
