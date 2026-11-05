@@ -2119,6 +2119,9 @@ extension Notification.Name {
                 .environment(\.czfPanelClose) { [weak self] in self?.dismissPanelOverlay() }
         )
         let host = UIHostingController(rootView: rootView)
+        // 3.8.292：宿主底色放透明（与源面板宿主 289 同款）——App
+        // 面板走液态玻璃时，玻璃要直接采客 App 当底。
+        host.view.backgroundColor = .clear
         let b = window.bounds
         host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.45)
         host.view.layer.cornerRadius = 20
@@ -3270,6 +3273,23 @@ struct AllAppsListView: View {
     }
 
     var body: some View {
+        // 3.8.292：App 面板液态玻璃，与源面板一模一样（289 只给
+        // 源面板上了玻璃，两边不一样，用户真机确认）。容器 +
+        // 搜索框 + App 行全上玻璃，运行条共用已是玻璃。玻璃只
+        // 在 iOS 26 且未开兼容模式时开，其余系统走原来实色底。
+        // 多个玻璃共用一个 GlassEffectContainer（一个 backdrop
+        // pass，滚动不掉帧）；容器本身 iOS 26 才有，放 #available 里。
+        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+            GlassEffectContainer(spacing: 8) {
+                appPanelContent
+            }
+        } else {
+            appPanelContent
+        }
+    }
+
+    @ViewBuilder
+    private var appPanelContent: some View {
         // 不用 NavigationView：空标题的导航栏白占一条高度，面板
         // 本来就只有半屏多；原来挂的 .searchable 绑的是常量空串
         // （根本不筛选），iOS 26 还把它渲染成悬浮条压在面板底部，
@@ -3306,8 +3326,16 @@ struct AllAppsListView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .modifier { content in
+                    // 3.8.292：搜索框玻璃（与源面板搜索框同款）；
+                    // 非玻璃系统走原来浅灰底 + 圆角。
+                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                        content.glassEffect(.regular, in: .rect(cornerRadius: 10))
+                    } else {
+                        content.background(Color(UIColor.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
             ScrollView {
@@ -3363,6 +3391,22 @@ struct AllAppsListView: View {
                 proxy.scrollTo("czfAppPanelTop", anchor: .top)
                 searchText = ""
             }
+            }
+            .background {
+                // 3.8.292：容器玻璃背景层（与源面板同款）——玻璃
+                // 不挂在内容 VStack 上（VStack 高度受底部安全区
+                // 限制，底部约 40pt 铺不到，形成接缝线 + 两个底
+                // 角没铺满）；背景层 + ignoresSafeArea 铺满宿主
+                // 全高，内容不动。非玻璃分支同样铺满。
+                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                    UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20)
+                        .fill(.clear)
+                        .glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+                        .ignoresSafeArea()
+                } else {
+                    Color(UIColor.systemBackground)
+                        .ignoresSafeArea()
+                }
             }
         }
         // 启动失败提示（源面板同款写法）：面板已关、启动在后台
@@ -3762,15 +3806,21 @@ struct SourcesPanelView: View {
                 Text(errorMessage ?? "")
             }
             }
-            .modifier { content in
-                // 3.8.289：面板容器玻璃——整块面板磨砂（样板图
-                // 同款）；只圆上面两角（下面贴屏底，宿主 layer
-                // 同款只圆上面）。非玻璃系统走 systemBackground，
-                // 外观与原来一致。
+            .background {
+                // 3.8.292：容器玻璃改成背景层——玻璃不再挂在内容
+                // VStack 上（VStack 高度受底部安全区限制，底部约
+                // 40pt 铺不到，形成接缝线 + 两个底角没铺满）；背景
+                // 层 + ignoresSafeArea 铺满宿主全高，内容不动。
+                // 非玻璃分支同样铺满（原来只铺 VStack，底部安全
+                // 区同样会露底）。形状、圆角与原来一字不动。
                 if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                    content.glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+                    UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20)
+                        .fill(.clear)
+                        .glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+                        .ignoresSafeArea()
                 } else {
-                    content.background(Color(UIColor.systemBackground))
+                    Color(UIColor.systemBackground)
+                        .ignoresSafeArea()
                 }
             }
             }
@@ -3874,9 +3924,17 @@ private struct SourcePanelRow: View {
     @ObservedObject private var sharedModel = DataManager.shared.model
     @ObservedObject private var pinnedStore = CZFPinnedAppsStore.shared
     @State private var copied = false
-    @State private var showVersionSheet = false
-    // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
-    @State private var showInstancePicker = false
+    // 3.8.292：两个 sheet 合并成一个 enum 驱动（同一视图挂两
+    // 个 .sheet 只有一个会真正弹出，另一个静默失效；291 的版
+    // 本单可能顶掉多开实例选择单）。打开处改 activeSheet =
+    // .instances / .versions，关单处改 activeSheet = nil。
+    @State private var activeSheet: RowSheet?
+
+    // 3.8.292：行内 sheet 种类——多开实例选择 / 历史版本。
+    private enum RowSheet: Identifiable {
+        case instances, versions
+        var id: Self { self }
+    }
 
     private var isInstalled: Bool {
         (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
@@ -3926,6 +3984,25 @@ private struct SourcePanelRow: View {
             return app.bundleIdentifier
         }
         return "\(latest.version) • \(app.bundleIdentifier)"
+    }
+
+    // 3.8.292：行长按菜单抽成独立 @ViewBuilder 子表达式——
+    // body 已很大（291 在 .contextMenu 处报 type '()' cannot
+    // conform to 'View'，类型检查器扛不住）；内容一字不动，
+    // 只换位置，body 里只留 `.contextMenu { rowContextMenu }`。
+    @ViewBuilder
+    private var rowContextMenu: some View {
+        Button {
+            pinnedStore.toggleSourcePin(app)
+        } label: {
+            Label(pinnedStore.isSourcePinned(app) ? "取消固定" : "固定到面板",
+                  systemImage: pinnedStore.isSourcePinned(app) ? "pin.slash" : "pin")
+        }
+        Button {
+            activeSheet = .versions
+        } label: {
+            Label("历史版本…", systemImage: "clock.arrow.circlepath")
+        }
     }
 
     var body: some View {
@@ -4006,7 +4083,8 @@ private struct SourcePanelRow: View {
                     if matches.count == 1, let only = matches.first {
                         Task { try? await only.runApp() }
                     } else if matches.count > 1 {
-                        showInstancePicker = true
+                        // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
+                        activeSheet = .instances
                     }
                 } label: {
                     Text("打开")
@@ -4046,48 +4124,38 @@ private struct SourcePanelRow: View {
                 }
             }
         }
-        .sheet(isPresented: $showInstancePicker) {
-            NavigationView {
-                List(installedAppModels, id: \.self) { model in
-                    Button {
-                        showInstancePicker = false
-                        Task { try? await model.runApp() }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(model.appInfo.displayName())
-                                .font(.system(size: 15)).bold()
-                            Text("容器 \(model.uiSelectedContainer?.name ?? model.uiSelectedContainer?.folderName ?? "") • 版本 \(model.appInfo.version())")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
+        .contextMenu { rowContextMenu }
+        .sheet(item: $activeSheet) { sheet in
+            // 3.8.292：两个 sheet 合并成一个（同一视图挂两个
+            // .sheet 只有一个会真正弹出）；内容原样搬入，只改
+            // 关单处为 activeSheet = nil。
+            switch sheet {
+            case .instances:
+                NavigationView {
+                    List(installedAppModels, id: \.self) { model in
+                        Button {
+                            activeSheet = nil
+                            Task { try? await model.runApp() }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(model.appInfo.displayName())
+                                    .font(.system(size: 15)).bold()
+                                Text("容器 \(model.uiSelectedContainer?.name ?? model.uiSelectedContainer?.folderName ?? "") • 版本 \(model.appInfo.version())")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .navigationTitle("选择要打开的实例")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { activeSheet = nil }
                         }
                     }
                 }
-                .navigationTitle("选择要打开的实例")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("取消") { showInstancePicker = false }
-                    }
-                }
+            case .versions:
+                SourceAppVersionsSheet(app: app, onDownloadVersion: onDownloadVersion)
             }
-        }
-        .contextMenu {
-            // 3.8.291：长按菜单——固定/取消固定 + 历史版本。
-            // 行上原来没有长按手势，不冲任何现有手势；写法与
-            // 本文件已装行的固定菜单同款（Label + pin 图标）。
-            Button {
-                pinnedStore.toggleSourcePin(app)
-            } label: {
-                Label(pinnedStore.isSourcePinned(app) ? "取消固定" : "固定到面板",
-                      systemImage: pinnedStore.isSourcePinned(app) ? "pin.slash" : "pin")
-            }
-            Button {
-                showVersionSheet = true
-            } label: {
-                Label("历史版本…", systemImage: "clock.arrow.circlepath")
-            }
-        }
-        .sheet(isPresented: $showVersionSheet) {
-            SourceAppVersionsSheet(app: app, onDownloadVersion: onDownloadVersion)
         }
     }
 }
@@ -4413,8 +4481,18 @@ struct AppCardRow: View {
             }
         }
         .padding(10)
-        .background(Color(.secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .modifier { content in
+            // 3.8.292：App 行玻璃（与源 App 行同款）；非玻璃
+            // 系统走原来浅灰圆角卡片。
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                content.glassEffect(.regular, in: .rect(cornerRadius: 20))
+            } else {
+                content.background {
+                    RoundedRectangle(cornerRadius: 20)
+                        .fill(Color(.secondarySystemBackground))
+                }
+            }
+        }
         // 长按行：固定到面板顶部 / 取消固定（用户定）；
         // 正在运行的还多两个：重启（卡死时一步恢复）、关闭
         .contextMenu {
