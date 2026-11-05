@@ -512,15 +512,16 @@ class LCAppModel: ObservableObject, Hashable {
             : nil
         try await signApp(force: false)
         await vpnCoreTask?.value
-        // 11（3.8.277）：标了 VPN 的 App，先等节点真正就绪再
-        // 放行启动——核心起来（SOCKS 口监听）不等于节点通了，
-        // 首次握手是懒触发的，不探就直接起，App 头几秒全是
-        // 不通的请求。探通立刻起；不通切下一个再探；超时/
-        // 都探不通按现有 fail-open 放行（核心起失败也不拦启动，
-        // 同款兜底），绝不无限等。没标 VPN 的 App（vpnCoreTask
-        // 为 nil）不探。
+        // P1（3.8.279）：探节点与开窗并行——277 是“探通再放行”，
+        // 探的 0.2–0.5 秒（坏节点数秒）全堵在开窗前。改核心起来
+        // 立刻开窗，探节点放后台并行跑；探通什么都不做，探不通
+        // 后台切节点（切节点逻辑现成）。代价：坏节点时头 1 秒左
+        // 右可能走 fail-open 直连（用户 2026-11-05 点头）。
+        // 没标 VPN 的 App（vpnCoreTask 为 nil）不探。
         if vpnCoreTask != nil {
-            _ = await CZFVPNManager.shared.waitUntilNodeReady(for: vpnAppInfo, timeout: 5)
+            Task.detached(priority: .userInitiated) {
+                _ = await CZFVPNManager.shared.waitUntilNodeReady(for: vpnAppInfo, timeout: 5)
+            }
         }
 
         var jitNeeded = appInfo.isJITNeeded || appInfo.is32bit

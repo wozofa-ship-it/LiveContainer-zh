@@ -11,6 +11,36 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     init() {
+        // 保活启动同步：重装后开关默认开，第一次启动即把
+        // dylib 部署进全局 Tweaks，不等用户打开设置页
+        LCSettingsView.syncKeepAliveAtLaunch()
+
+        // P2（3.8.279）：冷启动扫描移出主线程——原来 init 里同步
+        // 枚举 bundle 目录、逐个读两个 plist 建 LCAppInfo/Model，
+        // 几十次解析堵在首帧之前。改后台扫：先出首帧，扫完回主
+        // 线程一次赋值；排序管理器订阅了 model.$apps，赋值即重排，
+        // 列表随后上；定时备份/预热那时读到空只会跳过、不记日期。
+        // LCAppInfo/LCAppModel 的 init 只读 plist 与自身属性，无
+        // UIKit，后台建安全；@Published 赋值必须回主线程。
+        Task.detached(priority: .userInitiated) {
+            let scanned = Self.scanAppLists()
+            await MainActor.run {
+                let model = DataManager.shared.model
+                model.apps = scanned.apps
+                model.arm32EmuApps = scanned.arm32EmuApps
+                model.hiddenApps = scanned.hiddenApps
+                model.appDataFolderNames = scanned.appDataFolderNames
+                model.tweakFolderNames = scanned.tweakFolderNames
+                if let schemes = scanned.urlSchemes {
+                    UserDefaults.lcShared().set(Array(schemes), forKey: "LCGuestURLSchemes")
+                }
+            }
+        }
+    }
+
+    /// 冷启动扫描（P2：后台跑）：原 init 里的同一段，逻辑一字
+    /// 未动，只挪出来。返回五份清单 + URL schemes（非主 App 时为 nil）。
+    private static func scanAppLists() -> (apps: [LCAppModel], arm32EmuApps: [LCAppModel], hiddenApps: [LCAppModel], appDataFolderNames: [String], tweakFolderNames: [String], urlSchemes: Set<String>?) {
         let fm = FileManager()
         var tempAppDataFolderNames : [String] = []
         var tempTweakFolderNames : [String] = []
@@ -108,18 +138,7 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
             NSLog("[LC] error:\(error)")
         }
 
-        // 保活启动同步：重装后开关默认开，第一次启动即把
-        // dylib 部署进全局 Tweaks，不等用户打开设置页
-        LCSettingsView.syncKeepAliveAtLaunch()
-
-        DataManager.shared.model.apps = tempApps
-        DataManager.shared.model.arm32EmuApps = tempArm32EmuApps
-        DataManager.shared.model.hiddenApps = tempHiddenApps
-        DataManager.shared.model.appDataFolderNames = tempAppDataFolderNames
-        DataManager.shared.model.tweakFolderNames = tempTweakFolderNames
-        if let tempURLSchemes {
-            UserDefaults.lcShared().set(Array(tempURLSchemes), forKey: "LCGuestURLSchemes")
-        }
+        return (tempApps, tempArm32EmuApps, tempHiddenApps, tempAppDataFolderNames, tempTweakFolderNames, tempURLSchemes)
     }
     
     var body: some Scene {

@@ -601,6 +601,22 @@ struct LCDataManagementView : View {
                             ForEach(externalBackupFolderList, id: \.self) { folderURL in
                                 restoreRow(for: folderURL)
                             }
+                            // 已设文件夹也能重新选（3.8.279）：原来只在
+                            // 未设时给入口，设了就再也换不了，只能回
+                            // 数据管理页改。选完走同个 picker，存授权
+                            // + 刷新列表 + 体积，不用关 sheet 重进。
+                            Button {
+                                showRestoreSheetFolderPicker = true
+                            } label: {
+                                HStack {
+                                    Label("重新选择 iCloud 备份文件夹", systemImage: "folder")
+                                    Spacer()
+                                    Text(Self.externalBackupFolderURL()?.lastPathComponent ?? "")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
                         } else {
                             Button("选择 iCloud 备份文件夹") {
                                 showRestoreSheetFolderPicker = true

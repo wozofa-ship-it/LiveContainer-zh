@@ -245,6 +245,16 @@
     // Navigation bar
     UINavigationBar *navigationBar = [[UINavigationBar alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, navBarHeight)];
     navigationBar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    // 标题栏色差（3.8.279）：默认外观在 iOS 26 是半透明毛玻璃，
+    // 实测标题栏 244、状态栏 252、客内容 251，三条白不在一个色
+    // 上，顶上看得到一条缝。改不透明 + 跟窗口同色
+    // systemBackgroundColor，标题栏与窗口、状态栏同色。
+    UINavigationBarAppearance *czfBarAppearance = [[UINavigationBarAppearance alloc] init];
+    [czfBarAppearance configureWithOpaqueBackground];
+    czfBarAppearance.backgroundColor = UIColor.systemBackgroundColor;
+    navigationBar.standardAppearance = czfBarAppearance;
+    navigationBar.scrollEdgeAppearance = czfBarAppearance;
+    navigationBar.translucent = NO;
     UINavigationItem *navigationItem = [[UINavigationItem alloc] initWithTitle:self.title];
     navigationBar.items = @[navigationItem];
     

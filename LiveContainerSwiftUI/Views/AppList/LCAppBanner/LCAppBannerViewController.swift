@@ -253,16 +253,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     // 启动新开路拉满（3.8.240）：runApp 起完新窗可能还没进
-    // dock（签名耗时），0.3 秒×20 次轮询等它出现；归属按路径
+    // dock（签名耗时），0.1 秒×60 次轮询等它出现；归属按路径
     // 验，别人的窗口占着 uuid 就停表不碰；vc 没就绪继续等；
     // 拉满动画重入守卫吞掉的那次下个 tick 重试（isMaximized
-    // 没翻就说明没拉上），20 次后停。启动失败已有 launch 侧
+    // 没翻就说明没拉上），60 次后停。启动失败已有 launch 侧
     // showError，这里到期不重复报错。
     @available(iOS 16.0, *)
     private func pollAndMaximizeFreshWindow() {
         let expectedPath = configuration.model.appInfo.relativeBundlePath
         var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
             attempts += 1
             guard let self = self else {
                 timer.invalidate()
@@ -270,7 +270,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             }
             guard let uuid = self.bannerInstanceUUID(),
                   let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
-                if attempts >= 20 {
+                if attempts >= 60 {
                     timer.invalidate()
                 }
                 return
@@ -286,7 +286,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 return
             }
             guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
-                if attempts >= 20 {
+                if attempts >= 60 {
                     timer.invalidate()
                 }
                 return
@@ -294,7 +294,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             if !vc.isMaximized {
                 vc.maximizeWindow()
             }
-            if vc.isMaximized || attempts >= 20 {
+            if vc.isMaximized || attempts >= 60 {
                 timer.invalidate()
             }
         }
@@ -382,19 +382,19 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 读）。记的是点的意图，启动失败也不改回。
         Self.setLastLaunchMode(.minimized, for: configuration.model)
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
-        // 出现就重走正常路；20 次内没出现就停（启动失败已由
+        // 出现就重走正常路；60 次内没出现就停（启动失败已由
         // launch 侧 showError，不在这里重复报错）。
         guard let uuid = bannerInstanceUUID() else {
             Task { [weak self] in
                 await self?.launchForAux(multitask: nil, containerFolderName: nil)
             }
             var attempts = 0
-            Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+            Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
                 attempts += 1
                 if self?.bannerInstanceUUID() != nil {
                     timer.invalidate()
                     self?.minimizeButtonTapped()
-                } else if attempts >= 20 {
+                } else if attempts >= 60 {
                     timer.invalidate()
                 }
             }
@@ -411,18 +411,18 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 return
             }
         }
-        // 未运行：先启动，面板同款 0.3 秒×20 次轮询等窗口出现
+        // 未运行：先启动，面板同款 0.1 秒×60 次轮询等窗口出现
         // 再最小化；轮询只认归属对得上的条目，别人的窗口占着
         // uuid 时直接停表、不碰它（自己的新窗若拆容器会换 uuid，
         // 等这个 uuid 也等不来）。启动失败只走 showError，
-        // 轮询 20 次后自停——到期分不清失败还是拆容器换号，
+        // 轮询 60 次后自停——到期分不清失败还是拆容器换号，
         // 不在这里误报错。
         Task { [weak self] in
             await self?.launchForAux(multitask: nil, containerFolderName: uuid)
         }
         let expectedPath = configuration.model.appInfo.relativeBundlePath
         var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { timer in
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             attempts += 1
             if let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) {
                 let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == expectedPath } ?? false
@@ -430,7 +430,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                     MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
                 }
                 timer.invalidate()
-            } else if attempts >= 20 {
+            } else if attempts >= 60 {
                 timer.invalidate()
             }
         }
@@ -442,19 +442,19 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 读）。记的是点的意图，启动失败也不改回。
         Self.setLastLaunchMode(.small, for: configuration.model)
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
-        // 出现就重走正常路；20 次内没出现就停（启动失败已由
+        // 出现就重走正常路；60 次内没出现就停（启动失败已由
         // launch 侧 showError）。
         guard let uuid = bannerInstanceUUID() else {
             Task { [weak self] in
                 await self?.launchForAux(multitask: true, containerFolderName: nil)
             }
             var attempts = 0
-            Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+            Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
                 attempts += 1
                 if self?.bannerInstanceUUID() != nil {
                     timer.invalidate()
                     self?.smallWindowButtonTapped()
-                } else if attempts >= 20 {
+                } else if attempts >= 60 {
                     timer.invalidate()
                 }
             }
