@@ -2109,9 +2109,10 @@ extension Notification.Name {
         backdrop.isHidden = true
         backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
         window.addSubview(backdrop)
-        // 面板本体：底部 50% 高，上圆角（75% 版 2026-10-23 当晚被
+        // 面板本体：底部 45% 高，上圆角（75% 版 2026-10-23 当晚被
         // 用户真机否决：又高又肿，且整条盖死源面板手势起手带；
-        // 60% 版 2026-11-06 用户看样板图仍嫌高，降到 50%）
+        // 60% 版 2026-11-06 用户看样板图仍嫌高，50% 版同日用户
+        // 又令降到 45%，再推一版）
         let rootView = AnyView(
             AllAppsListView()
                 .environmentObject(self)
@@ -2119,7 +2120,7 @@ extension Notification.Name {
         )
         let host = UIHostingController(rootView: rootView)
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.5)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.45)
         host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -2176,7 +2177,7 @@ extension Notification.Name {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.5
+            let panelHeight = b.height * 0.45
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -2298,7 +2299,7 @@ extension Notification.Name {
         // systemBackground 兜底，外观与原来一致。
         host.view.backgroundColor = .clear
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.5)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.45)
         host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -2332,7 +2333,7 @@ extension Notification.Name {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.5
+            let panelHeight = b.height * 0.45
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -2371,7 +2372,7 @@ extension Notification.Name {
                   let newHost = toSources ? self.czfSourcesOverlayHost : self.czfPanelOverlayHost,
                   let newBackdrop = toSources ? self.czfSourcesOverlayBackdrop : self.czfPanelOverlayBackdrop else { return }
             let b = window.bounds
-            let panelHeight = b.height * 0.5
+            let panelHeight = b.height * 0.45
             if toSources {
                 self.czfSourcesPanelOpenCounter += 1
             } else {
