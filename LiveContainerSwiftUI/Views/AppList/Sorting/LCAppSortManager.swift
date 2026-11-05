@@ -161,88 +161,6 @@ class LCAppSortManager: ObservableObject {
         return true
     }
 
-    // 新2（3.8.277）：App 分组。groups 是分组名（有序，分组顺序），
-    // 存 App Group 键 LCAppGroups；groupMembers 是 [唯一 ID: 分组名]，
-    // 存 LCAppGroupMembers。没进 groupMembers 的 App 属“未分组”
-    //（不存；占位名 "未分组" 是保留名，不可作分组名）。
-    static let groupsKey = "LCAppGroups"
-    static let groupMembersKey = "LCAppGroupMembers"
-    static let ungroupedName = "未分组"
-
-    @Published var groups: [String] {
-        didSet {
-            LCUtils.appGroupUserDefault.set(groups, forKey: Self.groupsKey)
-            LCDataManagementView.writeCZFSettingsBackup()
-        }
-    }
-
-    @Published var groupMembers: [String: String] {
-        didSet {
-            LCUtils.appGroupUserDefault.set(groupMembers, forKey: Self.groupMembersKey)
-            LCDataManagementView.writeCZFSettingsBackup()
-        }
-    }
-
-    /// 该 App 的分组名，没进组返回 nil。
-    func groupName(for app: LCAppModel) -> String? {
-        guard let id = getUniqueIdentifier(for: app) else { return nil }
-        return groupMembers[id]
-    }
-
-    /// 把 App 移进分组；group 为 nil 表示移回“未分组”。
-    /// 不存在的分组名直接忽略。
-    func moveApp(_ app: LCAppModel, to group: String?) {
-        guard let id = getUniqueIdentifier(for: app) else { return }
-        if let group {
-            guard groups.contains(group) else { return }
-            groupMembers[id] = group
-        } else {
-            groupMembers.removeValue(forKey: id)
-        }
-    }
-
-    /// 新增分组（空白、保留名、已存在返回 false）。新分组排最后。
-    @discardableResult
-    func addGroup(named name: String) -> Bool {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != Self.ungroupedName, !groups.contains(trimmed) else { return false }
-        groups.append(trimmed)
-        return true
-    }
-
-    /// 分组改名（空白、保留名、旧名不存在、新名已存在返回 false）。
-    /// 组内成员的归属跟着新名走。
-    @discardableResult
-    func renameGroup(from oldName: String, to newName: String) -> Bool {
-        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != Self.ungroupedName, trimmed != oldName, groups.contains(oldName), !groups.contains(trimmed) else { return false }
-        groups = groups.map { $0 == oldName ? trimmed : $0 }
-        // 先收 ID 再改值：字典迭代中直接改值不安全。
-        let memberIDs = groupMembers.filter { $0.value == oldName }.map { $0.key }
-        for id in memberIDs {
-            groupMembers[id] = trimmed
-        }
-        return true
-    }
-
-    /// 删分组（不存在返回 false）。组内成员移回“未分组”。
-    @discardableResult
-    func deleteGroup(named name: String) -> Bool {
-        guard groups.contains(name) else { return false }
-        groups.removeAll { $0 == name }
-        // 先收 ID 再删：字典迭代中直接删键不安全。
-        let memberIDs = groupMembers.filter { $0.value == name }.map { $0.key }
-        for id in memberIDs {
-            groupMembers.removeValue(forKey: id)
-        }
-        return true
-    }
-
-    /// 分组重排：把分组从 from 移到 to（管理页 onMove 用）。
-    func moveGroup(fromOffsets source: IndexSet, toOffset destination: Int) {
-        groups.move(fromOffsets: source, toOffset: destination)
-    }
-    
     @Published var sortedApps : [LCAppModel] = []
     @Published var sortedHiddenApps : [LCAppModel] = []
     
@@ -250,7 +168,7 @@ class LCAppSortManager: ObservableObject {
     // MARK: - Initialization
     
     init() {
-        // 新1/新2（3.8.277）：init 里读 self 的属性前必须全部
+        // 新1（3.8.277）：init 里读 self 的属性前必须全部
         // 存储属性都已赋值，迁移/回落先用局部变量算完，再一次
         // 性赋值；didSet 在 init 里不触发，迁移结果直接写回
         // defaults 落盘（只在真正迁移/回落时写，原语义不变）。
@@ -272,16 +190,9 @@ class LCAppSortManager: ObservableObject {
             currentScheme = schemes.keys.sorted().first ?? Self.defaultSchemeName
             writeCurrentBack = true
         }
-        // 新2：分组。归属里写着不存在的分组名（删分组后残留的
-        // 旧数据）直接丢掉，App 回“未分组”。
-        let savedGroups: [String] = LCUtils.appGroupUserDefault.array(forKey: Self.groupsKey) as? [String] ?? []
-        let members = (LCUtils.appGroupUserDefault.dictionary(forKey: Self.groupMembersKey) as? [String: String] ?? [:]).filter { savedGroups.contains($0.value) }
-
         self.customSortOrder = savedOrder
         self.schemes = schemes
         self.currentSchemeName = currentScheme
-        self.groups = savedGroups
-        self.groupMembers = members
         if writeSchemesBack {
             LCUtils.appGroupUserDefault.set(schemes, forKey: Self.schemesKey)
         }
@@ -343,11 +254,6 @@ class LCAppSortManager: ObservableObject {
         }
         if let current = LCUtils.appGroupUserDefault.string(forKey: Self.currentSchemeKey), schemes[current] != nil {
             self.currentSchemeName = current
-        }
-        // 新2：分组也重读（恢复写回后当场生效，不用等重启）。
-        self.groups = LCUtils.appGroupUserDefault.array(forKey: Self.groupsKey) as? [String] ?? []
-        if let members = LCUtils.appGroupUserDefault.dictionary(forKey: Self.groupMembersKey) as? [String: String] {
-            self.groupMembers = members.filter { groups.contains($0.value) }
         }
         self.customSortOrder = LCUtils.appGroupUserDefault.array(forKey: "LCCustomSortOrder") as? [String] ?? []
         self.sortedApps = self.getSortedApps(DataManager.shared.model.apps, sortType: self.appSortType, customSortOrder: self.customSortOrder)

@@ -54,6 +54,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 长按不会同时弹出行菜单。
         let runLongPress = UILongPressGestureRecognizer(target: self, action: #selector(runControlLongPressed(_:)))
         bannerView.runControl.addGestureRecognizer(runLongPress)
+        // 面板同款次级按钮（16+ 才建，见 RootView；16 以下为 nil，不挂）。
+        if #available(iOS 16.0, *) {
+            bannerView.minimizeControl?.addTarget(self, action: #selector(minimizeButtonTapped), for: .touchUpInside)
+            bannerView.smallWindowControl?.addTarget(self, action: #selector(smallWindowButtonTapped), for: .touchUpInside)
+        }
         bannerView.addInteraction(UIContextMenuInteraction(delegate: self))
 
         // dock 变化（窗口开关）即重绘画片，卡片状态才跟得上；
@@ -106,10 +111,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     @objc private func bannerDoubleTapped(_ gestureRecognizer: UITapGestureRecognizer) {
-        // 双击按钮区不进设置：只排除启动 pill（优1 后行内
-        // 已无最小化/小窗口按钮，那两项随按钮一起撤掉）。
+        // 双击按钮区不进设置：原来只排除了启动 pill，两个新按钮
+        // 同样排除（按钮是 bannerView 的直接子视图，frame 就是
+        // bannerView 坐标系，不用逐个转坐标；16 以下新按钮为 nil，
+        // 后两项恒为 false，行为与原来一致）。
         let location = gestureRecognizer.location(in: bannerView)
-        guard !bannerView.runControl.frame.contains(location) else {
+        guard !bannerView.runControl.frame.contains(location),
+              !(bannerView.minimizeControl?.frame.contains(location) ?? false),
+              !(bannerView.smallWindowControl?.frame.contains(location) ?? false) else {
             return
         }
         openSettings()
@@ -539,49 +548,6 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 }
             })
         }
-
-        // 优1（3.8.277）：最小化/小窗口从行内撤下，改放长按菜单
-        // 这里。调的还是同名方法（minimizeButtonTapped /
-        // smallWindowButtonTapped），行为一字不动；多任务窗口
-        // 是 16+ 的东西，16 以下不出现这两项。
-        if #available(iOS 16.0, *) {
-            sectionChildren.append(UIAction(
-                title: "最小化",
-                image: UIImage(systemName: "arrow.down.to.line")
-            ) { [weak self] _ in
-                self?.minimizeButtonTapped()
-            })
-            sectionChildren.append(UIAction(
-                title: "小窗口",
-                image: UIImage(systemName: "macwindow")
-            ) { [weak self] _ in
-                self?.smallWindowButtonTapped()
-            })
-        }
-
-        // 新2（3.8.277）：移到分组——长按行把 App 归进分组；
-        // 正在用的分组打勾；“未分组”移回未分组。新建/改名/
-        // 删除/排序分组走排序菜单里的“管理分组…”页，这里只做归组。
-        let sortManager = LCAppSortManager.shared
-        var moveChildren: [UIMenuElement] = sortManager.groups.map { name in
-            UIAction(
-                title: name,
-                state: sortManager.groupName(for: model) == name ? .on : .off
-            ) { _ in
-                sortManager.moveApp(model, to: name)
-            }
-        }
-        moveChildren.append(UIAction(
-            title: LCAppSortManager.ungroupedName,
-            state: sortManager.groupName(for: model) == nil ? .on : .off
-        ) { _ in
-            sortManager.moveApp(model, to: nil)
-        })
-        sectionChildren.append(UIMenu(
-            title: "移到分组",
-            image: UIImage(systemName: "folder"),
-            children: moveChildren
-        ))
 
         let addToHomeScreenMenu = UIMenu(
             title: "lc.appBanner.addToHomeScreen".loc,

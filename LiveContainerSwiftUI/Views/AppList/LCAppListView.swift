@@ -112,13 +112,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 新1（3.8.277）：排序方案管理页。
     @State private var sortSchemesViewPresent = false
 
-    // 新2（3.8.277）：分组管理页。
-    @State private var sortGroupsViewPresent = false
-
-    // 新2（3.8.277）：已折叠的分组段（段名集合，只存内存，
-    // 不进备份；重进列表默认全展开）。
-    @State private var collapsedGroups: Set<String> = []
-
     // 新4（3.8.277）：批量操作。多选只针对主列表（可见 App），
     // 隐藏区 App 不参与（已隐藏的再“隐藏”无意义，备份/删除
     // 走数据管理页）。选中集存唯一 ID，不存下标——搜索过滤
@@ -199,27 +192,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
-    // 新2（3.8.277）：分组后的段。没建分组时返回一段空名段
-    //（不画段头），列表与原来平铺一字不差；建了分组后按分组
-    // 顺序分段，没进组的进最后一段“未分组”。段内顺序就是
-    // filteredApps 的顺序（当前排序），搜索结果同样分段。
-    private var groupedSections: [(name: String, apps: [LCAppModel])] {
-        let groups = sharedAppSortManager.groups
-        guard !groups.isEmpty else { return [("", filteredApps)] }
-        var sections: [(name: String, apps: [LCAppModel])] = []
-        for name in groups {
-            let apps = filteredApps.filter { sharedAppSortManager.groupName(for: $0) == name }
-            if !apps.isEmpty {
-                sections.append((name, apps))
-            }
-        }
-        let ungrouped = filteredApps.filter { sharedAppSortManager.groupName(for: $0) == nil }
-        if !ungrouped.isEmpty {
-            sections.append((LCAppSortManager.ungroupedName, ungrouped))
-        }
-        return sections
-    }
-
     // 新4（3.8.277）：一行 App 的显示。多选模式时行首挂勾选圈，
     // 整行点按即勾选（透明遮罩盖住横幅，免得点到启动按钮）；
     // 平时按优2挂拖拽（无搜索时），搜索时 plain 行。
@@ -271,11 +243,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         defer { dragReorderID = nil }
         guard searchContext.debouncedQuery.isEmpty else { return }
         let manager = sharedAppSortManager
-        // 新2：跨分组不拖——拖到另一分组的段里只会改顺序、不改
-        // 归属，看着像移过去了实际没动；只允许同分组内拖动，
-        // 换组走长按菜单“移到分组”。
-        guard let draggedApp = filteredApps.first(where: { manager.getUniqueIdentifier(for: $0) == draggedID }),
-              manager.groupName(for: draggedApp) == manager.groupName(for: targetApp) else { return }
+        guard filteredApps.contains(where: { manager.getUniqueIdentifier(for: $0) == draggedID }) else { return }
         var visibleIDs = filteredApps.compactMap { manager.getUniqueIdentifier(for: $0) }
         guard let from = visibleIDs.firstIndex(of: draggedID),
               let targetID = manager.getUniqueIdentifier(for: targetApp),
@@ -501,44 +469,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                         .buttonStyle(.plain)
                     }
-                    // 新2（3.8.277）：按分组分段显示。没建分组时只有一段
-                    // 空名段，不画段头，列表与原来一字不差；建了分组
-                    // 后按分组顺序分段，没进组的进最后一段“未分组”。
-                    // 段内仍按当前排序（filteredApps 的顺序）显示；
-                    // 搜索时只显示有匹配的段。段头点一下折叠/展开。
-                    // 隐藏 App 的分段逻辑在下面，一字不动。
-                    ForEach(groupedSections, id: \.name) { section in
-                        if !section.apps.isEmpty {
-                            VStack(alignment: .leading, spacing: 0) {
-                                if !section.name.isEmpty {
-                                    Button {
-                                        if collapsedGroups.contains(section.name) {
-                                            collapsedGroups.remove(section.name)
-                                        } else {
-                                            collapsedGroups.insert(section.name)
-                                        }
-                                    } label: {
-                                        HStack {
-                                            Text(section.name)
-                                                .font(.system(.title3).bold())
-                                            Text("\(section.apps.count)")
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                            Spacer()
-                                            Image(systemName: collapsedGroups.contains(section.name) ? "chevron.right" : "chevron.down")
-                                                .foregroundColor(.secondary)
-                                        }
-                                        .padding(.vertical, 6)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                if !collapsedGroups.contains(section.name) {
-                                    ForEach(section.apps, id: \.self) { app in
-                                        appRow(for: app)
-                                    }
-                                }
-                            }
-                        }
+                    ForEach(filteredApps, id: \.self) { app in
+                        appRow(for: app)
                     }
                     .transition(.scale)
                 }
@@ -729,13 +661,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             sortSchemesViewPresent = true
                         } label: {
                             Label("管理排序方案…", systemImage: "folder.badge.gearshape")
-                        }
-                        // 新2（3.8.277）：分组管理入口（新建/改名/
-                        // 删除/排序分组；归组走行长按菜单“移到分组”）。
-                        Button {
-                            sortGroupsViewPresent = true
-                        } label: {
-                            Label("管理分组…", systemImage: "folder.badge.plus")
                         }
                     } label: {
                         Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
@@ -1007,9 +932,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .sheet(isPresented: $sortSchemesViewPresent) {
             LCAppSortSchemesView()
-        }
-        .sheet(isPresented: $sortGroupsViewPresent) {
-            LCAppGroupsView()
         }
         .onAppear() {
             if !isViewAppeared {

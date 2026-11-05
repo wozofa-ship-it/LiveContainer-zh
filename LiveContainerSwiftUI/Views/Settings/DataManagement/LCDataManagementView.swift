@@ -105,7 +105,7 @@ struct LCDataManagementView : View {
     @State private var migrationPreviews: [BackupPreviewItem] = []
     @State private var migrationHasSettings = false
     @State private var migrationHasSort = false
-    @State private var migrationHasSchemesOrGroups = false
+    @State private var migrationHasSchemes = false
     @State private var migrationRunning = false
     @State private var migrationReport: String? = nil
     // 恢复选择 sheet 内的操作反馈（删备份等）：必须挂在 sheet
@@ -331,7 +331,7 @@ struct LCDataManagementView : View {
                     migrationPreviews = []
                     migrationHasSettings = false
                     migrationHasSort = false
-                    migrationHasSchemesOrGroups = false
+                    migrationHasSchemes = false
                     migrationRunning = false
                     migrationReport = nil
                     showMigrationWizard = true
@@ -1031,8 +1031,6 @@ struct LCDataManagementView : View {
         "LCAppSortType", "LCCustomSortOrder",
         // 新1（3.8.277）：多套排序方案与正在用的方案名也进备份。
         "LCCustomSortSchemes", "LCCustomSortSchemeCurrent",
-        // 新2（3.8.277）：分组名、分组顺序与归属关系也进备份。
-        "LCAppGroups", "LCAppGroupMembers",
         // 新3（3.8.277）：启动偏好（按 App 记忆的窗口方式）也进备份。
         "LCAppLastLaunchMode",
         // App Group 里的开关：排序之外这些原来也没进备份。
@@ -1358,8 +1356,7 @@ struct LCDataManagementView : View {
         // 按恢复的顺序走，不用等重启（以前只改了 defaults，
         // 内存里的 customSortOrder 还是旧的，看着像没恢复）。
         // 新1：方案键也算排序键，reloadSortSettings 会一并重读方案。
-        // 新2：分组键也算，reloadSortSettings 一并重读分组。
-        let sortRestored = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil || dict["LCCustomSortSchemes"] != nil || dict["LCCustomSortSchemeCurrent"] != nil || dict["LCAppGroups"] != nil || dict["LCAppGroupMembers"] != nil
+        let sortRestored = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil || dict["LCCustomSortSchemes"] != nil || dict["LCCustomSortSchemeCurrent"] != nil
         if sortRestored {
             DispatchQueue.main.async { LCAppSortManager.shared.reloadSortSettings() }
         }
@@ -2169,7 +2166,7 @@ struct LCDataManagementView : View {
         }
         migrationHasSettings = false
         migrationHasSort = false
-        migrationHasSchemesOrGroups = false
+        migrationHasSchemes = false
         if let url = settingsURL {
             let dict: [String: Any]? = await Task.detached {
                 guard let data = try? Data(contentsOf: url) else { return nil }
@@ -2178,7 +2175,7 @@ struct LCDataManagementView : View {
             if let dict {
                 migrationHasSettings = true
                 migrationHasSort = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil
-                migrationHasSchemesOrGroups = dict["LCCustomSortSchemes"] != nil || dict["LCAppGroups"] != nil
+                migrationHasSchemes = dict["LCCustomSortSchemes"] != nil
             }
         }
     }
@@ -2265,8 +2262,8 @@ struct LCDataManagementView : View {
                             Text(migrationHasSettings ? "设置备份：有" : "设置备份：没有")
                             if migrationHasSettings {
                                 Text(migrationHasSort ? "App 排序：有，会一起恢复" : "App 排序：没有")
-                                if migrationHasSchemesOrGroups {
-                                    Text("排序方案 / 分组：有，会一起恢复")
+                                if migrationHasSchemes {
+                                    Text("排序方案：有，会一起恢复")
                                 }
                             }
                         }
