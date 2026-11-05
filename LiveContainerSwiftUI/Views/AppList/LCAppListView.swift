@@ -117,15 +117,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 走数据管理页）。选中集存唯一 ID，不存下标——搜索过滤
     // 与排序变化都不会串选。
     @State private var batchMode = false
+    // 3.8.281：顶部 VPN 开关用的核心运行状态（CZFVPNManager 不是
+    // ObservableObject，本地 @State 存一份，进页/点按后从
+    // shared.isRunning 刷新，与设置页同款读法）。
+    @State private var vpnCoreRunning = false
     @State private var batchSelectedIDs: Set<String> = []
     @State private var batchDeleteConfirm = false
     @State private var batchBusy = false
 
     private var selectedBatchApps: [LCAppModel] {
-        sharedModel.apps.filter { app in
+        // 3.8.281：隐藏 App 也进批量勾选范围（原来只看可见 App，
+        // 隐藏区行就算有了勾选圈、勾了也没用——批量备份/删除都
+        // 拿不到它们；恢复备份本身不拦隐藏 App，拦的是这里）。
+        (sharedModel.apps + sharedModel.hiddenApps).filter { app in
             guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
             return batchSelectedIDs.contains(id)
         }
+    }
+
+    // 3.8.281：勾中的 App 是不是全是隐藏的（底栏“隐藏/恢复显示”
+    // 按钮换 label 用；空选时 false，按钮反正禁用）。
+    private var batchSelectionAllHidden: Bool {
+        !selectedBatchApps.isEmpty && selectedBatchApps.allSatisfy { $0.appInfo.isHidden }
     }
 
     private func isBatchSelected(_ app: LCAppModel) -> Bool {
@@ -282,17 +295,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
-        let (okNames, failedNames): ([String], [String]) = await withCheckedContinuation { continuation in
+        let (okNames, failedNames, skippedNames, overwrittenCount): ([String], [String], [String], Int) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                 var ok: [String] = []
                 var failed: [String] = []
+                // 3.8.281：锁了的跳过、覆盖计数
+                var skipped: [String] = []
+                var overwritten = 0
                 for app in apps {
                     let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                    // 3.8.281：锁了的跳过（报已锁定）；备之前先记有无
+                    // 旧备份，成功了才算一次覆盖（跑完报“覆盖了 N 个”）。
+                    let fname = LCDataManagementView.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
+                    if LCDataManagementView.isBackupLocked(fname) {
+                        skipped.append("\(name)（已锁定）")
+                        continue
+                    }
+                    let hadBackup = fm.fileExists(atPath: backupRoot.appendingPathComponent(fname).path)
                     do {
                         let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm)
                         ok.append(one.folderName)
+                        if hadBackup { overwritten += 1 }
                     } catch {
                         failed.append("\(name)：\(LCUtils.czfFriendlyError(error))")
                     }
@@ -301,14 +326,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     LCDataManagementView.syncBackupsToExternalFolder(appNames: ok, backupRoot: backupRoot)
                     LCDataManagementView.writeCZFSettingsBackupDebounced()
                 }
-                continuation.resume(returning: (ok, failed))
+                continuation.resume(returning: (ok, failed, skipped, overwritten))
             }
         }
-        if okNames.isEmpty {
+        if okNames.isEmpty && failedNames.isEmpty && !skippedNames.isEmpty {
+            // 3.8.281：全被跳过（都锁了）不是失败，如实报跳过。
+            installInfo = "已跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")
+            installInfoShow = true
+        } else if okNames.isEmpty {
             errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
             errorShow = true
         } else {
-            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n"))
+            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n"))
             installInfoShow = true
         }
         batchMode = false
@@ -318,8 +347,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 新4（3.8.277）：批量隐藏——复用单个隐藏函数
     // LCAppModel.toggleHidden（delegate 已指回本页，
     // changeAppVisibility 会把 App 搬进隐藏区）。只对当前
-    // 可见的勾选 App 调（toggle 是开关，隐藏区 App 不在
-    // 勾选范围里，防误触反向取消隐藏）。
+    // 可见的勾选 App 调（toggle 是开关，filter 拦住已隐藏
+    // 的，防误触反向取消隐藏；想取消隐藏走下面的 batchUnhide，
+    // 底栏按钮在全选隐藏时自动变“恢复显示”）。
     private func batchHide() async {
         let apps = selectedBatchApps.filter { !$0.appInfo.isHidden }
         guard !apps.isEmpty else { return }
@@ -329,6 +359,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             await app.toggleHidden()
         }
         installInfo = "已隐藏 \(apps.count) 个 App（在下方隐藏 App 分段里查看）"
+        installInfoShow = true
+        batchMode = false
+        batchSelectedIDs.removeAll()
+    }
+
+    // 3.8.281：批量恢复显示——把勾中的隐藏 App 搬回可见区。
+    // toggleHidden 是开关，已隐藏的调它就是取消隐藏；只对已
+    // 隐藏的调，可见的勾中了也不动（底栏按钮只在全选隐藏时
+    // 才变“恢复显示”，混选时仍是“隐藏”，防一键两边乱动）。
+    private func batchUnhide() async {
+        let apps = selectedBatchApps.filter { $0.appInfo.isHidden }
+        guard !apps.isEmpty else { return }
+        batchBusy = true
+        defer { batchBusy = false }
+        for app in apps {
+            await app.toggleHidden()
+        }
+        installInfo = "已恢复显示 \(apps.count) 个 App"
         installInfoShow = true
         batchMode = false
         batchSelectedIDs.removeAll()
@@ -488,7 +536,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         if sharedModel.isHiddenAppUnlocked {
                             LazyVStack {
                                 ForEach(filteredHiddenApps, id: \.self) { app in
-                                    LCAppBanner(appModel: app, delegate: self)
+                                    // 3.8.281：隐藏行也走 appRow——多选模式时行首
+                                    // 挂勾选圈才能勾上；平时 appRow 的拖拽对隐藏
+                                    // 行是死的（commitDragReorder 只认可见 App，
+                                    // 拖隐藏行/往隐藏行上放都直接 no-op）。
+                                    appRow(for: app)
                                 }
                                 .transition(.scale)
                             }
@@ -568,6 +620,32 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
                 }
                 
+                // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
+                // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
+                // 停止核心”同一套调用；状态从 shared.isRunning 读，
+                // 点按后刷新，不靠猜）。
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        LCDataManagementView()
+                    } label: {
+                        Label("数据管理", systemImage: "folder")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
+                        if vpnCoreRunning {
+                            CZFVPNManager.shared.stop()
+                        } else {
+                            _ = CZFVPNManager.shared.start()
+                        }
+                        vpnCoreRunning = CZFVPNManager.shared.isRunning
+                    } label: {
+                        Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
+                    }
+                    .foregroundStyle(vpnCoreRunning ? .green : .secondary)
+                }
+
                 // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
                 // 整行点按即勾选；关时清空勾选。
                 ToolbarItem(placement: .topBarTrailing) {
@@ -661,8 +739,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         Task { await batchBackup() }
                     }
                     .disabled(batchSelectedIDs.isEmpty || batchBusy)
-                    Button("隐藏") {
-                        Task { await batchHide() }
+                    // 3.8.281：勾中的全是隐藏 App 时按钮变“恢复显示”
+                    // （批量取消隐藏）；否则仍是“隐藏”（只藏可见的，
+                    // 已隐藏的不动）。selectedBatchApps 已含隐藏 App，
+                    // 全隐藏判断直接拿 batchSelectionAllHidden 算。
+                    Button(batchSelectionAllHidden ? "恢复显示" : "隐藏") {
+                        Task {
+                            if batchSelectionAllHidden {
+                                await batchUnhide()
+                            } else {
+                                await batchHide()
+                            }
+                        }
                     }
                     .disabled(batchSelectedIDs.isEmpty || batchBusy)
                     Button("删除") {
@@ -914,6 +1002,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             LCAppSortSchemesView()
         }
         .onAppear() {
+            // 3.8.281：每次进 App 页都刷新一次 VPN 开关状态（核心可能
+            // 在别处被起停，本地 @State 不自己猜）。
+            vpnCoreRunning = CZFVPNManager.shared.isRunning
             if !isViewAppeared {
                 if let webpageUrlStr = UserDefaults.standard.string(forKey: "webPageToOpen") {
                     Task { await openWebView(urlString: webpageUrlStr) }

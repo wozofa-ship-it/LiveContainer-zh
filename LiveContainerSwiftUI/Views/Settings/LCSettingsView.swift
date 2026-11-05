@@ -95,6 +95,8 @@ struct LCSettingsView: View {
     // 重装后第一次启动即恢复保活；不想保活再手动关
     @AppStorage("LCKeepAliveEnabled") var keepAliveEnabled = true
     @State var vpnCoreRunning = false
+    // 3.8.281：VPN 栏展开/收起（默认收起），记住选择。
+    @AppStorage("CZFVPNSectionExpanded") private var vpnSectionExpanded = false
     @State var vpnStatusMessage: String?
     @State var vpnNewNodeText = ""
     @State var vpnSubURL: String = UserDefaults.standard.string(forKey: "CZFVPNSubscriptionURL") ?? ""
@@ -809,8 +811,11 @@ private struct CZFVPNNodeLabel: View {
 
     @ViewBuilder private var vpnSection: some View {
         Section {
-            HStack {
-                TextField("粘贴节点链接（vless://…）", text: $vpnNewNodeText)
+            // 3.8.281：VPN 栏可收起（默认收起，只占一行；栏名旁直接
+            // 显示核心状态，找 VPN 不用滑半天；展开状态用 AppStorage 记住）。
+            DisclosureGroup(isExpanded: $vpnSectionExpanded) {
+                HStack {
+                    TextField("粘贴节点链接（vless://…）", text: $vpnNewNodeText)
                     .textInputAutocapitalization(.never)
                 Button("添加") {
                     // 重复添加不再静默：addNode 返回 false
@@ -1140,8 +1145,15 @@ private struct CZFVPNNodeLabel: View {
                     Text("核心关闭后自动停")
                 }
             }
-        } header: {
-            Text("单App VPN")
+            } label: {
+                HStack {
+                    Text("单App VPN")
+                    Spacer()
+                    Text(vpnCoreRunning ? "核心运行中" : "核心未启动")
+                        .font(.footnote)
+                        .foregroundStyle(.gray)
+                }
+            }
         } footer: {
             // 原来这里是一整段 400 多字说明，常驻占十几行。
             // 改成默认只剩一行入口，点开才看精简版：关键意思
