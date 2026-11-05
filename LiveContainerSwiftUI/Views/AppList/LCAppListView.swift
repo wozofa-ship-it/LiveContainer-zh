@@ -206,6 +206,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 .buttonStyle(.plain)
                 LCAppBanner(appModel: app, delegate: self)
+                    .frame(maxWidth: .infinity)
                     .overlay {
                         Color.clear
                             .contentShape(Rectangle())
@@ -298,7 +299,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 if !ok.isEmpty {
                     LCDataManagementView.syncBackupsToExternalFolder(appNames: ok, backupRoot: backupRoot)
-                    _ = LCDataManagementView.writeCZFSettingsBackup()
+                    LCDataManagementView.writeCZFSettingsBackupDebounced()
                 }
                 continuation.resume(returning: (ok, failed))
             }
@@ -478,51 +479,30 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredApps)
 
                 VStack {
-                    if LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
+                    // 隐藏区（3.8.280）：没人脸识别 = 只留一个 App 行高的
+                    // 空白，连“隐藏 App”几个字都不留，不留任何“这里藏了
+                    // 东西”的痕迹；长按空白处弹人脸识别，通过后 App 直接
+                    // 显示在列表里，不带标题。严格/非严格开关不再管列表
+                    // 显示（只剩 LCWebView 的链接跳转还在用它）。
+                    if sharedModel.hiddenApps.count > 0 {
                         if sharedModel.isHiddenAppUnlocked {
                             LazyVStack {
-                                HStack {
-                                    Text("lc.appList.hiddenApps".loc)
-                                        .font(.system(.title2).bold())
-                                    Spacer()
-                                }
-                                
                                 ForEach(filteredHiddenApps, id: \.self) { app in
                                     LCAppBanner(appModel: app, delegate: self)
                                 }
                                 .transition(.scale)
-                                
                             }
                             .padding()
                             .transition(.opacity)
                             .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredHiddenApps)
-                            
-                            if sharedModel.hiddenApps.count == 0 {
-                                Text("lc.appList.hideAppTip".loc)
-                                    .foregroundStyle(.gray)
-                            }
-                        }
-                    } else if sharedModel.hiddenApps.count > 0 {
-                        LazyVStack {
-                            HStack {
-                                Text("lc.appList.hiddenApps".loc)
-                                    .font(.system(.title2).bold())
-                                Spacer()
-                            }
-                            ForEach(filteredHiddenApps, id: \.self) { app in
-                                if sharedModel.isHiddenAppUnlocked {
-                                    LCAppBanner(appModel: app, delegate: self)
-                                } else {
-                                    LCAppSkeletonBanner()
+                        } else {
+                            Color.clear
+                                .frame(height: LCAppBannerRootView.bannerHeight)
+                                .contentShape(Rectangle())
+                                .onLongPressGesture {
+                                    Task { await authenticateUser() }
                                 }
-                            }
-                            .animation(.easeInOut, value: sharedModel.isHiddenAppUnlocked)
-                            .onTapGesture {
-                                Task { await authenticateUser() }
-                            }
                         }
-                        .padding()
-                        .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredHiddenApps)
                     }
 
                     let appCount = sharedModel.isHiddenAppUnlocked ? filteredApps.count + filteredHiddenApps.count : filteredApps.count

@@ -1116,6 +1116,31 @@ struct LCDataManagementView : View {
         return (writtenLocal, extName)
     }
 
+    // P7（3.8.280）：设置备份写盘防抖 + 后台写——原来每次启动/
+    // 切节点/改排序都在主线程同步做两次全量 dictionaryRepresentation
+    // + JSON + 两次原子写盘。备份只是尽力快照，不必每次同步落盘：
+    // 0.5 秒内多次调用只留最后一次，实际写放后台串行队列。调度
+    // 永远走主队列（调用方可能在备份任务的后台队列里），静态
+    // workItem 只在主线程碰，不加锁。需要立即拿到文件的导出流程
+    //（exportCZFSettings）继续走上面那个同步原函数，不走这里。
+    // 极端情况（改完设置 0.5 秒内杀进程）最多丢最后一次快照，
+    // 磁盘上仍是上一次的完整备份，设置本身在 UserDefaults 里不受影响。
+    private static var settingsBackupWorkItem: DispatchWorkItem?
+    private static let settingsBackupQueue = DispatchQueue(label: "com.livecontainer.settingsBackup", qos: .utility)
+
+    static func writeCZFSettingsBackupDebounced() {
+        DispatchQueue.main.async {
+            LCDataManagementView.settingsBackupWorkItem?.cancel()
+            let item = DispatchWorkItem {
+                LCDataManagementView.settingsBackupQueue.async {
+                    _ = LCDataManagementView.writeCZFSettingsBackup()
+                }
+            }
+            LCDataManagementView.settingsBackupWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+        }
+    }
+
     /// 备份文件夹是否有效：单 App 备份含 manifest.json，
     /// 旧时间戳结构含子文件夹。空目录不算备份：同步时不把它
     /// 扩散到 iCloud，免得那边也多个点进去恢复 0 个的空壳。
@@ -1985,7 +2010,7 @@ struct LCDataManagementView : View {
                     // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
                     Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
-                    Self.writeCZFSettingsBackup()
+                    Self.writeCZFSettingsBackupDebounced()
                     continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines))
                 } catch {
                     continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], [], [], []))
@@ -4186,7 +4211,7 @@ struct LCDataManagementView : View {
                     }
                     if !backedUpFolderNames.isEmpty {
                         Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
-                        Self.writeCZFSettingsBackup()
+                        Self.writeCZFSettingsBackupDebounced()
                     }
                 }
                 continuation.resume(returning: !backedUpFolderNames.isEmpty)

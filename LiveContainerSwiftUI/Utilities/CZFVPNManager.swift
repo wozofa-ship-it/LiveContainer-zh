@@ -180,7 +180,7 @@ public final class CZFVPNManager {
     // 换机重装导入的还是旧节点；这里顺手刷一份，配置永远是最新节点。
     // 只调 DataManagement 现成的静态写函数，不改那份文件。
     private func refreshSettingsBackup() {
-        _ = LCDataManagementView.writeCZFSettingsBackup()
+        LCDataManagementView.writeCZFSettingsBackupDebounced()
     }
 
     // 返回 true 表示真的加进去了；空链接或已存在返回 false，

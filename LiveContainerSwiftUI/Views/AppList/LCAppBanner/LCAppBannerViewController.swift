@@ -75,6 +75,18 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         bannerView.addGestureRecognizer(doubleTapGesture)
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 卡片有时空白（3.8.280 修）：进多选时整列卡片重建，
+        // 个别 representable 的 update 跑在了视图进层级之前，
+        // 内容没落上去，之后又没任何事件再触发一次 refresh，
+        // 行就一直空白（图标/名字/按钮全无，只剩勾选圈）。
+        // 视图真正上屏时再刷一次 + 强行布局，自愈。
+        refreshView()
+        bannerView.setNeedsLayout()
+        bannerView.layoutIfNeeded()
+    }
+
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
         if previousTraitCollection == nil || traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
@@ -155,7 +167,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         var dict = LCUtils.appGroupUserDefault.dictionary(forKey: lastLaunchModeKey) as? [String: String] ?? [:]
         dict[id] = mode.rawValue
         LCUtils.appGroupUserDefault.set(dict, forKey: lastLaunchModeKey)
-        LCDataManagementView.writeCZFSettingsBackup()
+        LCDataManagementView.writeCZFSettingsBackupDebounced()
     }
 
     @objc private func runButtonTapped() {

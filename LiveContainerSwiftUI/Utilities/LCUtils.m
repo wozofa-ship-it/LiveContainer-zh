@@ -4,6 +4,7 @@
 @import UniformTypeIdentifiers;
 @import Security;
 #import <IOKit/IOKitLib.h>
+#import <CommonCrypto/CommonCrypto.h>
 
 #import "LCUtils.h"
 #import "../../LiveContainer/LCSharedUtils.h"
@@ -162,7 +163,50 @@
                                                       pass:LCSharedUtils.certificatePassword completionHandler:completionHandler];
 }
 
+// P3：证书内容 SHA256 + 密码拼成的缓存键（hex）。
+// 放 getCertTeamIdWithKeyData 前面（同文件内先声明后调用，免得编译警告）。
++ (NSString *)czfCertTeamCacheKeyWithData:(NSData *)keyData password:(NSString *)password {
+    NSMutableData *input = [NSMutableData dataWithData:keyData];
+    [input appendData:[password dataUsingEncoding:NSUTF8StringEncoding]];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(input.bytes, (CC_LONG)input.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+        [hex appendFormat:@"%02x", digest[i]];
+    }
+    return hex;
+}
+
 + (NSString*)getCertTeamIdWithKeyData:(NSData*)keyData password:(NSString*)password {
+    // P3（3.8.280）：p12 解析一次够了——每次启动验签、每个
+    // tweak 文件夹验签都重新解密解析一遍。按证书内容 SHA256 +
+    // 密码缓存团队号；证书换了自然 miss 重新解析，不会拿错团队；
+    // 解析失败（nil）不缓存，下次重试。缓存是进程内字典，只认
+    // 两三个证书，不设上限。调用方在什么线程都可能，字典加锁。
+    if (keyData && password) {
+        static NSMutableDictionary<NSString*, NSString*> *teamIdCache = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{ teamIdCache = [NSMutableDictionary dictionary]; });
+        NSString *cacheKey = [self czfCertTeamCacheKeyWithData:keyData password:password];
+        @synchronized(teamIdCache) {
+            NSString *cached = teamIdCache[cacheKey];
+            if (cached) {
+                return cached;
+            }
+        }
+        NSError *error;
+        [self loadStoreFrameworksWithError2:&error];
+        if (error) {
+            return nil;
+        }
+        NSString* ans = [NSClassFromString(@"ZSigner") getTeamIdWithCert:keyData pass:password];
+        if (ans) {
+            @synchronized(teamIdCache) {
+                teamIdCache[cacheKey] = ans;
+            }
+        }
+        return ans;
+    }
     NSError *error;
     [self loadStoreFrameworksWithError2:&error];
     if (error) {

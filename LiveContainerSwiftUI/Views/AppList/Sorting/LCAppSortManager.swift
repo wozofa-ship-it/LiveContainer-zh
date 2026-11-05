@@ -69,7 +69,7 @@ class LCAppSortManager: ObservableObject {
             }
             // 排序方式变了就刷新设置备份：导出文件里的
             // LCAppSortType 别滞后，恢复直接拿最新值。
-            LCDataManagementView.writeCZFSettingsBackup()
+            LCDataManagementView.writeCZFSettingsBackupDebounced()
         }
     }
 
@@ -84,7 +84,7 @@ class LCAppSortManager: ObservableObject {
             }
             // 自定义顺序变了就刷新设置备份：导出文件里的
             // LCCustomSortOrder 别滞后，恢复直接拿最新顺序。
-            LCDataManagementView.writeCZFSettingsBackup()
+            LCDataManagementView.writeCZFSettingsBackupDebounced()
         }
     }
 
@@ -99,14 +99,14 @@ class LCAppSortManager: ObservableObject {
     @Published var schemes: [String: [String]] {
         didSet {
             LCUtils.appGroupUserDefault.set(schemes, forKey: Self.schemesKey)
-            LCDataManagementView.writeCZFSettingsBackup()
+            LCDataManagementView.writeCZFSettingsBackupDebounced()
         }
     }
 
     @Published var currentSchemeName: String {
         didSet {
             LCUtils.appGroupUserDefault.set(currentSchemeName, forKey: Self.currentSchemeKey)
-            LCDataManagementView.writeCZFSettingsBackup()
+            LCDataManagementView.writeCZFSettingsBackupDebounced()
         }
     }
 
