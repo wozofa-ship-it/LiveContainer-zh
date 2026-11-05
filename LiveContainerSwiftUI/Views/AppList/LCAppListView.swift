@@ -233,6 +233,57 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
+    // 3.8.285：283 构建 331 红字——LCAppListView.swift:540:25
+    // "the compiler is unable to type-check this expression in
+    // reasonable time"。body 本来就巨大，283 把盾牌的 Button +
+    // contextMenu 换成嵌套 Menu（里面还有子菜单 + ForEach），
+    // 整个 body 一个表达式 type-check 超时。修法照编译器说的
+    // 拆开：盾牌菜单与节点子菜单各抽成独立子表达式，body 的
+    // ToolbarItem 里只留一行调用；菜单内容、点按长按语义一字不动。
+    @ViewBuilder
+    private var vpnNodeSubmenu: some View {
+        Menu("选择节点") {
+            if CZFVPNManager.shared.nodeLinks.isEmpty {
+                Button("暂无节点") {}
+                    .disabled(true)
+            } else {
+                ForEach(Array(CZFVPNManager.shared.nodeLinks.enumerated()), id: \.offset) { idx, link in
+                    Button {
+                        CZFVPNManager.shared.setActiveNode(at: idx)
+                    } label: {
+                        Text(vpnNodeMenuLabel(idx: idx, link: link))
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var vpnShieldMenu: some View {
+        Menu {
+            Button(vpnCoreRunning ? "停止核心" : "启动核心") {
+                toggleVPNCore()
+            }
+            Button(vpnPinging ? "测速中…" : "测延迟") {
+                toolbarPingNodes()
+            }
+            .disabled(vpnPinging || CZFVPNManager.shared.nodeLinks.isEmpty)
+            vpnNodeSubmenu
+            Button("切到最快") {
+                switchToFastestNode()
+            }
+            .disabled(CZFVPNManager.shared.nodeLinks.isEmpty)
+            Button("前往 VPN 设置") {
+                sharedModel.selectedTab = .settings
+            }
+        } primaryAction: {
+            toggleVPNCore()
+        } label: {
+            Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
+        }
+        .foregroundStyle(vpnCoreRunning ? .green : .secondary)
+    }
+
     // 优2（3.8.277）：列表内拖动重排——正在拖的 App 唯一 ID（松手提交用）。
     @State private var dragReorderID: String? = nil
     
@@ -714,42 +765,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // ToolbarItem 里的 Button + contextMenu 长按不
                     // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
                     // 点按走 primaryAction 开关核心，长按出菜单——
-                    // 这才是工具栏上点按+长按的标准写法，菜单内容不变
-                    Menu {
-                        Button(vpnCoreRunning ? "停止核心" : "启动核心") {
-                            toggleVPNCore()
-                        }
-                        Button(vpnPinging ? "测速中…" : "测延迟") {
-                            toolbarPingNodes()
-                        }
-                        .disabled(vpnPinging || CZFVPNManager.shared.nodeLinks.isEmpty)
-                        Menu("选择节点") {
-                            if CZFVPNManager.shared.nodeLinks.isEmpty {
-                                Button("暂无节点") {}
-                                    .disabled(true)
-                            } else {
-                                ForEach(Array(CZFVPNManager.shared.nodeLinks.enumerated()), id: \.offset) { idx, link in
-                                    Button {
-                                        CZFVPNManager.shared.setActiveNode(at: idx)
-                                    } label: {
-                                        Text(vpnNodeMenuLabel(idx: idx, link: link))
-                                    }
-                                }
-                            }
-                        }
-                        Button("切到最快") {
-                            switchToFastestNode()
-                        }
-                        .disabled(CZFVPNManager.shared.nodeLinks.isEmpty)
-                        Button("前往 VPN 设置") {
-                            sharedModel.selectedTab = .settings
-                        }
-                    } primaryAction: {
-                        toggleVPNCore()
-                    } label: {
-                        Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
-                    }
-                    .foregroundStyle(vpnCoreRunning ? .green : .secondary)
+                    // 这才是工具栏上点按+长按的标准写法，菜单内容不变。
+                    // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
+                    // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
+                    // 这里只留一行调用。
+                    vpnShieldMenu
                 }
 
                 // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
