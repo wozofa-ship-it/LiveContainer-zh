@@ -381,8 +381,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         for app in apps {
             let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
             do {
-                let failedC = try LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { [weak self] model in
-                    self?.removeApp(app: model)
+                // removeFromList 是非逃逸闭包（deleteAppFiles 内同步调完），
+                // 抓 struct 的 self 合法、不产生循环引用；[weak self]
+                // 只能用于 class，LCAppListView 是 struct，编不过。
+                let failedC = try LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { model in
+                    self.removeApp(app: model)
                 }
                 deleted.append(name)
                 failedContainers.append(contentsOf: failedC)
