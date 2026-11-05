@@ -276,10 +276,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Button("前往 VPN 设置") {
                 sharedModel.selectedTab = .settings
             }
-        } primaryAction: {
-            toggleVPNCore()
         } label: {
             Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
+        } primaryAction: {
+            toggleVPNCore()
         }
         .foregroundStyle(vpnCoreRunning ? .green : .secondary)
     }

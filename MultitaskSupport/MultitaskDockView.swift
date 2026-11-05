@@ -3031,6 +3031,17 @@ struct PinnedAppsStripView: View {
     // 下面没有可固定的行，默认句会误导，调用方传自己的
     let emptyHint: String = "长按下面的 App 可以固定到这里"
 
+    // 3.8.286：显式 init——光加带默认值的存储属性不够，
+    // 构建 333 报 `extra argument 'emptyHint' in call`：调
+    // 用方传 emptyHint 时编译器不认（默认成员初始化没把它
+    // 捡进来）。直接把 init 写明，两处调用（App 面板只传
+    // onLaunch、源面板传 onLaunch + emptyHint）都走它；
+    // @ObservedObject/@State 照默认值走，不用在这里写。
+    init(onLaunch: @escaping (LCAppModel) -> Void, emptyHint: String = "长按下面的 App 可以固定到这里") {
+        self.onLaunch = onLaunch
+        self.emptyHint = emptyHint
+    }
+
     // 固定区顺序跟固定顺序走（不再跟列表排序走）：按住拖动
     // 换位改的就是这个顺序；已删 App 的残留键自然掉。
     private var pinnedApps: [LCAppModel] {
