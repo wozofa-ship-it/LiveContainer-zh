@@ -1082,6 +1082,10 @@ struct LCDataManagementView : View {
         "LCRedirectURLToHost", "LCDontSignApp", "LCStrictHiding",
         "LCSideJITServerAddress", "LCSelected32BitEmulator", "LCJITEnablerType",
         "CZFMinPowerSavingEnabled", "CZFMinAutoCloseEnabled", "CZFMinAutoCloseMinutes",
+        // 新4（3.8.288）：固定区列表 CZFPinnedPanelApps 也在 App Group
+        // 里（CZFPinnedAppsStore 读 App Group），不进这张表导入时
+        // 按 CZF 前缀误写标准库，固定区读不到等于没恢复（同上）。
+        "CZFPinnedPanelApps",
     ]
 
     // 注意：@discardableResult 必须紧贴 func 写，中间不能插
@@ -2688,6 +2692,9 @@ struct LCDataManagementView : View {
             // 跳到外层 catch，后面所有 App 都没恢复、报告也丢了。
             // 单个失败记下来继续恢复后面的，最后在报告里列出。
             var restoreFailedApps: [String] = []
+            // 3.8.286：组容器恢复失败的 App（旧数据已保留，只
+            // 是该组没恢复回来；与整 App 失败分开列）
+            var groupFailedApps: [String] = []
             var versionMismatchApps: [String] = []
             var missingFolders: [URL] = []
             // v216：无数据文件夹（与 noDataApps 文本并行）：结果
@@ -2830,6 +2837,10 @@ struct LCDataManagementView : View {
                     if outcome.keychainQueued > 0 {
                         keychainQueuedApps.append(app.appInfo.displayName() ?? folderName)
                     }
+                    // 3.8.286：组容器失败进报告（旧数据已保留）
+                    if !outcome.groupRestoreFailed.isEmpty {
+                        groupFailedApps.append("\(app.appInfo.displayName() ?? folderName)（组容器 \(outcome.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
+                    }
                     if outcome.ok {
                         restoredCount += 1
                         if await Self.backupVersionDiffers(appFolder: appFolder, app: app) {
@@ -2923,6 +2934,10 @@ struct LCDataManagementView : View {
                     }
                     if outcome2.keychainQueued > 0 {
                         keychainQueuedApps.append(item.name)
+                    }
+                    // 3.8.286：组容器失败进报告（旧数据已保留）
+                    if !outcome2.groupRestoreFailed.isEmpty {
+                        groupFailedApps.append("\(item.name)（组容器 \(outcome2.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
                     }
                     if outcome2.ok {
                         installRestoredCount += 1
@@ -3018,6 +3033,9 @@ struct LCDataManagementView : View {
             if !restoreFailedApps.isEmpty {
                 msg += "\n\n恢复失败的 App（已跳过，继续恢复了后面的）：\n" + restoreFailedApps.joined(separator: "\n")
             }
+            if !groupFailedApps.isEmpty {
+                msg += "\n\n组容器恢复失败的 App（旧数据已保留，未丢失）：\n" + groupFailedApps.joined(separator: "\n")
+            }
             if !versionMismatchApps.isEmpty {
                 msg += "\n\n备份版本与当前 App 版本不同的（数据已整套按备份时刻恢复；打开后若仍有个别信息异常，是新版读旧数据的兼容问题）：\n" + versionMismatchApps.joined(separator: "\n")
             }
@@ -3027,7 +3045,7 @@ struct LCDataManagementView : View {
             // 里各类失败清单照旧列出，只是换成错误弹窗。
             if presentResult {
                 let totalRestored = restoredCount + installRestoredCount
-                if totalRestored == 0 && (!restoreFailedApps.isEmpty || !noDataApps.isEmpty || !ambiguousApps.isEmpty || !installFailed.isEmpty || !installNotFound.isEmpty) {
+                if totalRestored == 0 && (!restoreFailedApps.isEmpty || !noDataApps.isEmpty || !ambiguousApps.isEmpty || !installFailed.isEmpty || !installNotFound.isEmpty || !groupFailedApps.isEmpty) {
                     errorInfo = msg
                     errorShow = true
                 } else {
@@ -3049,6 +3067,7 @@ struct LCDataManagementView : View {
             if !noDataApps.isEmpty { issues.append("无可恢复数据 \(noDataApps.count) 个") }
             if !ambiguousApps.isEmpty { issues.append("多候选对不上 \(ambiguousApps.count) 个") }
             if !restoreFailedApps.isEmpty { issues.append("恢复失败 \(restoreFailedApps.count) 个") }
+            if !groupFailedApps.isEmpty { issues.append("组容器失败 \(groupFailedApps.count) 个") }
             if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
             if !issues.isEmpty {
                 line += "（" + issues.joined(separator: "、") + "）"
@@ -3113,6 +3132,9 @@ struct LCDataManagementView : View {
         // 合并 + 完整备份会话合并之和）：登录态恢复报 0 时，
         // 凭它区分“备份里没东西”与“东西在但没合进来”。
         var mergedLoginFiles = 0
+        // 3.8.286：组容器整替失败的组名（原子替换后旧数据
+        // 保留，失败要进报告，不能静默丢掉）。
+        var groupRestoreFailed: [String] = []
         // 备份 Keychain 目录里的 plist 文件数（不管条目数）：
         // 0 = 目录缺/空；>0 但 keychainFound=0 = 快照文件在
         // 但读出 0 条（空快照，或文件未同步完/已损坏）。
@@ -3233,12 +3255,33 @@ struct LCDataManagementView : View {
     }
 
     static func copyGroupOffMain(from src: URL, to dest: URL) async -> Bool {
+        // 3.8.286（P0-3）：组容器恢复改原子替换——原来先删 dest
+        // 再拷，拷失败（磁盘满、iCloud 占位未下完）旧数据已丢，
+        // 且失败静默不记。照上面 replaceContainerOffMain 同款：
+        // 先拷临时目录（与 dest 同目录、同卷），再 replaceItemAt
+        // 换上；哪步失败都清 tmp、dest 原样不动，返回 false 记
+        // 进报告。dest 不存在时直接 moveItem。
         await Task.detached {
             let fm = FileManager.default
-            if fm.fileExists(atPath: dest.path) {
-                try? fm.removeItem(at: dest)
+            let tmp = dest.deletingLastPathComponent()
+                .appendingPathComponent(".restore-tmp-\(UUID().uuidString)")
+            do {
+                try fm.copyItem(at: src, to: tmp)
+            } catch {
+                try? fm.removeItem(at: tmp)
+                return false
             }
-            return (try? fm.copyItem(at: src, to: dest)) != nil
+            do {
+                if fm.fileExists(atPath: dest.path) {
+                    _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+                } else {
+                    try fm.moveItem(at: tmp, to: dest)
+                }
+            } catch {
+                try? fm.removeItem(at: tmp)
+                return false
+            }
+            return true
         }.value
     }
 
@@ -3398,6 +3441,9 @@ struct LCDataManagementView : View {
             app.appInfo.tweakFolder = manifestTweakFolder
         }
         var restoredExtras = false
+        // 3.8.286：组容器恢复失败的组名（P0-3 原子替换后失败
+        // 仍要进报告；outcome 在下面才建，先记局部变量）
+        var failedGroupNames: [String] = []
         // 组容器数据写回：和容器、钥匙串是同一时刻的快照，
         // 三处一起回滚，App 读到的才是一套对齐的数据
         let appGroupBackup = appFolder.appendingPathComponent("AppGroup")
@@ -3416,10 +3462,13 @@ struct LCDataManagementView : View {
                     }
                     continue
                 }
-                // 组容器整替拷盘挪后台（见三件套注释），语义
-                // 与原来一致（存在先删、失败静默不记）。
+                // 组容器整替拷盘挪后台（见三件套注释）：原子替换
+                // （先拷临时目录再 replaceItemAt，失败旧数据不动），
+                // 失败的组名进报告（不再静默丢掉）。
                 if await Self.copyGroupOffMain(from: groupFolder, to: dest) {
                     restoredExtras = true
+                } else {
+                    failedGroupNames.append(groupFolder.lastPathComponent)
                 }
             }
         }
@@ -3478,6 +3527,7 @@ struct LCDataManagementView : View {
         // 其余两路 loginMergeFolderCount=0，结果不变。
         outcome.containerFolderCount = containerFolders.count + loginMergeFolderCount
         outcome.mergedLoginFiles = mergedLoginFiles
+        outcome.groupRestoreFailed = failedGroupNames
         let keychainBackup = appFolder.appendingPathComponent("Keychain")
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             let plistFiles = files.filter { $0.pathExtension == "plist" }

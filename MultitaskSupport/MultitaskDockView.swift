@@ -3537,8 +3537,12 @@ struct SourcesPanelView: View {
     }
 
     var body: some View {
-        NavigationView {
-            ScrollViewReader { proxy in
+        // 3.8.288：源面板去顶栏（用户 2026-11-06 亲令去源名字
+        // 和图标）：“源”标题 + ✕关闭 + 刷新全删。照 App 面板
+        // 同款不用 NavigationView（空标题导航栏白占一条高度）；
+        // 关面板走遮罩点按/下滑/收起钮，刷新走每次调出时
+        // onChange 里的自动刷新（与 App 面板同款）。
+        ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 // 3.8.284：源面板与 App 面板一致——顶部固定区（复用
                 // PinnedAppsStripView，同一批固定 App）+ 搜索框，顺序
@@ -3614,24 +3618,6 @@ struct SourcesPanelView: View {
                 }
                 .padding(.vertical, 12)
             }
-            .navigationTitle("源")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button { closePanel() } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        Task { await viewModel.refreshAllSources() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-            }
             .onChange(of: dockManager.czfSourcesPanelOpenCounter) { _ in
                 // 每次调出回到初始状态：滚回最顶部（用户定，
                 // 不留上次滑动的位置）+ 刷新源数据 + 搜索清空
@@ -3647,7 +3633,6 @@ struct SourcesPanelView: View {
             }
             }
             }
-        }
     }
 
     // 与源页 LCSourcesView.install 一致，额外关掉面板让用户看安装进度
