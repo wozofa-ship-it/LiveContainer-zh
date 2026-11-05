@@ -710,16 +710,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        toggleVPNCore()
-                    } label: {
-                        Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
-                    }
-                    .foregroundStyle(vpnCoreRunning ? .green : .secondary)
-                    // 3.8.282：点按开关核心（不变）；长按弹出
-                    // VPN 核心功能菜单（启停、测延迟、选节点、
-                    // 切最快、去设置），节点行挂当前 ✓ 与延迟
-                    .contextMenu {
+                    // 3.8.283：长按菜单不显示（用户 282 真机报）：
+                    // ToolbarItem 里的 Button + contextMenu 长按不
+                    // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
+                    // 点按走 primaryAction 开关核心，长按出菜单——
+                    // 这才是工具栏上点按+长按的标准写法，菜单内容不变
+                    Menu {
                         Button(vpnCoreRunning ? "停止核心" : "启动核心") {
                             toggleVPNCore()
                         }
@@ -748,7 +744,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         Button("前往 VPN 设置") {
                             sharedModel.selectedTab = .settings
                         }
+                    } primaryAction: {
+                        toggleVPNCore()
+                    } label: {
+                        Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
                     }
+                    .foregroundStyle(vpnCoreRunning ? .green : .secondary)
                 }
 
                 // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
@@ -1598,8 +1599,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
 
     /// 全新安装完成后自动查备份记录（数据管理里备的）：
-    /// 按显示名或 manifest 里的 Bundle ID 匹配备份文件夹，
-    /// 有就直接恢复（容器+组数据+钥匙串整套）并提示已恢复，
+    /// 严格配对（照手动恢复的三档：dataUUID 精确匹配优先，
+    /// 否则显示名 + Bundle ID 都对上才算，多个候选不猜），
+    /// 有唯一备份就直接恢复（容器+组数据+钥匙串整套）并提示，
     /// 没有就不弹窗。只在全新安装时调——覆盖更新时
     /// 数据本来就在，拿旧备份回滚反而会把新数据冲掉
     func autoRestoreBackupAfterInstall(app: LCAppModel) async {
@@ -1616,27 +1618,59 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let fm = FileManager.default
         let bundleID = app.appInfo.bundleIdentifier() ?? ""
         let name = app.appInfo.displayName() ?? bundleID
+        let appUUID = app.appInfo.dataUUID ?? ""
         guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return
         }
         let root = docs.appendingPathComponent("Backups")
         let folders = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        // 3.8.283：自动恢复改严格配对（照手动恢复 restoreFromBackup
+        // 的三档）：dataUUID 精确匹配直接认；否则显示名 + Bundle ID
+        // 都对上才算候选；多个候选不猜（多开分身同 bundleID，取第
+        // 一个会串实例）。原来文件夹名一对上就认、bundleID 取第一
+        // 个，删掉重装很容易恢复成另一个实例的数据。
         var found: URL?
+        var candidates: [URL] = []
         for folder in folders {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else {
                 continue
             }
-            if folder.lastPathComponent == name {
+            var json: [String: String]?
+            if let data = try? Data(contentsOf: folder.appendingPathComponent("manifest.json")),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                json = obj
+            }
+            // 第一档：manifest dataUUID 就是这个实例（同一次安装）
+            if let du = json?["dataUUID"], !du.isEmpty, !appUUID.isEmpty, du == appUUID {
                 found = folder
                 break
             }
-            if !bundleID.isEmpty,
-               let data = try? Data(contentsOf: folder.appendingPathComponent("manifest.json")),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-               json["bundleIdentifier"] == bundleID {
-                found = folder
-                break
+            let mBid = json?["bundleIdentifier"] ?? ""
+            let mName = json?["displayName"] ?? ""
+            // 第二档：文件夹名 == 显示名且 manifest Bundle ID 对上
+            // 第三档（改名兜底）：manifest Bundle ID + 显示名都对上
+            // 无 manifest 的老备份只认文件夹名 == 显示名
+            if json == nil {
+                if folder.lastPathComponent == name { candidates.append(folder) }
+            } else if folder.lastPathComponent == name, !mBid.isEmpty, mBid == bundleID {
+                candidates.append(folder)
+            } else if !mBid.isEmpty, mBid == bundleID, !mName.isEmpty, mName == name {
+                candidates.append(folder)
+            }
+        }
+        if found == nil {
+            // 候选去重（同一文件夹可能同时满足二、三档）
+            let unique = Array(Set(candidates))
+            if unique.count == 1 {
+                found = unique[0]
+            } else if unique.count > 1 {
+                // 多个候选不猜：报一声，让用户去恢复列表手动选
+                await MainActor.run {
+                    installInfo = "「\(name)」找到多个备份，请在数据恢复里手动选择恢复"
+                    installInfoShow = true
+                }
+                return
             }
         }
         guard let found else {
