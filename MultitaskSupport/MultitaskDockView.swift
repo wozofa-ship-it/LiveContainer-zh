@@ -1485,6 +1485,10 @@ extension Notification.Name {
         let v = gesture.velocity(in: gesture.view)
         if (t.x <= -6 * s && abs(t.x) > 0.4 * abs(t.y)) || (t.x <= -2 && v.x <= -300) {
             czfLeftEdgePanFired.insert(id)
+            // 3.8.284：认领了源面板，客 App 的触摸到此为止
+            if let window = gesture.view as? UIWindow {
+                Self.czfCancelGuestTouches(in: window)
+            }
             self.czfOpenSourcesPanelFromFunnel()
         }
     }
@@ -1548,6 +1552,23 @@ extension Notification.Name {
     }()
     private static var czfHostOutwardTouches = [UITouch: CGPoint]()
 
+    // 3.8.284：面板手势认领后取消客 App 的触摸（用户真机报“滑
+    // 动面板时 App 内也动了”）：宿主原来只观察不拦截（sendEvent
+    // 钩子纯观察、窗口手势 cancelsTouchesInView = false、代理还
+    // 允许同时识别），面板手势和 App 自己的横滑两边同动。认领
+    // 的一刻把触摸所在窗口的交互关一下——UIKit 会立刻给正在
+    // 跟踪的视图/识别器发 touchesCancelled，客 App 的横滑就停
+    // 住弹回；下一轮 runloop 再打开，不影响之后的操作。只在认
+    // 领时关（下面三处），没认领的触摸一律不动，客 App 自己的
+    // 返回/滑动不受影响；终结兜底（.ended/.cancelled 才触发的）
+    // 触摸已经结束，没什么可取消，不关。
+    private static func czfCancelGuestTouches(in window: UIWindow) {
+        window.isUserInteractionEnabled = false
+        DispatchQueue.main.async {
+            window.isUserInteractionEnabled = true
+        }
+    }
+
     static func czfHostOutwardObserve(window: UIWindow, event: UIEvent) {
         guard let touches = event.allTouches, !touches.isEmpty else { return }
         let height = window.bounds.height
@@ -1570,6 +1591,8 @@ extension Notification.Name {
                 let dy = loc.y - start.y
                 if dx <= -6 * s, abs(dx) > 0.4 * abs(dy) {
                     czfHostOutwardTouches.removeValue(forKey: touch)
+                    // 3.8.284：认领了源面板，客 App 的触摸到此为止
+                    Self.czfCancelGuestTouches(in: window)
                     Self.shared.czfOpenSourcesPanelFromFunnel()
                 }
             case .ended:
@@ -1627,6 +1650,11 @@ extension Notification.Name {
             guard globalSwipeStartEdge == 0 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
             if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width) {
                 czfEdgeSwipeLatched = true
+                // 3.8.284：认领了面板手势（开 App 面板/切 App/
+                // 藏栏），客 App 的触摸到此为止
+                if let window = gesture.view as? UIWindow {
+                    Self.czfCancelGuestTouches(in: window)
+                }
             }
         case .ended, .cancelled:
             defer { czfEdgeSwipeLatched = false }
@@ -2165,16 +2193,16 @@ extension Notification.Name {
         dismissPanelOverlay()
     }
 
-    // 面板下滑关闭的起手限制：App 面板认固定栏整条（标题行
+    // 面板下滑关闭的起手限制：两面板都认固定栏整条（标题行
     // 已去掉后约 58pt，取 64：顶边 16 + 图标 40 + 底边 2；
     // 再往下是运行条（约 66 起），不扩到它），用户 2026-11-03
-    // 定固定栏往下滑动隐藏面板；源面板没有固定栏，仍只认
-    // 顶部 52pt 标题区。面板内的列表滚动一点不受影响；其余
+    // 定固定栏往下滑动隐藏面板；源面板 3.8.284 也加了固定栏，
+    // 与 App 面板同限。面板内的列表滚动一点不受影响；其余
     // 手势一律放行。
     public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if let hostView = gestureRecognizer.view,
            hostView === czfPanelOverlayHost?.view || hostView === czfSourcesOverlayHost?.view {
-            let topLimit: CGFloat = hostView === czfPanelOverlayHost?.view ? 64 : 52
+            let topLimit: CGFloat = 64
             guard gestureRecognizer.location(in: hostView).y < topLimit else { return false }
             // 下滑关闭只认向下为主的初动：原来顶部区内任何方向
             // 的移动都让下滑手势先认——横滑被它认走后全局手势
@@ -2999,6 +3027,9 @@ struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
     @ObservedObject var pinnedStore = CZFPinnedAppsStore.shared
     let onLaunch: (LCAppModel) -> Void
+    // 3.8.284：空态提示文案可改——App 面板用默认句，源面板
+    // 下面没有可固定的行，默认句会误导，调用方传自己的
+    let emptyHint: String = "长按下面的 App 可以固定到这里"
 
     // 固定区顺序跟固定顺序走（不再跟列表排序走）：按住拖动
     // 换位改的就是这个顺序；已删 App 的残留键自然掉。
@@ -3017,7 +3048,7 @@ struct PinnedAppsStripView: View {
         // 面板改由固定栏往下滑动隐藏，关面板走遮罩点按与下滑。
         VStack(alignment: .leading, spacing: 8) {
             if pinnedApps.isEmpty {
-                Text("长按下面的 App 可以固定到这里")
+                Text(emptyHint)
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -3070,6 +3101,7 @@ struct AllAppsListView: View {
     @Environment(\.dismiss) var dismiss
     @Environment(\.czfPanelClose) private var czfPanelClose
     @EnvironmentObject var dockManager: MultitaskDockManager
+    @ObservedObject private var sharedModel = DataManager.shared.model
 
     // 关闭面板：覆盖层（手势弹出）走注入的关闭动作；sheet（点蓝图标）走 dismiss
     private func closePanel() {
@@ -3110,6 +3142,16 @@ struct AllAppsListView: View {
     private var filteredPanelApps: [LCAppModel] {
         if searchText.isEmpty { return sortManager.sortedApps }
         return sortManager.sortedApps.filter { app in
+            app.appInfo.displayName().localizedCaseInsensitiveContains(searchText) ||
+            (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    // 3.8.284：已隐藏 App 也按同款搜索筛（与上面同一谓词）
+    private var filteredHiddenApps: [LCAppModel] {
+        let hidden = sharedModel.hiddenApps
+        if searchText.isEmpty { return hidden }
+        return hidden.filter { app in
             app.appInfo.displayName().localizedCaseInsensitiveContains(searchText) ||
             (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchText)
         }
@@ -3166,6 +3208,36 @@ struct AllAppsListView: View {
                         }, onSmallWindowOpen: {
                             smallWindowOpenApp(app)
                         })
+                    }
+                    // 已隐藏 App（3.8.284）：面板列表只走 sortedApps，
+                    // hiddenApps 从没进来过，面板里永远看不到已隐藏的
+                    // App。照主列表的做法：刷脸通过后直接显示（不带标
+                    // 题），没通过只留一行高空白，长按空白弹人脸识别。
+                    if !sharedModel.hiddenApps.isEmpty {
+                        if sharedModel.isHiddenAppUnlocked {
+                            ForEach(filteredHiddenApps, id: \.self) { app in
+                                AppCardRow(app: app, dockManager: dockManager, onLaunch: {
+                                    launchApp(app)
+                                }, onMinimizeOpen: {
+                                    minimizeOpenApp(app)
+                                }, onSmallWindowOpen: {
+                                    smallWindowOpenApp(app)
+                                })
+                            }
+                        } else {
+                            Color.clear
+                                .frame(height: 72)
+                                .contentShape(Rectangle())
+                                .onLongPressGesture {
+                                    Task {
+                                        do {
+                                            _ = try await LCUtils.authenticateUser()
+                                        } catch {
+                                            launchError = error.localizedDescription
+                                        }
+                                    }
+                                }
+                        }
                     }
                 }
                 // 列表外边距显式写死 16：与固定区、运行条外边距
@@ -3409,6 +3481,8 @@ struct SourcesPanelView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     @StateObject private var viewModel = AltStoreSourcesViewModel()
     @State private var errorMessage: String?
+    // 3.8.284：源面板搜索（与 App 面板同款）
+    @State private var searchText = ""
 
     private func closePanel() {
         if let czfPanelClose = czfPanelClose {
@@ -3418,15 +3492,66 @@ struct SourcesPanelView: View {
         }
     }
 
+    // 3.8.284：源内应用按名字/包名筛，源名命中则整节保留；
+    // 加载中/失败的节不过滤（照常显示，见 hasSearchResult）
+    private func matchedApps(for source: AltStoreSource) -> [AltStoreSourceApp] {
+        if searchText.isEmpty { return source.apps }
+        if source.name.localizedCaseInsensitiveContains(searchText) { return source.apps }
+        return source.apps.filter { app in
+            app.name.localizedCaseInsensitiveContains(searchText) ||
+            app.bundleIdentifier.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    private var hasSearchResult: Bool {
+        if searchText.isEmpty { return true }
+        return viewModel.sources.contains { item in
+            guard let source = item.source else { return true }
+            return !matchedApps(for: source).isEmpty
+        }
+    }
+
+    // 3.8.284：源面板固定区图标点按启动（与源行“打开”同款：
+    // 先关面板再跑 App；App 面板 launchApp 的“已运行顶回前台”
+    // 那段不搬，最小版先用关面板 + runApp）
+    private func launchPinnedApp(_ app: LCAppModel) {
+        closePanel()
+        Task { try? await app.runApp() }
+    }
+
     var body: some View {
         NavigationView {
             ScrollViewReader { proxy in
             VStack(spacing: 0) {
+                // 3.8.284：源面板与 App 面板一致——顶部固定区（复用
+                // PinnedAppsStripView，同一批固定 App）+ 搜索框，顺序
+                // 与 App 面板同款：固定区 → 运行条 → 搜索框 → 列表
+                PinnedAppsStripView(onLaunch: { app in launchPinnedApp(app) }, emptyHint: "在 App 面板长按 App 可固定到这里")
                 // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）
                 RunningAppsStripView { closePanel() }
                     .padding(.horizontal)
                     .padding(.top, 8)
                     .padding(.bottom, 10)
+                // 搜索框（与 App 面板同款，固定在运行条下方、不随列表滚动）
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("搜索", text: $searchText)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(UIColor.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     // 滚回顶部锚点（条子已挪到 ScrollView 外面，
@@ -3436,16 +3561,23 @@ struct SourcesPanelView: View {
                         Text("还没有添加源")
                             .foregroundColor(.secondary)
                             .padding(.horizontal)
+                    } else if !searchText.isEmpty && !hasSearchResult {
+                        Text("没有找到相关应用/源")
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal)
                     }
                     ForEach(viewModel.sources) { item in
                         if let source = item.source {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(source.name)
-                                    .font(.headline)
-                                    .padding(.horizontal)
-                                ForEach(source.apps) { app in
-                                    SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) })
+                            // 搜不到的节不渲染（源名命中则整节保留，见 matchedApps）
+                            if !matchedApps(for: source).isEmpty {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text(source.name)
+                                        .font(.headline)
                                         .padding(.horizontal)
+                                    ForEach(matchedApps(for: source)) { app in
+                                        SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) })
+                                            .padding(.horizontal)
+                                    }
                                 }
                             }
                         } else if item.isLoading {
@@ -3485,8 +3617,10 @@ struct SourcesPanelView: View {
             }
             .onChange(of: dockManager.czfSourcesPanelOpenCounter) { _ in
                 // 每次调出回到初始状态：滚回最顶部（用户定，
-                // 不留上次滑动的位置）+ 刷新源数据
+                // 不留上次滑动的位置）+ 刷新源数据 + 搜索清空
+                //（与 App 面板同款）
                 proxy.scrollTo("czfSourcesPanelTop", anchor: .top)
+                searchText = ""
                 Task { await viewModel.refreshAllSources() }
             }
             .alert("提示", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
