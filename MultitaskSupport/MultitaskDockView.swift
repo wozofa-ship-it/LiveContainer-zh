@@ -2109,8 +2109,9 @@ extension Notification.Name {
         backdrop.isHidden = true
         backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
         window.addSubview(backdrop)
-        // 面板本体：底部 60% 高，上圆角（75% 版 2026-10-23 当晚被
-        // 用户真机否决：又高又肿，且整条盖死源面板手势起手带）
+        // 面板本体：底部 50% 高，上圆角（75% 版 2026-10-23 当晚被
+        // 用户真机否决：又高又肿，且整条盖死源面板手势起手带；
+        // 60% 版 2026-11-06 用户看样板图仍嫌高，降到 50%）
         let rootView = AnyView(
             AllAppsListView()
                 .environmentObject(self)
@@ -2118,7 +2119,7 @@ extension Notification.Name {
         )
         let host = UIHostingController(rootView: rootView)
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.5)
         host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -2175,7 +2176,7 @@ extension Notification.Name {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.6
+            let panelHeight = b.height * 0.5
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -2291,8 +2292,13 @@ extension Notification.Name {
                 .environment(\.czfPanelClose) { [weak self] in self?.dismissSourcesOverlay() }
         )
         let host = UIHostingController(rootView: rootView)
+        // 3.8.289：宿主底色放透明——源面板走液态玻璃时，玻璃
+        // 要直接采客 App 当底；不放透明玻璃会被宿主默认底色盖住。
+        // 非玻璃系统下，面板底由 SourcesPanelView 里
+        // systemBackground 兜底，外观与原来一致。
+        host.view.backgroundColor = .clear
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.6)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.5)
         host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -2326,7 +2332,7 @@ extension Notification.Name {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.6
+            let panelHeight = b.height * 0.5
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -2365,7 +2371,7 @@ extension Notification.Name {
                   let newHost = toSources ? self.czfSourcesOverlayHost : self.czfPanelOverlayHost,
                   let newBackdrop = toSources ? self.czfSourcesOverlayBackdrop : self.czfPanelOverlayBackdrop else { return }
             let b = window.bounds
-            let panelHeight = b.height * 0.6
+            let panelHeight = b.height * 0.5
             if toSources {
                 self.czfSourcesPanelOpenCounter += 1
             } else {
@@ -3537,6 +3543,24 @@ struct SourcesPanelView: View {
     }
 
     var body: some View {
+        // 3.8.289：源面板液态玻璃（用户 2026-11-06 看样板图亲定，
+        // 按样板图 B 款：面板 + 搜索框 + 运行条 + 源 App 行全上
+        // 玻璃）。玻璃只在 iOS 26 且未开兼容模式时开
+        //（SharedModel.isLiquidGlassEnabled，与坞栏同款判断），
+        // 其余系统走原来实色底。多个玻璃共用一个
+        // GlassEffectContainer（一个 backdrop pass，滚动不掉帧）；
+        // 容器本身 iOS 26 才有，放 #available 里。
+        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+            GlassEffectContainer(spacing: 8) {
+                sourcesPanelContent
+            }
+        } else {
+            sourcesPanelContent
+        }
+    }
+
+    @ViewBuilder
+    private var sourcesPanelContent: some View {
         // 3.8.288：源面板去顶栏（用户 2026-11-06 亲令去源名字
         // 和图标）：“源”标题 + ✕关闭 + 刷新全删。照 App 面板
         // 同款不用 NavigationView（空标题导航栏白占一条高度）；
@@ -3569,8 +3593,16 @@ struct SourcesPanelView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .modifier { content in
+                    // 3.8.289：搜索框玻璃（样板图同款）；非玻璃
+                    // 系统走原来浅灰底 + 圆角。
+                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                        content.glassEffect(.regular, in: .rect(cornerRadius: 10))
+                    } else {
+                        content.background(Color(UIColor.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
             ScrollView {
@@ -3631,6 +3663,17 @@ struct SourcesPanelView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
+            }
+            .modifier { content in
+                // 3.8.289：面板容器玻璃——整块面板磨砂（样板图
+                // 同款）；只圆上面两角（下面贴屏底，宿主 layer
+                // 同款只圆上面）。非玻璃系统走 systemBackground，
+                // 外观与原来一致。
+                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                    content.glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+                } else {
+                    content.background(Color(UIColor.systemBackground))
+                }
             }
             }
     }
@@ -3883,9 +3926,17 @@ private struct SourcePanelRow: View {
             }
         }
         .padding(10)
-        .background {
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color(.secondarySystemBackground))
+        .modifier { content in
+            // 3.8.289：源 App 行玻璃（样板图同款）；非玻璃
+            // 系统走原来浅灰圆角卡片。
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                content.glassEffect(.regular, in: .rect(cornerRadius: 20))
+            } else {
+                content.background {
+                    RoundedRectangle(cornerRadius: 20)
+                        .fill(Color(.secondarySystemBackground))
+                }
+            }
         }
         .sheet(isPresented: $showInstancePicker) {
             NavigationView {
@@ -3971,8 +4022,16 @@ private struct RunningAppsStripView: View {
         // 一分不差，列表不跟着伸缩；只钉下限，大字号
         // 下内容长高仍能撑开，不裁字
         .frame(minHeight: 78)
-        .background(Color(UIColor.secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .modifier { content in
+            // 3.8.289：运行条玻璃（样板图同款；App 面板共用
+            // 此条，一并变玻璃）。非玻璃系统走原来浅灰底。
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                content.glassEffect(.regular, in: .rect(cornerRadius: 20))
+            } else {
+                content.background(Color(UIColor.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 20))
+            }
+        }
     }
 
     // 三个固定按钮：两态共用同一份定义，改一处即两态一致
