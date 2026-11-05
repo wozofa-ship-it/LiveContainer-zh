@@ -140,8 +140,15 @@ struct LCCustomSortView: View {
         let newCustomOrder = (localApps + localHiddenApps)
             .compactMap { manager.getUniqueIdentifier(for: $0) }
         
-        manager.customSortOrder = newCustomOrder
-        manager.appSortType = .custom
+        // 优3（3.8.277）：保存自定义顺序也关动画——写值那一下
+        // 列表整列重排会闪动，transaction 只压这一下，搜索
+        // 输入的动画抑制不动。
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            manager.customSortOrder = newCustomOrder
+            manager.appSortType = .custom
+        }
         
         presentationMode.wrappedValue.dismiss()
     }

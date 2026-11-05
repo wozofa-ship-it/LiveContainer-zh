@@ -11,11 +11,9 @@ final class LCAppBannerRootView: UIView {
 
     let runControl = LCAppBannerRunControl()
 
-    // 面板同款次级按钮（主列表卡片加“最小化”“小窗口”）：
-    // 只在 iOS 16+ 建——多任务窗口是 16+ 的东西，16 以下
-    // 卡片与原来一字不差；控制器里同样只认 16+。
-    var minimizeControl: UIButton?
-    var smallWindowControl: UIButton?
+    // 优1（3.8.277）：最小化/小窗口不再占行内位置，收进长按
+    // 菜单（控制器 makeContextMenu 里调同名方法，行为不动）。
+    // 行内只留启动 pill，名字列直连 runControl。
 
     private let visualBackgroundView = UIView()
     private let iconImageView = UIImageView()
@@ -101,17 +99,6 @@ final class LCAppBannerRootView: UIView {
         addSubview(detailStack)
         addSubview(runControl)
 
-        // 面板胶囊同款次级按钮：只在 16+ 建，16 以下不进层级、
-        // 不占布局，卡片与原来完全一致。
-        if #available(iOS 16.0, *) {
-            let minimizeButton = makeAuxButton(title: "最小化")
-            let smallWindowButton = makeAuxButton(title: "小窗口")
-            minimizeControl = minimizeButton
-            smallWindowControl = smallWindowButton
-            addSubview(minimizeButton)
-            addSubview(smallWindowButton)
-        }
-
         NSLayoutConstraint.activate([
             visualBackgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
             visualBackgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -132,43 +119,6 @@ final class LCAppBannerRootView: UIView {
             runControl.widthAnchor.constraint(equalToConstant: 70),
             runControl.heightAnchor.constraint(equalToConstant: 32)
         ])
-
-        // 次级按钮链：名字列先让（detailStack 横向抗压本来就是
-        // defaultLow），名字过长时先截名字，不断按钮；原来
-        // detailStack 直连 runControl 的 ≤ 约束留着，与这条链
-        // 不冲突（链更紧，先生效）。
-        if #available(iOS 16.0, *),
-           let minimizeButton = minimizeControl,
-           let smallWindowButton = smallWindowControl {
-            NSLayoutConstraint.activate([
-                minimizeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-                smallWindowButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-                minimizeButton.heightAnchor.constraint(equalToConstant: 32),
-                smallWindowButton.heightAnchor.constraint(equalToConstant: 32),
-                detailStack.trailingAnchor.constraint(lessThanOrEqualTo: minimizeButton.leadingAnchor, constant: -8),
-                minimizeButton.trailingAnchor.constraint(equalTo: smallWindowButton.leadingAnchor, constant: -8),
-                smallWindowButton.trailingAnchor.constraint(equalTo: runControl.leadingAnchor, constant: -8),
-            ])
-        }
-    }
-
-    // 面板灰胶囊同款：中性灰底、footnote 字、32 高胶囊，
-    // 宽度按文字自适应（Configuration，不用已废弃的 contentEdgeInsets）。
-    private func makeAuxButton(title: String) -> UIButton {
-        var config = UIButton.Configuration.filled()
-        config.title = title
-        config.cornerStyle = .capsule
-        config.baseBackgroundColor = .systemGray5
-        config.baseForegroundColor = .label
-        config.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 8, bottom: 7, trailing: 8)
-        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-            var outgoing = incoming
-            outgoing.font = .systemFont(ofSize: 13)
-            return outgoing
-        }
-        let button = UIButton(configuration: config)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
     }
 
     private func configureLabel(_ label: UILabel, font: UIFont) {

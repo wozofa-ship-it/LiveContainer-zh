@@ -222,18 +222,19 @@ static BOOL CZFReadAll(int fd, void *buf, size_t len) {
 }
 
 // 核心在不在：临时 socket 连本地 SOCKS 口 + 打个招呼，成功即在。
-// 结果缓存：活 5 秒、死 2 秒（核心刚起来能很快被发现）。
+// 结果缓存：活 10 秒、死 3 秒（核心刚起来能很快被发现；核心
+// 死了 10 秒内就不再往死口送，不会断网一分钟）。
 static BOOL CZFCoreAlive(void) {
     static double lastCheck = 0;
     static BOOL lastResult = NO;
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     double now = [NSDate timeIntervalSinceReferenceDate];
     pthread_mutex_lock(&lock);
-    // "活着"的结论缓存 60 秒：核心跟着宿主进程走，活着时极少
-    // 中途死掉；缓存太短时偶发探活失败会让一批连接/会话漏掉
-    // 代理、直连卡死，表现为"抽风"。死了的结论只缓存 3 秒，
-    // 核心被重新拉起后能很快恢复。
-    double ttl = lastResult ? 60.0 : 3.0;
+    // "活着"的结论缓存 10 秒（11，3.8.277）：原来 60 秒太久——
+    // 核心死了 60 秒内还在往死掉的 SOCKS 口送，App 表现为断网。
+    // 10 秒仍够挡偶发探活抖动（探活是回环毫秒级）；死了的结论
+    // 只缓存 3 秒，核心被重新拉起后能很快恢复。
+    double ttl = lastResult ? 10.0 : 3.0;
     if (now - lastCheck < ttl && lastCheck > 0) {
         BOOL r = lastResult;
         pthread_mutex_unlock(&lock);

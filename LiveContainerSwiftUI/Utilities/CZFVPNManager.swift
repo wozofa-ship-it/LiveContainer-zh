@@ -334,7 +334,11 @@ public final class CZFVPNManager {
     /// 的连接；起了没人用时原有的 30 分钟自动停不覆盖这种
     /// 情况（没 App 启动过），核心随宿主进程被系统挂起，
     /// 不额外耗电
-    public func prewarmIfNeeded() {
+    /// ignoringSuppression：前台进 App 页时传 true——进 App 页
+    /// 本身就是要用 App 的意图，与“打开标了 VPN 的 App”
+    /// 同类（那路本来就清抑制）；测速后的抑制只拦非前台的
+    /// 预热触发。预热真把核心起起来后清掉抑制（前提已不存在）。
+    public func prewarmIfNeeded(ignoringSuppression: Bool = false) {
         // 测速窗口内不预热：预热起核心会让 pingBatch 被拒、
         // 测速结果不准；预热本就是 opportunistic，下次进前台还会再跑
         vpnCoreLock.lock()
@@ -342,12 +346,13 @@ public final class CZFVPNManager {
         // 测速结束时核心没在跑就一直不预热：见字段注释，
         // 与时间无关、切走再进、进程重启都不放行，直到
         // 亲手起核心、打开标了 VPN 的 App、亲手拨一次
-        // 预热开关三者之一出现。恢复成“在跑”时下面
-        // guard !isRunning 本来就返回，不需要这层。
+        // 预热开关三者之一出现；前台进 App 页也放行
+        //（ignoringSuppression，见参数注释）。恢复成“在跑”
+        // 时下面 guard !isRunning 本来就返回，不需要这层。
         let suppressed = prewarmSuppressedAfterPing
         vpnCoreLock.unlock()
         if pinging { return }
-        if suppressed { return }
+        if suppressed && !ignoringSuppression { return }
         if UserDefaults.standard.object(forKey: "CZFVPNPrewarm") != nil, !UserDefaults.standard.bool(forKey: "CZFVPNPrewarm") {
             return
         }
@@ -357,7 +362,14 @@ public final class CZFVPNManager {
             key.hasPrefix("CZFVPNEnabled-") && defaults.bool(forKey: key)
         }
         guard hasMarked else { return }
-        _ = start()
+        if start() {
+            // 预热真把核心起起来了：测速后抑制的前提（核心停着）
+            // 已不存在，清掉——不然设置页一直显示“被压着”，
+            // 而实际上核心已经在跑了。
+            vpnCoreLock.lock()
+            prewarmSuppressedAfterPing = false
+            vpnCoreLock.unlock()
+        }
     }
 
     public func removeNode(at index: Int) {
@@ -412,6 +424,15 @@ public final class CZFVPNManager {
         } else if runningLink != nodeLink {
             _ = start()
         }
+    }
+
+    // 优5（3.8.277）：恢复/导入已把节点列表与活动下标写回
+    // defaults 后调——核心在跑且活动节点变了就重启切过去，
+    // 不需重启 App；核心停着时下次启动现读新节点。测速窗口
+    // 内推迟到测速收尾跟随（applyActiveNodeChange 同款守卫）。
+    // 起核心是同步阻塞的 CGoInvoke，调用方放 detached 跑。
+    public func applyRestoredNodeSettings() {
+        applyActiveNodeChange()
     }
 
     // 节点显示名：优先链接里的备注（标准格式的 # 片段；老格式
@@ -693,6 +714,76 @@ public final class CZFVPNManager {
             // 测速从快到慢，没测速排最后），钉死的改 override，
             // 跟随全局的改全局活动节点；一圈都不通就停。
             startFallback(from: link, for: appInfo)
+        }
+    }
+
+    // 11（3.8.277）：等节点真正就绪再放行 App 启动（runApp 在
+    // 核心任务 await 后调）。start() 只等核心开始监听（SOCKS
+    // 口起来），节点首次握手是懒触发的——光等 ensureRunning，
+    // App 起来时节点还没通，头几秒请求全失败。经核心发一次
+    // 真实请求验节点：通了立刻返回 true；不通按测速顺序切
+    // 下一个再探（最多 3 个节点）；超时/都探不通返回 false，
+    // 调用方按现有 fail-open 放行，绝不无限等。只在核心正跑
+    // 着该 App 的节点时才探；核心被别的 App 占着、或根本没
+    // 起来时直接返回 false，不动别人的节点。严格模式语义不
+    // 动：探不通也不改标记、不改直连与否。
+    // timeout 是单次探测超时（秒）：核心自己的握手超时是 4 秒
+    //（Xray policy handshake），5 秒是它加 1 秒余量。
+    public func waitUntilNodeReady(for appInfo: LCAppInfo?, timeout: TimeInterval = 5) async -> Bool {
+        guard let appInfo else { return false }
+        let link = effectiveLink(for: appInfo).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !link.isEmpty else { return false }
+        vpnCoreLock.lock()
+        let running = isRunning
+        let currentLink = runningLink
+        vpnCoreLock.unlock()
+        guard running, currentLink == link else { return false }
+        if await probeNodeThroughCore(timeout: timeout) { return true }
+        // 不通立刻切下一个（不等攒够 10 次失败才轮换）：
+        // 候选按新鲜测速从快到慢（startFallback 同款排序），
+        // 最多再试 2 个；都探不通就 fail-open，调用方照常启动。
+        let links = nodeLinks
+        guard links.count >= 2 else { return false }
+        let cands = Self.sortedSupportedCandidates(links: links, excluding: [link])
+        for cand in cands.prefix(2) {
+            // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，
+            // 不冻调用方的协作线程（runApp 侧同款做法）。
+            let started = await Task.detached(priority: .userInitiated) { CZFVPNManager.shared.start(withLink: cand.link) }.value
+            guard started else { continue }
+            if Self.nodeOverride(for: appInfo) != nil {
+                Self.setNodeOverride(cand.link, for: appInfo)
+            } else {
+                UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
+            }
+            if let bid = appInfo.bundleIdentifier() {
+                coreOwnerBundleId = bid
+            }
+            coreOwnerAppInfo = appInfo
+            scheduleRotateCheck()
+            if await probeNodeThroughCore(timeout: timeout) { return true }
+        }
+        return false
+    }
+
+    // 经核心发一次真实请求验节点：走 HTTP 10828 代理访
+    // generate_204（空回应、最轻），拿到任何 HTTP 回应即算
+    // 通（出站失败时核心直接断连接、不回 HTTP）。不用
+    // cp.cloudflare.com 作探针——有些节点单拦 Cloudflare
+    // 那一路、实际经节点上网是通的（测速里的假不通同款教训）。
+    // 超时/抛错即不通。只读，不改核心与节点状态。
+    private func probeNodeThroughCore(timeout: TimeInterval) async -> Bool {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = Self.proxyDictionary()
+        config.timeoutIntervalForRequest = timeout
+        config.timeoutIntervalForResource = timeout
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        guard let url = URL(string: "https://www.gstatic.com/generate_204") else { return false }
+        do {
+            let (_, response) = try await session.data(from: url)
+            return response is HTTPURLResponse
+        } catch {
+            return false
         }
     }
 

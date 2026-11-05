@@ -94,6 +94,20 @@ struct LCDataManagementView : View {
     @State private var pendingBackupApps: [LCAppModel] = []
     @State private var scheduleKeychainOnly = false
     @State private var showRestoreSelect = false
+    // 新5（3.8.277）：换机迁移向导状态。step：0 选来源、1 看内容、
+    // 2 一键恢复中（进度走 backupRestoreProgress 同款）、3 汇总报告。
+    @State private var showMigrationWizard = false
+    @State private var migrationStep = 0
+    @State private var migrationSourceExternal = false
+    @State private var migrationLocalCount = 0
+    @State private var migrationExternalCount = 0
+    @State private var migrationFolders: [URL] = []
+    @State private var migrationPreviews: [BackupPreviewItem] = []
+    @State private var migrationHasSettings = false
+    @State private var migrationHasSort = false
+    @State private var migrationHasSchemesOrGroups = false
+    @State private var migrationRunning = false
+    @State private var migrationReport: String? = nil
     // 恢复选择 sheet 内的操作反馈（删备份等）：必须挂在 sheet
     // 自己身上——v143 试过先关 sheet 再弹外层提示，还是有盖住/
     // 卡住的可能；sheet 内的事就在 sheet 内交代，不跨层弹提示
@@ -173,7 +187,7 @@ struct LCDataManagementView : View {
             } header: {
                 Text("设置备份")
             } footer: {
-                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置，连同 App 排序、定时备份/定时清理设置、已添加源，一起打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；每次备份 App 时那份也会自动刷新。换机或重装后导入即可恢复；导入后重启 LiveContainer 全部生效。")
+                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置，连同 App 排序、定时备份/定时清理设置、已添加源，一起打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；改了 App 排序、每次备份 App 时那份都会自动刷新。换机或重装后导入即可恢复；App 排序导入后直接生效，其余设置重启 LiveContainer 后生效。")
             }
             .fileImporter(isPresented: $showSettingsImporter, allowedContentTypes: [UTType.json]) { result in
                 switch result {
@@ -307,6 +321,29 @@ struct LCDataManagementView : View {
                         LCSettingsIcon(systemName: "arrow.clockwise", color: .green)
                         Text("lc.settings.restoreBackup".loc)
                     }
+                }
+                // 新5（3.8.277）：换机一键迁移向导——选来源、看里面
+                // 有什么、一键恢复 App + 设置 + 排序、最后给汇总报告。
+                Button {
+                    migrationStep = 0
+                    migrationSourceExternal = false
+                    migrationFolders = []
+                    migrationPreviews = []
+                    migrationHasSettings = false
+                    migrationHasSort = false
+                    migrationHasSchemesOrGroups = false
+                    migrationRunning = false
+                    migrationReport = nil
+                    showMigrationWizard = true
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "arrow.triangle.2.circlepath", color: .purple)
+                        Text("换机迁移向导")
+                    }
+                }
+                .sheet(isPresented: $showMigrationWizard) {
+                    migrationWizardView
+                        .interactiveDismissDisabled(migrationRunning)
                 }
                 Button {
                     showFolderPicker = true
@@ -992,6 +1029,12 @@ struct LCDataManagementView : View {
     ]
     static let settingsBackupAppGroupKeys: Set<String> = [
         "LCAppSortType", "LCCustomSortOrder",
+        // 新1（3.8.277）：多套排序方案与正在用的方案名也进备份。
+        "LCCustomSortSchemes", "LCCustomSortSchemeCurrent",
+        // 新2（3.8.277）：分组名、分组顺序与归属关系也进备份。
+        "LCAppGroups", "LCAppGroupMembers",
+        // 新3（3.8.277）：启动偏好（按 App 记忆的窗口方式）也进备份。
+        "LCAppLastLaunchMode",
         // App Group 里的开关：排序之外这些原来也没进备份。
         // CZFMin* 三个也在 App Group 里（设置页 @AppStorage
         // 指明了 store），必须进这张表——导入先判这张表，
@@ -1297,9 +1340,10 @@ struct LCDataManagementView : View {
     /// 走会误写标准库，界面读 App Group 就等于没恢复；再判
     /// CZF 前缀/标准扩展表 → 标准库；其余未知键一律不写
     /// （旧备份只有 CZF 键时行为不变，证书、书签这类敏感/
-    /// 设备键就算进了文件也不会被导入）。返回写回项数。
+    /// 设备键就算进了文件也不会被导入）。返回（写回项数，
+    /// 本次是否含排序键）。
     @discardableResult
-    static func applySettingsDictionary(_ dict: [String: Any]) -> Int {
+    static func applySettingsDictionary(_ dict: [String: Any]) -> (count: Int, sortRestored: Bool) {
         var count = 0
         for (key, value) in dict {
             if Self.settingsBackupAppGroupKeys.contains(key) {
@@ -1310,14 +1354,33 @@ struct LCDataManagementView : View {
                 count += 1
             }
         }
-        return count
+        // 排序键写回来了：当场让排序管理器重读重排，列表立即
+        // 按恢复的顺序走，不用等重启（以前只改了 defaults，
+        // 内存里的 customSortOrder 还是旧的，看着像没恢复）。
+        // 新1：方案键也算排序键，reloadSortSettings 会一并重读方案。
+        // 新2：分组键也算，reloadSortSettings 一并重读分组。
+        let sortRestored = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil || dict["LCCustomSortSchemes"] != nil || dict["LCCustomSortSchemeCurrent"] != nil || dict["LCAppGroups"] != nil || dict["LCAppGroupMembers"] != nil
+        if sortRestored {
+            DispatchQueue.main.async { LCAppSortManager.shared.reloadSortSettings() }
+        }
+        // 优5（3.8.277）：节点列表/活动下标写回来了：核心在跑
+        // 时经现成入口重启切过去（applyActiveNodeChange 只在
+        // 活动链接真变了时重启；测速窗口内推迟到收尾跟随），
+        // 不需重启 App；核心停着下次启动现读。起核心是同步
+        // 阻塞的 CGoInvoke，放 detached 跑，不冻调用线程
+        //（导入在主线程、恢复在后台任务里都一样）。
+        if dict["CZFVPNNodeLinks"] != nil || dict["CZFVPNNodeLink"] != nil || dict["CZFVPNActiveNodeIndex"] != nil {
+            Task.detached(priority: .userInitiated) { CZFVPNManager.shared.applyRestoredNodeSettings() }
+        }
+        return (count, sortRestored)
     }
 
     /// 恢复时找设置备份并写回（只给完整恢复用，登录态恢复不
     /// 碰全局设置）：跟恢复源同侧优先（iCloud 恢复用外部根
     /// 的那份，本地恢复用文稿根的那份），首选没有再试另一侧；
-    /// 两边都没有返回 found=false。返回（写回项数，找到没有）。
-    static func restoreCZFSettings(for backupURL: URL) async -> (imported: Int, found: Bool) {
+    /// 两边都没有返回 found=false。返回（写回项数，找到没有，
+    /// 本次是否含排序键）。
+    static func restoreCZFSettings(for backupURL: URL) async -> (imported: Int, found: Bool, sortRestored: Bool) {
         let fm = FileManager.default
         let localJSON = fm.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("CZFSettingsBackup.json")
         var candidates: [URL] = []
@@ -1339,9 +1402,10 @@ struct LCDataManagementView : View {
             // 解析 + 写回仍在调用方线程（与钥匙串导入同款分工）。
             guard let data = await Task.detached { try? Data(contentsOf: url) }.value,
                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            return (Self.applySettingsDictionary(dict), true)
+            let applied = Self.applySettingsDictionary(dict)
+            return (applied.count, true, applied.sortRestored)
         }
-        return (0, false)
+        return (0, false, false)
     }
 
     /// 导入设置备份：只认 CZF 开头的键和两张扩展表，逐个写回
@@ -1361,8 +1425,15 @@ struct LCDataManagementView : View {
             showSettingsTransferAlert = true
             return
         }
-        let count = Self.applySettingsDictionary(dict)
-        settingsTransferMessage = "已导入 \(count) 项设置，重启 LiveContainer 后全部生效"
+        let (count, sortRestored) = Self.applySettingsDictionary(dict)
+        // 优5（3.8.277）：恢复/导入后热生效的范围变了——手势、
+        // 多任务栏、节点无需重启即生效（节点在核心运行时自动
+        // 重连），定时、窗口模式与窗口位置下次打开 App 时生效。
+        // 旧文案“重启后全部生效”已不准确，改掉。
+        let hotNote = "手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效"
+        settingsTransferMessage = sortRestored
+            ? "已导入 \(count) 项设置，App 排序已直接恢复；\(hotNote)"
+            : "已导入 \(count) 项设置；\(hotNote)"
         showSettingsTransferAlert = true
     }
 
@@ -2016,7 +2087,11 @@ struct LCDataManagementView : View {
         if !loginOnly, let first = merged.first {
             let s = await Self.restoreCZFSettings(for: first)
             if s.found {
-                lines.append("设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效")
+                if s.sortRestored {
+                    lines.append("设置：已恢复 \(s.imported) 项，App 排序已直接恢复；手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效")
+                } else {
+                    lines.append("设置：已恢复 \(s.imported) 项；手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效")
+                }
             } else {
                 lines.append("设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入")
             }
@@ -2052,7 +2127,11 @@ struct LCDataManagementView : View {
         if !loginOnly, let first = folders.first {
             let s = await Self.restoreCZFSettings(for: first)
             if s.found {
-                lines.append("设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效")
+                if s.sortRestored {
+                    lines.append("设置：已恢复 \(s.imported) 项，App 排序已直接恢复；手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效")
+                } else {
+                    lines.append("设置：已恢复 \(s.imported) 项；手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效")
+                }
             } else {
                 lines.append("设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入")
             }
@@ -2067,6 +2146,196 @@ struct LCDataManagementView : View {
         // 恢复成功时会把头数多算 1 个；已选报头只认勾中数
         successInfo = "恢复已选完成（共 \(folders.count) 个备份）：\n\n" + lines.joined(separator: "\n")
         successShow = true
+    }
+
+    // 新5（3.8.277）：换机迁移向导——读所选来源里有什么。
+    // 文件夹清单走现成的 backupFolders；App 数走现成的
+    // previewItems；设置备份读源根目录的 CZFSettingsBackup.json
+    //（与 restoreCZFSettings 同款文件；iCloud 占位文件现读会堵
+    // 下载，放 detached 读，解析 + 判断仍在这里）。
+    private func loadMigrationContents() async {
+        let folders = backupFolders(fromExternal: migrationSourceExternal)
+        migrationFolders = folders
+        var items: [BackupPreviewItem] = []
+        for folder in folders {
+            items.append(contentsOf: await Self.previewItems(for: folder))
+        }
+        migrationPreviews = items
+        let settingsURL: URL?
+        if migrationSourceExternal {
+            settingsURL = Self.externalBackupFolderURL()?.appendingPathComponent("CZFSettingsBackup.json")
+        } else {
+            settingsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("CZFSettingsBackup.json")
+        }
+        migrationHasSettings = false
+        migrationHasSort = false
+        migrationHasSchemesOrGroups = false
+        if let url = settingsURL {
+            let dict: [String: Any]? = await Task.detached {
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }.value
+            if let dict {
+                migrationHasSettings = true
+                migrationHasSort = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil
+                migrationHasSchemesOrGroups = dict["LCCustomSortSchemes"] != nil || dict["LCAppGroups"] != nil
+            }
+        }
+    }
+
+    // 新5（3.8.277）：向导的一键恢复——复用现成的恢复已选：
+    // 逐个静默恢复 App + 设置只做一次 + 进度一条线
+    //（backupRestoreProgress）+ 最后汇总报告。报告在本向导
+    // 第 4 步显示，父页的 success 弹窗压住（同一次 Task 内
+    // 同步关掉，不会闪出来）。
+    private func startMigrationRestore() {
+        migrationStep = 2
+        migrationRunning = true
+        let folders = migrationFolders
+        Task {
+            await restoreSelectedBackups(folders: folders, loginOnly: false)
+            successShow = false
+            migrationReport = successInfo.isEmpty ? "恢复完成，未返回报告。" : successInfo
+            migrationRunning = false
+            migrationStep = 3
+        }
+    }
+
+    // 新5（3.8.277）：换机迁移向导界面。4 步：① 选备份来源
+    //（本地/iCloud 文件夹）② 列出里面有什么（App 数量、有没有
+    // 设置备份、有没有排序）③ 一键恢复 App + 设置 + 排序，进度
+    // 一条线 ④ 最后给汇总报告。恢复逻辑不另写，全走现成的
+    // restoreSelectedBackups / restoreCZFSettings / 进度报告。
+    @ViewBuilder
+    private var migrationWizardView: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("第 \(migrationStep + 1) 步，共 4 步")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if migrationStep == 0 {
+                    Text("选备份来源")
+                        .font(.title2).bold()
+                    Text("从哪份备份恢复？本地是本机文稿里的 Backups，iCloud 是你选的 iCloud 备份文件夹。")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Button {
+                        migrationSourceExternal = false
+                        migrationStep = 1
+                        Task { await loadMigrationContents() }
+                    } label: {
+                        HStack {
+                            Text("本地备份")
+                            Spacer()
+                            Text("\(migrationLocalCount) 个文件夹")
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        migrationSourceExternal = true
+                        migrationStep = 1
+                        Task { await loadMigrationContents() }
+                    } label: {
+                        HStack {
+                            Text("iCloud 备份文件夹")
+                            Spacer()
+                            Text(Self.externalBackupFolderURL() == nil ? "未选择" : "\(migrationExternalCount) 个文件夹")
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(Self.externalBackupFolderURL() == nil)
+                    Spacer()
+                } else if migrationStep == 1 {
+                    Text("里面有什么")
+                        .font(.title2).bold()
+                    if migrationFolders.isEmpty {
+                        Text("这个来源下没有备份文件夹。")
+                            .foregroundColor(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("App 备份：\(migrationFolders.count) 个文件夹，共 \(migrationPreviews.count) 个 App")
+                            Text(migrationHasSettings ? "设置备份：有" : "设置备份：没有")
+                            if migrationHasSettings {
+                                Text(migrationHasSort ? "App 排序：有，会一起恢复" : "App 排序：没有")
+                                if migrationHasSchemesOrGroups {
+                                    Text("排序方案 / 分组：有，会一起恢复")
+                                }
+                            }
+                        }
+                        .font(.subheadline)
+                        List {
+                            ForEach(migrationFolders, id: \.self) { folder in
+                                Text(folder.lastPathComponent)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .listStyle(.plain)
+                    }
+                    Spacer()
+                    HStack {
+                        Button("上一步") { migrationStep = 0 }
+                        Spacer()
+                        Button("一键恢复") { startMigrationRestore() }
+                            .disabled(migrationFolders.isEmpty || migrationRunning)
+                            .buttonStyle(.borderedProminent)
+                    }
+                } else if migrationStep == 2 {
+                    Text("正在恢复")
+                        .font(.title2).bold()
+                    if let progress = backupRestoreProgress {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text(progress)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+                        }
+                    } else {
+                        Text("准备恢复…")
+                            .foregroundColor(.secondary)
+                    }
+                    Text("恢复期间请不要关闭 LiveContainer，App 与设置按顺序恢复。")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                } else {
+                    Text("恢复完成")
+                        .font(.title2).bold()
+                    ScrollView {
+                        Text(migrationReport ?? "恢复完成，未返回报告。")
+                            .font(.subheadline)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button("完成") { showMigrationWizard = false }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            .padding()
+            .navigationTitle("换机迁移向导")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { showMigrationWizard = false }
+                        .disabled(migrationRunning)
+                }
+            }
+            .onAppear {
+                migrationLocalCount = backupFolders(fromExternal: false).count
+                migrationExternalCount = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true).count : 0
+            }
+        }
     }
 
     /// 恢复一个备份文件夹。presentResult=true（恢复单个时）照旧
@@ -2445,7 +2714,11 @@ struct LCDataManagementView : View {
             if !loginOnly && presentResult {
                 let s = await Self.restoreCZFSettings(for: backupURL)
                 if s.found {
-                    msg += "\n\n设置：已恢复 \(s.imported) 项，重启 LiveContainer 后全部生效"
+                    if s.sortRestored {
+                        msg += "\n\n设置：已恢复 \(s.imported) 项，App 排序已直接恢复；手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效"
+                    } else {
+                        msg += "\n\n设置：已恢复 \(s.imported) 项；手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效"
+                    }
                 } else {
                     msg += "\n\n设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入"
                 }

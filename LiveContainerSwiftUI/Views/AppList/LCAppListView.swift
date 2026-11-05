@@ -108,6 +108,49 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State private var helpPresent = false
     
     @State private var customSortViewPresent = false
+
+    // 新1（3.8.277）：排序方案管理页。
+    @State private var sortSchemesViewPresent = false
+
+    // 新2（3.8.277）：分组管理页。
+    @State private var sortGroupsViewPresent = false
+
+    // 新2（3.8.277）：已折叠的分组段（段名集合，只存内存，
+    // 不进备份；重进列表默认全展开）。
+    @State private var collapsedGroups: Set<String> = []
+
+    // 新4（3.8.277）：批量操作。多选只针对主列表（可见 App），
+    // 隐藏区 App 不参与（已隐藏的再“隐藏”无意义，备份/删除
+    // 走数据管理页）。选中集存唯一 ID，不存下标——搜索过滤
+    // 与排序变化都不会串选。
+    @State private var batchMode = false
+    @State private var batchSelectedIDs: Set<String> = []
+    @State private var batchDeleteConfirm = false
+    @State private var batchBusy = false
+
+    private var selectedBatchApps: [LCAppModel] {
+        sharedModel.apps.filter { app in
+            guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
+            return batchSelectedIDs.contains(id)
+        }
+    }
+
+    private func isBatchSelected(_ app: LCAppModel) -> Bool {
+        guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
+        return batchSelectedIDs.contains(id)
+    }
+
+    private func toggleBatchSelection(_ app: LCAppModel) {
+        guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return }
+        if batchSelectedIDs.contains(id) {
+            batchSelectedIDs.remove(id)
+        } else {
+            batchSelectedIDs.insert(id)
+        }
+    }
+
+    // 优2（3.8.277）：列表内拖动重排——正在拖的 App 唯一 ID（松手提交用）。
+    @State private var dragReorderID: String? = nil
     
     @EnvironmentObject private var sharedModel : SharedModel
     @EnvironmentObject private var sharedAppSortManager : LCAppSortManager
@@ -133,7 +176,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } else {
             return apps.filter { app in
                 app.appInfo.displayName().localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
-                (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery)
+                (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
+                // 优4（3.8.277）：搜版本号也命中。version 是
+                // LCAppModel 的公开计算属性（取自
+                // CFBundleShortVersionString，取不到是 "?"）；
+                // "?" 不参与匹配，免得只输一个问号就列出全部。
+                (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery))
             }
         }
     }
@@ -145,9 +193,212 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } else {
             return apps.filter { app in
                 app.appInfo.displayName().localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
-                (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery)
+                (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
+                (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery))
             }
         }
+    }
+
+    // 新2（3.8.277）：分组后的段。没建分组时返回一段空名段
+    //（不画段头），列表与原来平铺一字不差；建了分组后按分组
+    // 顺序分段，没进组的进最后一段“未分组”。段内顺序就是
+    // filteredApps 的顺序（当前排序），搜索结果同样分段。
+    private var groupedSections: [(name: String, apps: [LCAppModel])] {
+        let groups = sharedAppSortManager.groups
+        guard !groups.isEmpty else { return [("", filteredApps)] }
+        var sections: [(name: String, apps: [LCAppModel])] = []
+        for name in groups {
+            let apps = filteredApps.filter { sharedAppSortManager.groupName(for: $0) == name }
+            if !apps.isEmpty {
+                sections.append((name, apps))
+            }
+        }
+        let ungrouped = filteredApps.filter { sharedAppSortManager.groupName(for: $0) == nil }
+        if !ungrouped.isEmpty {
+            sections.append((LCAppSortManager.ungroupedName, ungrouped))
+        }
+        return sections
+    }
+
+    // 新4（3.8.277）：一行 App 的显示。多选模式时行首挂勾选圈，
+    // 整行点按即勾选（透明遮罩盖住横幅，免得点到启动按钮）；
+    // 平时按优2挂拖拽（无搜索时），搜索时 plain 行。
+    @ViewBuilder
+    private func appRow(for app: LCAppModel) -> some View {
+        if batchMode {
+            HStack(spacing: 8) {
+                Button { toggleBatchSelection(app) } label: {
+                    Image(systemName: isBatchSelected(app) ? "checkmark.circle.fill" : "circle")
+                        .font(.title2)
+                        .foregroundColor(isBatchSelected(app) ? .accentColor : .secondary)
+                }
+                .buttonStyle(.plain)
+                LCAppBanner(appModel: app, delegate: self)
+                    .overlay {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { toggleBatchSelection(app) }
+                    }
+            }
+        } else if searchContext.debouncedQuery.isEmpty {
+            // 优2：无搜索时行可长按拖动重排（搜索时显示是
+            // 子集，拖了会丢位置，所以不挂拖拽）。
+            LCAppBanner(appModel: app, delegate: self)
+                .onDrag {
+                    if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
+                        dragReorderID = id
+                        return NSItemProvider(object: id as NSString)
+                    }
+                    return NSItemProvider()
+                }
+                .onDrop(of: [.text], delegate: LCAppReorderDropDelegate(
+                    targetApp: app,
+                    draggedID: { dragReorderID },
+                    commit: { dragged, target in commitDragReorder(draggedID: dragged, targetApp: target) }
+                ))
+        } else {
+            LCAppBanner(appModel: app, delegate: self)
+        }
+    }
+
+    // 优2（3.8.277）：列表内长按拖动重排提交——松手时调。
+    // 按当前显示顺序把拖的 App 移到目标位置，写 customSortOrder
+    // 并置 .custom；没进自定义顺序的 App 按 sortByCustomOrder
+    // 规则追加在后（字母序）；隐藏区 App 保持现有相对顺序
+    // 跟在后面（与 LCCustomSortView.saveChanges 的拼接同款）。
+    // 搜索时不启用（显示是子集，写全量顺序会丢位置）。
+    private func commitDragReorder(draggedID: String, targetApp: LCAppModel) {
+        defer { dragReorderID = nil }
+        guard searchContext.debouncedQuery.isEmpty else { return }
+        let manager = sharedAppSortManager
+        // 新2：跨分组不拖——拖到另一分组的段里只会改顺序、不改
+        // 归属，看着像移过去了实际没动；只允许同分组内拖动，
+        // 换组走长按菜单“移到分组”。
+        guard let draggedApp = filteredApps.first(where: { manager.getUniqueIdentifier(for: $0) == draggedID }),
+              manager.groupName(for: draggedApp) == manager.groupName(for: targetApp) else { return }
+        var visibleIDs = filteredApps.compactMap { manager.getUniqueIdentifier(for: $0) }
+        guard let from = visibleIDs.firstIndex(of: draggedID),
+              let targetID = manager.getUniqueIdentifier(for: targetApp),
+              let to = visibleIDs.firstIndex(of: targetID), from != to else { return }
+        visibleIDs.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        var newOrder = visibleIDs
+        for hidden in sortedHiddenApps {
+            guard let id = manager.getUniqueIdentifier(for: hidden), !newOrder.contains(id) else { continue }
+            newOrder.append(id)
+        }
+        // 优3（3.8.277）：拖动松手写顺序也关动画——同款
+        // disablesAnimations transaction，免得整列闪动。
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            manager.customSortOrder = newOrder
+            manager.appSortType = .custom
+        }
+    }
+
+    // 新4（3.8.277）：批量备份——复用单个备份函数
+    // backupOneAppSync（LCDataManagementView 静态），逐个调，
+    // 单个失败不 abort 整批（backupApps 同款）；拷贝重活放
+    // 后台队列，主线程不卡。收尾同款：同步到外部备份文件夹 +
+    // 刷新设置备份。跑完退出多选模式。
+    private func batchBackup() async {
+        let apps = selectedBatchApps
+        guard !apps.isEmpty else { return }
+        batchBusy = true
+        defer { batchBusy = false }
+        let fm = FileManager.default
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            errorInfo = "lc.settings.backupFail".loc
+            errorShow = true
+            return
+        }
+        let backupRoot = docsURL.appendingPathComponent("Backups")
+        let (okNames, failedNames): ([String], [String]) = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let fm = FileManager.default
+                try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+                var ok: [String] = []
+                var failed: [String] = []
+                for app in apps {
+                    let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                    do {
+                        let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm)
+                        ok.append(one.folderName)
+                    } catch {
+                        failed.append("\(name)：\(LCUtils.czfFriendlyError(error))")
+                    }
+                }
+                if !ok.isEmpty {
+                    LCDataManagementView.syncBackupsToExternalFolder(appNames: ok, backupRoot: backupRoot)
+                    _ = LCDataManagementView.writeCZFSettingsBackup()
+                }
+                continuation.resume(returning: (ok, failed))
+            }
+        }
+        if okNames.isEmpty {
+            errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
+            errorShow = true
+        } else {
+            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n"))
+            installInfoShow = true
+        }
+        batchMode = false
+        batchSelectedIDs.removeAll()
+    }
+
+    // 新4（3.8.277）：批量隐藏——复用单个隐藏函数
+    // LCAppModel.toggleHidden（delegate 已指回本页，
+    // changeAppVisibility 会把 App 搬进隐藏区）。只对当前
+    // 可见的勾选 App 调（toggle 是开关，隐藏区 App 不在
+    // 勾选范围里，防误触反向取消隐藏）。
+    private func batchHide() async {
+        let apps = selectedBatchApps.filter { !$0.appInfo.isHidden }
+        guard !apps.isEmpty else { return }
+        batchBusy = true
+        defer { batchBusy = false }
+        for app in apps {
+            await app.toggleHidden()
+        }
+        installInfo = "已隐藏 \(apps.count) 个 App（在下方隐藏 App 分段里查看）"
+        installInfoShow = true
+        batchMode = false
+        batchSelectedIDs.removeAll()
+    }
+
+    // 新4（3.8.277）：批量删除——复用删 App 的文件部分
+    // LCAppBannerViewController.deleteAppFiles（单个 uninstall()
+    // 同款实现，删 .app 包 + 从列表移除 + 可选删数据容器与
+    // 钥匙串），逐个调，单个失败不 abort 整批。确认在调用前
+    // 由 confirmationDialog 一次问清（删 App / 删 App 及其数据）。
+    private func batchDelete(removeDataFolders: Bool) async {
+        let apps = selectedBatchApps
+        guard !apps.isEmpty else { return }
+        batchBusy = true
+        defer { batchBusy = false }
+        var deleted: [String] = []
+        var failed: [String] = []
+        var failedContainers: [String] = []
+        for app in apps {
+            let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+            do {
+                let failedC = try LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { [weak self] model in
+                    self?.removeApp(app: model)
+                }
+                deleted.append(name)
+                failedContainers.append(contentsOf: failedC)
+            } catch {
+                failed.append("\(name)：\(LCUtils.czfFriendlyError(error))")
+            }
+        }
+        if deleted.isEmpty {
+            errorInfo = "删除失败，一个都没删除：\n" + failed.joined(separator: "\n")
+            errorShow = true
+        } else {
+            installInfo = "已删除 \(deleted.count) 个 App" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")) + (failedContainers.isEmpty ? "" : "\n以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
+            installInfoShow = true
+        }
+        batchMode = false
+        batchSelectedIDs.removeAll()
     }
 
     // 浏览器式搜索（2026-10-24 用户定）：搜索框不再只滤已装 App，
@@ -247,8 +498,44 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                         .buttonStyle(.plain)
                     }
-                    ForEach(filteredApps, id: \.self) { app in
-                        LCAppBanner(appModel: app, delegate: self)
+                    // 新2（3.8.277）：按分组分段显示。没建分组时只有一段
+                    // 空名段，不画段头，列表与原来一字不差；建了分组
+                    // 后按分组顺序分段，没进组的进最后一段“未分组”。
+                    // 段内仍按当前排序（filteredApps 的顺序）显示；
+                    // 搜索时只显示有匹配的段。段头点一下折叠/展开。
+                    // 隐藏 App 的分段逻辑在下面，一字不动。
+                    ForEach(groupedSections, id: \.name) { section in
+                        if !section.apps.isEmpty {
+                            VStack(alignment: .leading, spacing: 0) {
+                                if !section.name.isEmpty {
+                                    Button {
+                                        if collapsedGroups.contains(section.name) {
+                                            collapsedGroups.remove(section.name)
+                                        } else {
+                                            collapsedGroups.insert(section.name)
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(section.name)
+                                                .font(.system(.title3).bold())
+                                            Text("\(section.apps.count)")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                            Spacer()
+                                            Image(systemName: collapsedGroups.contains(section.name) ? "chevron.right" : "chevron.down")
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .padding(.vertical, 6)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                if !collapsedGroups.contains(section.name) {
+                                    ForEach(section.apps, id: \.self) { app in
+                                        appRow(for: app)
+                                    }
+                                }
+                            }
+                        }
                     }
                     .transition(.scale)
                 }
@@ -366,6 +653,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
                 }
                 
+                // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
+                // 整行点按即勾选；关时清空勾选。
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        batchMode.toggle()
+                        if !batchMode { batchSelectedIDs.removeAll() }
+                    } label: {
+                        Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
+                    }
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("lc.appList.openLink".loc, systemImage: "link", action: {
                         Task { await onOpenWebViewTapped() }
@@ -374,7 +672,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Picker("Sort by", selection: $sharedAppSortManager.appSortType) {
+                        // 优3（3.8.277）：排序切换那一下不做全量动画——
+                        // 列表带 .animation(.easeInOut, value: filteredApps)，
+                        // 直接改 appSortType 会让整列重排闪动。自定义
+                        // Binding 在 setter 里用 disablesAnimations 的
+                        // transaction 包住写值，搜索输入的动画抑制
+                        //（searchContext.isTyping 那套）一行不动。
+                        Picker("Sort by", selection: Binding(
+                            get: { sharedAppSortManager.appSortType },
+                            set: { newValue in
+                                var transaction = Transaction()
+                                transaction.disablesAnimations = true
+                                withTransaction(transaction) {
+                                    sharedAppSortManager.appSortType = newValue
+                                }
+                            }
+                        )) {
                             ForEach(AppSortType.allCases, id: \.self) { sortType in
                                 Label(sortType.displayName, systemImage: sortType.systemImage)
                                     .tag(sortType)
@@ -382,7 +695,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                         .onChange(of: sharedAppSortManager.appSortType) { newValue in
                             if sharedAppSortManager.appSortType == .custom {
-                                customSortViewPresent = true
+                                // 自定义排序页是 sheet，用 withAnimation
+                                // 单独给它动画——上面关动画的 transaction
+                                // 别把它也压成无动画弹出。
+                                withAnimation { customSortViewPresent = true }
                             }
                         }
                         if sharedAppSortManager.appSortType == .custom {
@@ -394,11 +710,76 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                 Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
                             }
                         }
+                        // 新1（3.8.277）：排序方案切换——选方案即把
+                        // 该方案的顺序写进 customSortOrder 并置
+                        // .custom（switchScheme 里做，带关动画）。
+                        Divider()
+                        Picker("排序方案", selection: Binding(
+                            get: { sharedAppSortManager.currentSchemeName },
+                            set: { sharedAppSortManager.switchScheme(to: $0) }
+                        )) {
+                            ForEach(sharedAppSortManager.schemes.keys.sorted(), id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        Button {
+                            sortSchemesViewPresent = true
+                        } label: {
+                            Label("管理排序方案…", systemImage: "folder.badge.gearshape")
+                        }
+                        // 新2（3.8.277）：分组管理入口（新建/改名/
+                        // 删除/排序分组；归组走行长按菜单“移到分组”）。
+                        Button {
+                            sortGroupsViewPresent = true
+                        } label: {
+                            Label("管理分组…", systemImage: "folder.badge.plus")
+                        }
                     } label: {
                         Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
                     }
                 }
             }
+        }
+        // 新4（3.8.277）：批量操作底栏——多选模式时才出现。备份/
+        // 隐藏直接跑；删除先弹一次确认（删 App / 删 App 及其数据
+        // 二选一，与单个卸载两次确认同款口径）。跑的时候按钮禁用。
+        .safeAreaInset(edge: .bottom) {
+            if batchMode {
+                HStack {
+                    Text("已选 \(batchSelectedIDs.count) 个")
+                        .font(.subheadline)
+                    Spacer()
+                    Button("备份") {
+                        Task { await batchBackup() }
+                    }
+                    .disabled(batchSelectedIDs.isEmpty || batchBusy)
+                    Button("隐藏") {
+                        Task { await batchHide() }
+                    }
+                    .disabled(batchSelectedIDs.isEmpty || batchBusy)
+                    Button("删除") {
+                        batchDeleteConfirm = true
+                    }
+                    .disabled(batchSelectedIDs.isEmpty || batchBusy)
+                    .foregroundColor(.red)
+                    Button("取消") {
+                        batchMode = false
+                        batchSelectedIDs.removeAll()
+                    }
+                    .disabled(batchBusy)
+                }
+                .padding()
+                .background(Color(.secondarySystemBackground))
+            }
+        }
+        .confirmationDialog("删除 \(batchSelectedIDs.count) 个 App", isPresented: $batchDeleteConfirm, titleVisibility: .visible) {
+            Button("删除 App（保留数据）", role: .destructive) {
+                Task { await batchDelete(removeDataFolders: false) }
+            }
+            Button("删除 App 及其数据", role: .destructive) {
+                Task { await batchDelete(removeDataFolders: true) }
+            }
+            Button("取消", role: .cancel) { }
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .alert("lc.common.error".loc, isPresented: $errorShow){
@@ -620,6 +1001,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .sheet(isPresented: $customSortViewPresent) {
             LCCustomSortView()
+        }
+        .sheet(isPresented: $sortSchemesViewPresent) {
+            LCAppSortSchemesView()
+        }
+        .sheet(isPresented: $sortGroupsViewPresent) {
+            LCAppGroupsView()
         }
         .onAppear() {
             if !isViewAppeared {
@@ -1868,4 +2255,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
 extension View {
     func apply<V: View>(@ViewBuilder _ block: (Self) -> V) -> V { block(self) }
+}
+
+// 优2（3.8.277）：行拖放代理——只在 performDrop 里提交（松手即写），
+// 拖动过程中不改 customSortOrder（免得 didSet 每过一行就刷一次
+// 设置备份文件）。搜索时不启用（见 ForEach 处）。
+private struct LCAppReorderDropDelegate: DropDelegate {
+    let targetApp: LCAppModel
+    let draggedID: () -> String?
+    let commit: (String, LCAppModel) -> Void
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let dragged = draggedID() else { return false }
+        commit(dragged, targetApp)
+        return true
+    }
 }

@@ -68,8 +68,10 @@ struct LCTabView: View {
             // 每次打开 App 通知源页自动刷新一次（节流在源页那边）
             NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
             // 预热节点核心：有标了 VPN 的 App 时提前起核心，
-            // 第一个 VPN App 点开不用等冷启动
-            CZFVPNManager.shared.prewarmIfNeeded()
+            // 第一个 VPN App 点开不用等冷启动。11（3.8.277）：
+            // 前台进 App 页就预热，不过测速后的抑制——测速后
+            // 抑制一直拦着预热，下一个 VPN App 每次都吃满冷启动。
+            CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
             // 定时备份/定时清理的到点检查：原来只挂在数据管理页
             // 的 onAppear 上，不去那页就永远不触发（审计发现）。
             // 改成打开 LiveContainer 就查，到没到点由各自的
@@ -80,9 +82,19 @@ struct LCTabView: View {
             }
         }
         .onChange(of: scenePhase) { newPhase in
-            // 从后台切回前台时也预热一次（核心可能已被自动停）
+            // 从后台切回前台时也预热一次（核心可能已被自动停）；
+            // 同上，不过测速后的抑制。
             if newPhase == .active {
-                CZFVPNManager.shared.prewarmIfNeeded()
+                CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
+                // 优5（3.8.277）：定时备份/清理的到点检查原来只在
+                // 冷打开时跑（onAppear）；从后台切回也查一次，
+                // 恢复/导入改了定时后不用等下次冷打开。开关与
+                // 时间都是现读，到没到点由各自的日期去重守卫决定，
+                // 冷打开时 onAppear 与这路各跑一次不会重复执行。
+                Task {
+                    await LCDataManagementView.runScheduledBackupIfDue()
+                    await LCDataManagementView.runScheduledCacheIfDue()
+                }
             }
         }
         .downloadAlert(helper: downloadHelper)

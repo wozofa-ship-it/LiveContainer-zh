@@ -54,11 +54,6 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 长按不会同时弹出行菜单。
         let runLongPress = UILongPressGestureRecognizer(target: self, action: #selector(runControlLongPressed(_:)))
         bannerView.runControl.addGestureRecognizer(runLongPress)
-        // 面板同款次级按钮（16+ 才建，见 RootView；16 以下为 nil，不挂）。
-        if #available(iOS 16.0, *) {
-            bannerView.minimizeControl?.addTarget(self, action: #selector(minimizeButtonTapped), for: .touchUpInside)
-            bannerView.smallWindowControl?.addTarget(self, action: #selector(smallWindowButtonTapped), for: .touchUpInside)
-        }
         bannerView.addInteraction(UIContextMenuInteraction(delegate: self))
 
         // dock 变化（窗口开关）即重绘画片，卡片状态才跟得上；
@@ -111,14 +106,10 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     @objc private func bannerDoubleTapped(_ gestureRecognizer: UITapGestureRecognizer) {
-        // 双击按钮区不进设置：原来只排除了启动 pill，两个新按钮
-        // 同样排除（按钮是 bannerView 的直接子视图，frame 就是
-        // bannerView 坐标系，不用逐个转坐标；16 以下新按钮为 nil，
-        // 后两项恒为 false，行为与原来一致）。
+        // 双击按钮区不进设置：只排除启动 pill（优1 后行内
+        // 已无最小化/小窗口按钮，那两项随按钮一起撤掉）。
         let location = gestureRecognizer.location(in: bannerView)
-        guard !bannerView.runControl.frame.contains(location),
-              !(bannerView.minimizeControl?.frame.contains(location) ?? false),
-              !(bannerView.smallWindowControl?.frame.contains(location) ?? false) else {
+        guard !bannerView.runControl.frame.contains(location) else {
             return
         }
         openSettings()
@@ -132,6 +123,30 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             runControlLongPressAt = Date()
             MultitaskDockManager.shared.czfOpenAppPanel()
         }
+    }
+
+    // 新3（3.8.277）：启动偏好按 App 记忆。键 LCAppLastLaunchMode：
+    // [唯一 ID: "large"/"small"/"minimized"]，存 App Group。读是
+    // 现读（无缓存），恢复写回后下次点启动即生效，不用 reload。
+    private static let lastLaunchModeKey = "LCAppLastLaunchMode"
+
+    private enum LaunchMode: String {
+        case large, small, minimized
+    }
+
+    private static func lastLaunchMode(for model: LCAppModel) -> LaunchMode {
+        guard let id = LCAppSortManager.shared.getUniqueIdentifier(for: model),
+              let raw = LCUtils.appGroupUserDefault.dictionary(forKey: lastLaunchModeKey)?[id] as? String,
+              let mode = LaunchMode(rawValue: raw) else { return .large }
+        return mode
+    }
+
+    private static func setLastLaunchMode(_ mode: LaunchMode, for model: LCAppModel) {
+        guard let id = LCAppSortManager.shared.getUniqueIdentifier(for: model) else { return }
+        var dict = LCUtils.appGroupUserDefault.dictionary(forKey: lastLaunchModeKey) as? [String: String] ?? [:]
+        dict[id] = mode.rawValue
+        LCUtils.appGroupUserDefault.set(dict, forKey: lastLaunchModeKey)
+        LCDataManagementView.writeCZFSettingsBackup()
     }
 
     @objc private func runButtonTapped() {
@@ -198,14 +213,31 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
 
         Task { [weak self] in
-            await self?.runApp()
-            // 新开路拉满（3.8.240）：App 没在跑时启动只管起新窗、
-            // 起完没人拉满——上次关时是小窗就还是小窗，3.8.238
-            // 只修了在跑的带回拉满。起完等新窗进 dock 再拉满一次，
-            // 不管上次关时大小；小窗/最小化按钮不走这里。
-            await MainActor.run {
-                if #available(iOS 16.0, *) {
-                    self?.pollAndMaximizeFreshWindow()
+            guard let self else { return }
+            // 新3（3.8.277）：启动按钮按记忆的方式开——上次小窗口/
+            // 最小化就按那个方式起（走同名方法，新起 + 尺寸一次
+            // 做到位）；没记忆保持默认大窗口（原有新开路拉满）。
+            // 已在跑的带回逻辑在上面已处理（return），到这里的
+            // 都是要新起的；带回不记偏好，免得一次带回冲掉偏好。
+            // iOS 15 没有多任务窗口：别处备份恢复来的小窗口/
+            // 最小化偏好在 15 上会静默无操作（同名方法直接 return），
+            // #available 守在这里，落回默认大窗口。
+            let rememberedMode = Self.lastLaunchMode(for: self.configuration.model)
+            if rememberedMode == .small, #available(iOS 16.0, *) {
+                await MainActor.run { [weak self] in self?.smallWindowButtonTapped() }
+            } else if rememberedMode == .minimized, #available(iOS 16.0, *) {
+                await MainActor.run { [weak self] in self?.minimizeButtonTapped() }
+            } else {
+                Self.setLastLaunchMode(.large, for: self.configuration.model)
+                await self.runApp()
+                // 新开路拉满（3.8.240）：App 没在跑时启动只管起新窗、
+                // 起完没人拉满——上次关时是小窗就还是小窗，3.8.238
+                // 只修了在跑的带回拉满。起完等新窗进 dock 再拉满一次，
+                // 不管上次关时大小；小窗/最小化按钮不走这里。
+                await MainActor.run {
+                    if #available(iOS 16.0, *) {
+                        self.pollAndMaximizeFreshWindow()
+                    }
                 }
             }
         }
@@ -337,6 +369,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func minimizeButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
+        // 新3：记偏好——下次点“启动”按最小化开（runButtonTapped
+        // 读）。记的是点的意图，启动失败也不改回。
+        Self.setLastLaunchMode(.minimized, for: configuration.model)
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；20 次内没出现就停（启动失败已由
         // launch 侧 showError，不在这里重复报错）。
@@ -394,6 +429,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func smallWindowButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
+        // 新3：记偏好——下次点“启动”按小窗口开（runButtonTapped
+        // 读）。记的是点的意图，启动失败也不改回。
+        Self.setLastLaunchMode(.small, for: configuration.model)
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；20 次内没出现就停（启动失败已由
         // launch 侧 showError）。
@@ -501,6 +539,49 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 }
             })
         }
+
+        // 优1（3.8.277）：最小化/小窗口从行内撤下，改放长按菜单
+        // 这里。调的还是同名方法（minimizeButtonTapped /
+        // smallWindowButtonTapped），行为一字不动；多任务窗口
+        // 是 16+ 的东西，16 以下不出现这两项。
+        if #available(iOS 16.0, *) {
+            sectionChildren.append(UIAction(
+                title: "最小化",
+                image: UIImage(systemName: "arrow.down.to.line")
+            ) { [weak self] _ in
+                self?.minimizeButtonTapped()
+            })
+            sectionChildren.append(UIAction(
+                title: "小窗口",
+                image: UIImage(systemName: "macwindow")
+            ) { [weak self] _ in
+                self?.smallWindowButtonTapped()
+            })
+        }
+
+        // 新2（3.8.277）：移到分组——长按行把 App 归进分组；
+        // 正在用的分组打勾；“未分组”移回未分组。新建/改名/
+        // 删除/排序分组走排序菜单里的“管理分组…”页，这里只做归组。
+        let sortManager = LCAppSortManager.shared
+        var moveChildren: [UIMenuElement] = sortManager.groups.map { name in
+            UIAction(
+                title: name,
+                state: sortManager.groupName(for: model) == name ? .on : .off
+            ) { _ in
+                sortManager.moveApp(model, to: name)
+            }
+        }
+        moveChildren.append(UIAction(
+            title: LCAppSortManager.ungroupedName,
+            state: sortManager.groupName(for: model) == nil ? .on : .off
+        ) { _ in
+            sortManager.moveApp(model, to: nil)
+        })
+        sectionChildren.append(UIMenu(
+            title: "移到分组",
+            image: UIImage(systemName: "folder"),
+            children: moveChildren
+        ))
 
         let addToHomeScreenMenu = UIMenu(
             title: "lc.appBanner.addToHomeScreen".loc,
@@ -621,6 +702,36 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         UIApplication.shared.open(url)
     }
 
+    // 新4（3.8.277）：删 App 的文件部分（不含确认弹窗）：删 .app
+    // 包、从列表移除、可选删数据容器 + 钥匙串。单个 uninstall()
+    // 与批量删除共用这一份，不另写。删包失败直接 throw（App 还
+    // 在列表里）；容器单个删失败记下来继续，不中断整批。
+    // removeFromList 由调用方传：单个走 delegate.removeApp，
+    // 批量走列表自己的 removeApp（同一个方法）。返回删失败的容器名。
+    static func deleteAppFiles(_ model: LCAppModel, removeDataFolders: Bool, removeFromList: (LCAppModel) -> Void) throws -> [String] {
+        let appInfo = model.appInfo
+        guard let bundlePath = appInfo.bundlePath() else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let fileManager = FileManager.default
+        try fileManager.removeItem(atPath: bundlePath)
+        removeFromList(model)
+        guard removeDataFolders else { return [] }
+        var failedContainers: [String] = []
+        for container in appInfo.containers {
+            let dataUUID = container.folderName
+            do {
+                try fileManager.removeItem(at: LCPath.dataPath.appendingPathComponent(dataUUID))
+            } catch {
+                failedContainers.append(dataUUID)
+                continue
+            }
+            LCUtils.removeAppKeychain(dataUUID: dataUUID)
+            DataManager.shared.model.appDataFolderNames.removeAll { $0 == dataUUID }
+        }
+        return failedContainers
+    }
+
     private func uninstall() async {
         let appInfo = configuration.model.appInfo
         let displayName = appInfo.displayName() ?? configuration.model.displayName
@@ -646,35 +757,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
 
         do {
-            guard let bundlePath = appInfo.bundlePath() else {
-                throw CocoaError(.fileNoSuchFile)
+            let failedContainers = try Self.deleteAppFiles(configuration.model, removeDataFolders: shouldRemoveAppFolders) { [weak self] model in
+                self?.delegate.removeApp(app: model)
             }
-
-            let fileManager = FileManager.default
-            try fileManager.removeItem(atPath: bundlePath)
-            delegate.removeApp(app: configuration.model)
-
-            if shouldRemoveAppFolders {
-                // 逐个删容器：原来循环里任一 removeItem 抛错就进
-                // catch，App 已从列表消失，剩下的容器和钥匙串留在
-                // 磁盘上且不再属于任何条目。现单步失败不中断：文件
-                // 夹删失败的容器跳过钥匙串与名单清理（文件夹还在，
-                // 钥匙串与名单留着才对得上），最后汇总报一次。
-                var failedContainers: [String] = []
-                for container in containers {
-                    let dataUUID = container.folderName
-                    do {
-                        try fileManager.removeItem(at: LCPath.dataPath.appendingPathComponent(dataUUID))
-                    } catch {
-                        failedContainers.append(dataUUID)
-                        continue
-                    }
-                    LCUtils.removeAppKeychain(dataUUID: dataUUID)
-                    DataManager.shared.model.appDataFolderNames.removeAll { $0 == dataUUID }
-                }
-                if !failedContainers.isEmpty {
-                    showError("以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
-                }
+            if !failedContainers.isEmpty {
+                showError("以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
             }
         } catch {
             showError(error.localizedDescription)
