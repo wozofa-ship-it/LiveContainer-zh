@@ -4310,10 +4310,11 @@ struct SourcesPanelView: View {
             // 3.8.316：用户 20:22 截图——快捷行整体偏右，往左
             // 挪 4pt（稍微）。居中 Spacer 对称时视觉仍偏右，
             // 加号在末尾会把重心往右带一点。
+            // 3.8.317：用户 21:57 截图——还偏右，再往左挪 4pt。
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 8)
-            .offset(x: -4)
+            .offset(x: -8)
             .onAppear {
                 vpnCoreRunning = CZFVPNManager.shared.isRunning
                 CZFPanelCustomShortcuts.migrateIfNeeded()
@@ -5340,6 +5341,11 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
     case selectbackup
     case backupall
     case schedulebackup
+    // 3.8.317：快捷方式再加设置功能——插件/源/应用三
+    // 个主页面此前不在选单里，点开是同款 sheet。
+    case tweaks
+    case sources
+    case apps
 
     var id: String { rawValue }
 
@@ -5355,6 +5361,9 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .selectbackup: return "选择备份"
         case .backupall: return "备份全部"
         case .schedulebackup: return "定时备份"
+        case .tweaks: return "插件管理"
+        case .sources: return "源管理"
+        case .apps: return "应用管理"
         }
     }
 
@@ -5370,6 +5379,9 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .selectbackup: return "checkmark.circle.fill"
         case .backupall: return "doc.on.doc"
         case .schedulebackup: return "clock.fill"
+        case .tweaks: return "puzzlepiece"
+        case .sources: return "books.vertical"
+        case .apps: return "square.stack.3d.up.fill"
         }
     }
 
@@ -5386,6 +5398,9 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .selectbackup: LCDataManagementView(initialSheet: .backupSelect)
         case .backupall: LCDataManagementView(initialSheet: .backupAll)
         case .schedulebackup: LCDataManagementView(initialSheet: .scheduleBackup)
+        case .tweaks: LCTweaksView()
+        case .sources: LCSourcesView()
+        case .apps: LCAppListView()
         }
     }
 }

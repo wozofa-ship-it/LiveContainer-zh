@@ -924,6 +924,10 @@ struct LCDataManagementView : View {
                     }
                 }
             }
+            // 3.8.317：用户 21:54 截图——从面板图标打开恢复时，内层
+            // 恢复 sheet 顶部短一截（外层 sheet 还在呈现动画里就
+            // 弹了内层，按未落定的容器布局）。改大号定额，强制满高。
+            .presentationDetents([.large])
         }
         .sheet(isPresented: $showScheduleBackup) {
             NavigationView {
@@ -1067,9 +1071,12 @@ struct LCDataManagementView : View {
         // 3.8.313：直开某动作——只跑一次（关掉内层 sheet 后
         // 本页重现时不再重复弹）。包一层 async，让外层 sheet
         // 先落定再弹内层，避免两层 sheet 同帧抢呈现。
+        // 3.8.317：一个 runloop 不够——外层 sheet 呈现动画约
+        // 0.35 秒，内层在动画中途弹会按未落定的容器布局，
+        // 顶部短一截（用户 21:54 截图）。改 0.5 秒，等落定。
         if !didApplyInitialSheet, let sheet = initialSheet {
             didApplyInitialSheet = true
-            DispatchQueue.main.async {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 switch sheet {
                 case .restore:
                     self.showRestoreSelect = true
@@ -1486,11 +1493,23 @@ struct LCDataManagementView : View {
     /// 文件夹递归总大小（备份体积显示用，后台线程算）
     static func folderSize(_ url: URL) -> Int64 {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) else {
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey, .isDirectoryKey], options: [.skipsHiddenFiles]) else {
             return 0
         }
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
+            // 3.8.317：软链目录不跟进——枚举器默认会钻进软链指
+            // 向的目录，链回祖先就是死循环，统计永远算不完
+            // （用户 2026-11-06 21:46 真机实证：数据管理
+            // “正在统计…”一直卡住）。软链本身不计大小（目标
+            // 在树内由实路径计一次，树外本就不该计）。
+            if let values = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey]),
+               values.isSymbolicLink == true {
+                if values.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
             if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
                 total += Int64(size)
             }
@@ -1665,8 +1684,17 @@ struct LCDataManagementView : View {
     // 是 /var，直接拼会脏（v146 修过的同款坑）
     static func accumulateSizes(into map: inout [URL: Int64], folders: [URL], root: URL, fm: FileManager) {
         for folder in folders { map[folder] = 0 }
-        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) else { return }
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey, .isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
         for case let fileURL as URL in enumerator {
+            // 3.8.317：同 folderSize——软链目录不跟进，防链回
+            // 祖先的死循环把恢复 sheet 的按备份大小也卡死。
+            if let values = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey]),
+               values.isSymbolicLink == true {
+                if values.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
             guard let rel = Self.relativePath(of: fileURL, under: root),
                   let top = rel.split(separator: "/").first.map(String.init),
                   let folder = folders.first(where: { $0.lastPathComponent == top }) else { continue }

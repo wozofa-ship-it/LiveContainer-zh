@@ -38,8 +38,6 @@ struct LCTweakFolderView : View {
     // 左滑批量带数量），确认后才调 deleteTweakItem。
     @State private var pendingDeleteItem: LCTweakItem?
     @State private var showDeleteItemConfirm = false
-    @State private var pendingDeleteIndexSet: IndexSet?
-    @State private var showDeleteIndexSetConfirm = false
 
     @StateObject private var newFolderInput = InputHelper()
     
@@ -180,9 +178,20 @@ struct LCTweakFolderView : View {
                         }
                     }
 
-                }.onDelete { indexSet in
-                    pendingDeleteIndexSet = indexSet
-                    showDeleteIndexSetConfirm = true
+                    // 3.8.317：左滑删除改走 swipeActions——原来的
+                    // .onDelete 只弹确认框、不删数据，List 底层
+                    // UICollectionView 已按“删了 1 条”算，数据源
+                    // 仍是旧数，直接报 Invalid update（设置页 VPN
+                    // 节点删在用节点同款真机实证）。swipeActions
+                    // 的按钮不触发 List 自动删，点了才由代码删。
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            pendingDeleteItem = tweakItem
+                            showDeleteItemConfirm = true
+                        } label: {
+                            Label("lc.common.delete".loc, systemImage: "trash")
+                        }
+                    }
                 }
             } footer: {
                 if isRoot {
@@ -251,16 +260,6 @@ struct LCTweakFolderView : View {
                 pendingDeleteItem = nil
             }
             Button("lc.common.cancel".loc, role: .cancel) { pendingDeleteItem = nil }
-        } message: {
-            Text("删除后无法恢复")
-        }
-        // 左滑批量确认，带数量。
-        .alert("删除所选 \(pendingDeleteIndexSet?.count ?? 0) 个插件？", isPresented: $showDeleteIndexSetConfirm) {
-            Button("lc.common.delete".loc, role: .destructive) {
-                if let indexSet = pendingDeleteIndexSet { deleteTweakItem(indexSet: indexSet) }
-                pendingDeleteIndexSet = nil
-            }
-            Button("lc.common.cancel".loc, role: .cancel) { pendingDeleteIndexSet = nil }
         } message: {
             Text("删除后无法恢复")
         }

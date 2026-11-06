@@ -930,24 +930,31 @@ private struct CZFVPNNodeLabel: View {
                     .tint(.blue)
                     .disabled(vpnPinging || vpnSinglePinging)
                 }
-            }
-            .onDelete { offsets in
-                // 测速中左滑也禁删：.disabled 不一定挡得住
-                // List 的左滑删除，动作里再守一次，免得
-                // 测速中列表变了、结果下标错位。
-                guard !vpnPinging && !vpnSinglePinging else { return }
-                // 删在用节点先弹确认：manager 侧删在用
-                // 节点已改成停核心不自动切，界面再确认
-                // 一次，免得左滑手误把在用节点删了。
-                if offsets.contains(vpnActiveIndex) {
-                    pendingDeleteIndices = offsets.sorted()
-                    showDeleteActiveConfirm = true
-                } else {
-                    for i in offsets.sorted(by: >) {
-                        CZFVPNManager.shared.removeNode(at: i)
+                // 3.8.317：左滑删除改走 swipeActions 的删除钮——
+                // 原来的 .onDelete 删在用节点时只弹确认框、不删
+                // 数据，List 底层 UICollectionView 却已按“删了
+                // 1 条”去算（7-1=6），数据源仍是 7 条，直接报
+                // Invalid update（用户 2026-11-06 21:42 真机实
+                // 证）。swipeActions 的按钮不触发 List 自动删，
+                // 点了才由代码删数据，确认框再弹也安全。
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        guard !vpnPinging && !vpnSinglePinging else { return }
+                        // 删在用节点先弹确认：manager 侧删在用
+                        // 节点已改成停核心不自动切，界面再确认
+                        // 一次，免得左滑手误把在用节点删了。
+                        if index == vpnActiveIndex {
+                            pendingDeleteIndices = [index]
+                            showDeleteActiveConfirm = true
+                        } else {
+                            CZFVPNManager.shared.removeNode(at: index)
+                            vpnPingResults = [:]
+                            refreshVPNState()
+                        }
+                    } label: {
+                        Label("删除", systemImage: "trash")
                     }
-                    vpnPingResults = [:]
-                    refreshVPNState()
+                    .disabled(vpnPinging || vpnSinglePinging)
                 }
             }
             // 测速中节点行置灰：测速中点节点行只会把勾
