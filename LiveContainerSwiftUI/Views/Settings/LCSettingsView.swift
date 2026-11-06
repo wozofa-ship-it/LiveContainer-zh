@@ -227,7 +227,11 @@ struct LCSettingsView: View {
     @EnvironmentObject private var sharedModel : SharedModel
     
     @State private var isViewAppeared = false
-    
+
+    // 3.8.308：源面板直开某设置页——deepLink host 对上
+    // CZFSettingsPage 就弹对应页（sheet，不动导航栈）。
+    @State private var deepLinkSettingsPage: CZFSettingsPage? = nil
+
     let storeName = LCUtils.getStoreName()
     
     init() {
@@ -374,6 +378,20 @@ struct LCSettingsView: View {
             guard sharedModel.selectedTab == .settings, let link else { return }
             sharedModel.deepLink = nil
             handleURL(url: link)
+        }
+        // 3.8.308：源面板直开设置页（sheet，不动导航栈；
+        // 关掉后 deepLinkSettingsPage 清掉，下次还能再开）。
+        .sheet(item: $deepLinkSettingsPage) { page in
+            NavigationView {
+                page.destinationView
+                    .navigationTitle(page.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") { deepLinkSettingsPage = nil }
+                        }
+                    }
+            }
         }
         // 切回前台刷新核心状态：核心在后台被自动停、被别的
         // App 起停后，设置页按钮还是旧状态，下一按钮一刷新
@@ -1958,6 +1976,10 @@ private struct CZFVPNNodeLabel: View {
                 onSideStoreCertificateCallback(certificateData: certData, password: password)
                 
             }
+        } else if let host = url.host, let page = CZFSettingsPage(rawValue: host) {
+            // 3.8.308：源面板直开设置页——host 对上页标识就弹
+            // 对应页（sheet）；host 不认就只停在设置页。
+            deepLinkSettingsPage = page
         }
     }
 }

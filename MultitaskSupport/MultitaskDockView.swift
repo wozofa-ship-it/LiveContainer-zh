@@ -3762,8 +3762,12 @@ struct SourcesPanelView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
     @StateObject private var viewModel = AltStoreSourcesViewModel()
     @State private var errorMessage: String?
-    // 3.8.284：源面板搜索（与 App 面板同款）
-    @State private var searchText = ""
+    // 3.8.308：VPN 开关状态（CZFVPNManager 不是 ObservableObject，
+    // 读 isRunning 落 @State，打开面板时刷新一次、切完再刷新一次）
+    @State private var vpnCoreRunning: Bool = false
+    // 3.8.308：自定义设置快捷方式——点开选设置页（存 UserDefaults，
+    // 下次点直接开那页）；没配过时点开也是选页单。
+    @State private var showCustomSettingsPicker: Bool = false
 
     private func closePanel() {
         if let czfPanelClose = czfPanelClose {
@@ -3773,23 +3777,20 @@ struct SourcesPanelView: View {
         }
     }
 
-    // 3.8.284：源内应用按名字/包名筛，源名命中则整节保留；
-    // 加载中/失败的节不过滤（照常显示，见 hasSearchResult）
-    private func matchedApps(for source: AltStoreSource) -> [AltStoreSourceApp] {
-        if searchText.isEmpty { return source.apps }
-        if source.name.localizedCaseInsensitiveContains(searchText) { return source.apps }
-        return source.apps.filter { app in
-            app.name.localizedCaseInsensitiveContains(searchText) ||
-            app.bundleIdentifier.localizedCaseInsensitiveContains(searchText)
-        }
+    // 3.8.308：直开某设置页——先关面板、切到设置页签、
+    // 再把 deepLink 交给设置页（LCSettingsView.handleURL
+    // 按 host 弹对应页面；host 不认就只停在设置页）。
+    private func openSettingsPage(_ page: String) {
+        closePanel()
+        DataManager.shared.model.selectedTab = .settings
+        DataManager.shared.model.deepLink = URL(string: "livecontainer://\(page)")
     }
 
-    private var hasSearchResult: Bool {
-        if searchText.isEmpty { return true }
-        return viewModel.sources.contains { item in
-            guard let source = item.source else { return true }
-            return !matchedApps(for: source).isEmpty
-        }
+    // 3.8.308：源面板搜索已去掉（用户亲令），列表不再按名字/
+    // 包名筛——整节原样显示；matchedApps 只剩一个透传壳，
+    // 行里还调它，留着不动结构。
+    private func matchedApps(for source: AltStoreSource) -> [AltStoreSourceApp] {
+        return source.apps
     }
 
     // 3.8.284：源面板固定区图标点按启动（与源行“打开”同款：
@@ -3841,10 +3842,13 @@ struct SourcesPanelView: View {
         // 同款不用 NavigationView（空标题导航栏白占一条高度）；
         // 关面板走遮罩点按/下滑/收起钮，刷新走每次调出时
         // onChange 里的自动刷新（与 App 面板同款）。
+        // 3.8.308：搜索框去掉（用户亲令）；运行条只在有打开
+        // 的 App 时显示；搜索框的位置改成快捷开关行——VPN
+        // 开关 + 数据管理 + 自定义设置（可配，直开某设置页）。
         VStack(spacing: 0) {
             // 3.8.284：源面板与 App 面板一致——顶部固定区（复用
-            // PinnedAppsStripView，同一批固定 App）+ 搜索框，顺序
-            // 与 App 面板同款：固定区 → 运行条 → 搜索框 → 列表
+            // PinnedAppsStripView，同一批固定 App），顺序与 App
+            // 面板同款：固定区 → 运行条 → 快捷开关 → 列表
             // 3.8.291：源面板把源数据传进固定区——源固定项按
             // 包名在各源里找对应 App 解析，点按直接安装。
             PinnedAppsStripView(
@@ -3855,39 +3859,94 @@ struct SourcesPanelView: View {
                 },
                 onInstallSourceApp: { app in installFromPanel(app: app) }
             )
-            // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）
-            RunningAppsStripView { closePanel() }
-                .padding(.horizontal)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
-            // 搜索框（与 App 面板同款，固定在运行条下方、不随列表滚动）
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("搜索", text: $searchText)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-                if !searchText.isEmpty {
-                    Button { searchText = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+            // 运行条固定在顶部，不随列表滚动（与 App 面板一致）；
+            // 没打开的 App 时整条不显示，不占地方。
+            if !dockManager.apps.isEmpty {
+                RunningAppsStripView { closePanel() }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
+            }
+            // 快捷开关行（固定在运行条下方、不随列表滚动）
+            HStack(spacing: 10) {
+                // VPN 开关：起停核心（与设置页同款：先记手动
+                // 切换、再起/停、再刷新状态）
+                HStack(spacing: 6) {
+                    Image(systemName: "shield.fill")
+                        .foregroundColor(vpnCoreRunning ? .green : .secondary)
+                    Toggle("VPN", isOn: Binding(
+                        get: { vpnCoreRunning },
+                        set: { newValue in
+                            CZFVPNManager.shared.noteManualCoreToggle(started: newValue)
+                            if newValue {
+                                _ = CZFVPNManager.shared.start()
+                            } else {
+                                CZFVPNManager.shared.stop()
+                            }
+                            vpnCoreRunning = CZFVPNManager.shared.isRunning
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(UIColor.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                // 数据管理：直开数据管理设置页
+                Button {
+                    openSettingsPage("datamanagement")
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "externaldrive.fill")
+                        Text("数据管理")
                     }
                 }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .modifier { content in
-                // 3.8.289：搜索框玻璃（样板图同款）；非玻璃
-                // 系统走原来浅灰底 + 圆角。
-                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                    content.glassEffect(.regular, in: .rect(cornerRadius: 10))
-                } else {
-                    content.background(Color(UIColor.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(UIColor.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                // 自定义设置：点开配过的设置页；没配过或长按
+                // 改配（选页单里挑一个存下来，下次点直接开）
+                Button {
+                    if let page = CZFPanelCustomSettingsPage.current {
+                        openSettingsPage(page)
+                    } else {
+                        showCustomSettingsPicker = true
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "gearshape.fill")
+                        Text(CZFPanelCustomSettingsPage.currentName ?? "自定义")
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(UIColor.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .contextMenu {
+                    Button("更换设置页…") {
+                        showCustomSettingsPicker = true
+                    }
+                    if CZFPanelCustomSettingsPage.current != nil {
+                        Button("清除自定义", role: .destructive) {
+                            CZFPanelCustomSettingsPage.clear()
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
+            .onAppear {
+                vpnCoreRunning = CZFVPNManager.shared.isRunning
+            }
+        }
+        .sheet(isPresented: $showCustomSettingsPicker) {
+            CZFPanelCustomSettingsPicker { page in
+                CZFPanelCustomSettingsPage.set(page)
+                showCustomSettingsPicker = false
+                openSettingsPage(page)
+            }
         }
     }
 
@@ -3901,10 +3960,6 @@ struct SourcesPanelView: View {
                     Color.clear.frame(height: 0).id("czfSourcesPanelTop")
                     if viewModel.sources.isEmpty {
                         Text("还没有添加源")
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal)
-                    } else if !searchText.isEmpty && !hasSearchResult {
-                        Text("没有找到相关应用/源")
                             .foregroundColor(.secondary)
                             .padding(.horizontal)
                     }
@@ -3941,10 +3996,10 @@ struct SourcesPanelView: View {
             }
             .onChange(of: dockManager.czfSourcesPanelOpenCounter) { _ in
                 // 每次调出回到初始状态：滚回最顶部（用户定，
-                // 不留上次滑动的位置）+ 刷新源数据 + 搜索清空
-                //（与 App 面板同款）
+                // 不留上次滑动的位置）+ 刷新源数据 + 刷新 VPN
+                // 开关状态（与 App 面板同款）
                 proxy.scrollTo("czfSourcesPanelTop", anchor: .top)
-                searchText = ""
+                vpnCoreRunning = CZFVPNManager.shared.isRunning
                 Task { await viewModel.refreshAllSources() }
             }
             .alert("提示", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
@@ -4854,6 +4909,105 @@ extension UIWindow {
         // 包一层 #available，iOS 15 下跳过（管理器本身也不跑）。
         if #available(iOS 16.0, *) {
             MultitaskDockManager.czfHostOutwardObserve(window: self, event: event)
+        }
+    }
+}
+
+// MARK: - 3.8.308：源面板自定义设置快捷方式
+// 可直开的设置页（deepLink host 与这里 rawValue 一一对应；
+// LCSettingsView.handleURL 按 host 弹对应页）。
+enum CZFSettingsPage: String, CaseIterable, Identifiable {
+    case datamanagement
+    case multitask
+    case jit
+    case multilc
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .datamanagement: return "数据管理"
+        case .multitask: return "多任务设置"
+        case .jit: return "JIT 诊断"
+        case .multilc: return "多开管理"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .datamanagement: return "externaldrive.fill"
+        case .multitask: return "rectangle.stack"
+        case .jit: return "wrench.and.screwdriver"
+        case .multilc: return "apps.iphone"
+        }
+    }
+
+    @ViewBuilder
+    var destinationView: some View {
+        switch self {
+        case .datamanagement: LCDataManagementView()
+        case .multitask: LCMultitaskSettingView()
+        case .jit: LCJITLessDiagnoseView()
+        case .multilc: LCMultiLCManagementView()
+        }
+    }
+}
+
+// 3.8.308：自定义设置快捷方式存哪个页（UserDefaults，
+// 不新开键以外的落盘；值是 CZFSettingsPage 的 rawValue）。
+enum CZFPanelCustomSettingsPage {
+    static let key = "CZFPanelCustomSettingsPage"
+
+    static var current: String? {
+        UserDefaults.standard.string(forKey: key)
+    }
+
+    static var currentName: String? {
+        guard let id = current else { return nil }
+        return CZFSettingsPage(rawValue: id)?.title
+    }
+
+    static func set(_ page: String) {
+        UserDefaults.standard.set(page, forKey: key)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
+
+// 3.8.308：自定义设置选页单——列出可直开的设置页，
+// 点一个就存下来并马上打开那页。
+@available(iOS 16.0, *)
+private struct CZFPanelCustomSettingsPicker: View {
+    let onPick: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            List(CZFSettingsPage.allCases) { page in
+                Button {
+                    onPick(page.rawValue)
+                } label: {
+                    HStack {
+                        Image(systemName: page.icon)
+                            .foregroundColor(.blue)
+                        Text(page.title)
+                        Spacer()
+                        if CZFPanelCustomSettingsPage.current == page.rawValue {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("自定义设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
         }
     }
 }
