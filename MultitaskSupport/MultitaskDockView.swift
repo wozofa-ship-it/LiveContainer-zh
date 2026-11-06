@@ -3271,6 +3271,19 @@ struct PinnedAppsStripView: View {
                             pinnedIcon(for: item)
                                 .frame(width: 40, height: 40)
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
+                                .modifier { content in
+                                    // 3.8.298：固定区图标发糊的根因——面板包在
+                                    // GlassEffectContainer 里，没挂 glassEffect
+                                    // 的子视图会被当成 backdrop 模糊掉；搜索框/
+                                    // 列表行/运行条都有玻璃所以清晰。给固定图标
+                                    // 也挂玻璃（圆角 12 与 clipShape 同形），
+                                    // 图标本身保持清晰；非玻璃系统原样。
+                                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                                        content.glassEffect(.regular, in: .rect(cornerRadius: 12))
+                                    } else {
+                                        content
+                                    }
+                                }
                                 .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
