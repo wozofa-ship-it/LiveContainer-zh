@@ -581,6 +581,7 @@ struct LCSourcesView: View {
                                     onInstall: install(app:),
                                     onInstallAsNew: installAsNew(app:),
                                     onDownload: download(app:),
+                                    onDownloadVersion: downloadVersion(url:),
                                     onRemove: { sourcePendingRemoval = item },
                                     toggleExpanded: { toggleExpansion(for: item.id) },
                                     isBatchMode: isBatchMode,
@@ -927,6 +928,15 @@ struct LCSourcesView: View {
             errorMessage = "lc.sources.error.missingDownload".loc
             return
         }
+        downloadVersion(url: downloadURL)
+    }
+
+    // 3.8.307：源详情页历史版本下载——指定任意版本 URL
+    // 下载（不只 latest）。与 download(app:) 同款流程：
+    // hostSession 下到文稿目录，再弹分享框；失败走 errorMessage。
+    // download(app:) 已改走它，行为不变。
+    @MainActor
+    private func downloadVersion(url downloadURL: URL) {
         Task {
             do {
                 let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: downloadURL)
@@ -1129,6 +1139,9 @@ private struct AltStoreSourceSectionView: View {
     let onInstall: (AltStoreSourceApp) -> Void
     let onInstallAsNew: (AltStoreSourceApp) -> Void
     let onDownload: (AltStoreSourceApp) -> Void
+    // 3.8.307：详情页历史版本下载——指定版本 URL 下
+    //（onDownload 只下最新版，历史版本走这条）。
+    let onDownloadVersion: (URL) -> Void
     let onRemove: () -> Void
     let toggleExpanded: () -> Void
     let isBatchMode: Bool
@@ -1198,7 +1211,7 @@ private struct AltStoreSourceSectionView: View {
             } else if let source = item.source, isExpanded || isFiltering {
                 VStack(spacing: 12) {
                     ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))]) { app in
-                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
+                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
                     }
                     if filteredApps.isEmpty {
                         if source.apps.isEmpty || isFiltering {
@@ -1233,6 +1246,8 @@ private struct LCSourceAppBanner: View {
     let installAction: (AltStoreSourceApp) -> Void
     let installAsNewAction: (AltStoreSourceApp) -> Void
     let downloadAction: (AltStoreSourceApp) -> Void
+    // 3.8.307：详情页历史版本下载（指定版本 URL）。
+    let downloadVersionAction: (URL) -> Void
     let isBatchMode: Bool
     let isSelected: Bool
     let onToggleSelect: () -> Void
@@ -1553,7 +1568,7 @@ private struct LCSourceAppBanner: View {
             }
         }
         .sheet(isPresented: $showDetail) {
-            LCSourceAppDetailView(app: app, source: source)
+            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: downloadVersionAction)
         }
         .sheet(isPresented: $showInstancePicker) {
             NavigationView {
@@ -1585,6 +1600,8 @@ private struct LCSourceAppBanner: View {
 private struct LCSourceAppDetailView: View {
     let app: AltStoreSourceApp
     let source: AltStoreSource
+    // 3.8.307：历史版本下载——点版本行下载该版本的 URL。
+    let onDownloadVersion: (URL) -> Void
     @Environment(\.dismiss) private var dismiss
 
     // 从描述或下载链接里找 GitHub 地址
@@ -1639,32 +1656,48 @@ private struct LCSourceAppDetailView: View {
                             .font(.callout)
                     }
                 }
+                // 3.8.307：版本行可点下载——原来只是展示，
+                // 点了没反应。先关详情单再下载：分享框从
+                // rootVC 弹出，不与详情单叠在一起（与源面
+                // 板历史版本单同款）。
                 Section(header: Text("版本信息")) {
                     ForEach(app.versions) { version in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(version.version)
-                                .font(.subheadline).bold()
-                            if let date = version.releaseDate {
-                                Text(date, style: .date)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                        Button {
+                            dismiss()
+                            onDownloadVersion(version.downloadURL)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(version.version)
+                                    .font(.subheadline).bold()
+                                if let date = version.releaseDate {
+                                    Text(date, style: .date)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                if let size = version.size {
+                                    Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                if let vdesc = version.localizedDescription, !vdesc.isEmpty {
+                                    Text(vdesc)
+                                        .font(.caption)
+                                }
                             }
-                            if let size = version.size {
-                                Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            if let vdesc = version.localizedDescription, !vdesc.isEmpty {
-                                Text(vdesc)
-                                    .font(.caption)
-                            }
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
+                        .buttonStyle(.plain)
                     }
                 }
                 if let downloadURL = app.latestVersion?.downloadURL {
                     Section(header: Text("下载地址")) {
-                        Link(destination: downloadURL) {
+                        // 3.8.307：下载地址改走应用内下载——原来
+                        // 是 Link，点开 Safari 下不了 IPA；现在
+                        // 点一下直接下最新版（与行上下载同款）。
+                        Button {
+                            dismiss()
+                            onDownloadVersion(downloadURL)
+                        } label: {
                             HStack {
                                 Image(systemName: "arrow.down.circle")
                                 Text(downloadURL.absoluteString)
@@ -1672,6 +1705,8 @@ private struct LCSourceAppDetailView: View {
                                     .lineLimit(2)
                             }
                         }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.blue)
                     }
                 }
                 if let githubURL {

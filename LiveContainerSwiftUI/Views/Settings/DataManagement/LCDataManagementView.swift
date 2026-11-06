@@ -106,6 +106,11 @@ struct LCDataManagementView : View {
     // 备份/恢复进行中的进度文案（第几个、当前哪个 App）：
     // 以前全程黑盒，GB 级备份只能干等、卡没卡都不知道
     @State private var backupRestoreProgress: String? = nil
+    // 3.8.307：恢复列表排序/筛选——0=时间（新→旧）、1=名字
+    // （A→Z）；只看登录态是筛选（manifest scope == "login"）。
+    // @State 不落盘，每次打开恢复 sheet 都是默认态。
+    @State private var backupSortMode: Int = 0
+    @State private var backupLoginOnlyFilter: Bool = false
     @State private var showBackupSelect = false
     @State private var backupSelectedIDs = Set<String>()
     @State private var showBackupScopeDialog = false
@@ -596,6 +601,27 @@ struct LCDataManagementView : View {
                 // “选哪个文件夹”再进单源列表；文件夹选择与
                 // 换机迁移放最顶上（3.8.282）
                 List {
+                    // 3.8.307：一键恢复全部挪到列表顶部单独一行
+                    //（原来藏在工具栏“全部”菜单里，翻半天才找
+                    // 到）；副标题写清恢复的是全部本地备份。
+                    Section {
+                        Button {
+                            showRestoreSelect = false
+                            pendingRestoreURL = nil
+                            pendingRestoreAll = true
+                            showRestoreScopeDialog = true
+                        } label: {
+                            HStack {
+                                LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("一键恢复全部")
+                                    Text("恢复全部本地备份（本地 + iCloud）")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
                     // 3.8.282：选文件夹与换机迁移都放最顶上
                     //（用户 2026-11-06 亲令：文件夹选择原来在
                     // iCloud 区最底下、迁移向导在 sheet 最底下，
@@ -629,21 +655,50 @@ struct LCDataManagementView : View {
                             }
                         }
                     }
+                    // 3.8.307：恢复列表排序/筛选——时间（新→旧）
+                    // / 名字（A→Z）二选一 + 只看登录态开关。
+                    Section {
+                        Picker("排序", selection: $backupSortMode) {
+                            Text("时间").tag(0)
+                            Text("名字").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+                        Toggle("只看登录态", isOn: $backupLoginOnlyFilter)
+                    }
+                    // 3.8.307：两边都空时给空状态 + 去备份按钮
+                    //（原来每区各一句“暂无备份”，没处可点）。
+                    if backupFolderList.isEmpty && externalBackupFolderList.isEmpty {
+                        Section {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("还没有备份")
+                                    .font(.headline)
+                                Text("先备份一次，恢复时才能在这里选")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Button("去备份") {
+                                    showRestoreSelect = false
+                                    pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
+                                    showBackupScopeDialog = true
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
                     Section("本地备份") {
-                        if backupFolderList.isEmpty {
-                            Text("暂无备份")
+                        if sortedLocalBackups.isEmpty {
+                            Text(backupFolderList.isEmpty ? "暂无备份" : "没有符合筛选的备份")
                                 .foregroundColor(.secondary)
                         }
-                        ForEach(backupFolderList, id: \.self) { folderURL in
+                        ForEach(sortedLocalBackups, id: \.self) { folderURL in
                             restoreRow(for: folderURL)
                         }
                     }
                     Section("iCloud 备份") {
-                        if externalBackupFolderList.isEmpty {
-                            Text("暂无备份")
+                        if sortedExternalBackups.isEmpty {
+                            Text(externalBackupFolderList.isEmpty ? "暂无备份" : "没有符合筛选的备份")
                                 .foregroundColor(.secondary)
                         }
-                        ForEach(externalBackupFolderList, id: \.self) { folderURL in
+                        ForEach(sortedExternalBackups, id: \.self) { folderURL in
                             restoreRow(for: folderURL)
                         }
                     }
@@ -678,14 +733,6 @@ struct LCDataManagementView : View {
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Menu {
-                            Button {
-                                showRestoreSelect = false
-                                pendingRestoreURL = nil
-                                pendingRestoreAll = true
-                                showRestoreScopeDialog = true
-                            } label: {
-                                Label("一键恢复全部", systemImage: "arrow.clockwise.circle")
-                            }
                             Button {
                                 showSelectBackups = true
                             } label: {
@@ -728,7 +775,9 @@ struct LCDataManagementView : View {
                         pendingDeleteBackupURL = nil
                     }
                 } message: {
-                    Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」，此操作不可恢复")
+                    // 3.8.307：写清本地 + iCloud 份一起删（306
+                    // 起单删就两边都清，文案不写用户以为只删一边）
+                    Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」（本地 + iCloud 份一起删），此操作不可恢复")
                 }
                 // iCloud 未设时在 sheet 内直接选文件夹：选完
                 // 刷新 iCloud 列表 + 体积，不用关 sheet 重进
@@ -774,7 +823,7 @@ struct LCDataManagementView : View {
                 // sheet 内再叠一层 sheet（与文件夹 picker、清
                 // 单预览同款嵌套，不关恢复 sheet；“删除”先弹
                 // 自己的确认框再删，锁了的跳过并报数；“恢复”
-                // 走范围弹窗，一键恢复全部仍在工具栏菜单里）
+                // 走范围弹窗，一键恢复全部已挪到列表顶部单独一行）
                 .sheet(isPresented: $showSelectBackups) {
                     NavigationView {
                         List {
@@ -851,7 +900,10 @@ struct LCDataManagementView : View {
                             }
                             Button("lc.common.cancel".loc, role: .cancel) {}
                         } message: {
-                            Text("将删除所选的 \(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.count) 个备份，已锁定的不会删，此操作不可恢复")
+                            // 3.8.307：写清本地 + iCloud 份一起删
+                            //（306 起多选删就两边都清，文案不写
+                            // 用户以为只删一边）
+                            Text("将删除所选的 \(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.count) 个备份（本地 + iCloud 份一起删），已锁定的不会删，此操作不可恢复")
                         }
                     }
                 }
@@ -1670,6 +1722,26 @@ struct LCDataManagementView : View {
         return parts.joined(separator: " · ")
     }
 
+    // 3.8.307：恢复列表排序/筛选——时间按 manifest backupDate
+    // 倒序（新→旧，字符串本身是 yyyy-MM-dd HH:mm，字典序即
+    // 时间序）；名字按文件夹名不区分大小写；只看登录态按
+    // manifest scope == "login"。每行 manifest 只读一次，
+    // 列表几十个以内，现场读够用。
+    private func applyBackupSortFilter(to folders: [URL]) -> [URL] {
+        var list = folders
+        if backupLoginOnlyFilter {
+            list = list.filter { Self.manifestInfo(of: $0)?.scope == "login" }
+        }
+        if backupSortMode == 1 {
+            list.sort { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        } else {
+            list.sort { (Self.manifestInfo(of: $0)?.backupDate ?? "") > (Self.manifestInfo(of: $1)?.backupDate ?? "") }
+        }
+        return list
+    }
+    private var sortedLocalBackups: [URL] { applyBackupSortFilter(to: backupFolderList) }
+    private var sortedExternalBackups: [URL] { applyBackupSortFilter(to: externalBackupFolderList) }
+
     @ViewBuilder
     func restoreRow(for folderURL: URL) -> some View {
         HStack {
@@ -1724,12 +1796,18 @@ struct LCDataManagementView : View {
             // 3.8.282：锁开关放行上（不只左滑）：用户说“锁定备份
             // 开关没看到”——左滑才有的入口太藏，行内直接给一个
             // 锁钮（橙=已锁，灰=未锁），点一下即锁/解锁
+            // 3.8.307：三个按钮都加大触摸区——锁钮给 44pt
+            // 最小边（图标小但手能点中），恢复/导出用大号
+            // 控件，行内按钮不再挤在一起误点
             Button {
                 toggleBackupLock(folderName: folderURL.lastPathComponent)
             } label: {
                 Image(systemName: lockedBackupNames.contains(folderURL.lastPathComponent) ? "lock.fill" : "lock.open")
                     .foregroundColor(lockedBackupNames.contains(folderURL.lastPathComponent) ? .orange : .secondary)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             Button {
                 showRestoreSelect = false
                 pendingRestoreURL = folderURL
@@ -1743,6 +1821,7 @@ struct LCDataManagementView : View {
                 .foregroundColor(.blue)
             }
             .buttonStyle(.bordered)
+            .controlSize(.large)
             Button {
                 presentExportPicker(for: folderURL)
             } label: {
@@ -1753,6 +1832,7 @@ struct LCDataManagementView : View {
                 .foregroundColor(.blue)
             }
             .buttonStyle(.bordered)
+            .controlSize(.large)
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
@@ -2150,7 +2230,14 @@ struct LCDataManagementView : View {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
-        backupRestoreProgress = "正在备份（0/\(apps.count)）…"
+        // 初始进度也写清第一个 App 的名字（循环里每 App 都会
+        // 刷新，0/N 那个空名只闪一下也别留）
+        if let first = apps.first {
+            let firstName = first.appInfo.displayName() ?? first.appInfo.bundleIdentifier() ?? "Unknown"
+            backupRestoreProgress = "正在备份 \(firstName)（1/\(apps.count)）"
+        } else {
+            backupRestoreProgress = "正在备份（0/\(apps.count)）…"
+        }
         // 拷贝重活整体挪到后台队列：原来这段在打开页面触发定时备份时
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
