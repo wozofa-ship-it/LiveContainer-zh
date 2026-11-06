@@ -128,6 +128,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State private var vpnPingMessage: String?
     @State private var batchSelectedIDs: Set<String> = []
     @State private var batchDeleteConfirm = false
+    // 3.8.302：批量备份范围单开关——App 页多选备份原来点“备份”
+    // 就直接跑完整备份、从不问范围（用户 300 真机报“只显示备份
+    // 成功，没显示登录态还是完整备份”）；点备份先弹范围单，
+    // 选了范围再跑，结果里也写明范围。
+    @State private var batchBackupScopeConfirm = false
     @State private var batchBusy = false
 
     private var selectedBatchApps: [LCAppModel] {
@@ -412,7 +417,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 单个失败不 abort 整批（backupApps 同款）；拷贝重活放
     // 后台队列，主线程不卡。收尾同款：同步到外部备份文件夹 +
     // 刷新设置备份。跑完退出多选模式。
-    private func batchBackup() async {
+    // 3.8.302：范围由调用方从范围单里选了再传进来（原来无参、
+    // 默认完整备份，从不问范围）。
+    private func batchBackup(loginOnly: Bool) async {
         let apps = selectedBatchApps
         guard !apps.isEmpty else { return }
         batchBusy = true
@@ -444,7 +451,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     }
                     let hadBackup = fm.fileExists(atPath: backupRoot.appendingPathComponent(fname).path)
                     do {
-                        let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm)
+                        let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
                         ok.append(one.folderName)
                         if hadBackup { overwritten += 1 }
                     } catch {
@@ -466,7 +473,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
             errorShow = true
         } else {
-            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n"))
+            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (loginOnly ? "（只备份登录态）" : "（完整备份）") + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n"))
             installInfoShow = true
         }
         batchMode = false
@@ -862,7 +869,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         .font(.subheadline)
                     Spacer()
                     Button("备份") {
-                        Task { await batchBackup() }
+                        // 3.8.302：先弹范围单再跑（原来直接跑完整备份）。
+                        batchBackupScopeConfirm = true
                     }
                     .disabled(batchSelectedIDs.isEmpty || batchBusy)
                     // 3.8.281：勾中的全是隐藏 App 时按钮变“恢复显示”
@@ -902,6 +910,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Task { await batchDelete(removeDataFolders: true) }
             }
             Button("取消", role: .cancel) { }
+        }
+        // 3.8.302：批量备份范围单（与数据管理页“备份范围”单同款
+        // 两选项 + 同款说明）；选了范围才跑 batchBackup，取消不跑。
+        .confirmationDialog("备份范围", isPresented: $batchBackupScopeConfirm, titleVisibility: .visible) {
+            Button("只备份登录态") {
+                Task { await batchBackup(loginOnly: true) }
+            }
+            Button("完整备份（数据 + 登录态）") {
+                Task { await batchBackup(loginOnly: false) }
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .alert("lc.common.error".loc, isPresented: $errorShow){
