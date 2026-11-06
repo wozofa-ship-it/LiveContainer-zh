@@ -3223,6 +3223,25 @@ struct PinnedAppsStripView: View {
             return nil
         }.filter { item in seenKeys.insert(item.pinKey).inserted }
     }
+    // 3.8.298：固定区图标发糊的根因——面板包在 GlassEffectContainer
+    // 里，没挂 glassEffect 的子视图会被当成 backdrop 模糊掉；搜索框/
+    // 列表行/运行条都有玻璃所以清晰。给固定图标也挂玻璃（圆角 12 与
+    // clipShape 同形），图标本身保持清晰。
+    // 3.8.300：不用 .modifier { content in }——298/299 两版都栽在它
+    // 上面：pinnedIcon 返的是 @ViewBuilder 的 some View，链上
+    // .frame/.clipShape 后 Self 是包着不透明类型的 ModifiedContent，
+    // 自定义 modifier 扩展推不出闭包参数 content 的类型（四条红字
+    // 两版一模一样，else 改透明底也没救，根因不在 else）。改成普通
+    // @ViewBuilder 泛型函数，参数类型由实参显式推断，不靠闭包推断。
+    @ViewBuilder
+    private func pinnedIconGlass<Content: View>(_ content: Content) -> some View {
+        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+            content.glassEffect(.regular, in: .rect(cornerRadius: 12))
+        } else {
+            content
+        }
+    }
+
     // 3.8.291：固定区图标——已装走 RunningAppIcon，源固定项
     // 走 iconURL 的 AsyncImage（与源行同款写法）。
     @ViewBuilder
@@ -3268,28 +3287,11 @@ struct PinnedAppsStripView: View {
                             // 按住拖动换位（用户 2026-11-03 定）：iOS
                             // 的 onDrag 本来就要按住才起拖，与点按不
                             // 冲突；拖过目标即换位，松手即定。
-                            pinnedIcon(for: item)
-                                .frame(width: 40, height: 40)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                                .modifier { content in
-                                    // 3.8.298：固定区图标发糊的根因——面板包在
-                                    // GlassEffectContainer 里，没挂 glassEffect
-                                    // 的子视图会被当成 backdrop 模糊掉；搜索框/
-                                    // 列表行/运行条都有玻璃所以清晰。给固定图标
-                                    // 也挂玻璃（圆角 12 与 clipShape 同形），
-                                    // 图标本身保持清晰。
-                                    // 3.8.299：else 不能直接返裸 content——
-                                    // 裸 content 让编译器推不出闭包参数类型
-                                    // （298 四条红字全是它；搜索框/行/运行条
-                                    // 的 else 都返改过后的视图才能编）。非玻
-                                    // 璃系统用透明底（看不见，只为让两边都
-                                    // 是改过后的视图类型），图标原样。
-                                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                                        content.glassEffect(.regular, in: .rect(cornerRadius: 12))
-                                    } else {
-                                        content.background(Color.clear)
-                                    }
-                                }
+                            pinnedIconGlass(
+                                pinnedIcon(for: item)
+                                    .frame(width: 40, height: 40)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                            )
                                 .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
