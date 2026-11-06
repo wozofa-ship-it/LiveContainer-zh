@@ -285,6 +285,20 @@ class LCAppModel: ObservableObject, Hashable {
             other.uiContainers.contains { $0.folderName == sharedFolder }
         }
         guard isSharedWithOther else { return }
+        // 拆分换容器时把待恢复的钥匙串排队文件一起带过去：
+        // 恢复只把 CZFKeychainImport.plist 写进恢复时已有的容器，
+        // 启动若切到别的容器（复用旧的或新建的），文件留在旧容器
+        // 里、桥在新容器里看不到，imported=0/0、登录回不来——
+        // 多开 App 时好时坏的根因之一。文件跟启动走；目标已有
+        // 文件时不动（恢复时已写过一份），只补缺的。
+        let carryPendingKeychainImport: (LCContainer) -> Void = { newContainer in
+            let fm = FileManager.default
+            let src = selected.containerURL.appendingPathComponent("CZFKeychainImport.plist")
+            let dst = newContainer.containerURL.appendingPathComponent("CZFKeychainImport.plist")
+            if fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) {
+                try? fm.moveItem(at: src, to: dst)
+            }
+        }
         // 旧数据归先装的那一个：先装的条目不拆、继续用旧容器，
         // 后装的条目才拆到新容器，不然先启动的那个反而丢了
         // 旧数据、后启动的那个却捡了旧数据，完全反了。先按
@@ -316,6 +330,7 @@ class LCAppModel: ObservableObject, Hashable {
             uiSelectedContainer = own
             uiDefaultDataFolder = own.folderName
             appInfo.dataUUID = own.folderName
+            carryPendingKeychainImport(own)
             return
         }
         let newName = NSUUID().uuidString
@@ -329,6 +344,7 @@ class LCAppModel: ObservableObject, Hashable {
         newContainer.makeLCContainerInfoPlist(appIdentifier: bundleIdentifier, keychainGroupId: group)
         appInfo.dataUUID = newName
         uiDefaultDataFolder = newName
+        carryPendingKeychainImport(newContainer)
     }
     private func czfIsolateMultiOpenContainersIfNeeded() {
         guard !czfOtherSameBundleApps().isEmpty else { return }
