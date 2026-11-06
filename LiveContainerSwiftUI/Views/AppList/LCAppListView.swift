@@ -133,7 +133,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 成功，没显示登录态还是完整备份”）；点备份先弹范围单，
     // 选了范围再跑，结果里也写明范围。
     @State private var batchBackupScopeConfirm = false
+    // 批量恢复范围单开关（同款：先弹范围单再跑）。
+    @State private var batchRestoreScopeConfirm = false
     @State private var batchBusy = false
+    // 每行备份状态：实例唯一 ID → “已备份 · 日期”/“无备份”，
+    // 进页时一次扫完 Backups 目录算好，行上只查表不扫盘；
+    // 批量备份/恢复跑完后刷新。
+    @State private var backupStatusByID: [String: String] = [:]
 
     private var selectedBatchApps: [LCAppModel] {
         // 3.8.281：隐藏 App 也进批量勾选范围（原来只看可见 App，
@@ -162,6 +168,77 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             batchSelectedIDs.remove(id)
         } else {
             batchSelectedIDs.insert(id)
+        }
+    }
+
+    // 全选用的当前列表：可见 App + 已解锁的隐藏 App（搜
+    // 索时只含搜到的）；全选只动这些，不动列表外的。
+    private var batchCurrentList: [LCAppModel] {
+        filteredApps + (sharedModel.isHiddenAppUnlocked ? filteredHiddenApps : [])
+    }
+    private var batchAllSelected: Bool {
+        !batchCurrentList.isEmpty && batchCurrentList.allSatisfy { app in
+            guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
+            return batchSelectedIDs.contains(id)
+        }
+    }
+    private func toggleBatchSelectAll() {
+        if batchAllSelected {
+            for app in batchCurrentList {
+                if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
+                    batchSelectedIDs.remove(id)
+                }
+            }
+        } else {
+            for app in batchCurrentList {
+                if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
+                    batchSelectedIDs.insert(id)
+                }
+            }
+        }
+    }
+
+    // 每行备份状态：一次扫完 Backups 目录（每文件夹只读一次
+    // manifest），按 dataUUID 建表；没对上的按显示名+包名
+    // 兜底（与 backupFolderName 的认领同款优先级，显示用）；
+    // 扫盘放后台，查表写表回主线程，行上只查表。
+    private func refreshBackupStatus() {
+        Task.detached {
+            let fm = FileManager.default
+            guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            let backupRoot = docsURL.appendingPathComponent("Backups")
+            var byUUID: [String: String] = [:]
+            var byNameBid: [String: String] = [:]
+            if let folders = try? fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil) {
+                for folder in folders {
+                    guard let info = LCDataManagementView.manifestInfo(of: folder), !info.backupDate.isEmpty else { continue }
+                    if !info.dataUUID.isEmpty {
+                        byUUID[info.dataUUID] = info.backupDate
+                    }
+                    if !info.displayName.isEmpty && !info.bundleID.isEmpty {
+                        byNameBid["\(info.displayName)|\(info.bundleID)"] = info.backupDate
+                    }
+                }
+            }
+            let byUUIDCopy = byUUID
+            let byNameBidCopy = byNameBid
+            await MainActor.run {
+                var table: [String: String] = [:]
+                for app in sharedModel.apps + sharedModel.hiddenApps {
+                    guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { continue }
+                    let uuid = app.appInfo.dataUUID ?? ""
+                    let name = app.appInfo.displayName() ?? ""
+                    let bid = app.appInfo.bundleIdentifier() ?? ""
+                    if !uuid.isEmpty, let date = byUUIDCopy[uuid] {
+                        table[id] = "已备份 · \(date)"
+                    } else if let date = byNameBidCopy["\(name)|\(bid)"] {
+                        table[id] = "已备份 · \(date)"
+                    } else {
+                        table[id] = "无备份"
+                    }
+                }
+                backupStatusByID = table
+            }
         }
     }
 
@@ -391,42 +468,69 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 新4（3.8.277）：一行 App 的显示。多选模式时行首挂勾选圈，
     // 整行点按即勾选（透明遮罩盖住横幅，免得点到启动按钮）；
     // 平时按优2挂拖拽（无搜索时），搜索时 plain 行。
+    // 行下备份状态小字：查 refreshBackupStatus 建的表，
+    // 表还没算好时不显示（不闪“无备份”）。
+    @ViewBuilder
+    private func backupStatusCaption(for app: LCAppModel) -> some View {
+        if let id = sharedAppSortManager.getUniqueIdentifier(for: app),
+           let status = backupStatusByID[id] {
+            HStack(spacing: 4) {
+                Image(systemName: status == "无备份" ? "externaldrive.badge.questionmark" : "externaldrive.fill")
+                    .font(.caption2)
+                Text(status)
+                    .font(.caption)
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+        }
+    }
+
     @ViewBuilder
     private func appRow(for app: LCAppModel) -> some View {
         if batchMode {
-            HStack(spacing: 8) {
-                Button { toggleBatchSelection(app) } label: {
-                    Image(systemName: isBatchSelected(app) ? "checkmark.circle.fill" : "circle")
-                        .font(.title2)
-                        .foregroundColor(isBatchSelected(app) ? .accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-                LCAppBanner(appModel: app, delegate: self)
-                    .frame(maxWidth: .infinity)
-                    .overlay {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { toggleBatchSelection(app) }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Button { toggleBatchSelection(app) } label: {
+                        Image(systemName: isBatchSelected(app) ? "checkmark.circle.fill" : "circle")
+                            .font(.title2)
+                            .foregroundColor(isBatchSelected(app) ? .accentColor : .secondary)
                     }
+                    .buttonStyle(.plain)
+                    LCAppBanner(appModel: app, delegate: self)
+                        .frame(maxWidth: .infinity)
+                        .overlay {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture { toggleBatchSelection(app) }
+                        }
+                }
+                backupStatusCaption(for: app)
             }
         } else if searchContext.debouncedQuery.isEmpty {
             // 优2：无搜索时行可长按拖动重排（搜索时显示是
             // 子集，拖了会丢位置，所以不挂拖拽）。
-            LCAppBanner(appModel: app, delegate: self)
-                .onDrag {
-                    if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
-                        dragReorderID = id
-                        return NSItemProvider(object: id as NSString)
+            VStack(alignment: .leading, spacing: 2) {
+                LCAppBanner(appModel: app, delegate: self)
+                    .onDrag {
+                        if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
+                            dragReorderID = id
+                            return NSItemProvider(object: id as NSString)
+                        }
+                        return NSItemProvider()
                     }
-                    return NSItemProvider()
-                }
-                .onDrop(of: [.text], delegate: LCAppReorderDropDelegate(
-                    targetApp: app,
-                    draggedID: { dragReorderID },
-                    commit: { dragged, target in commitDragReorder(draggedID: dragged, targetApp: target) }
-                ))
+                    .onDrop(of: [.text], delegate: LCAppReorderDropDelegate(
+                        targetApp: app,
+                        draggedID: { dragReorderID },
+                        commit: { dragged, target in commitDragReorder(draggedID: dragged, targetApp: target) }
+                    ))
+                backupStatusCaption(for: app)
+            }
         } else {
-            LCAppBanner(appModel: app, delegate: self)
+            VStack(alignment: .leading, spacing: 2) {
+                LCAppBanner(appModel: app, delegate: self)
+                backupStatusCaption(for: app)
+            }
         }
     }
 
@@ -527,6 +631,61 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         batchMode = false
         batchSelectedIDs.removeAll()
+        refreshBackupStatus()
+    }
+
+    // 批量恢复：多选的 App 各找自己的备份文件夹，有备份的
+    // 调 restoreOneApp（静态，数据管理页同款），没备份的
+    // 记“无备份”跳过；单个失败不 abort 整批，跑完汇总报数；
+    // 跑完刷新每行备份状态。
+    private func batchRestore(loginOnly: Bool) async {
+        let apps = selectedBatchApps
+        guard !apps.isEmpty else { return }
+        batchBusy = true
+        defer { batchBusy = false }
+        let fm = FileManager.default
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            errorInfo = "lc.settings.backupFail".loc
+            errorShow = true
+            return
+        }
+        let backupRoot = docsURL.appendingPathComponent("Backups")
+        var ok: [String] = []
+        var failed: [String] = []
+        var noBackup: [String] = []
+        for app in apps {
+            let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+            let folderName = LCDataManagementView.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
+            let folderURL = backupRoot.appendingPathComponent(folderName)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: folderURL.path, isDirectory: &isDir), isDir.boolValue else {
+                noBackup.append(name)
+                continue
+            }
+            do {
+                let outcome = try await LCDataManagementView.restoreOneApp(appFolder: folderURL, app: app, loginOnly: loginOnly)
+                if outcome.ok {
+                    ok.append(name)
+                } else {
+                    failed.append("\(name)：恢复未完成")
+                }
+            } catch {
+                failed.append("\(name)：\(LCUtils.czfFriendlyError(error))")
+            }
+        }
+        if ok.isEmpty && failed.isEmpty && !noBackup.isEmpty {
+            installInfo = "所选 App 都没有备份：\n" + noBackup.joined(separator: "\n")
+            installInfoShow = true
+        } else if ok.isEmpty {
+            errorInfo = "恢复失败，一个都没恢复上：\n" + failed.joined(separator: "\n")
+            errorShow = true
+        } else {
+            installInfo = "批量恢复完成：成功 \(ok.count) 个" + (loginOnly ? "（只恢复登录态）" : "（完整恢复）") + (failed.isEmpty ? "" : "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")) + (noBackup.isEmpty ? "" : "，无备份 \(noBackup.count) 个：\n" + noBackup.joined(separator: "\n"))
+            installInfoShow = true
+        }
+        batchMode = false
+        batchSelectedIDs.removeAll()
+        refreshBackupStatus()
     }
 
     // 新4（3.8.277）：批量隐藏——复用单个隐藏函数
@@ -916,10 +1075,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 HStack {
                     Text("已选 \(batchSelectedIDs.count) 个")
                         .font(.subheadline)
+                    Button(batchAllSelected ? "取消全选" : "全选") {
+                        toggleBatchSelectAll()
+                    }
+                    .disabled(batchBusy)
                     Spacer()
                     Button("备份") {
                         // 3.8.302：先弹范围单再跑（原来直接跑完整备份）。
                         batchBackupScopeConfirm = true
+                    }
+                    .disabled(batchSelectedIDs.isEmpty || batchBusy)
+                    Button("恢复") {
+                        batchRestoreScopeConfirm = true
                     }
                     .disabled(batchSelectedIDs.isEmpty || batchBusy)
                     // 3.8.281：勾中的全是隐藏 App 时按钮变“恢复显示”
@@ -972,6 +1139,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Button("取消", role: .cancel) { }
         } message: {
             Text("只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
+        }
+        // 批量恢复范围单（与批量备份同款两选项）；选了范围
+        // 才跑 batchRestore，取消不跑。
+        .confirmationDialog("恢复范围", isPresented: $batchRestoreScopeConfirm, titleVisibility: .visible) {
+            Button("只恢复登录态") {
+                Task { await batchRestore(loginOnly: true) }
+            }
+            Button("完整恢复（数据 + 登录态）") {
+                Task { await batchRestore(loginOnly: false) }
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("只恢复登录态：只恢复登录会话，不动 App 数据；完整恢复会把备份里的数据整个恢复回来。没有备份的 App 会跳过。")
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .alert("lc.common.error".loc, isPresented: $errorShow){
@@ -1208,6 +1388,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.281：每次进 App 页都刷新一次 VPN 开关状态（核心可能
             // 在别处被起停，本地 @State 不自己猜）。
             vpnCoreRunning = CZFVPNManager.shared.isRunning
+            // 每行备份状态：每次进页都重算（备份可能在数据管理
+            // 页刚做完，回来行上要对上）。
+            refreshBackupStatus()
             if !isViewAppeared {
                 if let webpageUrlStr = UserDefaults.standard.string(forKey: "webPageToOpen") {
                     Task { await openWebView(urlString: webpageUrlStr) }

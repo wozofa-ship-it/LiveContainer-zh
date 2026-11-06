@@ -184,6 +184,10 @@ struct LCDataManagementView : View {
     @State private var previewFolderURL: URL? = nil
     @State private var previewItems: [BackupPreviewItem] = []
     @State private var showBackupPreview = false
+    // 清单预览加载中：点行先弹 sheet 给转圈（清单枚举在后台
+    // 算，登录档大时要点几秒；以前算完才弹 sheet，点后半天
+    // 没反应、用户以为没点上）。
+    @State private var previewLoading = false
     // v216：恢复后“无可恢复数据”的文件夹（结果弹窗里的
     // “在文件 App 里打开”按钮用它；按钮点过就清空，不漏到
     // 下一次无关弹窗里）
@@ -212,7 +216,17 @@ struct LCDataManagementView : View {
     @State private var pendingDeleteBackupURL: URL? = nil
     
     @EnvironmentObject private var sharedModel : SharedModel
-    
+
+    // 备份选 App 的全选状态：列表里 App 全勾上了才算全选。
+    private var allBackupSelected: Bool {
+        let apps = sharedModel.apps + sharedModel.hiddenApps
+        return !apps.isEmpty && apps.allSatisfy { backupSelectedIDs.contains(Self.instanceKey(for: $0)) }
+    }
+    // 选择备份的全选状态：当前备份列表全勾上了才算全选。
+    private var allSelectBackupsSelected: Bool {
+        !selectBackupFolders.isEmpty && selectBackupFolders.allSatisfy { selectedBackupFolderURLs.contains($0) }
+    }
+
     init(initialSheet: LCDataManagementInitialSheet? = nil) {
         self.initialSheet = initialSheet
         _folderPaths = State(initialValue: [
@@ -346,6 +360,9 @@ struct LCDataManagementView : View {
                             .lineLimit(1)
                     }
                 }
+                // 备份/恢复进行中禁用入口：跑一半再点一个会并发
+                // 跑两份，备份互相覆盖、恢复互相抢容器；进度条
+                // 在上面走着时入口全灰，跑完自动恢复。
                 Button {
                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
                     showBackupScopeDialog = true
@@ -355,6 +372,7 @@ struct LCDataManagementView : View {
                         Text("lc.settings.backupAll".loc)
                     }
                 }
+                .disabled(backupRestoreProgress != nil)
                 Button {
                     showBackupSelect = true
                 } label: {
@@ -363,6 +381,7 @@ struct LCDataManagementView : View {
                         Text("lc.settings.backupSelected".loc)
                     }
                 }
+                .disabled(backupRestoreProgress != nil)
                 Button {
                     loadScheduleSettings()
                     showScheduleBackup = true
@@ -388,6 +407,7 @@ struct LCDataManagementView : View {
                         Text("lc.settings.restoreBackup".loc)
                     }
                 }
+                .disabled(backupRestoreProgress != nil)
             }
             // 3.8.281：换机迁移向导搬进恢复 sheet 里（备份组只留 4 行）；
             // 向导 sheet 挂在组上，入口在恢复 sheet 内。
@@ -600,12 +620,24 @@ struct LCDataManagementView : View {
                 .navigationTitle("lc.settings.backupSelected".loc)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("lc.settings.backup".loc) {
-                            pendingBackupApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
-                                backupSelectedIDs.contains(Self.instanceKey(for: $0))
+                        HStack {
+                            Button(allBackupSelected ? "取消全选" : "全选") {
+                                if allBackupSelected {
+                                    backupSelectedIDs.removeAll()
+                                } else {
+                                    backupSelectedIDs = Set((sharedModel.apps + sharedModel.hiddenApps).map { Self.instanceKey(for: $0) })
+                                }
                             }
-                            showBackupSelect = false
-                            showBackupScopeDialog = true
+                            Button("lc.settings.backup".loc) {
+                                pendingBackupApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
+                                    backupSelectedIDs.contains(Self.instanceKey(for: $0))
+                                }
+                                showBackupSelect = false
+                                showBackupScopeDialog = true
+                            }
+                            // 零勾选禁用确认：以前零勾选也能走完还报
+                            // 成功（空跑一趟）；现在没勾就不让点。
+                            .disabled(backupSelectedIDs.isEmpty)
                         }
                     }
                 }
@@ -809,9 +841,21 @@ struct LCDataManagementView : View {
                 // sheet、设 pendingRestoreURL、弹 scope 弹窗）
                 .sheet(isPresented: $showBackupPreview) {
                     NavigationView {
-                        List {
-                            ForEach(previewItems, id: \.folderName) { item in
-                                previewRow(for: item)
+                        Group {
+                            if previewLoading && previewItems.isEmpty {
+                                VStack(spacing: 12) {
+                                    ProgressView()
+                                    Text("正在加载清单…")
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            } else {
+                                List {
+                                    ForEach(previewItems, id: \.folderName) { item in
+                                        previewRow(for: item)
+                                    }
+                                }
                             }
                         }
                         .navigationTitle("备份清单预览")
@@ -893,19 +937,28 @@ struct LCDataManagementView : View {
                                 // 单删）：勾中了既能删也能恢复——删除先确认
                                 // 再删（锁了的跳过并报数），恢复走范围弹窗
                                 HStack {
-                                    Button("删除", role: .destructive) {
-                                        showDeleteMultiSelectConfirm = true
+                                    Button(allSelectBackupsSelected ? "取消全选" : "全选") {
+                                        if allSelectBackupsSelected {
+                                            selectedBackupFolderURLs.removeAll()
+                                        } else {
+                                            selectedBackupFolderURLs = Set(selectBackupFolders)
+                                        }
                                     }
-                                    Button("恢复") {
-                                        pendingRestoreFolders = selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }
-                                        pendingRestoreAll = false
-                                        pendingRestoreURL = nil
-                                        showSelectBackups = false
-                                        showRestoreSelect = false
-                                        showRestoreScopeDialog = true
+                                    HStack {
+                                        Button("删除", role: .destructive) {
+                                            showDeleteMultiSelectConfirm = true
+                                        }
+                                        Button("恢复") {
+                                            pendingRestoreFolders = selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }
+                                            pendingRestoreAll = false
+                                            pendingRestoreURL = nil
+                                            showSelectBackups = false
+                                            showRestoreSelect = false
+                                            showRestoreScopeDialog = true
+                                        }
                                     }
+                                    .disabled(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.isEmpty)
                                 }
-                                .disabled(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.isEmpty)
                             }
                         }
                         // 3.8.282：多选删备份的确认框（挂在选择备份 sheet 里，
@@ -1860,16 +1913,17 @@ struct LCDataManagementView : View {
             .contentShape(Rectangle())
             .onTapGesture {
                 previewFolderURL = folderURL
-                // 预览计算放 Task：原来点行同步算清单，登录档整树
-                // 枚举在主线程堵几秒到几十秒、看门狗杀进程；
-                // Task 挂起不堵主线程，算完再弹 sheet（终态与
-                // 原来一致）。连点两行时只认最后一次（先算完的
+                // 先弹 sheet 给加载反馈：清单枚举在后台算，
+                // 算完再填表；连点两行时只认最后一次（先算完的
                 // 旧结果不覆盖新行），防异步时序错位。
+                previewItems = []
+                previewLoading = true
+                showBackupPreview = true
                 Task {
                     let items = await Self.previewItems(for: folderURL)
                     if previewFolderURL == folderURL {
                         previewItems = items
-                        showBackupPreview = true
+                        previewLoading = false
                     }
                 }
             }

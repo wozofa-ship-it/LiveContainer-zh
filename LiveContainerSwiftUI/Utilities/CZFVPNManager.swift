@@ -149,7 +149,10 @@ public final class CZFVPNManager {
     private static var autoStopDelay: TimeInterval {
         // integer(forKey:) 在键不存在时返回 0，正好落到默认 10，
         // 不用 object(as? Int) 的桥接不确定性（仓内 activeNodeIndex 同款读法）。
+        // -1 = 永不：返 .infinity，调用方（noteRunningAppsChanged）
+        // 见到无限直接不排停核心，绝不拿它去排 asyncAfter。
         let minutes = UserDefaults.standard.integer(forKey: autoStopMinutesKey)
+        if minutes == -1 { return .infinity }
         return TimeInterval([5, 10, 30].contains(minutes) ? minutes : 10) * 60
     }
 
@@ -455,6 +458,46 @@ public final class CZFVPNManager {
         applyActiveNodeChange()
     }
 
+    // 节点自定义别名：按链接原文存字典（UserDefaults），
+    // 删节点/改链接时旧别名自然失效（键对不上就不用），
+    // 不另做清理——字典里多一条死记录无害。
+    private static let nodeAliasKey = "CZFVPNNodeAliases"
+    public static func nodeAlias(for link: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: nodeAliasKey) as? [String: String])?[link]
+    }
+    public static func setNodeAlias(_ alias: String?, for link: String) {
+        var dict = UserDefaults.standard.dictionary(forKey: nodeAliasKey) as? [String: String] ?? [:]
+        if let alias = alias?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty {
+            dict[link] = alias
+        } else {
+            dict.removeValue(forKey: link)
+        }
+        UserDefaults.standard.set(dict, forKey: nodeAliasKey)
+    }
+
+    // 改一条节点的链接（长按菜单“编辑链接”用）：只换列表
+    // 不碰核心；改的正是在用节点时活动下标跟到新链接，
+    // 不落到第一个；改的不是在用节点时按内容找回不动。
+    // 已有相同链接时返回 false（不造重复行），调用方据此提示。
+    @discardableResult
+    public func updateNode(at index: Int, with newLink: String) -> Bool {
+        let trimmed = newLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        var links = nodeLinks
+        guard links.indices.contains(index) else { return false }
+        if links[index] != trimmed && links.contains(trimmed) { return false }
+        let wasActive = index == activeNodeIndex
+        links[index] = trimmed
+        UserDefaults.standard.set(links, forKey: Self.nodeListKey)
+        if wasActive {
+            UserDefaults.standard.set(index, forKey: Self.activeNodeKey)
+        } else if let idx = links.firstIndex(of: nodeLink) {
+            UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+        }
+        refreshSettingsBackup()
+        return true
+    }
+
     // 节点显示名：优先链接里的备注（标准格式的 # 片段；老格式
     // 经 normalizedShareLink 后 remarks 也会落到片段里），其次
     // 是 地址:端口——列表里一眼能认出是哪个节点
@@ -485,6 +528,11 @@ public final class CZFVPNManager {
         // 写 tls 块，insecure 参数真实生效才标）。
         if CZFSingBoxRouting.showsInsecureMark(for: link) {
             detail = detail.isEmpty ? "不验证书" : "\(detail) · 不验证书"
+        }
+        // 自定义别名优先：用户亲手起的名字盖过链接备注/地址，
+        // 详情行（协议·地址）不动，行上仍能认出是哪个节点。
+        if let alias = nodeAlias(for: link), !alias.isEmpty {
+            name = alias
         }
         return (name, detail)
     }
@@ -819,6 +867,9 @@ public final class CZFVPNManager {
         }
         guard isRunning else { return }
         pendingStopWork?.cancel()
+        // 永不档：前面已取消待停任务，这里不再排新的——
+        // asyncAfter 拿 .infinity 排期行为未定义，绝不能排。
+        guard !Self.autoStopDelay.isInfinite else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isRunning else { return }
             if Self.isHostProxyEnabled { return }

@@ -3668,7 +3668,9 @@ struct AllAppsListView: View {
         // 主线程轮询等待窗口出现，找到后最小化；只认归属对得上
         // 的条目，别人的窗口占着 uuid 时直接停表、不碰它（自己
         // 的新窗若拆容器会换 uuid，等这个 uuid 也等不来）。
-        // 轮询到期分不清失败还是拆容器换号，不在这里误报错。
+        // 轮询到期给提示：以前到期只停表、界面上什么都没发生，
+        // 用户以为点了没反应；到期分不清失败还是拆容器换号，
+        // 文案只说没等到窗口、不定性为启动失败。
         var attempts = 0
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             attempts += 1
@@ -3680,6 +3682,7 @@ struct AllAppsListView: View {
                 timer.invalidate()
             } else if attempts >= 60 {
                 timer.invalidate()
+                self.reportLaunchError("最小化超时：6 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试")
             }
         }
     }

@@ -119,6 +119,22 @@ struct LCSettingsView: View {
     @State var vpnNodeSelecting = false
     @State var vpnSelectedNodeLinks: Set<String> = []
     @State var pendingDeleteIndices: [Int] = []
+    // 节点长按菜单（复制/编辑/别名/多选）+ 手动拖拽排序：
+    // 编辑/别名走 textFieldAlert（iOS 15 可用；alert 内
+    // TextField 需 iOS 16，部署目标 15.0 不可用）。
+    @State var vpnEditNodeIndex: Int? = nil
+    @State var vpnEditNodeText = ""
+    @State var vpnEditNodeShow = false
+    @State var vpnAliasNodeLink: String? = nil
+    @State var vpnAliasText = ""
+    @State var vpnAliasShow = false
+    @State var vpnReordering = false
+    // 订阅自动更新：开关 + 上次拉取时间（超 24 小时才拉，
+    // 进设置页检查一次，不每次进都拉）。
+    @AppStorage("CZFVPNSubAutoUpdate") var vpnSubAutoUpdate = false
+    // 清理不通确认框
+    @State var showClearFailedConfirm = false
+    @State var pendingClearFailedCount = 0
     @State var vpnPinging = false
     @State var vpnPingRejected = false
     // 单测被核心占用拒写过的节点链接（CZF，3.8.237）：
@@ -249,9 +265,23 @@ struct LCSettingsView: View {
             || vpnPingResults.count > 1
     }
 
+    // 已开 VPN 的 App 汇总（可见 + 隐藏）：按 CZFVPNManager
+    // 的 per-App 开关读，VPN 区里一行显示名字。
+    private var vpnEnabledApps: [LCAppModel] {
+        (sharedModel.apps + sharedModel.hiddenApps).filter { CZFVPNManager.isEnabled(for: $0.appInfo) }
+    }
+
+    // 订阅自动更新上次拉取时间的显示
+    private var subAutoUpdateLastText: String {
+        let last = UserDefaults.standard.double(forKey: "CZFVPNSubAutoUpdateLast")
+        if last <= 0 { return "还没自动更新过，进设置页时检查" }
+        return "上次更新：\(Date(timeIntervalSince1970: last).formatted(date: .numeric, time: .shortened))"
+    }
+
     var body: some View {
         NavigationView {
             Form {
+                vpnSection
                 jitLessSection
                 multiLCSection
                 multitaskSection
@@ -261,7 +291,6 @@ struct LCSettingsView: View {
                 miscSection
                 storageSection
                 keepAliveSection
-                vpnSection
                 aboutSection
                 updateSection
                 versionFooter
@@ -364,6 +393,47 @@ struct LCSettingsView: View {
                     certificateImportPasswordAlert.show = false
                 }
             )
+            // 节点长按菜单：编辑链接（改下标对应的链接，不碰
+            // 核心；改的正是在用节点时活动下标跟到新链接）。
+            .textFieldAlert(
+                isPresented: $vpnEditNodeShow,
+                title: "编辑节点链接",
+                text: $vpnEditNodeText,
+                placeholder: "vless://…",
+                action: { newText in
+                    if let idx = vpnEditNodeIndex, let text = newText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if CZFVPNManager.shared.updateNode(at: idx, with: text) {
+                            vpnPingResults = [:]
+                            refreshVPNState()
+                        } else {
+                            errorInfo = "节点已存在，未重复添加"
+                            errorShow = true
+                        }
+                    }
+                    vpnEditNodeIndex = nil
+                },
+                actionCancel: { _ in
+                    vpnEditNodeIndex = nil
+                }
+            )
+            // 节点长按菜单：自定义别名（空字符串=清除别名，
+            // 恢复显示链接备注/地址）。
+            .textFieldAlert(
+                isPresented: $vpnAliasShow,
+                title: "节点别名",
+                text: $vpnAliasText,
+                placeholder: "给节点起个名字",
+                action: { newText in
+                    if let link = vpnAliasNodeLink {
+                        CZFVPNManager.setNodeAlias(newText, for: link)
+                        refreshVPNState()
+                    }
+                    vpnAliasNodeLink = nil
+                },
+                actionCancel: { _ in
+                    vpnAliasNodeLink = nil
+                }
+            )
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .onAppear() {
@@ -378,6 +448,16 @@ struct LCSettingsView: View {
             guard sharedModel.selectedTab == .settings, let link else { return }
             sharedModel.deepLink = nil
             handleURL(url: link)
+        }
+        // 订阅自动更新：进设置页检查一次（超 24 小时才拉）；
+        // 刚打开开关也检查一次，免得开了还要等下次进页。
+        .onAppear {
+            autoUpdateSubscriptionIfNeeded()
+        }
+        .onChange(of: vpnSubAutoUpdate) { newValue in
+            if newValue {
+                autoUpdateSubscriptionIfNeeded()
+            }
         }
         // 3.8.308：源面板直开设置页（sheet，不动导航栈；
         // 关掉后 deepLinkSettingsPage 清掉，下次还能再开）。
@@ -878,6 +958,38 @@ private struct CZFVPNNodeLabel: View {
                 }
                 .disabled(vpnSubBusy || vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vpnPinging || vpnSinglePinging)
             }
+            // 订阅自动更新：开着时进设置页检查，上次拉取超 24
+            // 小时才重新拉（只追加新节点，保留手填节点）。
+            Toggle(isOn: $vpnSubAutoUpdate) {
+                Text("订阅自动更新")
+            }
+            if vpnSubAutoUpdate {
+                Text(subAutoUpdateLastText)
+                    .font(.footnote)
+                    .foregroundStyle(.gray)
+            }
+            // 已开 VPN 的 App 汇总：按 per-App 开关读，只汇总、
+            // 不改开关（改开关去各 App 设置页）。
+            if vpnEnabledApps.isEmpty {
+                Text("暂无 App 开启 VPN")
+                    .font(.footnote)
+                    .foregroundStyle(.gray)
+            } else {
+                Text("已开 VPN 的 App（\(vpnEnabledApps.count)）：\(vpnEnabledApps.map { $0.appInfo.displayName() ?? $0.appInfo.bundleIdentifier() ?? "?" }.joined(separator: "、"))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            // 手动拖拽排序：点“排序”出现拖动柄，拖完点“完成”；
+            // 活动节点按内容跟随，不重启核心。
+            HStack {
+                Text("节点")
+                    .font(.headline)
+                Spacer()
+                Button(vpnReordering ? "完成" : "排序") {
+                    vpnReordering.toggle()
+                }
+                .buttonStyle(.borderless)
+            }
             ForEach(Array(vpnNodes.enumerated()), id: \.offset) { index, link in
                 Button {
                     if vpnNodeSelecting {
@@ -908,14 +1020,39 @@ private struct CZFVPNNodeLabel: View {
                         )
                     }
                 }
-                // 长按行进多选删除：原来长按菜单的复测与右滑
-                // 测速同一入口（startSinglePing），复测仍可右滑；
-                // 长按现在进多选，点行勾选、全选、删除选中。
-                .onLongPressGesture {
-                    if !vpnNodeSelecting {
-                        vpnNodeSelecting = true
+                // 长按菜单：复制链接/编辑链接/自定义别名/多选。
+                // 原来长按直接进多选，菜单里留“多选”同款入口；
+                // 复测仍走右滑，不动。
+                .contextMenu {
+                    Button {
+                        UIPasteboard.general.string = link
+                        successInfo = "节点链接已复制"
+                        successShow = true
+                    } label: {
+                        Label("复制链接", systemImage: "doc.on.doc")
                     }
-                    vpnSelectedNodeLinks.insert(link)
+                    Button {
+                        vpnEditNodeIndex = index
+                        vpnEditNodeText = link
+                        vpnEditNodeShow = true
+                    } label: {
+                        Label("编辑链接", systemImage: "pencil")
+                    }
+                    Button {
+                        vpnAliasNodeLink = link
+                        vpnAliasText = CZFVPNManager.nodeAlias(for: link) ?? ""
+                        vpnAliasShow = true
+                    } label: {
+                        Label("自定义别名", systemImage: "tag")
+                    }
+                    Button {
+                        if !vpnNodeSelecting {
+                            vpnNodeSelecting = true
+                        }
+                        vpnSelectedNodeLinks.insert(link)
+                    } label: {
+                        Label("多选", systemImage: "checkmark.circle")
+                    }
                 }
                 // 右滑测速：整表测速太慢时只测这一条，
                 // 与原长按复测同一入口；左滑删除不动。
@@ -962,6 +1099,15 @@ private struct CZFVPNNodeLabel: View {
             // 像切了其实还没切；置灰后测速中点不动，
             // 测完再点才是真切。单节点复测同理。
             .disabled(vpnPinging || vpnSinglePinging)
+            // 手动拖拽排序：上面“排序”开着时出拖动柄，
+            // 拖完 replaceNodeOrder 写回，活动节点按内容跟随。
+            .environment(\.editMode, vpnReordering ? .constant(.active) : .constant(.inactive))
+            .onMove { source, destination in
+                var links = vpnNodes
+                links.move(fromOffsets: source, toOffset: destination)
+                CZFVPNManager.shared.replaceNodeOrder(links)
+                refreshVPNState()
+            }
             // 多选删除操作条：只在长按进多选后出现；全选按链接集合算，
             // 删选中走 deleteSelectedVPNNodeLinks（在用节点走确认框）。
             if vpnNodeSelecting {
@@ -1044,18 +1190,8 @@ private struct CZFVPNNodeLabel: View {
                 // 跟随、不重启核心。
                 if vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }) {
                     Button("清理不通") {
-                        let failed = Set(vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }.map { $0.key })
-                        let kept = CZFVPNManager.shared.nodeLinks.enumerated().filter { !failed.contains($0.offset) }.map { $0.element }
-                        // 清理不碰核心：只换列表，核心在跑继续用
-                        // 在用节点、停着继续停着；再清掉内存结果、
-                        // 按新列表剪掉已删节点的落盘缓存，最后刷新，
-                        // 否则旧失败结果还在、清理按钮永远不消失，
-                        // 看起来像没清理。
-                        CZFVPNManager.shared.replaceNodesWithoutCoreChange(kept)
-                        vpnNodes = CZFVPNManager.shared.nodeLinks
-                        vpnPingResults = [:]
-                        savePingResults()
-                        refreshVPNState()
+                        pendingClearFailedCount = vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }.count
+                        showClearFailedConfirm = true
                     }
                     // 被拒时不再禁清理：被拒结果已不再覆写
                     // 界面和缓存，清理按上次真测结果走；
@@ -1091,6 +1227,27 @@ private struct CZFVPNNodeLabel: View {
                     .disabled(vpnPinging || vpnSinglePinging)
                     .buttonStyle(.borderless)
                 }
+            }
+            // 清理不通先确认：删节点不可恢复，点一下就删
+            // 太容易手误；确认框里写清删几个、在用与不支持的不删。
+            .alert("清理不通的节点？", isPresented: $showClearFailedConfirm) {
+                Button("清理 \(pendingClearFailedCount) 个", role: .destructive) {
+                    let failed = Set(vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }.map { $0.key })
+                    let kept = CZFVPNManager.shared.nodeLinks.enumerated().filter { !failed.contains($0.offset) }.map { $0.element }
+                    // 清理不碰核心：只换列表，核心在跑继续用
+                    // 在用节点、停着继续停着；再清掉内存结果、
+                    // 按新列表剪掉已删节点的落盘缓存，最后刷新，
+                    // 否则旧失败结果还在、清理按钮永远不消失，
+                    // 看起来像没清理。
+                    CZFVPNManager.shared.replaceNodesWithoutCoreChange(kept)
+                    vpnNodes = CZFVPNManager.shared.nodeLinks
+                    vpnPingResults = [:]
+                    savePingResults()
+                    refreshVPNState()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("将删除 \(pendingClearFailedCount) 个测速不通的节点（在用节点与不支持的节点不会删），此操作不可恢复")
             }
             }
             // 被拒提示独立一行：原来它和一串按钮挤在同一行，
@@ -1164,6 +1321,7 @@ private struct CZFVPNNodeLabel: View {
                 Text("5 分钟").tag(5)
                 Text("10 分钟").tag(10)
                 Text("30 分钟").tag(30)
+                Text("永不").tag(-1)
             } label: {
                 HStack {
                     LCSettingsIcon(systemName: "timer", color: .red.opacity(0.85))
@@ -1618,6 +1776,32 @@ private struct CZFVPNNodeLabel: View {
             vpnNodeSelecting = false
             vpnPingResults = [:]
             refreshVPNState()
+        }
+    }
+
+    // 订阅自动更新：开关开着、填了订阅地址、上次拉取超 24
+    // 小时（或从没拉过）时才拉；走 mergeSubscriptionLinks
+    // （只追加新节点，保留手填节点），成功/失败都走现有
+    // successInfo/errorInfo 弹窗反馈；进设置页检查一次。
+    func autoUpdateSubscriptionIfNeeded() {
+        guard vpnSubAutoUpdate else { return }
+        let url = vpnSubURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, !vpnSubBusy else { return }
+        let last = UserDefaults.standard.double(forKey: "CZFVPNSubAutoUpdateLast")
+        if last > 0 && Date().timeIntervalSince1970 - last < 24 * 3600 { return }
+        vpnSubBusy = true
+        CZFVPNManager.fetchSubscriptionLinks(urlString: url) { result in
+            DispatchQueue.main.async {
+                vpnSubBusy = false
+                switch result {
+                case .success(let links):
+                    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFVPNSubAutoUpdateLast")
+                    mergeSubscriptionLinks(links)
+                case .failure(let error):
+                    errorInfo = "订阅自动更新失败：\(error.localizedDescription)"
+                    errorShow = true
+                }
+            }
         }
     }
 
