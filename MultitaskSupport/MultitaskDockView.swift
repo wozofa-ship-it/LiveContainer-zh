@@ -3906,7 +3906,12 @@ struct SourcesPanelView: View {
                 DataManager.shared.model.selectedTab = .settings
             }
         } label: {
-            Image(systemName: vpnCoreRunning ? "shield.fill" : "shield")
+            // 3.8.315：盾牌常驻实心——之前关时用空心 shield，
+            // 细线条在灰圆底上显得比旁边实心蓝图标小一圈，
+            // 用户 19:40 红条指出跟固定图标对不齐；改成常驻
+            // shield.fill，开关只靠颜色区分（绿=开、灰=关），
+            // 跟旁边实心图标同等视觉分量。
+            Image(systemName: "shield.fill")
                 .font(.system(size: 22))
                 .foregroundStyle(vpnCoreRunning ? .green : .secondary)
                 .frame(width: 40, height: 40)
@@ -4186,17 +4191,9 @@ struct SourcesPanelView: View {
                 Spacer()
                 // VPN：点按开关核心，长按弹节点菜单
                 panelVPNMenu
-                // 数据管理：直开数据管理设置页
-                Button {
-                    openSettingsPage("datamanagement")
-                } label: {
-                    Image(systemName: "externaldrive.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.blue)
-                        .frame(width: 40, height: 40)
-                        .background(Color(UIColor.secondarySystemBackground))
-                        .clipShape(Circle())
-                }
+                // 3.8.315：用户 19:39 令——快捷行只留 VPN 默认，
+                // 数据管理固定图标去掉（数据管理仍在设置页里，
+                // 不再占快捷行一个位置）。
                 // 自定义快捷方式（3.8.311：用户要的不是加 App
                 // 快捷，而是把 APP 详情页里的设置加为快捷方式——
                 // 某个 App 的某个开关/设置。开关类点按直接切换
