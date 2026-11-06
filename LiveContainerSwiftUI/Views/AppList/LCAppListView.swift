@@ -199,6 +199,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             vpnPingMessage = "还没加节点"
             return
         }
+        // 3.8.305：跟设置页 startVPNPing 同规则——核心在跑先停、
+        // 测完重启原来那条；没在跑直接测、测完不启动。停核心在
+        // 测速标志立起来之前做，免得测速窗口内起停被 deferred
+        // 逻辑插队。原来不先停核心，核心在跑时整批被生命周期锁
+        // 拒、只能弹“先停核心再测”让用户手动停；现在自动走完。
+        let pingStoppedCore = CZFVPNManager.shared.stopCoreForPing()
         vpnPinging = true
         CZFVPNManager.shared.pingAllNodes { results, rejected in
             self.vpnPinging = false
@@ -209,7 +215,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 被拒时也是不覆写、不落盘）。原来无条件先存结果，
                 // 核心在跑时一测就把整表写成失败，菜单全挂“失败”，
                 // 跟设置页的毫秒数对不上。旧结果留着，菜单继续显示
-                // 上次真测的毫秒数；没测过就不挂后缀。
+                // 上次真测的毫秒数；没测过就不挂后缀。先停核心后
+                // 正常不应再被拒，这支留作兜底。
                 self.vpnPingMessage = "核心在跑，测速被占用——先停核心再测"
             } else {
                 var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -221,6 +228,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 } else {
                     self.vpnPingMessage = "全部节点测速失败"
                 }
+            }
+            // 停过的核心测完重启原来那条（没停过就不启动）；
+            // 放 afterPing 之前，回调里切节点时核心已在跑。
+            if pingStoppedCore {
+                CZFVPNManager.shared.restartCoreAfterPing()
             }
             afterPing?(results)
         }

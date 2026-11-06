@@ -3725,6 +3725,14 @@ struct LCDataManagementView : View {
                         outcome.keychainQueued += items.count
                     }
                     restoredExtras = true
+                    // 3.8.305：钥匙串已排队也关窗——排队文件要下次
+                    // 全新启动才由桥抢导，只合了文件没动容器名时
+                    // 关窗集里没它，正在跑的 App 继续用内存旧状态、
+                    // 看着像没恢复。把全部容器名补进关窗集，恢复后
+                    // 统一关窗重开；没在跑就是空操作。
+                    for container in app.uiContainers {
+                        restoredFolderNames.insert(container.folderName)
+                    }
                 }
             }
         }

@@ -186,9 +186,13 @@ static BOOL CZFKBGroupContainsBid(NSString *group, NSString *bid) {
 // - 末段含字段（字段是 App 名的 4 字以上片段，如 awem）；
 // - 字段含容器名 / 容器名含字段（容器名若是显示名，能接住中文服务名；
 //   若是 UUID 则天然不命中，无误伤）。
+// - 字段含显示名 / 显示名含字段（3.8.305：容器名是 UUID 时显示名
+//   是唯一能接住中文服务名的信号；红果短剧这类 App 的令牌服务名
+//   常含中文显示名，包名末段是英文、匹配不上。显示名是 App 自身
+//   的名字，他人令牌不会拿它当服务名，误收风险与容器名同级）。
 // 刻意不用“Bundle ID 含字段”（字段是 login/token 这类通用词时，
 // Bundle ID 恰好含它不代表归属，误收就是串号）。
-static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString *folderName) {
+static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString *folderName, NSString *displayName) {
     if (!bundleID.length) return NO;
     NSString *last = [bundleID componentsSeparatedByString:@"."].lastObject;
     NSArray<NSString *> *keys = @[
@@ -207,6 +211,8 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
         if (last.length >= 3 && f.length >= 4 && [last localizedCaseInsensitiveContainsString:f]) return YES;
         if (folderName.length >= 3 && [f localizedCaseInsensitiveContainsString:folderName]) return YES;
         if (folderName.length >= 3 && f.length >= 4 && [folderName localizedCaseInsensitiveContainsString:f]) return YES;
+        if (displayName.length >= 3 && [f localizedCaseInsensitiveContainsString:displayName]) return YES;
+        if (displayName.length >= 3 && f.length >= 4 && [displayName localizedCaseInsensitiveContainsString:f]) return YES;
     }
     return NO;
 }
@@ -220,7 +226,9 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
 // 隔离容器传 nil，此时归属谓词与旧版一字不差（4 项全留，真隔离
 // 时默认组/进程默认组本来就是 nil，退化成共享组 + alis），
 // 自定义组/归属过滤/计数一律不启用，隔离路不动。
-static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName, NSString *defaultGroup, NSString *lcDefaultGroup, NSString *bundleID) {
+// displayName：非隔离容器才传（= 容器 plist 的 name，即 App 显示名）；
+// 隔离容器传 nil。只进归属谓词，不进任何组判定。
+static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName, NSString *defaultGroup, NSString *lcDefaultGroup, NSString *bundleID, NSString *displayName) {
     NSMutableArray *all = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableSet *seenExcluded = [NSMutableSet set];
@@ -275,7 +283,7 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                     || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
                     || CZFKBGroupContainsBid(itemGroup, bundleID)) {
                     mine = YES;
-                } else if (itemGroup && CZFKBItemMatchesApp(item, bundleID, folderName)) {
+                } else if (itemGroup && CZFKBItemMatchesApp(item, bundleID, folderName, displayName)) {
                     mine = YES;
                 } else {
                     // 含无组名：无法归属，保守排除
@@ -546,6 +554,10 @@ static void CZFKBRun(void) {
         NSArray<NSString *> *entitled = CZFKBEntitledGroups();
         if (!group && entitled.count == 0 && !lcDefaultGroup) return;
         NSString *folderName = home.lastPathComponent;
+        // 显示名（容器 plist 的 name）：非隔离才进导出归属谓词，
+        // 隔离传 nil（见 CZFKBExport 注释）。不是字符串时按缺失处理。
+        id displayNameValue = info[@"name"];
+        NSString *displayName = [displayNameValue isKindOfClass:NSString.class] ? displayNameValue : nil;
         // 钩子同款自检：本容器组到底在不在本进程的授权里。
         // 不在（-34018）= 钩子根本没装上，App 的钥匙串调用
         // 全部落空、登录只能走文件——回执里写清，不再瞎猜
@@ -579,7 +591,7 @@ static void CZFKBRun(void) {
         if (writeGroup) {
             imported = CZFKBImport(home, writeGroup, folderName, isolated, team, lcDefaultGroup);
         }
-        CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup, lcDefaultGroup, isolated ? nil : bundleID);
+        CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup, lcDefaultGroup, isolated ? nil : bundleID, isolated ? nil : displayName);
         // 状态回执：宿主备份弹窗直接带出来，桥跑没跑、组对
         // 不对、条目在不在，一行定案
         BOOL inEntitled = group && [entitled containsObject:group];
@@ -649,10 +661,13 @@ static BOOL CZFKBTryImportEarly(void) {
 
 __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
     // 先在构造线程上抢一轮写回（HOME 没就位就短轮询
-    // ≤0.5 秒），抢不到再交给后台长轮询；全量流程（导出+
-    // 回执+兜底导入）照常在后台跑一遍
+    // ≤2 秒，3.8.305 由 0.5 秒放宽：冷启动/大 App 上 LCBootstrap
+    // 指 HOME 可能慢过 0.5 秒，抢导错过、App 先读了钥匙串，
+    // 就是恢复了却显示未登录的时序坑；抢导是唯一保证令牌在
+    // App 读之前落地的路，多等 1.5 秒值得），抢不到再交给
+    // 后台长轮询；全量流程（导出+回执+兜底导入）照常在后台跑一遍
     if (!CZFKBTryImportEarly()) {
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 40; i++) {
             usleep(50000);
             if (CZFKBTryImportEarly()) break;
         }
