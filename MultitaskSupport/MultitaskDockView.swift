@@ -3391,23 +3391,49 @@ struct AllAppsListView: View {
     }
 
     var body: some View {
-        // 3.8.292：App 面板液态玻璃，与源面板一模一样（289 只给
-        // 源面板上了玻璃，两边不一样，用户真机确认）。容器 +
-        // 搜索框 + App 行全上玻璃，运行条共用已是玻璃。玻璃只
-        // 在 iOS 26 且未开兼容模式时开，其余系统走原来实色底。
-        // 多个玻璃共用一个 GlassEffectContainer（一个 backdrop
+        // 3.8.304：滚动列表移出 GlassEffectContainer——301 把行上玻璃
+        // 去掉治好了滑动盖头，但容器里没玻璃的子视图会被当成 backdrop
+        // 模糊掉，302 的行全糊了（用户 2026-11-06 13:47 截图）。玻璃只
+        // 给固定不动的铬（固定区/运行条/搜索框/面板底），滚动列表走实色、
+        // 在容器外面，既不糊也不盖头。固定铬仍共用一个容器（一个 backdrop
         // pass，滚动不掉帧）；容器本身 iOS 26 才有，放 #available 里。
-        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-            GlassEffectContainer(spacing: 8) {
-                appPanelContent
+        VStack(spacing: 0) {
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                GlassEffectContainer(spacing: 8) {
+                    appPanelHeader
+                }
+            } else {
+                appPanelHeader
             }
-        } else {
-            appPanelContent
+            appPanelList
+        }
+        .background {
+            // 3.8.292：容器玻璃背景层（与源面板同款）——玻璃
+            // 不挂在内容 VStack 上（VStack 高度受底部安全区
+            // 限制，底部约 40pt 铺不到，形成接缝线 + 两个底
+            // 角没铺满）；背景层 + ignoresSafeArea 铺满宿主
+            // 全高，内容不动。非玻璃分支同样铺满。
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20)
+                    .fill(.clear)
+                    .glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+                    .ignoresSafeArea()
+            } else {
+                Color(UIColor.systemBackground)
+                    .ignoresSafeArea()
+            }
+        }
+        // 启动失败提示（源面板同款写法）：面板已关、启动在后台
+        // Task 里抛错时，把原因弹出来，不再“点了没反应”。
+        .alert("提示", isPresented: Binding(get: { launchError != nil }, set: { if !$0 { launchError = nil } })) {
+            Button("好") { launchError = nil }
+        } message: {
+            Text(launchError ?? "")
         }
     }
 
     @ViewBuilder
-    private var appPanelContent: some View {
+    private var appPanelHeader: some View {
         // 不用 NavigationView：空标题的导航栏白占一条高度，面板
         // 本来就只有半屏多；原来挂的 .searchable 绑的是常量空串
         // （根本不筛选），iOS 26 还把它渲染成悬浮条压在面板底部，
@@ -3415,47 +3441,52 @@ struct AllAppsListView: View {
         // 关闭钮并进固定区标题行：独立顶栏又是一层，顶部
         // 顶栏+固定+运行三层叠着（用户点名），省下的高度
         // 全留给列表
-        ScrollViewReader { proxy in
-            VStack(spacing: 0) {
-                // 顶部固定区（用户定）：不要"App"标题，换成可固定
-                // 的 App 小图标横排（长按下面列表行固定/取消），
-                // 固定区不随列表滚动
-                PinnedAppsStripView(onLaunch: { app in launchApp(app) })
-                // 状态栏条固定在顶部，不随列表滚动（原来在
-                // ScrollView 里，往下翻卡片后收起/最小化/
-                // 关闭全部就没了，得翻回顶部）
-                RunningAppsStripView { closePanel() }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .padding(.bottom, 10)
-                // 搜索框：固定在运行条下方，不随列表滚动。
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("搜索", text: $searchText)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    if !searchText.isEmpty {
-                        Button { searchText = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .modifier { content in
-                    // 3.8.292：搜索框玻璃（与源面板搜索框同款）；
-                    // 非玻璃系统走原来浅灰底 + 圆角。
-                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                        content.glassEffect(.regular, in: .rect(cornerRadius: 10))
-                    } else {
-                        content.background(Color(UIColor.secondarySystemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                }
+        VStack(spacing: 0) {
+            // 顶部固定区（用户定）：不要"App"标题，换成可固定
+            // 的 App 小图标横排（长按下面列表行固定/取消），
+            // 固定区不随列表滚动
+            PinnedAppsStripView(onLaunch: { app in launchApp(app) })
+            // 状态栏条固定在顶部，不随列表滚动（原来在
+            // ScrollView 里，往下翻卡片后收起/最小化/
+            // 关闭全部就没了，得翻回顶部）
+            RunningAppsStripView { closePanel() }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 8)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+            // 搜索框：固定在运行条下方，不随列表滚动。
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("搜索", text: $searchText)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .modifier { content in
+                // 3.8.292：搜索框玻璃（与源面板搜索框同款）；
+                // 非玻璃系统走原来浅灰底 + 圆角。
+                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                    content.glassEffect(.regular, in: .rect(cornerRadius: 10))
+                } else {
+                    content.background(Color(UIColor.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var appPanelList: some View {
+        ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 10) {
                     ForEach(filteredPanelApps, id: \.self) { app in
@@ -3509,30 +3540,6 @@ struct AllAppsListView: View {
                 proxy.scrollTo("czfAppPanelTop", anchor: .top)
                 searchText = ""
             }
-            }
-            .background {
-                // 3.8.292：容器玻璃背景层（与源面板同款）——玻璃
-                // 不挂在内容 VStack 上（VStack 高度受底部安全区
-                // 限制，底部约 40pt 铺不到，形成接缝线 + 两个底
-                // 角没铺满）；背景层 + ignoresSafeArea 铺满宿主
-                // 全高，内容不动。非玻璃分支同样铺满。
-                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                    UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20)
-                        .fill(.clear)
-                        .glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
-                        .ignoresSafeArea()
-                } else {
-                    Color(UIColor.systemBackground)
-                        .ignoresSafeArea()
-                }
-            }
-        }
-        // 启动失败提示（源面板同款写法）：面板已关、启动在后台
-        // Task 里抛错时，把原因弹出来，不再“点了没反应”。
-        .alert("提示", isPresented: Binding(get: { launchError != nil }, set: { if !$0 { launchError = nil } })) {
-            Button("好") { launchError = nil }
-        } message: {
-            Text(launchError ?? "")
         }
     }
     
@@ -3794,77 +3801,99 @@ struct SourcesPanelView: View {
     }
 
     var body: some View {
-        // 3.8.289：源面板液态玻璃（用户 2026-11-06 看样板图亲定，
-        // 按样板图 B 款：面板 + 搜索框 + 运行条 + 源 App 行全上
-        // 玻璃）。玻璃只在 iOS 26 且未开兼容模式时开
-        //（SharedModel.isLiquidGlassEnabled，与坞栏同款判断），
-        // 其余系统走原来实色底。多个玻璃共用一个
-        // GlassEffectContainer（一个 backdrop pass，滚动不掉帧）；
-        // 容器本身 iOS 26 才有，放 #available 里。
-        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-            GlassEffectContainer(spacing: 8) {
-                sourcesPanelContent
+        // 3.8.304：滚动列表移出 GlassEffectContainer（与 App 面板同款
+        // 原因：301 去行上玻璃治好滑动盖头，但容器里没玻璃的子视图会被
+        // 当成 backdrop 模糊掉，302 的行全糊了，用户 2026-11-06 13:47
+        // 截图）。玻璃只给固定不动的铬，滚动列表走实色、在容器外面。
+        VStack(spacing: 0) {
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                GlassEffectContainer(spacing: 8) {
+                    sourcesPanelHeader
+                }
+            } else {
+                sourcesPanelHeader
             }
-        } else {
-            sourcesPanelContent
+            sourcesPanelList
+        }
+        .background {
+            // 3.8.292：容器玻璃改成背景层——玻璃不再挂在内容
+            // VStack 上（VStack 高度受底部安全区限制，底部约
+            // 40pt 铺不到，形成接缝线 + 两个底角没铺满）；背景
+            // 层 + ignoresSafeArea 铺满宿主全高，内容不动。
+            // 非玻璃分支同样铺满（原来只铺 VStack，底部安全
+            // 区同样会露底）。形状、圆角与原来一字不动。
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20)
+                    .fill(.clear)
+                    .glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+                    .ignoresSafeArea()
+            } else {
+                Color(UIColor.systemBackground)
+                    .ignoresSafeArea()
+            }
         }
     }
 
     @ViewBuilder
-    private var sourcesPanelContent: some View {
+    private var sourcesPanelHeader: some View {
         // 3.8.288：源面板去顶栏（用户 2026-11-06 亲令去源名字
         // 和图标）：“源”标题 + ✕关闭 + 刷新全删。照 App 面板
         // 同款不用 NavigationView（空标题导航栏白占一条高度）；
         // 关面板走遮罩点按/下滑/收起钮，刷新走每次调出时
         // onChange 里的自动刷新（与 App 面板同款）。
+        VStack(spacing: 0) {
+            // 3.8.284：源面板与 App 面板一致——顶部固定区（复用
+            // PinnedAppsStripView，同一批固定 App）+ 搜索框，顺序
+            // 与 App 面板同款：固定区 → 运行条 → 搜索框 → 列表
+            // 3.8.291：源面板把源数据传进固定区——源固定项按
+            // 包名在各源里找对应 App 解析，点按直接安装。
+            PinnedAppsStripView(
+                onLaunch: { app in launchPinnedApp(app) },
+                emptyHint: "在 App 面板长按 App 可固定到这里",
+                sourceAppResolver: { bundleIdentifier in
+                    viewModel.sources.compactMap(\.source).flatMap(\.apps).first { $0.bundleIdentifier == bundleIdentifier }
+                },
+                onInstallSourceApp: { app in installFromPanel(app: app) }
+            )
+            // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）
+            RunningAppsStripView { closePanel() }
+                .padding(.horizontal)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+            // 搜索框（与 App 面板同款，固定在运行条下方、不随列表滚动）
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("搜索", text: $searchText)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .modifier { content in
+                // 3.8.289：搜索框玻璃（样板图同款）；非玻璃
+                // 系统走原来浅灰底 + 圆角。
+                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                    content.glassEffect(.regular, in: .rect(cornerRadius: 10))
+                } else {
+                    content.background(Color(UIColor.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var sourcesPanelList: some View {
         ScrollViewReader { proxy in
-            VStack(spacing: 0) {
-                // 3.8.284：源面板与 App 面板一致——顶部固定区（复用
-                // PinnedAppsStripView，同一批固定 App）+ 搜索框，顺序
-                // 与 App 面板同款：固定区 → 运行条 → 搜索框 → 列表
-                // 3.8.291：源面板把源数据传进固定区——源固定项按
-                // 包名在各源里找对应 App 解析，点按直接安装。
-                PinnedAppsStripView(
-                    onLaunch: { app in launchPinnedApp(app) },
-                    emptyHint: "在 App 面板长按 App 可固定到这里",
-                    sourceAppResolver: { bundleIdentifier in
-                        viewModel.sources.compactMap(\.source).flatMap(\.apps).first { $0.bundleIdentifier == bundleIdentifier }
-                    },
-                    onInstallSourceApp: { app in installFromPanel(app: app) }
-                )
-                // 状态栏条固定在顶部，不随列表滚动（与 App 面板一致）
-                RunningAppsStripView { closePanel() }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .padding(.bottom, 10)
-                // 搜索框（与 App 面板同款，固定在运行条下方、不随列表滚动）
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("搜索", text: $searchText)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    if !searchText.isEmpty {
-                        Button { searchText = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .modifier { content in
-                    // 3.8.289：搜索框玻璃（样板图同款）；非玻璃
-                    // 系统走原来浅灰底 + 圆角。
-                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                        content.glassEffect(.regular, in: .rect(cornerRadius: 10))
-                    } else {
-                        content.background(Color(UIColor.secondarySystemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     // 滚回顶部锚点（条子已挪到 ScrollView 外面，
@@ -3923,25 +3952,7 @@ struct SourcesPanelView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
-            }
-            .background {
-                // 3.8.292：容器玻璃改成背景层——玻璃不再挂在内容
-                // VStack 上（VStack 高度受底部安全区限制，底部约
-                // 40pt 铺不到，形成接缝线 + 两个底角没铺满）；背景
-                // 层 + ignoresSafeArea 铺满宿主全高，内容不动。
-                // 非玻璃分支同样铺满（原来只铺 VStack，底部安全
-                // 区同样会露底）。形状、圆角与原来一字不动。
-                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                    UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20)
-                        .fill(.clear)
-                        .glassEffect(.regular, in: UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
-                        .ignoresSafeArea()
-                } else {
-                    Color(UIColor.systemBackground)
-                        .ignoresSafeArea()
-                }
-            }
-            }
+        }
     }
 
     // 与源页 LCSourcesView.install 一致，额外关掉面板让用户看安装进度
