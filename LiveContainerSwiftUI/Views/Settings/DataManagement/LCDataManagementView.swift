@@ -2695,6 +2695,10 @@ struct LCDataManagementView : View {
             // 3.8.286：组容器恢复失败的 App（旧数据已保留，只
             // 是该组没恢复回来；与整 App 失败分开列）
             var groupFailedApps: [String] = []
+            // 3.8.294（P0-4）：iCloud 未下完、恢复可能不完整的
+            // App（仍算恢复成功计入 restoredCount，单列提示，
+            // 不进 noDataApps——数据确实部分恢复了）
+            var downloadIncompleteApps: [String] = []
             var versionMismatchApps: [String] = []
             var missingFolders: [URL] = []
             // v216：无数据文件夹（与 noDataApps 文本并行）：结果
@@ -2841,6 +2845,11 @@ struct LCDataManagementView : View {
                     if !outcome.groupRestoreFailed.isEmpty {
                         groupFailedApps.append("\(app.appInfo.displayName() ?? folderName)（组容器 \(outcome.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
                     }
+                    // 3.8.294（P0-4）：下载未完成仍算恢复成功（部分
+                    // 数据已拷回），单列进报告，不进 noDataApps。
+                    if outcome.downloadIncomplete {
+                        downloadIncompleteApps.append(app.appInfo.displayName() ?? folderName)
+                    }
                     if outcome.ok {
                         restoredCount += 1
                         if await Self.backupVersionDiffers(appFolder: appFolder, app: app) {
@@ -2939,6 +2948,10 @@ struct LCDataManagementView : View {
                     if !outcome2.groupRestoreFailed.isEmpty {
                         groupFailedApps.append("\(item.name)（组容器 \(outcome2.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
                     }
+                    // 3.8.294（P0-4）：下载未完成仍算恢复成功，单列进报告。
+                    if outcome2.downloadIncomplete {
+                        downloadIncompleteApps.append(item.name)
+                    }
                     if outcome2.ok {
                         installRestoredCount += 1
                         if await Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
@@ -3036,6 +3049,9 @@ struct LCDataManagementView : View {
             if !groupFailedApps.isEmpty {
                 msg += "\n\n组容器恢复失败的 App（旧数据已保留，未丢失）：\n" + groupFailedApps.joined(separator: "\n")
             }
+            if !downloadIncompleteApps.isEmpty {
+                msg += "\n\niCloud 未下完，恢复可能不完整的 App（已恢复的部分数据可用；等 iCloud 同步完再恢复一次可补全）：\n" + downloadIncompleteApps.joined(separator: "\n")
+            }
             if !versionMismatchApps.isEmpty {
                 msg += "\n\n备份版本与当前 App 版本不同的（数据已整套按备份时刻恢复；打开后若仍有个别信息异常，是新版读旧数据的兼容问题）：\n" + versionMismatchApps.joined(separator: "\n")
             }
@@ -3068,6 +3084,7 @@ struct LCDataManagementView : View {
             if !ambiguousApps.isEmpty { issues.append("多候选对不上 \(ambiguousApps.count) 个") }
             if !restoreFailedApps.isEmpty { issues.append("恢复失败 \(restoreFailedApps.count) 个") }
             if !groupFailedApps.isEmpty { issues.append("组容器失败 \(groupFailedApps.count) 个") }
+            if !downloadIncompleteApps.isEmpty { issues.append("iCloud 未下完 \(downloadIncompleteApps.count) 个") }
             if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
             if !issues.isEmpty {
                 line += "（" + issues.joined(separator: "、") + "）"
@@ -3135,6 +3152,11 @@ struct LCDataManagementView : View {
         // 3.8.286：组容器整替失败的组名（原子替换后旧数据
         // 保留，失败要进报告，不能静默丢掉）。
         var groupRestoreFailed: [String] = []
+        // 3.8.294（P0-4）：iCloud 下载未完成——任一段
+        // waitForUbiquitousDownload 超时仍有文件未下完时为
+        // true；本地文件夹、无文件、全部已下完时为 false。
+        // 恢复可能只拷了一部分，报告里单列提示，不静默报成功。
+        var downloadIncomplete = false
         // 备份 Keychain 目录里的 plist 文件数（不管条目数）：
         // 0 = 目录缺/空；>0 但 keychainFound=0 = 快照文件在
         // 但读出 0 条（空快照，或文件未同步完/已损坏）。
@@ -3155,9 +3177,12 @@ struct LCDataManagementView : View {
     /// v216：onProgress 已下数/总数回调（非逃逸闭包，调用方
     /// 在主线程写进度文案）。本地文件夹直接返回、不报进度；
     /// 总数为 0 时不报（没东西可等）；提前下完时报 (total, total)。
-    static func waitForUbiquitousDownload(_ url: URL, fm: FileManager, maxSeconds: Int = 120, onProgress: ((Int, Int) -> Void)? = nil) async {
+    /// 3.8.294（P0-4）：返回全部文件是否真正下完——本地文件
+    /// 夹、无文件、轮询到全部 .current 为 true，超时仍有未下
+    /// 完为 false；调用方记进 outcome，报告里单列提示。
+    static func waitForUbiquitousDownload(_ url: URL, fm: FileManager, maxSeconds: Int = 120, onProgress: ((Int, Int) -> Void)? = nil) async -> Bool {
         guard let extURL = Self.externalBackupFolderURL(),
-              url.path.hasPrefix(extURL.path + "/") else { return }
+              url.path.hasPrefix(extURL.path + "/") else { return true }
         try? fm.startDownloadingUbiquitousItem(at: url)
         // 整树枚举挪后台：大容器几万文件时逐个 resourceValues
         // 在主线程同样是秒级长堵；逻辑与原来一字不差（上限、
@@ -3180,7 +3205,7 @@ struct LCDataManagementView : View {
             }
             return out
         }.value
-        if files.isEmpty { return }
+        if files.isEmpty { return true }
         // 只轮询还没下完的：原来每秒全量扫一遍（N 个文件 × 120 秒），
         // 文件一多就是几百万次 resourceValues；下完的移出本轮，越轮越少。
         // 语义跟原来一致：读不到状态按已下完处理（不卡住），状态
@@ -3195,7 +3220,7 @@ struct LCDataManagementView : View {
         // 本 target 是 Swift 5 mode（project.pbxproj，app target
         // LiveContainerSwiftUI 的 SWIFT_VERSION = 5.0），捕获
         // onProgress 闭包可编译；CI 为最终 verdict。
-        await Task.detached {
+        return await Task.detached {
             var remaining = files
             if !files.isEmpty { await MainActor.run { onProgress?(0, files.count) } }
             for _ in 0..<maxSeconds {
@@ -3207,9 +3232,10 @@ struct LCDataManagementView : View {
                     let done = files.count - remaining.count
                     await MainActor.run { onProgress?(done, files.count) }
                 }
-                if remaining.isEmpty { return }
+                if remaining.isEmpty { return true }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
+            return false
         }.value
     }
 
@@ -3351,6 +3377,9 @@ struct LCDataManagementView : View {
             manifestTweakFolder = json["tweakFolder"] ?? ""
         }
         var restoredContainers = 0
+        // 3.8.294（P0-4）：本次恢复里任一段 iCloud 下载超时
+        // 未下完即 true，结尾写进 outcome.downloadIncomplete。
+        var downloadIncomplete = false
         // 登录态合并计数（三种合并之和，见各合并点）与完整
         // 备份登录态恢复的顶层文件夹数（容器数修正用，见
         // outcome 赋值处）：只记数，不改合并语义。
@@ -3361,10 +3390,35 @@ struct LCDataManagementView : View {
         // 全算）：结尾关窗口用，不只关 dataUUID——非默认容器
         // 的窗口若在跑，恢复后它继续用内存旧数据跑。
         var restoredFolderNames = Set<String>()
+        // 3.8.294（P0-5）：恢复前先关窗——恢复进行中 App 还在
+        // 跑时，它会继续写数据容器，写完就被本函数的覆盖/合并
+        // 盖掉（或关窗时丢掉）。结尾已有恢复后关窗，但那是事后
+        // 补救，恢复进行中的几分钟写入已丢。开始拷数据前就把本
+        // 次要恢复的容器对应的窗口关掉。文件夹名就是窗口 uuid
+        // （结尾关窗直接拿 restoredFolderNames 当 uuid 关）；
+        // AppGroup/钥匙串没有窗口 uuid（组容器是共享的，钥匙串
+        // 排队进全部容器），但它们随容器恢复一起写回，关容器窗
+        // 口即关掉会写它们的进程。只关本次备份里的容器，不动别
+        // 的 App、也不动本 App 不在备份里的容器；没在跑就是空操
+        // 作（closeAppWindow 内部按 uuid 查不到即返回）。候选集
+        // 是备份里的文件夹名（不是结尾的 restoredFolderNames）：
+        // 精确动过的集合要等各循环跑完才知道，开始前只能按候选
+        // 集关，个别被跳过（登录空壳）的窗口多关一次无害、重开
+        // 即可。过滤条件与下面 containerFolders 同款；loginOnly
+        // 全量合并时 containerFolders 为空，这里仍按备份文件夹名
+        // 关，覆盖合并路径。MultitaskDockManager 是 iOS 16+ 类，
+        // 必须用 #available 包住（2026-10-25 构建 #186 红字教训）。
+        if #available(iOS 16.0, *) {
+            let backupContainerNames: [String] = ((try? fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)) ?? []).map { $0.lastPathComponent }.filter { $0 != "manifest.json" && !$0.hasSuffix(".app") && $0 != "AppGroup" && $0 != "Keychain" }
+            for name in backupContainerNames {
+                MultitaskDockManager.shared.closeAppWindow(uuid: name)
+            }
+        }
         for containerFolder in containerFolders {
             let folderName = containerFolder.lastPathComponent
             // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
-            await Self.waitForUbiquitousDownload(containerFolder, fm: fm, onProgress: downloadProgress)
+            let containerDownloaded = await Self.waitForUbiquitousDownload(containerFolder, fm: fm, onProgress: downloadProgress)
+            if !containerDownloaded { downloadIncomplete = true }
             if let live = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == folderName }) {
                 if isLoginBackup {
                     // 登录态备份只有半套会话文件：合并进现有
@@ -3451,7 +3505,8 @@ struct LCDataManagementView : View {
             for groupFolder in groupFolders {
                 let dest = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupFolder.lastPathComponent)
                 // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
-                await Self.waitForUbiquitousDownload(groupFolder, fm: fm, onProgress: downloadProgress)
+                let groupDownloaded = await Self.waitForUbiquitousDownload(groupFolder, fm: fm, onProgress: downloadProgress)
+                if !groupDownloaded { downloadIncomplete = true }
                 if isLoginBackup && fm.fileExists(atPath: dest.path) {
                     // 登录态档的组容器同样是半套：合并，不整替。
                     // 合并拷盘挪后台（见三件套注释）。
@@ -3503,7 +3558,8 @@ struct LCDataManagementView : View {
                 let n = folder.lastPathComponent
                 if n == "manifest.json" || n.hasSuffix(".app") || n == "AppGroup" || n == "Keychain" { continue }
                 // iCloud 源先等数据下完再合并，否则拷到占位空壳
-                await Self.waitForUbiquitousDownload(folder, fm: fm, onProgress: downloadProgress)
+                let mergeDownloaded = await Self.waitForUbiquitousDownload(folder, fm: fm, onProgress: downloadProgress)
+                if !mergeDownloaded { downloadIncomplete = true }
                 guard let target = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n })
                         ?? app.uiSelectedContainer ?? app.uiContainers.first else { continue }
                 // 合并拷盘挪后台（见三件套注释）：目标值先在
@@ -3528,6 +3584,7 @@ struct LCDataManagementView : View {
         outcome.containerFolderCount = containerFolders.count + loginMergeFolderCount
         outcome.mergedLoginFiles = mergedLoginFiles
         outcome.groupRestoreFailed = failedGroupNames
+        outcome.downloadIncomplete = downloadIncomplete
         let keychainBackup = appFolder.appendingPathComponent("Keychain")
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             let plistFiles = files.filter { $0.pathExtension == "plist" }
@@ -3586,7 +3643,15 @@ struct LCDataManagementView : View {
                         plist = await Self.readKeychainPlist(file: file)
                     }
                 }
-                guard let plist else { continue }
+                guard let plist else {
+                    // 3.8.294（P0-4）：重试 5 秒仍读不出——若文件还没
+                    // 下完（占位），不是快照损坏：记进下载未完成，报
+                    // 告里提示，不要静默跳过。已下完仍读不出是损坏
+                    // 或缺失，不归下载未完成。本地文件无 iCloud 状态，
+                    // isFileDownloaded 按已下载处理（返回 true）。
+                    if !Self.isFileDownloaded(file, underExternal: true) { outcome.downloadIncomplete = true }
+                    continue
+                }
                 let data = plist.data
                 let items = plist.items
                 let writeResult = await Self.importKeychainItems(items, container: target)

@@ -2625,8 +2625,9 @@ public struct MultitaskDockSwiftView: View {
             .padding(dynamicPadding)
             .sheet(isPresented: $showAllApps) {
                 AllAppsListView(onLaunchError: { sheetLaunchError = $0 })
-                    // 只留一个半屏档位：两个档位时系统会先拉高抽屉、列表滚不动
-                    .presentationDetents([.fraction(0.6)])
+                    // 3.8.294：档位与 overlay 面板高度对齐（45%）：
+                    // 原来 0.6 与面板 45% 不一致，同一份列表两种高度。
+                    .presentationDetents([.fraction(0.45)])
                     .presentationDragIndicator(.visible)
             }
             // sheet 路面板启动失败提示（与面板本地 alert 同款文案）：
@@ -2991,9 +2992,13 @@ final class CZFPinnedAppsStore: ObservableObject {
     }
     /// 旧版按包名存的固定项迁移（只跑一次）：单实例的包名直转
     /// 成该实例的键（用户的固定保留）；多实例的包名无法断定
-    /// 当初固定的是哪一个，丢弃（用户重固定一次即可，点一下），
-    /// 绝不猜一个实例替用户固定；已删 App 的残留一并清掉。
+    /// 当初固定的是哪一个，原键保留不猜（解析时查不到自然掉，
+    /// 不删数据）；已删 App 的残留键同样保留，不主动清掉。
     /// 模型表为空时不跑、不记迁移完成（等面板下次打开模型到了再跑）。
+    // 3.8.294：迁移只转换、不删除——匹配不上的旧键原样保留。
+    // 原来“多实例或查无此 App 一律丢弃”，模型表还在加载（不全）
+    // 时跑一次就会把固定过的 App 永久删掉；固定数据丢了不可逆，
+    // 残留键留着无害（解析时查不到自然掉，不占地方也不报错）。
     func migrateLegacyPins(models: [LCAppModel]) {
         guard !LCUtils.appGroupUserDefault.bool(forKey: migratedKey) else { return }
         guard !models.isEmpty else { return }
@@ -3014,8 +3019,12 @@ final class CZFPinnedAppsStore: ObservableObject {
             if sameBundle.count == 1, let only = sameBundle.first {
                 let key = Self.pinKey(for: only)
                 if !migrated.contains(key) { migrated.append(key) }
+                continue
             }
-            // 多实例（sameBundle.count > 1）或查无此 App：一律丢弃。
+            // 多实例（sameBundle.count > 1）或查无此 App：原样保留，
+            // 不删——模型表可能还没加载完，删了就找不回来；下次
+            // 解析时查不到自然掉，不影响显示也不报错。
+            if !migrated.contains(entry) { migrated.append(entry) }
         }
         pinnedIds = migrated
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
@@ -4388,14 +4397,29 @@ private struct RunningAppsStripView: View {
 }
 
 // 状态栏里的单个已打开 App 图标（异步加载方式与 AppCardRow 一致）
+// 3.8.294：之前只写“与 AppCardRow 一致”，实际没走 IconCacheManager，
+// 固定区图标全灰（点按有效、图标不见）——列表行走缓存先命中直接显，
+// 这里每次都重解且加载时机不可靠。改成与 AppCardRow 同款：缓存键
+// Bundle ID + dataUUID；onAppear 先查缓存命中直接用，未命中后台
+// 解一次并写回；body 里也读一次缓存，列表已解进缓存时不用等
+// onAppear 就直接显出来。
 @available(iOS 16.0, *)
 private struct RunningAppIcon: View {
     let appInfo: LCAppInfo?
     @State private var icon: UIImage?
 
+    private var cacheKey: String {
+        guard let appInfo = appInfo else { return "" }
+        return "\(appInfo.bundleIdentifier() ?? "")_\(appInfo.dataUUID ?? "")"
+    }
+    private var cachedIcon: UIImage? {
+        guard !cacheKey.isEmpty else { return nil }
+        return IconCacheManager.shared.getIcon(for: cacheKey)
+    }
+
     var body: some View {
         Group {
-            if let icon = icon {
+            if let icon = icon ?? cachedIcon {
                 Image(uiImage: icon)
                     .resizable()
             } else {
@@ -4404,9 +4428,20 @@ private struct RunningAppIcon: View {
             }
         }
         .onAppear {
+            // 缓存命中也写回 @State（审计建议）：body 与 onAppear 是
+            // 同一主线程 pass，若缓存恰在两者之间被别的行写进来，
+            // 光 return 不设 State，灰块要等下次父视图重渲染才消失。
+            if let cached = cachedIcon {
+                if icon == nil { self.icon = cached }
+                return
+            }
             guard let appInfo = appInfo else { return }
+            let key = cacheKey
             DispatchQueue.global(qos: .userInitiated).async {
                 let loaded = appInfo.iconIsDarkIcon(false)
+                if let loaded = loaded, !key.isEmpty {
+                    IconCacheManager.shared.setIcon(loaded, for: key)
+                }
                 DispatchQueue.main.async {
                     self.icon = loaded
                 }
