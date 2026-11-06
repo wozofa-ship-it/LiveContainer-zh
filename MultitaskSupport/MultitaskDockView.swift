@@ -179,6 +179,12 @@ extension Notification.Name {
     // 源面板覆盖层：与 App 面板同构，各自一套遮罩+宿主，互开时先关对方
     private var czfSourcesOverlayBackdrop: UIView?
     private var czfSourcesOverlayHost: UIHostingController<AnyView>?
+    // 键盘高度（CZF）：面板搜索框获焦弹键盘时，键盘会盖住面板下半截
+    // （搜索框与列表被挡住，键盘还收不掉）。记下当前键盘高度，面板
+    // 打开位置按它上移；键盘收起归零。3.8.296 修“点搜索面板收了键
+    // 盘没收”bug。
+    private var czfKeyboardHeight: CGFloat = 0
+    private var czfKeyboardObserversAdded = false
 
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
@@ -2083,12 +2089,57 @@ extension Notification.Name {
     }
 
 
+    // 键盘监听（3.8.296）：只注册一次；面板打开时键盘弹出/收起，
+    // 按键盘高度整体上移/落下面板，搜索框始终露在键盘上面。
+    private func czfStartKeyboardObserving() {
+        guard !czfKeyboardObserversAdded else { return }
+        czfKeyboardObserversAdded = true
+        NotificationCenter.default.addObserver(self, selector: #selector(czfKeyboardWillShow(_:)), name: UIResponder.keyboardWillShowNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(czfKeyboardWillHide(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
+    }
+
+    @objc private func czfKeyboardWillShow(_ note: Notification) {
+        // 键盘 frame 在 userInfo 里是 NSValue（不是 CGRect），必须走
+        // cgRectValue 取——直接 as? CGRect 取不到，会静默失效。
+        guard let value = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else { return }
+        czfKeyboardHeight = value.cgRectValue.height
+        czfShiftOpenPanelsForKeyboard()
+    }
+
+    @objc private func czfKeyboardWillHide(_ note: Notification) {
+        czfKeyboardHeight = 0
+        czfShiftOpenPanelsForKeyboard()
+    }
+
+    // 面板打开时的顶沿 Y（键盘弹出时整体上移键盘高度，搜索框露在
+    // 键盘上面；键盘收起归零回到底部 45%+48pt 的位置）。
+    private func czfPanelOpenY(panelHeight: CGFloat, in bounds: CGRect) -> CGFloat {
+        bounds.height - panelHeight - czfKeyboardHeight
+    }
+
+    // 键盘弹出/收起时，把已打开的面板整体上移/落下（只动已打开的；
+    // 没开的面板下次弹出时按 czfPanelOpenY 算位置，不用这里管）。
+    private func czfShiftOpenPanelsForKeyboard() {
+        for (host, _) in [(czfPanelOverlayHost, czfPanelOverlayBackdrop), (czfSourcesOverlayHost, czfSourcesOverlayBackdrop)] {
+            guard let host, !host.view.isHidden, let window = host.view.superview else { continue }
+            let panelHeight = host.view.frame.height
+            let targetY = czfPanelOpenY(panelHeight: panelHeight, in: window.bounds)
+            UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut]) {
+                host.view.frame.origin.y = targetY
+            }
+        }
+    }
+
+
     // 建好手势面板覆盖层（只建一次，常驻窗口待命，和快捷栏同一个生命周期）。
     // #89 是每次左滑现建 SwiftUI 视图树：首帧渲染慢，滑完要等一下才动，
     // 体感像失灵；且开/关状态只认存着的引用，视图一旦被外部摘掉引用还
     // 非空，之后永远弹不出（小窗口"有时行有时不行"）。常驻后开/关只改
     // 可见性和位置，状态以视图 isHidden 为准，不再被旧引用毒化。
     private func ensurePanelOverlay(in window: UIWindow) {
+        // 键盘监听只注册一次（3.8.296）：面板搜索框获焦弹键盘时按
+        // 键盘高度上移面板，关面板时收键盘。
+        czfStartKeyboardObserving()
         if let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop {
             // 已建过：若被挪出当前窗口（窗口/场景切换），搬回当前窗口
             if host.view.superview !== window {
@@ -2109,10 +2160,11 @@ extension Notification.Name {
         backdrop.isHidden = true
         backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfPanelBackdropTapped)))
         window.addSubview(backdrop)
-        // 面板本体：底部 45% 高，上圆角（75% 版 2026-10-23 当晚被
+        // 面板本体：底部 45% 高 + 48pt，上圆角（75% 版 2026-10-23 当晚被
         // 用户真机否决：又高又肿，且整条盖死源面板手势起手带；
         // 60% 版 2026-11-06 用户看样板图仍嫌高，50% 版同日用户
-        // 又令降到 45%，再推一版）
+        // 又令降到 45%，再推一版；3.8.296 用户令再调高 48pt——
+        // 固定区图标被面板顶沿压住发糊，顶沿抬高 48pt 留出余量）
         let rootView = AnyView(
             AllAppsListView()
                 .environmentObject(self)
@@ -2123,7 +2175,7 @@ extension Notification.Name {
         // 面板走液态玻璃时，玻璃要直接采客 App 当底。
         host.view.backgroundColor = .clear
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.45)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.45 + 48)
         host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -2180,7 +2232,7 @@ extension Notification.Name {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.45
+            let panelHeight = b.height * 0.45 + 48
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -2189,7 +2241,7 @@ extension Notification.Name {
             }
             UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
                 backdrop.alpha = 1
-                host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
+                host.view.frame = CGRect(x: 0, y: czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
             }
         }
     }
@@ -2229,7 +2281,9 @@ extension Notification.Name {
         let isSources = hostView === czfSourcesOverlayHost?.view
         let backdrop = isSources ? czfSourcesOverlayBackdrop : czfPanelOverlayBackdrop
         let panelHeight = hostView.frame.height
-        let openY = container.bounds.height - panelHeight
+        // 拖回落点按键盘高度算（3.8.296）：键盘弹出时面板整体上移过，
+        // 落点也要上移，否则松手弹回会把面板压回键盘底下。
+        let openY = czfPanelOpenY(panelHeight: panelHeight, in: container.bounds)
         switch gesture.state {
         case .changed:
             let dy = max(0, gesture.translation(in: container).y)
@@ -2261,18 +2315,29 @@ extension Notification.Name {
     private func dismissPanelOverlay() {
         guard let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop, !host.view.isHidden else { return }
         let height = host.view.frame.height
+        // 3.8.296：关面板落到底部（y = 屏高）再藏，不再按 height 相对
+        // 下移——键盘弹出时面板整体上移过，相对下移 height 会停在
+        // 屏高 - 键盘高度处、露半截在屏内。
+        let b = host.view.superview?.bounds ?? UIScreen.main.bounds
         UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn], animations: {
             backdrop.alpha = 0
-            host.view.frame = host.view.frame.offsetBy(dx: 0, dy: height)
+            host.view.frame = CGRect(x: 0, y: b.height, width: host.view.frame.width, height: height)
         }, completion: { _ in
             backdrop.isHidden = true
             host.view.isHidden = true
+            // 关面板时顺带收键盘（3.8.296）：搜索框获焦后关面板，
+            // TextField 随宿主隐藏但不 resign，键盘会孤儿留在屏上。
+            // 放 completion 里——先关面板再收键盘，避免键盘收起的
+            // 移位回调与关面板动画打架。
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         })
     }
 
     // MARK: - 源面板覆盖层（与 App 面板同构：常驻待命、强制对齐呈现）
 
     private func ensureSourcesOverlay(in window: UIWindow) {
+        // 键盘监听只注册一次（3.8.296，见 ensurePanelOverlay）。
+        czfStartKeyboardObserving()
         if let host = czfSourcesOverlayHost, let backdrop = czfSourcesOverlayBackdrop {
             if host.view.superview !== window {
                 window.addSubview(backdrop)
@@ -2302,7 +2367,7 @@ extension Notification.Name {
         // systemBackground 兜底，外观与原来一致。
         host.view.backgroundColor = .clear
         let b = window.bounds
-        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.45)
+        host.view.frame = CGRect(x: 0, y: b.height, width: b.width, height: b.height * 0.45 + 48)
         host.view.layer.cornerRadius = 20
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
@@ -2336,7 +2401,7 @@ extension Notification.Name {
             window.bringSubviewToFront(backdrop)
             window.bringSubviewToFront(host.view)
             let b = window.bounds
-            let panelHeight = b.height * 0.45
+            let panelHeight = b.height * 0.45 + 48
             backdrop.frame = b
             backdrop.isHidden = false
             host.view.isHidden = false
@@ -2345,7 +2410,7 @@ extension Notification.Name {
             }
             UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
                 backdrop.alpha = 1
-                host.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
+                host.view.frame = CGRect(x: 0, y: czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
             }
         }
     }
@@ -2375,7 +2440,7 @@ extension Notification.Name {
                   let newHost = toSources ? self.czfSourcesOverlayHost : self.czfPanelOverlayHost,
                   let newBackdrop = toSources ? self.czfSourcesOverlayBackdrop : self.czfPanelOverlayBackdrop else { return }
             let b = window.bounds
-            let panelHeight = b.height * 0.45
+            let panelHeight = b.height * 0.45 + 48
             if toSources {
                 self.czfSourcesPanelOpenCounter += 1
             } else {
@@ -2392,8 +2457,10 @@ extension Notification.Name {
             }
             let oldHeight = oldHost.view.frame.height
             UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
-                oldHost.view.frame = oldHost.view.frame.offsetBy(dx: 0, dy: oldHeight)
-                newHost.view.frame = CGRect(x: 0, y: b.height - panelHeight, width: b.width, height: panelHeight)
+                // 3.8.296：旧面板落到底部（y = 屏高）再藏，不按 height 相对
+                // 下移——键盘弹出时旧面板上移过，相对下移会露半截。
+                oldHost.view.frame = CGRect(x: 0, y: b.height, width: oldHost.view.frame.width, height: oldHeight)
+                newHost.view.frame = CGRect(x: 0, y: czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
             } completion: { _ in
                 oldBackdrop.isHidden = true
                 oldHost.view.isHidden = true
@@ -2423,12 +2490,16 @@ extension Notification.Name {
     private func dismissSourcesOverlay() {
         guard let host = czfSourcesOverlayHost, let backdrop = czfSourcesOverlayBackdrop, !host.view.isHidden else { return }
         let height = host.view.frame.height
+        // 3.8.296：同 App 面板——落到底部再藏（键盘上移过时相对下移
+        // 会露半截），completion 里顺带收键盘（见 dismissPanelOverlay）。
+        let b = host.view.superview?.bounds ?? UIScreen.main.bounds
         UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn], animations: {
             backdrop.alpha = 0
-            host.view.frame = host.view.frame.offsetBy(dx: 0, dy: height)
+            host.view.frame = CGRect(x: 0, y: b.height, width: host.view.frame.width, height: height)
         }, completion: { _ in
             backdrop.isHidden = true
             host.view.isHidden = true
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         })
     }
 
