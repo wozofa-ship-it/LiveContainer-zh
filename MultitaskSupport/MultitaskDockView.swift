@@ -2241,7 +2241,7 @@ extension Notification.Name {
             }
             UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
                 backdrop.alpha = 1
-                host.view.frame = CGRect(x: 0, y: czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
+                host.view.frame = CGRect(x: 0, y: self.czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
             }
         }
     }
@@ -2410,7 +2410,7 @@ extension Notification.Name {
             }
             UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.6, options: [.curveEaseOut]) {
                 backdrop.alpha = 1
-                host.view.frame = CGRect(x: 0, y: czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
+                host.view.frame = CGRect(x: 0, y: self.czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
             }
         }
     }
@@ -2460,7 +2460,7 @@ extension Notification.Name {
                 // 3.8.296：旧面板落到底部（y = 屏高）再藏，不按 height 相对
                 // 下移——键盘弹出时旧面板上移过，相对下移会露半截。
                 oldHost.view.frame = CGRect(x: 0, y: b.height, width: oldHost.view.frame.width, height: oldHeight)
-                newHost.view.frame = CGRect(x: 0, y: czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
+                newHost.view.frame = CGRect(x: 0, y: self.czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
             } completion: { _ in
                 oldBackdrop.isHidden = true
                 oldHost.view.isHidden = true
