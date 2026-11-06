@@ -4237,11 +4237,12 @@ struct SourcesPanelView: View {
                                 RunningAppIcon(appInfo: app.appInfo)
                                     .frame(width: 40, height: 40)
                                     .clipShape(Circle())
-                                // 3.8.313：角标不许探出 40 框——之前 offset(2,2)
-                                // 把角标推出框外，App 图标视觉占位变成 42，
-                                // 跟旁边 40 的圆图标对不齐（用户 19:06 截图
-                                // 指出 App 图标都不对齐）；角标贴着右下角
-                                // 待在框内，整行占位统一 40。
+                                // 3.8.314：角标必须完全落在 40 圆内——313 只去了
+                                // offset(2,2) 还不够：20 角标贴在右下角时，
+                                // 圆心离主圆圆心 14.1、半径 10，最远点 24.1
+                                // 仍探出主圆（半径 20）约 4pt，用户 19:37
+                                // 截图证实还挂在边上；改成内收 4pt 后最远点
+                                // 18.5，整颗角标收进圆内，跟旁边 40 圆图标齐。
                                 Circle()
                                     .fill(settingBadgeColor(for: item, setting: setting))
                                     .frame(width: 20, height: 20)
@@ -4250,6 +4251,7 @@ struct SourcesPanelView: View {
                                             .font(.system(size: 10, weight: .bold))
                                             .foregroundColor(.white)
                                     )
+                                    .offset(x: -4, y: -4)
                             }
                         }
                         .contextMenu {
