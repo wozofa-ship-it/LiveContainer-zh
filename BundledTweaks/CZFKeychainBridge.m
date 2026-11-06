@@ -721,6 +721,21 @@ static BOOL CZFKBTryImportEarly(void) {
     }
 }
 
+// 3.8.318：CZFKBRun 串行化——构造器、启动完成、切后台三处
+// 各 dispatch_async 到全局并发队列，全量流程（导出写 dump、
+// 写回执）会并发交错：A 写 dump（4 条）、B 写 dump（8 条）、
+// A 写回执（4）、B 写回执（8），终态 dump=4、回执=8，备份
+// 只拿到 4 条、令牌可能在丢的 4 条里，恢复永不成。串行队列
+// 保证一次只跑一遍全量流程，dump 与回执同属同一遍、必然一致。
+static dispatch_queue_t CZFKBRunQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.kdt.livecontainer.czfkbRun", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
 __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
     // 先在构造线程上抢一轮写回（HOME 没就位就短轮询
     // ≤2 秒，3.8.305 由 0.5 秒放宽：冷启动/大 App 上 LCBootstrap
@@ -734,7 +749,7 @@ __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
             if (CZFKBTryImportEarly()) break;
         }
     }
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    dispatch_async(CZFKBRunQueue(), ^{
         CZFKBRun();
     });
     // 登录发生在启动之后（首次登录、令牌刷新）：界面起来后
@@ -745,7 +760,7 @@ __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
                                                       object:nil
                                                        queue:nil
                                                   usingBlock:^(NSNotification *note) {
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        dispatch_async(CZFKBRunQueue(), ^{
             CZFKBRun();
         });
     }];
@@ -757,7 +772,7 @@ __attribute__((constructor)) static void CZFKeychainBridgeInit(void) {
                                                       object:nil
                                                        queue:nil
                                                   usingBlock:^(NSNotification *note) {
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        dispatch_async(CZFKBRunQueue(), ^{
             CZFKBRun();
         });
     }];
