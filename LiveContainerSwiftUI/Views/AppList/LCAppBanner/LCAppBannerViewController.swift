@@ -110,6 +110,27 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             darkModeIcon: darkModeIcon
         )
         refreshView()
+        // 3.8.313：记一笔“待布局后重刷”（见 viewDidLayoutSubviews）。
+        needsLayoutRefresh = true
+    }
+
+    // 3.8.313：3.8.280 的 viewDidAppear 自愈不够——List 里
+    // representable 的 viewDidAppear 本就不可靠，个别 cell
+    // 压根不走它，进多选时行还是空白（用户 19:12 真机：只剩
+    // 红果一行有内容，其余只剩勾选圈）。layout 是比 appearance
+    // 更可靠的信号：视图进了层级、拿到真实 frame 才会布局。
+    // update 里先记一笔，布局时若框非空就重刷一次并清掉；
+    // 只刷一次，不循环；viewDidAppear 的旧自愈留着当第二道。
+    private var needsLayoutRefresh = false
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard needsLayoutRefresh else { return }
+        guard view.bounds.width > 0, view.bounds.height > 0 else { return }
+        needsLayoutRefresh = false
+        refreshView()
+        bannerView.setNeedsLayout()
+        bannerView.layoutIfNeeded()
     }
 
     private func refreshView() {

@@ -4237,6 +4237,11 @@ struct SourcesPanelView: View {
                                 RunningAppIcon(appInfo: app.appInfo)
                                     .frame(width: 40, height: 40)
                                     .clipShape(Circle())
+                                // 3.8.313：角标不许探出 40 框——之前 offset(2,2)
+                                // 把角标推出框外，App 图标视觉占位变成 42，
+                                // 跟旁边 40 的圆图标对不齐（用户 19:06 截图
+                                // 指出 App 图标都不对齐）；角标贴着右下角
+                                // 待在框内，整行占位统一 40。
                                 Circle()
                                     .fill(settingBadgeColor(for: item, setting: setting))
                                     .frame(width: 20, height: 20)
@@ -4245,7 +4250,6 @@ struct SourcesPanelView: View {
                                             .font(.system(size: 10, weight: .bold))
                                             .foregroundColor(.white)
                                     )
-                                    .offset(x: 2, y: 2)
                             }
                         }
                         .contextMenu {
@@ -5295,6 +5299,14 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
     case multilc
     case storage
     case backup
+    // 3.8.313：备份/恢复直达——都是 LCDataManagementView
+    // 里的动作，用 initialSheet 让它一出现就弹出对应页；
+    // 用户 19:06 令：恢复数据、选择备份进设置页，再加些
+    // 重要的（备份全部、定时备份同组补齐）。
+    case restore
+    case selectbackup
+    case backupall
+    case schedulebackup
 
     var id: String { rawValue }
 
@@ -5306,6 +5318,10 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .multilc: return "多开管理"
         case .storage: return "存储管理"
         case .backup: return "备份"
+        case .restore: return "恢复数据"
+        case .selectbackup: return "选择备份"
+        case .backupall: return "备份全部"
+        case .schedulebackup: return "定时备份"
         }
     }
 
@@ -5317,6 +5333,10 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .multilc: return "apps.iphone"
         case .storage: return "internaldrive.fill"
         case .backup: return "archivebox.fill"
+        case .restore: return "arrow.clockwise"
+        case .selectbackup: return "checkmark.circle.fill"
+        case .backupall: return "doc.on.doc"
+        case .schedulebackup: return "clock.fill"
         }
     }
 
@@ -5329,6 +5349,10 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .multilc: LCMultiLCManagementView()
         case .storage: LCStorageManagementView()
         case .backup: LCDataManagementView()
+        case .restore: LCDataManagementView(initialSheet: .restore)
+        case .selectbackup: LCDataManagementView(initialSheet: .backupSelect)
+        case .backupall: LCDataManagementView(initialSheet: .backupAll)
+        case .schedulebackup: LCDataManagementView(initialSheet: .scheduleBackup)
         }
     }
 }

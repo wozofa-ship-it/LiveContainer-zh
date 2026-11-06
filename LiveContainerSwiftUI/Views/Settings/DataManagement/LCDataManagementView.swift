@@ -86,10 +86,25 @@ struct BackupPreviewItem {
     }
 }
 
+/// 3.8.313：源面板快捷方式直开数据管理里的某个动作——
+/// 快捷方式存的设置页（CZFSettingsPage）里，恢复/备份类
+/// 不是新页，都是 LCDataManagementView 里的 sheet/弹窗；
+/// 用 initialSheet 告诉本页一出现就自动弹出哪一个，免得
+/// 用户先进数据管理再点一次。
+enum LCDataManagementInitialSheet {
+    case restore
+    case backupSelect
+    case backupAll
+    case scheduleBackup
+}
+
 struct LCDataManagementView : View {
     @State var folderPaths : [LCFolderPath]
     @State var filzaInstalled = false
     @State var appeared = false
+    // 3.8.313：直开某动作（见 LCDataManagementInitialSheet）。
+    let initialSheet: LCDataManagementInitialSheet?
+    @State private var didApplyInitialSheet = false
     
     @StateObject private var appFolderRemovalAlert = YesNoHelper()
     @State private var folderRemoveCount = 0
@@ -198,7 +213,8 @@ struct LCDataManagementView : View {
     
     @EnvironmentObject private var sharedModel : SharedModel
     
-    init() {
+    init(initialSheet: LCDataManagementInitialSheet? = nil) {
+        self.initialSheet = initialSheet
         _folderPaths = State(initialValue: [
             LCFolderPath(path: LCPath.docPath, desc: "Private Container"),
             LCFolderPath(path: LCPath.lcGroupDocPath, desc: "App Group Container"),
@@ -1047,6 +1063,26 @@ struct LCDataManagementView : View {
                 }
             }
             appeared = true
+        }
+        // 3.8.313：直开某动作——只跑一次（关掉内层 sheet 后
+        // 本页重现时不再重复弹）。包一层 async，让外层 sheet
+        // 先落定再弹内层，避免两层 sheet 同帧抢呈现。
+        if !didApplyInitialSheet, let sheet = initialSheet {
+            didApplyInitialSheet = true
+            DispatchQueue.main.async {
+                switch sheet {
+                case .restore:
+                    self.showRestoreSelect = true
+                case .backupSelect:
+                    self.showBackupSelect = true
+                case .backupAll:
+                    self.pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
+                    self.showBackupScopeDialog = true
+                case .scheduleBackup:
+                    self.loadScheduleSettings()
+                    self.showScheduleBackup = true
+                }
+            }
         }
         externalFolderName = Self.externalBackupFolderURL()?.lastPathComponent
         // 兜底：把本地备份补齐同步到外部文件夹（后台线程，避免大备份拷贝卡界面）
