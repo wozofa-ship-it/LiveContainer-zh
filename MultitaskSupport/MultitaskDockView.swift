@@ -3277,11 +3277,17 @@ struct PinnedAppsStripView: View {
                                     // 的子视图会被当成 backdrop 模糊掉；搜索框/
                                     // 列表行/运行条都有玻璃所以清晰。给固定图标
                                     // 也挂玻璃（圆角 12 与 clipShape 同形），
-                                    // 图标本身保持清晰；非玻璃系统原样。
+                                    // 图标本身保持清晰。
+                                    // 3.8.299：else 不能直接返裸 content——
+                                    // 裸 content 让编译器推不出闭包参数类型
+                                    // （298 四条红字全是它；搜索框/行/运行条
+                                    // 的 else 都返改过后的视图才能编）。非玻
+                                    // 璃系统用透明底（看不见，只为让两边都
+                                    // 是改过后的视图类型），图标原样。
                                     if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
                                         content.glassEffect(.regular, in: .rect(cornerRadius: 12))
                                     } else {
-                                        content
+                                        content.background(Color.clear)
                                     }
                                 }
                                 .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)

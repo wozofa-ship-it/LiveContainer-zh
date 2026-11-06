@@ -24,6 +24,35 @@ struct NoDataFolderEntry: Identifiable {
     let folder: URL
 }
 
+/// 3.8.299：恢复用 IPA 选择器的 delegate。恢复 Task 里用
+/// withCheckedContinuation 等用户选文件，delegate 回调就是
+/// resume 的时机。UIDocumentPickerViewController 的 delegate
+/// 是弱引用，coordinator 靠 selfRetain 活到回调（选到或取
+/// 消都只 resume 一次，回调完立刻释放）。
+private final class RestoreIPAPickerCoordinator: NSObject, UIDocumentPickerDelegate {
+    private let onDone: (URL?) -> Void
+    private var done = false
+    private var selfRetain: RestoreIPAPickerCoordinator?
+    init(onDone: @escaping (URL?) -> Void) {
+        self.onDone = onDone
+        super.init()
+        selfRetain = self
+    }
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard !done else { return }
+        done = true
+        let url = urls.first
+        selfRetain = nil
+        onDone(url)
+    }
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        guard !done else { return }
+        done = true
+        selfRetain = nil
+        onDone(nil)
+    }
+}
+
 /// 恢复前备份清单预览的一行（v216）：只读元数据和已下载
 /// 到本机的文件，绝不触发 iCloud 下载（未同步的部分标
 /// “未同步”，不给假数字）。
@@ -2896,7 +2925,17 @@ struct LCDataManagementView : View {
                 if presentResult {
                     backupRestoreProgress = "正在安装并恢复 \(item.name)（等安装完成）…"
                 }
-                guard let downloadURL = downloadURLForApp(bundleID: item.bundleID, name: item.name, in: sourceApps) else {
+                // 3.8.299：源里没有待恢复的 App 时，别直接报“未在源中
+                // 找到”了事（用户得自己退出恢复、去 App 页导 IPA、装
+                // 好再回来恢复——这条路当初就没想通）。当场请用户选它
+                // 的 IPA 文件，选好就走下面同一条安装通道、装好就恢复，
+                // 整条链不出恢复流程；取消才记未找到。
+                let downloadURL: URL
+                if let fromSource = downloadURLForApp(bundleID: item.bundleID, name: item.name, in: sourceApps) {
+                    downloadURL = fromSource
+                } else if let picked = await pickIPAForRestore(appName: item.name) {
+                    downloadURL = picked
+                } else {
                     installNotFound.append(item.name)
                     continue
                 }
@@ -3029,7 +3068,9 @@ struct LCDataManagementView : View {
                 msg += "\n\n其中 \(installRestoredCount) 个是先安装再恢复的"
             }
             if !installNotFound.isEmpty {
-                msg += "\n\n未在源中找到（请手动到 App 页导入 IPA）：\n" + installNotFound.joined(separator: "\n")
+                // 3.8.299：源里没有时恢复流程已当场请用户选 IPA，
+                // 走到这里是用户取消了选择（不是没提示就跳过）。
+                msg += "\n\n未恢复（源里没有，也没选 IPA 文件；再恢复一次、选 IPA 即可装好恢复）：\n" + installNotFound.joined(separator: "\n")
             }
             if !installFailed.isEmpty {
                 msg += "\n\n安装失败或超时（可到 App 页看报错后重试）：\n" + installFailed.joined(separator: "\n")
@@ -4097,6 +4138,36 @@ struct LCDataManagementView : View {
             }
         }
         return nil
+    }
+
+    /// 3.8.299：源里没有待恢复 App 的下载地址时，当场请用户选它的
+    /// IPA 文件（asCopy，选中的文件会拷一份，装完再恢复）。取消
+    /// 返回 nil（调用方按原有“未在源中找到”记）。恢复 Task 不一
+    /// 定在主线程，弹 picker 必须切到主线程；用 continuation 把
+    /// delegate 回调桥回 async，选到或取消都只 resume 一次。
+    private func pickIPAForRestore(appName: String) async -> URL? {
+        await withCheckedContinuation { continuation in
+            Task { @MainActor in
+                // 先确认能弹 picker 再建 coordinator：没窗口时直接
+                // resume nil，不建 coordinator（建了又没回调，selfRetain
+                // 会一直挂着不释放）。
+                guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                      let rootViewController = windowScene.windows.first?.rootViewController else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let coordinator = RestoreIPAPickerCoordinator { url in
+                    continuation.resume(returning: url)
+                }
+                let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.ipa, UTType.tipa], asCopy: true)
+                picker.allowsMultipleSelection = false
+                picker.delegate = coordinator
+                // picker 标题写清是给哪个 App 选安装包，免得用户
+                // 对着文件列表不知道在选谁的 IPA
+                picker.title = "为「\(appName)」选择 IPA"
+                rootViewController.present(picker, animated: true)
+            }
+        }
     }
 
     func moveDanglingFolders() async {
