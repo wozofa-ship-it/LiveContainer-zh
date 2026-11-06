@@ -1369,20 +1369,31 @@ private struct CZFVPNNodeLabel: View {
 
     @ViewBuilder private var aboutSection: some View {
         Section {
+            // 3.8.322 液体化繁为简：品牌图统一 30 圆角框，与
+            // LCSettingsIcon 同尺寸同圆角，行高不再随图大小抖。
             HStack {
                 Image("GitHub")
+                    .resizable()
+                    .frame(width: 30, height: 30)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
                 Button("LiveContainer/LiveContainer") {
                     openGitHub()
                 }
             }
             HStack {
                 Image("Twitter")
+                    .resizable()
+                    .frame(width: 30, height: 30)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
                 Button("khanhduytran0") {
                     openTwitter()
                 }
             }
             HStack {
                 Image("GitHub")
+                    .resizable()
+                    .frame(width: 30, height: 30)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
                 Button("Huge_Black") {
                     openGitHub2()
                 }
@@ -1440,15 +1451,15 @@ private struct CZFVPNNodeLabel: View {
     }
 
     @ViewBuilder private var versionFooter: some View {
-        VStack{
-            Text(LCUtils.getVersionInfo())
-                .foregroundStyle(.gray)
-                .onTapGesture(count: 5) {
-                    sharedModel.developerMode = true
-                }
-        }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            .background(Color(UIColor.systemGroupedBackground))
+        // 3.8.322 液体化繁为简：VStack + systemGroupedBackground
+        // 是多余的——Form 本来就是分组底色，再套一层没意义；
+        // 只留文字，居中、灰字、点 5 下进开发者模式，一字不动。
+        Text(LCUtils.getVersionInfo())
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .onTapGesture(count: 5) {
+                sharedModel.developerMode = true
+            }
             .listRowInsets(EdgeInsets())
     }
 

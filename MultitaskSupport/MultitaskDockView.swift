@@ -4195,132 +4195,128 @@ struct SourcesPanelView: View {
             // 快捷图标行（固定在运行条下方、不随列表滚动）
             // 3.8.309：三个小图标，大小一样、间距平均；VPN 点按
             // 开关、长按选节点（与 App 页盾牌同款 Menu）。
-            // 3.8.312：用户 18:29/18:31 两度改主意——不要左对
-            // 齐，要居中（17:07 的“从左边排起”已作废，17:29
-            // 的居中令为准）；图标 36→40 稍大一点；上下间距
-            // 改成一样的 8（跟 App 面板搜索框下沿的 8 同距）。
-            HStack(spacing: 16) {
-                // 居中（两端 Spacer 把整行推到中间）。
-                Spacer()
-                // VPN：点按开关核心，长按弹节点菜单
-                panelVPNMenu
-                // 3.8.315：用户 19:39 令——快捷行只留 VPN 默认，
-                // 数据管理固定图标去掉（数据管理仍在设置页里，
-                // 不再占快捷行一个位置）。
-                // 自定义快捷方式（3.8.311：用户要的不是加 App
-                // 快捷，而是把 APP 详情页里的设置加为快捷方式——
-                // 某个 App 的某个开关/设置。开关类点按直接切换
-                //（角标绿=开、灰=关），多选项类点按打开该 App
-                // 的设置页；长按可移除）。
-                ForEach(customShortcuts, id: \.self) { item in
-                    if let raw = CZFPanelCustomShortcuts.pageRaw(from: item),
-                       let page = CZFSettingsPage(rawValue: raw) {
-                        Button {
-                            openSettingsPage(page.rawValue)
-                        } label: {
-                            Image(systemName: page.icon)
-                                .font(.system(size: 22))
-                                .foregroundStyle(.blue)
-                                .frame(width: 40, height: 40)
-                                .background(Color(UIColor.secondarySystemBackground))
-                                .clipShape(Circle())
-                        }
-                        .contextMenu {
-                            Button("移除此快捷方式", role: .destructive) {
-                                CZFPanelCustomShortcuts.remove(item)
-                                customShortcuts = CZFPanelCustomShortcuts.items
-                                refreshSettingStates()
-                            }
-                        }
-                        // 3.8.316：按住拖动调序（同固定区拖动换位）。
-                        .onDrag {
-                            draggedShortcutKey = item
-                            return NSItemProvider(object: item as NSString)
-                        }
-                        .onDrop(of: [.text], delegate: CZFCustomShortcutReorderDelegate(
-                            targetIndex: customShortcuts.firstIndex(of: item) ?? 0,
-                            items: $customShortcuts,
-                            draggedKey: $draggedShortcutKey
-                        ))
-                    } else if let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
-                              let app = app(forPinKey: pinKey),
-                              let setting = CZFPanelAppSetting(rawValue: key) {
-                        Button {
-                            if setting.isToggle {
-                                toggleSetting(item: item)
-                            } else {
-                                settingsApp = app
-                                showAppSettings = true
-                            }
-                        } label: {
-                            ZStack(alignment: .bottomTrailing) {
-                                RunningAppIcon(appInfo: app.appInfo)
+            // 3.8.322 液体化繁为简：根上对齐——原来居中 Spacer +
+            // offset(-4/-6/-8) 来回调，图标一多整行就溢出到固定区
+            // 第一图标左边去（用户 02:34 定：不得超过第一个固定
+            // App 位置、要对齐）。改成跟固定区同款结构：横滑
+            // ScrollView + HStack + 内缩 10，外 16，首图标左缘
+            // 恒在 26，与固定区第一图标同线；图标再多只往右滑，
+            // 不再左溢；offset 删掉，不再调数字。间距 16→14，
+            // 与固定区统一。里面按钮/菜单/拖动一字不动。
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    // VPN：点按开关核心，长按弹节点菜单
+                    panelVPNMenu
+                    // 3.8.315：用户 19:39 令——快捷行只留 VPN 默认，
+                    // 数据管理固定图标去掉（数据管理仍在设置页里，
+                    // 不再占快捷行一个位置）。
+                    // 自定义快捷方式（3.8.311：用户要的不是加 App
+                    // 快捷，而是把 APP 详情页里的设置加为快捷方式——
+                    // 某个 App 的某个开关/设置。开关类点按直接切换
+                    //（角标绿=开、灰=关），多选项类点按打开该 App
+                    // 的设置页；长按可移除）。
+                    ForEach(customShortcuts, id: \.self) { item in
+                        if let raw = CZFPanelCustomShortcuts.pageRaw(from: item),
+                           let page = CZFSettingsPage(rawValue: raw) {
+                            Button {
+                                openSettingsPage(page.rawValue)
+                            } label: {
+                                Image(systemName: page.icon)
+                                    .font(.system(size: 22))
+                                    .foregroundStyle(.blue)
                                     .frame(width: 40, height: 40)
+                                    .background(Color(UIColor.secondarySystemBackground))
                                     .clipShape(Circle())
-                                // 3.8.314：角标必须完全落在 40 圆内——313 只去了
-                                // offset(2,2) 还不够：20 角标贴在右下角时，
-                                // 圆心离主圆圆心 14.1、半径 10，最远点 24.1
-                                // 仍探出主圆（半径 20）约 4pt，用户 19:37
-                                // 截图证实还挂在边上；改成内收 4pt 后最远点
-                                // 18.5，整颗角标收进圆内，跟旁边 40 圆图标齐。
-                                Circle()
-                                    .fill(settingBadgeColor(for: item, setting: setting))
-                                    .frame(width: 20, height: 20)
-                                    .overlay(
-                                        Image(systemName: setting.icon)
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(.white)
-                                    )
-                                    .offset(x: -4, y: -4)
                             }
-                        }
-                        .contextMenu {
-                            Button("移除此快捷方式", role: .destructive) {
-                                CZFPanelCustomShortcuts.remove(item)
-                                customShortcuts = CZFPanelCustomShortcuts.items
-                                refreshSettingStates()
+                            .contextMenu {
+                                Button("移除此快捷方式", role: .destructive) {
+                                    CZFPanelCustomShortcuts.remove(item)
+                                    customShortcuts = CZFPanelCustomShortcuts.items
+                                    refreshSettingStates()
+                                }
                             }
+                            // 3.8.316：按住拖动调序（同固定区拖动换位）。
+                            .onDrag {
+                                draggedShortcutKey = item
+                                return NSItemProvider(object: item as NSString)
+                            }
+                            .onDrop(of: [.text], delegate: CZFCustomShortcutReorderDelegate(
+                                targetIndex: customShortcuts.firstIndex(of: item) ?? 0,
+                                items: $customShortcuts,
+                                draggedKey: $draggedShortcutKey
+                            ))
+                        } else if let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
+                                  let app = app(forPinKey: pinKey),
+                                  let setting = CZFPanelAppSetting(rawValue: key) {
+                            Button {
+                                if setting.isToggle {
+                                    toggleSetting(item: item)
+                                } else {
+                                    settingsApp = app
+                                    showAppSettings = true
+                                }
+                            } label: {
+                                ZStack(alignment: .bottomTrailing) {
+                                    RunningAppIcon(appInfo: app.appInfo)
+                                        .frame(width: 40, height: 40)
+                                        .clipShape(Circle())
+                                    // 3.8.314：角标必须完全落在 40 圆内——313 只去了
+                                    // offset(2,2) 还不够：20 角标贴在右下角时，
+                                    // 圆心离主圆圆心 14.1、半径 10，最远点 24.1
+                                    // 仍探出主圆（半径 20）约 4pt，用户 19:37
+                                    // 截图证实还挂在边上；改成内收 4pt 后最远点
+                                    // 18.5，整颗角标收进圆内，跟旁边 40 圆图标齐。
+                                    Circle()
+                                        .fill(settingBadgeColor(for: item, setting: setting))
+                                        .frame(width: 20, height: 20)
+                                        .overlay(
+                                            Image(systemName: setting.icon)
+                                                .font(.system(size: 10, weight: .bold))
+                                                .foregroundColor(.white)
+                                        )
+                                        .offset(x: -4, y: -4)
+                                }
+                            }
+                            .contextMenu {
+                                Button("移除此快捷方式", role: .destructive) {
+                                    CZFPanelCustomShortcuts.remove(item)
+                                    customShortcuts = CZFPanelCustomShortcuts.items
+                                    refreshSettingStates()
+                                }
+                            }
+                            // 3.8.316：按住拖动调序（同固定区拖动换位）。
+                            .onDrag {
+                                draggedShortcutKey = item
+                                return NSItemProvider(object: item as NSString)
+                            }
+                            .onDrop(of: [.text], delegate: CZFCustomShortcutReorderDelegate(
+                                targetIndex: customShortcuts.firstIndex(of: item) ?? 0,
+                                items: $customShortcuts,
+                                draggedKey: $draggedShortcutKey
+                            ))
                         }
-                        // 3.8.316：按住拖动调序（同固定区拖动换位）。
-                        .onDrag {
-                            draggedShortcutKey = item
-                            return NSItemProvider(object: item as NSString)
-                        }
-                        .onDrop(of: [.text], delegate: CZFCustomShortcutReorderDelegate(
-                            targetIndex: customShortcuts.firstIndex(of: item) ?? 0,
-                            items: $customShortcuts,
-                            draggedKey: $draggedShortcutKey
-                        ))
+                    }
+                    // 加号：添加一个自定义快捷方式（点开选页单）
+                    Button {
+                        showCustomSettingsPicker = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.blue)
+                            .frame(width: 40, height: 40)
+                            .background(Color(UIColor.secondarySystemBackground))
+                            .clipShape(Circle())
                     }
                 }
-                // 加号：添加一个自定义快捷方式（点开选页单）
-                Button {
-                    showCustomSettingsPicker = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.blue)
-                        .frame(width: 40, height: 40)
-                        .background(Color(UIColor.secondarySystemBackground))
-                        .clipShape(Circle())
-                }
-                Spacer()
+                // 内缩 10：与固定区 HStack 的内缩同数，外 16 +
+                // 内 10 = 首图标左缘 26，与固定区第一图标同线。
+                .padding(.leading, 10)
             }
-            // 快捷行与固定区/列表的间距（3.8.312：用户 18:29
-            // 斥距离还是那么大，要跟 App 面板搜索框同距——
-            // 搜索框下沿是 8；又 17:29 令上下距离一样。改成
-            // 上 8 下 8，对称，贴紧上下两端）。
-            // 3.8.316：用户 20:22 截图——快捷行整体偏右，往左
-            // 挪 4pt（稍微）。居中 Spacer 对称时视觉仍偏右，
-            // 加号在末尾会把重心往右带一点。
-            // 3.8.317：用户 21:57 截图——还偏右，再往左挪 4pt。
-            // 3.8.318：用户 00:03 斥 -8 移动太恐怖，改回 -4。
-            // 3.8.319：用户 01:13 说 -4 位置没调好（-4 仍偏右、-8 太过），取中间 -6。
-            // 3.8.321：用户 02:16 截图斥越改越离谱，-6 不对，改回 316 的 -4。
+            // 上下间距 8/8（3.8.312 定：跟搜索框下沿同距，
+            // 上下对称）；offset 已删，位置由布局本身保证。
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 8)
-            .offset(x: -4)
             .onAppear {
                 vpnCoreRunning = CZFVPNManager.shared.isRunning
                 CZFPanelCustomShortcuts.migrateIfNeeded()

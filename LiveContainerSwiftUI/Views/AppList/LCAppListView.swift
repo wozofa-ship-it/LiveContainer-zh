@@ -826,6 +826,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 
                 LazyVStack {
                     // 浏览器式搜索行：有输入时才出现，网址放最上面
+                    // 3.8.322 液体化繁为简：提示行圆角 16→22，与 App
+                    // 横幅行同圆角；计数行灰色走 .secondary，与行下
+                    // 备份状态小字同色。底栏固定铬走玻璃（见下）。
                     if !czfSearchText.isEmpty {
                         if let url = czfSearchURL {
                             Button {
@@ -848,7 +851,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                 }
                                 .padding(10)
                                 .background(Color(.secondarySystemBackground))
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .clipShape(RoundedRectangle(cornerRadius: 22))
                             }
                             .buttonStyle(.plain)
                         }
@@ -868,7 +871,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             }
                             .padding(10)
                             .background(Color(.secondarySystemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                            .clipShape(RoundedRectangle(cornerRadius: 22))
                         }
                         .buttonStyle(.plain)
                     }
@@ -914,7 +917,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     let appCount = sharedModel.isHiddenAppUnlocked ? filteredApps.count + filteredHiddenApps.count : filteredApps.count
                     Text(appCount > 0 || searchContext.debouncedQuery != "" ? "lc.appList.appCounter %lld".localizeWithFormat(appCount) : (sharedModel.multiLCStatus == 2 ? "lc.appList.convertToSharedToShowInLC2".loc : "lc.appList.installTip".loc))
                         .padding(.horizontal)
-                        .foregroundStyle(.gray)
+                        .foregroundStyle(.secondary)
                         .animation(searchContext.isTyping ? nil : .easeInOut, value: appCount)
                         .onTapGesture(count: 3) {
                             Task { await authenticateUser() }
@@ -922,7 +925,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }.animation(searchContext.isTyping ? nil : .easeInOut, value: LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding"))
 
                 if sharedModel.multiLCStatus == 2 {
-                    Text("lc.appList.manageInPrimaryTip".loc).foregroundStyle(.gray).padding()
+                    Text("lc.appList.manageInPrimaryTip".loc).foregroundStyle(.secondary).padding()
                 }
 
             }
@@ -1125,7 +1128,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     .disabled(batchBusy)
                 }
                 .padding()
-                .background(Color(.secondarySystemBackground))
+                .modifier { content in
+                    // 液体化：底栏是固定不动的铬（safeAreaInset 底栏，
+                    // 不随列表滚动），iOS 26 走玻璃；非玻璃系统走
+                    // 原来浅灰底。行在滚动列表里，绝不挂玻璃。
+                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                        content.glassEffect(.regular, in: .rect(cornerRadius: 20))
+                    } else {
+                        content.background(Color(.secondarySystemBackground))
+                    }
+                }
             }
         }
         .confirmationDialog("删除 \(batchSelectedIDs.count) 个 App", isPresented: $batchDeleteConfirm, titleVisibility: .visible) {

@@ -2857,6 +2857,8 @@ struct LCDataManagementView : View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 if migrationStep == 0 {
+                    // 3.8.322 液体化繁为简：选项卡圆角 12→20，
+                    // 与面板卡片行统一。
                     Text("选备份来源")
                         .font(.title2).bold()
                     Text("从哪份备份恢复？本地是本机文稿里的 Backups，iCloud 是你选的 iCloud 备份文件夹。")
@@ -2875,7 +2877,7 @@ struct LCDataManagementView : View {
                         }
                         .padding()
                         .background(Color(.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .clipShape(RoundedRectangle(cornerRadius: 20))
                     }
                     .buttonStyle(.plain)
                     Button {
@@ -2891,7 +2893,7 @@ struct LCDataManagementView : View {
                         }
                         .padding()
                         .background(Color(.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .clipShape(RoundedRectangle(cornerRadius: 20))
                     }
                     .buttonStyle(.plain)
                     .disabled(Self.externalBackupFolderURL() == nil)
