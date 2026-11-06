@@ -4312,10 +4312,11 @@ struct SourcesPanelView: View {
             // 加号在末尾会把重心往右带一点。
             // 3.8.317：用户 21:57 截图——还偏右，再往左挪 4pt。
             // 3.8.318：用户 00:03 斥 -8 移动太恐怖，改回 -4。
+            // 3.8.319：用户 01:13 说 -4 位置没调好（-4 仍偏右、-8 太过），取中间 -6。
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 8)
-            .offset(x: -4)
+            .offset(x: -6)
             .onAppear {
                 vpnCoreRunning = CZFVPNManager.shared.isRunning
                 CZFPanelCustomShortcuts.migrateIfNeeded()
