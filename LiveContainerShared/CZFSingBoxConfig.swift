@@ -190,7 +190,8 @@ public enum CZFSingBoxConfig {
     /// tuic：照抄 TUICLink 语义（官方 outbound/tuic：server /
     /// server_port 必填，uuid 必填，password，congestion_control
     /// ∈ cubic/new_reno/bbr，udp_relay_mode ∈ native/quic，tls 必填）。
-    static func tuicOutbound(link: String) throws -> [String: Any] {
+    /// tag 默认 node-out；多出站测速时调用方传 node-out-<i>。
+    static func tuicOutbound(link: String, tag: String = CZFSingBoxRouting.nodeTag) throws -> [String: Any] {
         guard let comps = components(of: link), comps.scheme?.lowercased() == "tuic" else {
             throw CZFSingBoxConfigError.unsupportedScheme("tuic")
         }
@@ -210,7 +211,7 @@ public enum CZFSingBoxConfig {
         let tlsP = tlsParams(map)
         var out: [String: Any] = [
             "type": "tuic",
-            "tag": CZFSingBoxRouting.nodeTag,
+            "tag": tag,
             "server": server,
             "server_port": port,
             "uuid": uuid,
@@ -281,6 +282,63 @@ public enum CZFSingBoxConfig {
         // 不认 Optional，必抛错），这里先解包再放进数组。
         root["outbounds"] = [outbound]
 
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw CZFSingBoxConfigError.encodingFailed
+        }
+        return json
+    }
+
+    /// 生成多 TUIC 出站的 sing-box 配置 JSON（测速用，3.8.306）：
+    /// 一个临时实例带 N 个 TUIC 出站（tag node-out-<i>）+ N 个
+    /// mixed 入站（端口 basePort...basePort+N-1），路由规则把每个
+    /// 入站钉到对应的出站，N 个探针并行跑，总耗时 ≈ 最慢的一个
+    /// （原来是每节点起一个实例串行测，N 个节点要 N 倍时间）。
+    /// 与单节点版同款骨架（log/dns），只是出站/入站/路由按节点数
+    /// 展开。links 为空或 basePort + 数量越界时 throw。
+    /// 非 tuic 链接一律 throw notSingBoxNode（调用方先按 coreKind
+    /// 分流，只把 tuic 链接传进来）。
+    public static func configJSON(for links: [String], basePort: Int) throws -> String {
+        guard !links.isEmpty else {
+            throw CZFSingBoxConfigError.missingField("links")
+        }
+        guard (1...65535).contains(basePort), basePort + links.count - 1 <= 65535 else {
+            throw CZFSingBoxConfigError.invalidValue("basePort")
+        }
+        var outbounds: [[String: Any]] = []
+        var inbounds: [[String: Any]] = []
+        var rules: [[String: Any]] = []
+        for (i, link) in links.enumerated() {
+            guard CZFSingBoxRouting.scheme(of: link) == "tuic" else {
+                throw CZFSingBoxConfigError.notSingBoxNode
+            }
+            let tag = "node-out-\(i)"
+            let inboundTag = "mixed-in-\(i)"
+            outbounds.append(try tuicOutbound(link: link, tag: tag))
+            inbounds.append([
+                "type": "mixed",
+                "tag": inboundTag,
+                "listen": "127.0.0.1",
+                "listen_port": basePort + i,
+            ])
+            rules.append([
+                "inbound": [inboundTag],
+                "outbound": tag,
+            ])
+        }
+        var root: [String: Any] = [
+            "log": ["level": "warning"],
+            "dns": [
+                "servers": [["tag": "local", "type": "local"]],
+                "final": "local",
+            ],
+            "inbounds": inbounds,
+            "route": [
+                "rules": rules,
+                "final": "node-out-0",
+            ],
+        ]
+        root["outbounds"] = outbounds
         let data = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
         guard let json = String(data: data, encoding: .utf8) else {
             throw CZFSingBoxConfigError.encodingFailed

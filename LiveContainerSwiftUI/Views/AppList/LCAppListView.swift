@@ -208,6 +208,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         vpnPinging = true
         CZFVPNManager.shared.pingAllNodes { results, rejected in
             self.vpnPinging = false
+            var bestIndex: Int? = nil
             if rejected {
                 // 3.8.303：被拒那批全是失败，不是节点真不通——不覆写
                 // 旧结果（manager 的规矩：pingAllNodes/pingSingleNode
@@ -223,6 +224,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 for (idx, r) in results.enumerated() { stored[idx] = r }
                 self.vpnPingResults = stored
                 if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }) {
+                    bestIndex = best.offset
                     let name = CZFVPNManager.nodeDisplay(for: links[best.offset]).name
                     self.vpnPingMessage = "最快：\(name)（\(best.element.delay)ms），共测了 \(results.count) 个节点"
                 } else {
@@ -233,6 +235,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 放 afterPing 之前，回调里切节点时核心已在跑。
             if pingStoppedCore {
                 CZFVPNManager.shared.restartCoreAfterPing()
+            }
+            // 3.8.306：测完自动切到最快节点——核心已重启（在跑），
+            // 再切节点时 applyActiveNodeChange 会重启新节点。
+            // 已是最快就不切（省一次重启）。switchToFastestNode
+            // 调这里时回调还会再切一次同节点，是空操作。
+            if let best = bestIndex, best != CZFVPNManager.shared.activeNodeIndex, best < CZFVPNManager.shared.nodeLinks.count {
+                CZFVPNManager.shared.setActiveNode(at: best)
+                let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[best]).name
+                self.vpnPingMessage = "已切到最快节点：\(name)（\(results[best].delay)ms）"
             }
             afterPing?(results)
         }
@@ -284,9 +295,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
+    // 3.8.306：盾牌菜单顶上直接显示当前节点名和延迟——原来要
+    // 点进“选择节点”子菜单、再看每行的毫秒数才知道在用哪个。
+    // 没测过显示“未测速”，没节点显示“暂无节点”。
+    private var vpnCurrentNodeLabel: String {
+        let links = CZFVPNManager.shared.nodeLinks
+        guard !links.isEmpty else { return "暂无节点" }
+        let idx = CZFVPNManager.shared.activeNodeIndex
+        guard idx < links.count else { return "暂无节点" }
+        let name = CZFVPNManager.nodeDisplay(for: links[idx]).name
+        if let r = vpnPingResults[idx] {
+            return r.success ? "当前节点：\(name) · \(r.delay)ms" : "当前节点：\(name) · 失败"
+        }
+        return "当前节点：\(name) · 未测速"
+    }
+
     @ViewBuilder
     private var vpnShieldMenu: some View {
         Menu {
+            Button(vpnCurrentNodeLabel) {}
+                .disabled(true)
             Button(vpnCoreRunning ? "停止核心" : "启动核心") {
                 toggleVPNCore()
             }
