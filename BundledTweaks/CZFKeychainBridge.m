@@ -190,11 +190,26 @@ static BOOL CZFKBGroupContainsBid(NSString *group, NSString *bid) {
 //   是唯一能接住中文服务名的信号；红果短剧这类 App 的令牌服务名
 //   常含中文显示名，包名末段是英文、匹配不上。显示名是 App 自身
 //   的名字，他人令牌不会拿它当服务名，误收风险与容器名同级）。
+// - 字段含厂商前缀（3.8.310：Bundle ID 前两段，如 com.ss；大厂
+//   App 的令牌常存在厂商共享组、服务名是厂商通用名（如
+//   com.ss.local.storage），不含 App 名、也不含显示名，上面几条
+//   全 miss 就被排除——红果短剧恢复后登录过期就是这么丢的。
+//   厂商前缀是同一厂商的共享标识，同厂商 App 共用同一账号体系，
+//   误收同厂商兄弟 App 的令牌也不会串到别家账号；跨厂商不命中。
+//   前缀至少 6 字（com.ss 正好 6 字；防 com.a 这类 5 字短前缀
+//   误伤 com.apple/com.amazon 等）。
 // 刻意不用“Bundle ID 含字段”（字段是 login/token 这类通用词时，
 // Bundle ID 恰好含它不代表归属，误收就是串号）。
 static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString *folderName, NSString *displayName) {
     if (!bundleID.length) return NO;
     NSString *last = [bundleID componentsSeparatedByString:@"."].lastObject;
+    // 厂商前缀：Bundle ID 前两段（如 com.ss），至少 6 字才启用。
+    NSString *vendorPrefix = nil;
+    NSArray<NSString *> *bParts = [bundleID componentsSeparatedByString:@"."];
+    if (bParts.count >= 2) {
+        NSString *cand = [NSString stringWithFormat:@"%@.%@", bParts[0], bParts[1]];
+        if (cand.length >= 6) vendorPrefix = cand;
+    }
     NSArray<NSString *> *keys = @[
         (__bridge NSString *)kSecAttrService,
         (__bridge NSString *)kSecAttrAccount,
@@ -213,6 +228,7 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
         if (folderName.length >= 3 && f.length >= 4 && [folderName localizedCaseInsensitiveContainsString:f]) return YES;
         if (displayName.length >= 3 && [f localizedCaseInsensitiveContainsString:displayName]) return YES;
         if (displayName.length >= 3 && f.length >= 4 && [displayName localizedCaseInsensitiveContainsString:f]) return YES;
+        if (vendorPrefix.length && [f localizedCaseInsensitiveContainsString:vendorPrefix]) return YES;
     }
     return NO;
 }
@@ -222,12 +238,15 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
 // lcDefaultGroup：进程默认组（= application-identifier），
 // 非隔离容器才传；隔离容器传 nil（钩子开时不走这里，且隔
 // 离容器绝不碰共享的进程默认组，防串登录）。
-// bundleID：非隔离容器才传（= 容器 plist 的 appIdentifier）；
-// 隔离容器传 nil，此时归属谓词与旧版一字不差（4 项全留，真隔离
-// 时默认组/进程默认组本来就是 nil，退化成共享组 + alis），
-// 自定义组/归属过滤/计数一律不启用，隔离路不动。
-// displayName：非隔离容器才传（= 容器 plist 的 name，即 App 显示名）；
-// 隔离容器传 nil。只进归属谓词，不进任何组判定。
+// bundleID：3.8.310 起隔离也传（以前隔离传 nil、归属谓词退
+// 化成旧 4 项，厂商共享组里的令牌全被排除——红果恢复后登录
+// 过期就是这么丢的。传 bundleID 后走新谓词，厂商组令牌靠
+// 组含 Bundle ID 或字段归属（含厂商前缀）收进来；
+// defaultGroup/lcDefaultGroup 隔离仍是 nil，进程默认组照旧
+// 不碰）。bundleID 缺失（plist 无 appIdentifier）时仍传 nil，
+// 此时归属谓词与旧版一字不差（4 项全留），回落行为不动。
+// displayName：3.8.310 起隔离也传（同 bundleID 的理，只进
+// 归属谓词，不进任何组判定）。
 static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSString *group, NSString *folderName, NSString *defaultGroup, NSString *lcDefaultGroup, NSString *bundleID, NSString *displayName) {
     NSMutableArray *all = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
@@ -591,7 +610,15 @@ static void CZFKBRun(void) {
         if (writeGroup) {
             imported = CZFKBImport(home, writeGroup, folderName, isolated, team, lcDefaultGroup);
         }
-        CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup, lcDefaultGroup, isolated ? nil : bundleID, isolated ? nil : displayName);
+        // 3.8.310：bundleID/displayName 隔离也传（以前隔离传 nil、
+        // 归属谓词退化成旧 4 项，厂商共享组里的令牌全被排除——
+        // 红果这类 App 令牌在厂商组、服务名又是厂商通用名，旧
+        // 谓词一条都接不住，备份里钥匙串恒为 2 条、登录恢复必
+        // 失败。传 bundleID 后走新谓词（组含 Bundle ID 或字段
+        // 归属，含 3.8.310 厂商前缀），厂商组令牌能被收进来；
+        // defaultGroup/lcDefaultGroup 隔离仍传 nil，进程默认组
+        // 照旧不碰，隔离的防串号底线不动）。
+        CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup, lcDefaultGroup, bundleID, displayName);
         // 状态回执：宿主备份弹窗直接带出来，桥跑没跑、组对
         // 不对、条目在不在，一行定案
         BOOL inEntitled = group && [entitled containsObject:group];

@@ -1749,6 +1749,11 @@ struct LCDataManagementView : View {
                 HStack(spacing: 4) {
                     Text(folderURL.lastPathComponent)
                         .font(.headline)
+                        // 3.8.310：名字只显示一行（用户斥“app 名字
+                        // 都挡住了”——大按钮把名字栏挤窄，名字折
+                        // 成两三行；按钮改小后名字有地方了，一行
+                        // 放不下就截断，不再折行）。
+                        .lineLimit(1)
                     // 3.8.281：锁了的备份行首挂 🔒
                     if lockedBackupNames.contains(folderURL.lastPathComponent) {
                         Image(systemName: "lock.fill")
@@ -1799,6 +1804,9 @@ struct LCDataManagementView : View {
             // 3.8.307：三个按钮都加大触摸区——锁钮给 44pt
             // 最小边（图标小但手能点中），恢复/导出用大号
             // 控件，行内按钮不再挤在一起误点
+            // 3.8.310：用户斥恢复行按钮太大太丑、App 名字都
+            // 被挡住了——恢复/导出改回常规尺寸，名字栏有地方
+            // 了（名字另加 lineLimit(1) 不再折行）。
             Button {
                 toggleBackupLock(folderName: folderURL.lastPathComponent)
             } label: {
@@ -1821,7 +1829,7 @@ struct LCDataManagementView : View {
                 .foregroundColor(.blue)
             }
             .buttonStyle(.bordered)
-            .controlSize(.large)
+            .controlSize(.regular)
             Button {
                 presentExportPicker(for: folderURL)
             } label: {
@@ -1832,7 +1840,7 @@ struct LCDataManagementView : View {
                 .foregroundColor(.blue)
             }
             .buttonStyle(.bordered)
-            .controlSize(.large)
+            .controlSize(.regular)
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
