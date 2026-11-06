@@ -4272,17 +4272,13 @@ private struct SourcePanelRow: View {
             rowActionButtons
         }
         .padding(10)
-        .modifier { content in
-            // 3.8.289：源 App 行玻璃（样板图同款）；非玻璃
-            // 系统走原来浅灰圆角卡片。
-            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                content.glassEffect(.regular, in: .rect(cornerRadius: 20))
-            } else {
-                content.background {
-                    RoundedRectangle(cornerRadius: 20)
-                        .fill(Color(.secondarySystemBackground))
-                }
-            }
+        .background {
+            // 3.8.301：行不用玻璃——ScrollView 里的玻璃行一滚动就
+            // 画到固定头（运行条/搜索框）上面去（300 真机：源面板
+            // 一滑，源行就盖住固定区/运行条）；玻璃只留给固定不动
+            // 的铬（固定图标/运行条/搜索框），行一律走实色卡片。
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color(.secondarySystemBackground))
         }
         .contextMenu { rowContextMenu }
         .sheet(item: $activeSheet) { sheet in sheetContent(for: sheet) }
@@ -4672,17 +4668,12 @@ struct AppCardRow: View {
             }
         }
         .padding(10)
-        .modifier { content in
-            // 3.8.292：App 行玻璃（与源 App 行同款）；非玻璃
-            // 系统走原来浅灰圆角卡片。
-            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                content.glassEffect(.regular, in: .rect(cornerRadius: 20))
-            } else {
-                content.background {
-                    RoundedRectangle(cornerRadius: 20)
-                        .fill(Color(.secondarySystemBackground))
-                }
-            }
+        .background {
+            // 3.8.301：行不用玻璃——与源 App 行同病：ScrollView 里
+            // 的玻璃行一滚动就画到固定头上面去（300 真机源面板已
+            // 实证）；玻璃只留给固定不动的铬，行一律走实色卡片。
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color(.secondarySystemBackground))
         }
         // 长按行：固定到面板顶部 / 取消固定（用户定）；
         // 正在运行的还多两个：重启（卡死时一步恢复）、关闭
