@@ -160,6 +160,24 @@ static NSInteger CZFKBStatLCDefault = 0;
 static NSInteger CZFKBStatCustom = 0;
 static NSInteger CZFKBStatExcluded = 0;
 
+// 归属过滤（单开通用修复，隔离容器不用）：
+// 组名是否以点分段为单位完整包含 Bundle ID（防 com.example.app
+// 误含 com.example.app2：子串匹配会错，段匹配不会）。
+static BOOL CZFKBGroupContainsBid(NSString *group, NSString *bid) {
+    if (!group.length || !bid.length) return NO;
+    NSArray<NSString *> *gParts = [group componentsSeparatedByString:@"."];
+    NSArray<NSString *> *bParts = [bid componentsSeparatedByString:@"."];
+    if (bParts.count == 0 || gParts.count < bParts.count) return NO;
+    for (NSUInteger i = 0; i + bParts.count <= gParts.count; i++) {
+        BOOL match = YES;
+        for (NSUInteger j = 0; j < bParts.count; j++) {
+            if (![gParts[i + j] isEqualToString:bParts[j]]) { match = NO; break; }
+        }
+        if (match) return YES;
+    }
+    return NO;
+}
+
 // 3.8.316：厂商组是否含厂商前缀（Bundle ID 前两段，如
 // com.taobao）：厂商共享组（如 TEAM.com.taobao.shared）
 // 不含完整 Bundle ID，上面 CZFKBGroupContainsBid 不命中；
