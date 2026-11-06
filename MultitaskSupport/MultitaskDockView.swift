@@ -4005,6 +4005,124 @@ private struct SourcePanelRow: View {
         }
     }
 
+    // 3.8.293：行动作按钮组抽成独立 @ViewBuilder 子表达式——
+    // body 已超类型检查器上限（291 在 contextMenu、292 在
+    // sheet 各报一次 type '()' cannot conform to 'View'，
+    // 错永远落在链上最后一个 modifier）；内容一字不动，只换位置。
+    @ViewBuilder
+    private var rowActionButtons: some View {
+        if let downloadURL = app.latestVersion?.downloadURL {
+            Button {
+                UIPasteboard.general.string = downloadURL.absoluteString
+                copied = true
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 25, height: 25)
+            }
+            .buttonStyle(BasicButtonStyle())
+        }
+        Button {
+            onDownload()
+        } label: {
+            Text("下载")
+                .font(.system(size: 13)).bold()
+                .foregroundColor(.white)
+                .frame(height: 25)
+                .padding(.horizontal, 10)
+        }
+        .buttonStyle(BasicButtonStyle())
+        .background(Capsule().fill(Color.gray))
+        .clipShape(Capsule())
+        if isPlugin && isPluginInstalled {
+            Text("已安装")
+                .font(.system(size: 13)).bold()
+                .foregroundColor(.white)
+                .frame(height: 25)
+                .padding(.horizontal, 10)
+                .background(Capsule().fill(Color.green))
+                .clipShape(Capsule())
+        } else if !isPlugin && isInstalled && hasUpdate {
+            Button {
+                onInstall()
+            } label: {
+                Text("更新")
+                    .font(.system(size: 13)).bold()
+                    .foregroundColor(.white)
+                    .frame(height: 25)
+                    .padding(.horizontal, 10)
+            }
+            .buttonStyle(BasicButtonStyle())
+            .background(Capsule().fill(Color.orange))
+            .clipShape(Capsule())
+        } else if !isPlugin && isInstalled {
+            Button {
+                let matches = installedAppModels
+                if matches.count == 1, let only = matches.first {
+                    Task { try? await only.runApp() }
+                } else if matches.count > 1 {
+                    // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
+                    activeSheet = .instances
+                }
+            } label: {
+                Text("打开")
+                    .font(.system(size: 13)).bold()
+                    .foregroundColor(.white)
+                    .frame(height: 25)
+                    .padding(.horizontal, 10)
+            }
+            .buttonStyle(BasicButtonStyle())
+            .background(Capsule().fill(Color.green))
+            .clipShape(Capsule())
+        } else {
+            Button {
+                onInstall()
+            } label: {
+                Text("安装")
+                    .font(.system(size: 13)).bold()
+                    .foregroundColor(.white)
+                    .frame(height: 25)
+                    .padding(.horizontal, 10)
+            }
+            .buttonStyle(BasicButtonStyle())
+            .background(Capsule().fill(Color.blue))
+            .clipShape(Capsule())
+        }
+    }
+
+    // 3.8.293：sheet 内容抽成独立 @ViewBuilder 函数——与上面
+    // 同一原因；实例单与历史版本单原样搬入。
+    @ViewBuilder
+    private func sheetContent(for sheet: RowSheet) -> some View {
+        switch sheet {
+        case .instances:
+            NavigationView {
+                List(installedAppModels, id: \.self) { model in
+                    Button {
+                        activeSheet = nil
+                        Task { try? await model.runApp() }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(model.appInfo.displayName())
+                                .font(.system(size: 15)).bold()
+                            Text("容器 \(model.uiSelectedContainer?.name ?? model.uiSelectedContainer?.folderName ?? "") • 版本 \(model.appInfo.version())")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .navigationTitle("选择要打开的实例")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { activeSheet = nil }
+                    }
+                }
+            }
+        case .versions:
+            SourceAppVersionsSheet(app: app, onDownloadVersion: onDownloadVersion)
+        }
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             AsyncImage(url: app.iconURL) { phase in
@@ -4033,83 +4151,7 @@ private struct SourcePanelRow: View {
                 }
             }
             Spacer()
-            if let downloadURL = app.latestVersion?.downloadURL {
-                Button {
-                    UIPasteboard.general.string = downloadURL.absoluteString
-                    copied = true
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 25, height: 25)
-                }
-                .buttonStyle(BasicButtonStyle())
-            }
-            Button {
-                onDownload()
-            } label: {
-                Text("下载")
-                    .font(.system(size: 13)).bold()
-                    .foregroundColor(.white)
-                    .frame(height: 25)
-                    .padding(.horizontal, 10)
-            }
-            .buttonStyle(BasicButtonStyle())
-            .background(Capsule().fill(Color.gray))
-            .clipShape(Capsule())
-            if isPlugin && isPluginInstalled {
-                Text("已安装")
-                    .font(.system(size: 13)).bold()
-                    .foregroundColor(.white)
-                    .frame(height: 25)
-                    .padding(.horizontal, 10)
-                    .background(Capsule().fill(Color.green))
-                    .clipShape(Capsule())
-            } else if !isPlugin && isInstalled && hasUpdate {
-                Button {
-                    onInstall()
-                } label: {
-                    Text("更新")
-                        .font(.system(size: 13)).bold()
-                        .foregroundColor(.white)
-                        .frame(height: 25)
-                        .padding(.horizontal, 10)
-                }
-                .buttonStyle(BasicButtonStyle())
-                .background(Capsule().fill(Color.orange))
-                .clipShape(Capsule())
-            } else if !isPlugin && isInstalled {
-                Button {
-                    let matches = installedAppModels
-                    if matches.count == 1, let only = matches.first {
-                        Task { try? await only.runApp() }
-                    } else if matches.count > 1 {
-                        // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
-                        activeSheet = .instances
-                    }
-                } label: {
-                    Text("打开")
-                        .font(.system(size: 13)).bold()
-                        .foregroundColor(.white)
-                        .frame(height: 25)
-                        .padding(.horizontal, 10)
-                }
-                .buttonStyle(BasicButtonStyle())
-                .background(Capsule().fill(Color.green))
-                .clipShape(Capsule())
-            } else {
-                Button {
-                    onInstall()
-                } label: {
-                    Text("安装")
-                        .font(.system(size: 13)).bold()
-                        .foregroundColor(.white)
-                        .frame(height: 25)
-                        .padding(.horizontal, 10)
-                }
-                .buttonStyle(BasicButtonStyle())
-                .background(Capsule().fill(Color.blue))
-                .clipShape(Capsule())
-            }
+            rowActionButtons
         }
         .padding(10)
         .modifier { content in
@@ -4125,38 +4167,7 @@ private struct SourcePanelRow: View {
             }
         }
         .contextMenu { rowContextMenu }
-        .sheet(item: $activeSheet) { sheet in
-            // 3.8.292：两个 sheet 合并成一个（同一视图挂两个
-            // .sheet 只有一个会真正弹出）；内容原样搬入，只改
-            // 关单处为 activeSheet = nil。
-            switch sheet {
-            case .instances:
-                NavigationView {
-                    List(installedAppModels, id: \.self) { model in
-                        Button {
-                            activeSheet = nil
-                            Task { try? await model.runApp() }
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(model.appInfo.displayName())
-                                    .font(.system(size: 15)).bold()
-                                Text("容器 \(model.uiSelectedContainer?.name ?? model.uiSelectedContainer?.folderName ?? "") • 版本 \(model.appInfo.version())")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                    .navigationTitle("选择要打开的实例")
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") { activeSheet = nil }
-                        }
-                    }
-                }
-            case .versions:
-                SourceAppVersionsSheet(app: app, onDownloadVersion: onDownloadVersion)
-            }
-        }
+        .sheet(item: $activeSheet) { sheet in sheetContent(for: sheet) }
     }
 }
 
@@ -4415,6 +4426,32 @@ struct AppCardRow: View {
     @ObservedObject private var pinnedStore = CZFPinnedAppsStore.shared
     @State private var appIcon: UIImage?
     
+    // 3.8.293：行长按菜单抽成独立 @ViewBuilder 子表达式——
+    // body 已超类型检查器上限（292 在这里报 type '()' cannot
+    // conform to 'View'）；内容一字不动，只换位置。
+    @ViewBuilder
+    private var rowContextMenu: some View {
+        Button {
+            pinnedStore.toggle(app)
+        } label: {
+            Label(pinnedStore.isPinned(app) ? "取消固定" : "固定到顶部",
+                  systemImage: pinnedStore.isPinned(app) ? "pin.slash" : "pin")
+        }
+        if let uuid = app.appInfo.dataUUID,
+           dockManager.apps.contains(where: { $0.appUUID == uuid }) {
+            Button {
+                dockManager.restartApp(uuid: uuid)
+            } label: {
+                Label("重启 App", systemImage: "arrow.clockwise")
+            }
+            Button(role: .destructive) {
+                dockManager.closeAppWindow(uuid: uuid)
+            } label: {
+                Label("关闭 App", systemImage: "xmark.circle")
+            }
+        }
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             // App icon
@@ -4495,27 +4532,7 @@ struct AppCardRow: View {
         }
         // 长按行：固定到面板顶部 / 取消固定（用户定）；
         // 正在运行的还多两个：重启（卡死时一步恢复）、关闭
-        .contextMenu {
-            Button {
-                pinnedStore.toggle(app)
-            } label: {
-                Label(pinnedStore.isPinned(app) ? "取消固定" : "固定到顶部",
-                      systemImage: pinnedStore.isPinned(app) ? "pin.slash" : "pin")
-            }
-            if let uuid = app.appInfo.dataUUID,
-               dockManager.apps.contains(where: { $0.appUUID == uuid }) {
-                Button {
-                    dockManager.restartApp(uuid: uuid)
-                } label: {
-                    Label("重启 App", systemImage: "arrow.clockwise")
-                }
-                Button(role: .destructive) {
-                    dockManager.closeAppWindow(uuid: uuid)
-                } label: {
-                    Label("关闭 App", systemImage: "xmark.circle")
-                }
-            }
-        }
+        .contextMenu { rowContextMenu }
     }
     
     private func loadIcon() {
