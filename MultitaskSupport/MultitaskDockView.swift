@@ -2358,6 +2358,10 @@ extension Notification.Name {
         let rootView = AnyView(
             SourcesPanelView()
                 .environmentObject(self)
+                // 3.8.311：App 设置页（LCAppSettingsView）要
+                // SharedModel 作 @EnvironmentObject，面板是独立
+                // hosting，不注会崩；注的是全 App 同一个实例。
+                .environmentObject(DataManager.shared.model)
                 .environment(\.czfPanelClose) { [weak self] in self?.dismissSourcesOverlay() }
         )
         let host = UIHostingController(rootView: rootView)
@@ -3766,11 +3770,17 @@ struct SourcesPanelView: View {
     // 读 isRunning 落 @State，打开面板时刷新一次、切完再刷新一次）
     @State private var vpnCoreRunning: Bool = false
     // 3.8.310：添加自定义快捷方式的选单开关（点“+”弹选单，
-    // 选设置页或单独 App 加进快捷行）。
+    // 选设置页或 App 的某个设置加进快捷行）。
     @State private var showCustomSettingsPicker: Bool = false
     // 3.8.310：自定义快捷方式列表（可添加多个单独图标，存在
     // UserDefaults 数组里；@State 持有当前快照，增删后刷新）。
     @State private var customShortcuts: [String] = []
+    // 3.8.311：App 设置快捷方式的开关状态快照（key 是完整条目串，
+    // 值是开/关；打开面板、增删、点按切换后刷新，角标颜色用它）。
+    @State private var settingStates: [String: Bool] = [:]
+    // 3.8.311：多选项类快捷方式要打开的 App 设置页（sheet 用）。
+    @State private var settingsApp: LCAppModel?
+    @State private var showAppSettings: Bool = false
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -3940,11 +3950,150 @@ struct SourcesPanelView: View {
     }
 
     // 3.8.310：按 pinKey（包名_dataUUID）找已装 App（自定义
-    // 快捷方式里的单独 App 用它解析；找不到就当这条快捷方式
+    // 快捷方式里的 App 设置用它解析；找不到就当这条快捷方式
     // 失效、不渲染）。
     private func app(forPinKey pinKey: String) -> LCAppModel? {
         (LCAppSortManager.shared.sortedApps + LCAppSortManager.shared.sortedHiddenApps)
             .first { CZFPinnedAppsStore.pinKey(for: $0) == pinKey }
+    }
+
+    // 3.8.311：App 设置快捷方式——开关类点按直接切换，
+    // 多选项类点按打开该 App 的设置页（用户 17:34 亲定）。
+
+    /// 读某个开关类快捷方式的当前状态（多选项类 / 解析失败返回 nil）。
+    private func currentSettingState(item: String) -> Bool? {
+        guard let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
+              let app = app(forPinKey: pinKey),
+              let setting = CZFPanelAppSetting(rawValue: key),
+              setting.isToggle else { return nil }
+        switch setting {
+        case .schedMin: return isSchedMinOn(for: app)
+        case .fixNotify: return app.uiFixLocalNotification
+        case .vpn: return CZFVPNManager.isEnabled(for: app.appInfo)
+        case .keepAlive: return isKeepAliveOn(for: app)
+        case .jit: return app.uiIsJITNeeded
+        case .fixPicker: return app.uiFixFilePickerNew
+        case .openSettings: return nil
+        }
+    }
+
+    /// 刷新全部开关状态快照（打开面板、增删、点按切换后调）。
+    private func refreshSettingStates() {
+        var states: [String: Bool] = [:]
+        for item in customShortcuts {
+            if let state = currentSettingState(item: item) {
+                states[item] = state
+            }
+        }
+        settingStates = states
+    }
+
+    /// 开关角标色：开 = 绿，关 = 灰；多选项类恒蓝。
+    private func settingBadgeColor(for item: String, setting: CZFPanelAppSetting) -> Color {
+        guard setting.isToggle else { return .blue }
+        return (settingStates[item] ?? false) ? .green : .gray
+    }
+
+    /// 点按开关类快捷方式：直接切换该设置（不进设置页）。
+    private func toggleSetting(item: String) {
+        guard let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
+              let app = app(forPinKey: pinKey),
+              let setting = CZFPanelAppSetting(rawValue: key),
+              setting.isToggle else { return }
+        switch setting {
+        case .schedMin: toggleSchedMin(for: app)
+        case .fixNotify: app.uiFixLocalNotification.toggle()
+        case .vpn: CZFVPNManager.setEnabled(!CZFVPNManager.isEnabled(for: app.appInfo), for: app.appInfo)
+        case .keepAlive: toggleKeepAlive(for: app)
+        case .jit: app.uiIsJITNeeded.toggle()
+        case .fixPicker: app.uiFixFilePickerNew.toggle()
+        case .openSettings: break
+        }
+        refreshSettingStates()
+    }
+
+    // 定时最小化打开：同款 LCAppSettingsView.saveSchedMinSettings
+    //（键 CZFSchedMinEnabled-<bid> / CZFSchedMinMinutes-<bid>，
+    // 默认 8:00；切开关不重置已设时间；开定时要踢一下轮询表，
+    // 否则之前停掉的表不会自己恢复）。
+    private func isSchedMinOn(for app: LCAppModel) -> Bool {
+        guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return false }
+        return UserDefaults.standard.bool(forKey: "CZFSchedMinEnabled-\(bid)")
+    }
+
+    private func toggleSchedMin(for app: LCAppModel) {
+        guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        let newValue = !defaults.bool(forKey: "CZFSchedMinEnabled-\(bid)")
+        defaults.set(newValue, forKey: "CZFSchedMinEnabled-\(bid)")
+        if defaults.object(forKey: "CZFSchedMinMinutes-\(bid)") == nil {
+            defaults.set(8 * 60, forKey: "CZFSchedMinMinutes-\(bid)")
+        }
+        defaults.removeObject(forKey: "CZFSchedMinLastDate-\(bid)")
+        if newValue, #available(iOS 16.0, *) {
+            MultitaskDockManager.shared.czfKickSchedMinTimer()
+        }
+    }
+
+    // 每 App 保活：同款 LCAppSettingsView.setKeepAlive
+    //（白名单文件 CZFKeepAliveApps.txt 在两夹；不存在 = 全保）。
+    private func keepAliveListURLs() -> [URL] {
+        [LCPath.tweakPath, LCPath.lcGroupTweakPath].map { $0.appendingPathComponent("CZFKeepAliveApps.txt") }
+    }
+
+    private func readKeepAliveList() -> [String]? {
+        for url in keepAliveListURLs() {
+            if let content = try? String(contentsOf: url, encoding: .utf8) {
+                return content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            }
+        }
+        return nil
+    }
+
+    private func writeKeepAliveList(_ list: [String]) throws {
+        let content = list.isEmpty ? "" : list.joined(separator: "\n") + "\n"
+        let fm = FileManager()
+        for url in keepAliveListURLs() {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func isKeepAliveOn(for app: LCAppModel) -> Bool {
+        guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return true }
+        if let list = readKeepAliveList() {
+            return list.contains(bid)
+        }
+        return true
+    }
+
+    private func toggleKeepAlive(for app: LCAppModel) {
+        guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return }
+        let on = !isKeepAliveOn(for: app)
+        do {
+            if on {
+                if var list = readKeepAliveList() {
+                    if !list.contains(bid) {
+                        list.append(bid)
+                        try writeKeepAliveList(list)
+                    }
+                }
+                // 文件不存在 = 本来就全保，不用写
+            } else {
+                if var list = readKeepAliveList() {
+                    list.removeAll { $0 == bid }
+                    try writeKeepAliveList(list)
+                } else {
+                    // 首次关：用全部 App 名单种子，只去掉这个 App
+                    let all = (LCAppSortManager.shared.sortedApps + LCAppSortManager.shared.sortedHiddenApps).compactMap { $0.appInfo.bundleIdentifier() }.filter { !$0.isEmpty && $0 != bid }
+                    guard !all.isEmpty else { return }
+                    try writeKeepAliveList(all)
+                }
+            }
+            CZFHostKeepAlive.shared.refresh()
+        } catch {
+            // 写失败就当没切（刷新后角标仍显旧值）
+        }
     }
 
     var body: some View {
@@ -4030,11 +4179,11 @@ struct SourcesPanelView: View {
                         .background(Color(UIColor.secondarySystemBackground))
                         .clipShape(Circle())
                 }
-                // 自定义快捷方式（3.8.310：用户要的不是把一个
-                // 快捷设置变成固定，而是能添加多个自定义单独
-                // 开关——每个快捷方式是一个独立图标。分两类：
-                // 设置页点开对应设置页；单独 App 点开直接启动
-                // 那个 App；长按可移除）。
+                // 自定义快捷方式（3.8.311：用户要的不是加 App
+                // 快捷，而是把 APP 详情页里的设置加为快捷方式——
+                // 某个 App 的某个开关/设置。开关类点按直接切换
+                //（角标绿=开、灰=关），多选项类点按打开该 App
+                // 的设置页；长按可移除）。
                 ForEach(customShortcuts, id: \.self) { item in
                     if let raw = CZFPanelCustomShortcuts.pageRaw(from: item),
                        let page = CZFSettingsPage(rawValue: raw) {
@@ -4052,21 +4201,40 @@ struct SourcesPanelView: View {
                             Button("移除此快捷方式", role: .destructive) {
                                 CZFPanelCustomShortcuts.remove(item)
                                 customShortcuts = CZFPanelCustomShortcuts.items
+                                refreshSettingStates()
                             }
                         }
-                    } else if let pinKey = CZFPanelCustomShortcuts.appPinKey(from: item),
-                              let app = app(forPinKey: pinKey) {
+                    } else if let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
+                              let app = app(forPinKey: pinKey),
+                              let setting = CZFPanelAppSetting(rawValue: key) {
                         Button {
-                            launchPinnedApp(app)
+                            if setting.isToggle {
+                                toggleSetting(item: item)
+                            } else {
+                                settingsApp = app
+                                showAppSettings = true
+                            }
                         } label: {
-                            RunningAppIcon(appInfo: app.appInfo)
-                                .frame(width: 36, height: 36)
-                                .clipShape(Circle())
+                            ZStack(alignment: .bottomTrailing) {
+                                RunningAppIcon(appInfo: app.appInfo)
+                                    .frame(width: 36, height: 36)
+                                    .clipShape(Circle())
+                                Circle()
+                                    .fill(settingBadgeColor(for: item, setting: setting))
+                                    .frame(width: 18, height: 18)
+                                    .overlay(
+                                        Image(systemName: setting.icon)
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(.white)
+                                    )
+                                    .offset(x: 2, y: 2)
+                            }
                         }
                         .contextMenu {
                             Button("移除此快捷方式", role: .destructive) {
                                 CZFPanelCustomShortcuts.remove(item)
                                 customShortcuts = CZFPanelCustomShortcuts.items
+                                refreshSettingStates()
                             }
                         }
                     }
@@ -4097,6 +4265,25 @@ struct SourcesPanelView: View {
                 vpnCoreRunning = CZFVPNManager.shared.isRunning
                 CZFPanelCustomShortcuts.migrateIfNeeded()
                 customShortcuts = CZFPanelCustomShortcuts.items
+                refreshSettingStates()
+            }
+            // 3.8.311：多选项类快捷方式打开的 App 设置页（sheet 挂
+            // 在快捷行上，与选页单的 sheet 挂在不同视图，避免
+            // 同一视图挂两个 sheet 冲突；设置页要 SharedModel，
+            // 面板根视图已注入 DataManager.shared.model）。
+            .sheet(isPresented: $showAppSettings) {
+                if let app = settingsApp {
+                    NavigationView {
+                        LCAppSettingsView(model: app)
+                            .navigationTitle(app.appInfo.displayName() ?? "")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .cancellationAction) {
+                                    Button("关闭") { showAppSettings = false }
+                                }
+                            }
+                    }
+                }
             }
         }
         .sheet(isPresented: $showCustomSettingsPicker) {
@@ -4106,10 +4293,12 @@ struct SourcesPanelView: View {
                 showCustomSettingsPicker = false
                 if let raw = CZFPanelCustomShortcuts.pageRaw(from: item) {
                     openSettingsPage(raw)
-                } else if let pinKey = CZFPanelCustomShortcuts.appPinKey(from: item),
-                          let app = app(forPinKey: pinKey) {
-                    launchPinnedApp(app)
                 }
+                // 3.8.311：App 设置类只加图标，不马上执行——
+                // 开关类马上切会把已开的切成关（翻转当前态），
+                // 多选项类马上开页会跟选页单的 sheet 抢呈现；
+                // 加完点图标再用，一眼看清。
+                refreshSettingStates()
             }
         }
     }
@@ -5125,12 +5314,14 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
     }
 }
 
-// 3.8.310：自定义快捷方式（可添加多个单独图标）——
-// 用户要的不是把一个快捷设置变成固定，而是能添加多个
-// 自定义单独开关：每个快捷方式是一个独立图标。分两类：
+// 3.8.311：自定义快捷方式（可添加多个单独图标）——
+// 用户 17:30 纠正：要的不是加 App 快捷（点图标启动 App），
+// 而是把 APP 详情页里的设置加为快捷方式——某个 App 的
+// 某个开关/设置。分两类：
 // - 设置页：存 "page:<rawValue>"，点开对应设置页；
-// - 单独 App：存 "app:<pinKey>"（pinKey = 包名_dataUUID），
-//   点开直接启动那个 App。
+// - App 设置：存 "setting:<pinKey>:<key>"（pinKey = 包名
+//   _dataUUID，key 是 CZFPanelAppSetting 的 rawValue），
+//   开关类点按直接切换，多选项类点按打开该 App 的设置页。
 // 存 UserDefaults 数组，按添加顺序排；长按图标可移除。
 enum CZFPanelCustomShortcuts {
     static let key = "CZFPanelCustomShortcuts"
@@ -5142,16 +5333,18 @@ enum CZFPanelCustomShortcuts {
     }
 
     static func pageItem(_ raw: String) -> String { "page:\(raw)" }
-    static func appItem(_ pinKey: String) -> String { "app:\(pinKey)" }
+    static func settingItem(pinKey: String, key: String) -> String { "setting:\(pinKey):\(key)" }
 
     static func pageRaw(from item: String) -> String? {
         guard item.hasPrefix("page:") else { return nil }
         return String(item.dropFirst(5))
     }
 
-    static func appPinKey(from item: String) -> String? {
-        guard item.hasPrefix("app:") else { return nil }
-        return String(item.dropFirst(4))
+    static func settingPinKeyAndKey(from item: String) -> (pinKey: String, key: String)? {
+        guard item.hasPrefix("setting:") else { return nil }
+        let parts = item.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        return (String(parts[1]), String(parts[2]))
     }
 
     static func contains(_ item: String) -> Bool {
@@ -5172,7 +5365,13 @@ enum CZFPanelCustomShortcuts {
 
     // 旧版单自定义迁移：309 只存一个设置页 rawValue，第一次
     // 读到新数组为空且旧值还在时，把旧值搬进数组并清掉旧键。
+    // 3.8.311：310 的 "app:" 启动快捷是误读（用户不要），
+    // 一并清掉，不留死条目。
     static func migrateIfNeeded() {
+        let cleaned = items.filter { !$0.hasPrefix("app:") }
+        if cleaned.count != items.count {
+            items = cleaned
+        }
         guard items.isEmpty else { return }
         if let old = UserDefaults.standard.string(forKey: legacyKey) {
             items = [pageItem(old)]
@@ -5181,8 +5380,49 @@ enum CZFPanelCustomShortcuts {
     }
 }
 
-// 3.8.310：添加自定义快捷方式——两区：设置页 + 单独 App。
-// 点一个就加进快捷行（去重），并马上打开那页/启动那个 App。
+// 3.8.311：App 设置快捷方式的目录——某个 App 的某个设置。
+// 开关类（isToggle）点按直接切换；多选项类点按打开该 App
+// 的设置页（语言、多任务、模块文件夹、容器等都在那页上）。
+enum CZFPanelAppSetting: String, CaseIterable {
+    case schedMin = "schedmin"
+    case fixNotify = "fixnotify"
+    case vpn = "vpn"
+    case keepAlive = "keepalive"
+    case jit = "jit"
+    case fixPicker = "fixpicker"
+    case openSettings = "opensettings"
+
+    var title: String {
+        switch self {
+        case .schedMin: return "定时最小化打开"
+        case .fixNotify: return "修复本地通知"
+        case .vpn: return "单 App VPN"
+        case .keepAlive: return "保活"
+        case .jit: return "JIT 启动"
+        case .fixPicker: return "修复文件选择器"
+        case .openSettings: return "打开 App 设置页"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .schedMin: return "clock.fill"
+        case .fixNotify: return "bell.fill"
+        case .vpn: return "shield.fill"
+        case .keepAlive: return "heart.fill"
+        case .jit: return "bolt.fill"
+        case .fixPicker: return "folder.fill"
+        case .openSettings: return "gearshape.fill"
+        }
+    }
+
+    /// 是否开关类（点按直接切换）；false = 多选项类（点按打开 App 设置页）。
+    var isToggle: Bool { self != .openSettings }
+}
+
+// 3.8.311：添加自定义快捷方式——两区：设置页 + App 设置。
+// 设置页点一个就加进快捷行；App 设置是两级：先挑 App，
+// 再挑它的某个设置（开关类 / 打开设置页）。
 @available(iOS 16.0, *)
 private struct CZFPanelCustomSettingsPicker: View {
     let onPick: (String) -> Void
@@ -5214,22 +5454,16 @@ private struct CZFPanelCustomSettingsPicker: View {
                         }
                     }
                 }
-                Section("App") {
+                Section("App 设置") {
                     ForEach(installedApps, id: \.self) { app in
-                        let item = CZFPanelCustomShortcuts.appItem(CZFPinnedAppsStore.pinKey(for: app))
-                        Button {
-                            onPick(item)
+                        NavigationLink {
+                            CZFPanelAppSettingListView(app: app, onPick: onPick)
                         } label: {
                             HStack {
                                 RunningAppIcon(appInfo: app.appInfo)
                                     .frame(width: 28, height: 28)
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                                 Text(app.appInfo.displayName() ?? "")
-                                Spacer()
-                                if CZFPanelCustomShortcuts.contains(item) {
-                                    Image(systemName: "checkmark")
-                                        .foregroundColor(.blue)
-                                }
                             }
                         }
                     }
@@ -5243,5 +5477,62 @@ private struct CZFPanelCustomSettingsPicker: View {
                 }
             }
         }
+    }
+}
+
+// 3.8.311：某个 App 的设置列表（选页单第二级）——
+// 上区是开关类（点按直接切换），下区是打开该 App 的设置页
+//（语言、多任务、模块文件夹、容器等都在那页上）。
+@available(iOS 16.0, *)
+private struct CZFPanelAppSettingListView: View {
+    let app: LCAppModel
+    let onPick: (String) -> Void
+
+    private var pinKey: String {
+        CZFPinnedAppsStore.pinKey(for: app)
+    }
+
+    var body: some View {
+        List {
+            Section("开关") {
+                ForEach(CZFPanelAppSetting.allCases.filter { $0.isToggle }, id: \.self) { setting in
+                    let item = CZFPanelCustomShortcuts.settingItem(pinKey: pinKey, key: setting.rawValue)
+                    Button {
+                        onPick(item)
+                    } label: {
+                        HStack {
+                            Image(systemName: setting.icon)
+                                .foregroundColor(.blue)
+                            Text(setting.title)
+                            Spacer()
+                            if CZFPanelCustomShortcuts.contains(item) {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+            Section("设置页") {
+                let setting = CZFPanelAppSetting.openSettings
+                let item = CZFPanelCustomShortcuts.settingItem(pinKey: pinKey, key: setting.rawValue)
+                Button {
+                    onPick(item)
+                } label: {
+                    HStack {
+                        Image(systemName: setting.icon)
+                            .foregroundColor(.blue)
+                        Text(setting.title)
+                        Spacer()
+                        if CZFPanelCustomShortcuts.contains(item) {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle(app.appInfo.displayName() ?? "")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
