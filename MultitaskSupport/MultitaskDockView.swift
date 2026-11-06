@@ -3768,6 +3768,141 @@ struct SourcesPanelView: View {
     // 3.8.308：自定义设置快捷方式——点开选设置页（存 UserDefaults，
     // 下次点直接开那页）；没配过时点开也是选页单。
     @State private var showCustomSettingsPicker: Bool = false
+    // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
+    // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
+    @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    @State private var vpnPinging: Bool = false
+
+    // 3.8.309：VPN 开关（与 App 页 toggleVPNCore 同款：先记手动
+    // 切换、再起/停、再刷新状态）。
+    private func togglePanelVPNCore() {
+        CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
+        if vpnCoreRunning {
+            CZFVPNManager.shared.stop()
+        } else {
+            _ = CZFVPNManager.shared.start()
+        }
+        vpnCoreRunning = CZFVPNManager.shared.isRunning
+    }
+
+    // 3.8.309：节点行字（与 App 页 vpnNodeMenuLabel 同款：当前
+    // 节点打 ✓，测过延迟挂毫秒数，失败挂“失败”）。
+    private func panelVPNNodeMenuLabel(idx: Int, link: String) -> String {
+        let name = CZFVPNManager.nodeDisplay(for: link).name
+        var suffix = ""
+        if let r = vpnPingResults[idx] {
+            suffix = r.success ? " · \(r.delay)ms" : " · 失败"
+        }
+        let mark = idx == CZFVPNManager.shared.activeNodeIndex ? "✓ " : ""
+        return mark + name + suffix
+    }
+
+    // 3.8.309：测延迟（与 App 页 toolbarPingNodes 同款：先停核心
+    // 再测、测完重启原来那条；被拒不覆写旧结果；测完自动切最快）。
+    private func panelToolbarPingNodes() {
+        guard !vpnPinging else { return }
+        let links = CZFVPNManager.shared.nodeLinks
+        guard !links.isEmpty else { return }
+        let pingStoppedCore = CZFVPNManager.shared.stopCoreForPing()
+        vpnPinging = true
+        CZFVPNManager.shared.pingAllNodes { results, rejected in
+            self.vpnPinging = false
+            var bestIndex: Int? = nil
+            if !rejected {
+                var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+                for (idx, r) in results.enumerated() { stored[idx] = r }
+                self.vpnPingResults = stored
+                if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }) {
+                    bestIndex = best.offset
+                }
+            }
+            if pingStoppedCore {
+                CZFVPNManager.shared.restartCoreAfterPing()
+            }
+            if let best = bestIndex, best != CZFVPNManager.shared.activeNodeIndex, best < CZFVPNManager.shared.nodeLinks.count {
+                CZFVPNManager.shared.setActiveNode(at: best)
+            }
+        }
+    }
+
+    // 3.8.309：切到最快（与 App 页 switchToFastestNode 同款：有
+    // 本轮测速结果直接切，没有就先测再切；下标先判界防越界）。
+    private func panelSwitchToFastestNode() {
+        let links = CZFVPNManager.shared.nodeLinks
+        if let best = vpnPingResults.filter({ $0.value.success && $0.key < links.count }).min(by: { $0.value.delay < $1.value.delay }) {
+            CZFVPNManager.shared.setActiveNode(at: best.key)
+            return
+        }
+        panelToolbarPingNodes()
+    }
+
+    // 3.8.309：菜单顶上当前节点名和延迟（与 App 页同款；没测过
+    // 显示“未测速”，没节点显示“暂无节点”）。
+    private var panelVPNCurrentNodeLabel: String {
+        let links = CZFVPNManager.shared.nodeLinks
+        guard !links.isEmpty else { return "暂无节点" }
+        let idx = CZFVPNManager.shared.activeNodeIndex
+        guard idx < links.count else { return "暂无节点" }
+        let name = CZFVPNManager.nodeDisplay(for: links[idx]).name
+        if let r = vpnPingResults[idx] {
+            return r.success ? "当前节点：\(name) · \(r.delay)ms" : "当前节点：\(name) · 失败"
+        }
+        return "当前节点：\(name) · 未测速"
+    }
+
+    // 3.8.309：节点子菜单（与 App 页 vpnNodeSubmenu 同款）。
+    @ViewBuilder
+    private var panelVPNNodeSubmenu: some View {
+        Menu("选择节点") {
+            if CZFVPNManager.shared.nodeLinks.isEmpty {
+                Button("暂无节点") {}
+                    .disabled(true)
+            } else {
+                ForEach(Array(CZFVPNManager.shared.nodeLinks.enumerated()), id: \.offset) { idx, link in
+                    Button {
+                        CZFVPNManager.shared.setActiveNode(at: idx)
+                    } label: {
+                        Text(panelVPNNodeMenuLabel(idx: idx, link: link))
+                    }
+                }
+            }
+        }
+    }
+
+    // 3.8.309：VPN 盾牌菜单（与 App 页 vpnShieldMenu 同款：点按
+    // 开关核心，长按弹菜单；图标是小圆底盾牌，绿=开、灰=关）。
+    @ViewBuilder
+    private var panelVPNMenu: some View {
+        Menu {
+            Button(panelVPNCurrentNodeLabel) {}
+                .disabled(true)
+            Button(vpnCoreRunning ? "停止核心" : "启动核心") {
+                togglePanelVPNCore()
+            }
+            Button(vpnPinging ? "测速中…" : "测延迟") {
+                panelToolbarPingNodes()
+            }
+            .disabled(vpnPinging || CZFVPNManager.shared.nodeLinks.isEmpty)
+            panelVPNNodeSubmenu
+            Button("切到最快") {
+                panelSwitchToFastestNode()
+            }
+            .disabled(CZFVPNManager.shared.nodeLinks.isEmpty)
+            Button("前往 VPN 设置") {
+                closePanel()
+                DataManager.shared.model.selectedTab = .settings
+            }
+        } label: {
+            Image(systemName: vpnCoreRunning ? "shield.fill" : "shield")
+                .font(.system(size: 20))
+                .foregroundStyle(vpnCoreRunning ? .green : .secondary)
+                .frame(width: 36, height: 36)
+                .background(Color(UIColor.secondarySystemBackground))
+                .clipShape(Circle())
+        } primaryAction: {
+            togglePanelVPNCore()
+        }
+    }
 
     private func closePanel() {
         if let czfPanelClose = czfPanelClose {
@@ -3867,45 +4002,23 @@ struct SourcesPanelView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 10)
             }
-            // 快捷开关行（固定在运行条下方、不随列表滚动）
-            HStack(spacing: 10) {
-                // VPN 开关：起停核心（与设置页同款：先记手动
-                // 切换、再起/停、再刷新状态）
-                HStack(spacing: 6) {
-                    Image(systemName: "shield.fill")
-                        .foregroundColor(vpnCoreRunning ? .green : .secondary)
-                    Toggle("VPN", isOn: Binding(
-                        get: { vpnCoreRunning },
-                        set: { newValue in
-                            CZFVPNManager.shared.noteManualCoreToggle(started: newValue)
-                            if newValue {
-                                _ = CZFVPNManager.shared.start()
-                            } else {
-                                CZFVPNManager.shared.stop()
-                            }
-                            vpnCoreRunning = CZFVPNManager.shared.isRunning
-                        }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            // 快捷图标行（固定在运行条下方、不随列表滚动）
+            // 3.8.309：三个小图标，大小一样、间距平均；VPN 点按
+            // 开关、长按选节点（与 App 页盾牌同款 Menu）。
+            HStack(spacing: 16) {
+                // VPN：点按开关核心，长按弹节点菜单
+                panelVPNMenu
                 // 数据管理：直开数据管理设置页
                 Button {
                     openSettingsPage("datamanagement")
                 } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "externaldrive.fill")
-                        Text("数据管理")
-                    }
+                    Image(systemName: "externaldrive.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.blue)
+                        .frame(width: 36, height: 36)
+                        .background(Color(UIColor.secondarySystemBackground))
+                        .clipShape(Circle())
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
                 // 自定义设置：点开配过的设置页；没配过或长按
                 // 改配（选页单里挑一个存下来，下次点直接开）
                 Button {
@@ -3915,15 +4028,13 @@ struct SourcesPanelView: View {
                         showCustomSettingsPicker = true
                     }
                 } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "gearshape.fill")
-                        Text(CZFPanelCustomSettingsPage.currentName ?? "自定义")
-                    }
+                    Image(systemName: CZFPanelCustomSettingsPage.current.flatMap { CZFSettingsPage(rawValue: $0)?.icon } ?? "gearshape.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.blue)
+                        .frame(width: 36, height: 36)
+                        .background(Color(UIColor.secondarySystemBackground))
+                        .clipShape(Circle())
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
                 .contextMenu {
                     Button("更换设置页…") {
                         showCustomSettingsPicker = true
@@ -4921,6 +5032,8 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
     case multitask
     case jit
     case multilc
+    case storage
+    case backup
 
     var id: String { rawValue }
 
@@ -4930,6 +5043,8 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .multitask: return "多任务设置"
         case .jit: return "JIT 诊断"
         case .multilc: return "多开管理"
+        case .storage: return "存储管理"
+        case .backup: return "备份"
         }
     }
 
@@ -4939,6 +5054,8 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .multitask: return "rectangle.stack"
         case .jit: return "wrench.and.screwdriver"
         case .multilc: return "apps.iphone"
+        case .storage: return "internaldrive.fill"
+        case .backup: return "archivebox.fill"
         }
     }
 
@@ -4949,6 +5066,8 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .multitask: LCMultitaskSettingView()
         case .jit: LCJITLessDiagnoseView()
         case .multilc: LCMultiLCManagementView()
+        case .storage: LCStorageManagementView()
+        case .backup: LCDataManagementView()
         }
     }
 }
