@@ -1094,20 +1094,23 @@ private struct CZFVPNNodeLabel: View {
                     .disabled(vpnPinging || vpnSinglePinging)
                 }
             }
-            // 测速中节点行置灰：测速中点节点行只会把勾
-            // 先动、核心切换被挡下测完才补跑，看起来
-            // 像切了其实还没切；置灰后测速中点不动，
-            // 测完再点才是真切。单节点复测同理。
-            .disabled(vpnPinging || vpnSinglePinging)
             // 手动拖拽排序：上面“排序”开着时出拖动柄，
             // 拖完 replaceNodeOrder 写回，活动节点按内容跟随。
-            .environment(\.editMode, vpnReordering ? .constant(.active) : .constant(.inactive))
+            // onMove 必须直接挂在 ForEach 上（3.8.320 构建
+            // #370 红字：挂在 .disabled/.environment 之后，
+            // 类型变成 some View 就没有 onMove 了）。
             .onMove { source, destination in
                 var links = vpnNodes
                 links.move(fromOffsets: source, toOffset: destination)
                 CZFVPNManager.shared.replaceNodeOrder(links)
                 refreshVPNState()
             }
+            // 测速中节点行置灰：测速中点节点行只会把勾
+            // 先动、核心切换被挡下测完才补跑，看起来
+            // 像切了其实还没切；置灰后测速中点不动，
+            // 测完再点才是真切。单节点复测同理。
+            .disabled(vpnPinging || vpnSinglePinging)
+            .environment(\.editMode, vpnReordering ? .constant(.active) : .constant(.inactive))
             // 多选删除操作条：只在长按进多选后出现；全选按链接集合算，
             // 删选中走 deleteSelectedVPNNodeLinks（在用节点走确认框）。
             if vpnNodeSelecting {

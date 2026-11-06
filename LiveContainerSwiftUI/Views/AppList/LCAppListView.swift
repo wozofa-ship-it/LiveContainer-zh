@@ -680,7 +680,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             errorInfo = "恢复失败，一个都没恢复上：\n" + failed.joined(separator: "\n")
             errorShow = true
         } else {
-            installInfo = "批量恢复完成：成功 \(ok.count) 个" + (loginOnly ? "（只恢复登录态）" : "（完整恢复）") + (failed.isEmpty ? "" : "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")) + (noBackup.isEmpty ? "" : "，无备份 \(noBackup.count) 个：\n" + noBackup.joined(separator: "\n"))
+            // 长串一次拼编译器算不动（3.8.320 构建 #370 红字），
+            // 拆成几句一段一段拼。
+            var summary = "批量恢复完成：成功 \(ok.count) 个"
+            summary += loginOnly ? "（只恢复登录态）" : "（完整恢复）"
+            if !failed.isEmpty {
+                summary += "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")
+            }
+            if !noBackup.isEmpty {
+                summary += "，无备份 \(noBackup.count) 个：\n" + noBackup.joined(separator: "\n")
+            }
+            installInfo = summary
             installInfoShow = true
         }
         batchMode = false
