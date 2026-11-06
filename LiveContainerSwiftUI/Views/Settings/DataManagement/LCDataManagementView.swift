@@ -248,7 +248,7 @@ struct LCDataManagementView : View {
             } header: {
                 Text("设置备份")
             } footer: {
-                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置，连同 App 排序、定时备份/定时清理设置、已添加源，一起打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；改了 App 排序、每次备份 App 时那份都会自动刷新。换机或重装后导入即可恢复；App 排序导入后直接生效，其余设置重启 LiveContainer 后生效。")
+                Text("把节点列表、每个 App 的 VPN 标记、窗口位置、手势灵敏度等 CZF 设置，连同 App 排序、固定区图标顺序与快捷行图标顺序、定时备份/定时清理设置、已添加源，一起打包成一个 JSON 文件（CZFSettingsBackup.json）。点「导出设置」直接存：本地文稿根目录一份，你在下面选的备份文件夹里自动也一份；改了 App 排序、每次备份 App 时那份都会自动刷新。换机或重装后导入即可恢复；App 排序与固定区顺序导入后直接生效，其余设置重启 LiveContainer 后生效。")
             }
             .fileImporter(isPresented: $showSettingsImporter, allowedContentTypes: [UTType.json]) { result in
                 switch result {
@@ -1554,6 +1554,15 @@ struct LCDataManagementView : View {
         let sortRestored = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil || dict["LCCustomSortSchemes"] != nil || dict["LCCustomSortSchemeCurrent"] != nil
         if sortRestored {
             DispatchQueue.main.async { LCAppSortManager.shared.reloadSortSettings() }
+        }
+        // 3.8.316：固定区顺序也当场重读——CZFPinnedPanelApps
+        // 与快捷行 CZFPanelCustomShortcuts 都已在导出里（前者
+        // 在 AppGroup 白名单，后者走 CZF 前缀扫描），导入写回
+        // 后固定区 store 内存还是旧的，不重读看着像没恢复；
+        // 快捷行是面板 onAppear 时现读 customShortcuts，下次
+        // 打开即按新顺序走，无需另调。
+        if dict["CZFPinnedPanelApps"] != nil {
+            DispatchQueue.main.async { CZFPinnedAppsStore.shared.reload() }
         }
         // 优5（3.8.277）：节点列表/活动下标写回来了：核心在跑
         // 时经现成入口重启切过去（applyActiveNodeChange 只在

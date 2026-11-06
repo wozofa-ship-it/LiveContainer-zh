@@ -160,23 +160,27 @@ static NSInteger CZFKBStatLCDefault = 0;
 static NSInteger CZFKBStatCustom = 0;
 static NSInteger CZFKBStatExcluded = 0;
 
-// 归属过滤（单开通用修复，隔离容器不用）：
-// 组名是否以点分段为单位完整包含 Bundle ID（防 com.example.app
-// 误含 com.example.app2：子串匹配会错，段匹配不会）。
-static BOOL CZFKBGroupContainsBid(NSString *group, NSString *bid) {
+// 3.8.316：厂商组是否含厂商前缀（Bundle ID 前两段，如
+// com.taobao）：厂商共享组（如 TEAM.com.taobao.shared）
+// 不含完整 Bundle ID，上面 CZFKBGroupContainsBid 不命中；
+// 若条目服务名又是通用词，CZFKBItemMatchesApp 也 miss，
+// 令牌就被排除——闲鱼登录恢复失败的漏口之一。组含厂商前
+// 缀即归属（同厂商共用账号体系，跨厂商不命中），与字段
+// 里的厂商前缀同级安全。
+static BOOL CZFKBGroupContainsVendorPrefix(NSString *group, NSString *bid) {
     if (!group.length || !bid.length) return NO;
-    NSArray<NSString *> *gParts = [group componentsSeparatedByString:@"."];
     NSArray<NSString *> *bParts = [bid componentsSeparatedByString:@"."];
-    if (bParts.count == 0 || gParts.count < bParts.count) return NO;
-    for (NSUInteger i = 0; i + bParts.count <= gParts.count; i++) {
-        BOOL match = YES;
-        for (NSUInteger j = 0; j < bParts.count; j++) {
-            if (![gParts[i + j] isEqualToString:bParts[j]]) { match = NO; break; }
-        }
-        if (match) return YES;
+    if (bParts.count < 2) return NO;
+    NSString *prefix = [NSString stringWithFormat:@"%@.%@", bParts[0], bParts[1]];
+    if (prefix.length < 6) return NO;
+    NSArray<NSString *> *gParts = [group componentsSeparatedByString:@"."];
+    if (gParts.count < 2) return NO;
+    for (NSUInteger i = 0; i + 1 < gParts.count; i++) {
+        if ([gParts[i] isEqualToString:bParts[0]] && [gParts[i + 1] isEqualToString:bParts[1]]) return YES;
     }
     return NO;
 }
+
 
 // 条目字段是否指向本 App（共享组里的逐条目归属，宁可漏收不串号）：
 // 只看字符串字段（service/account/generic/label；NSData 的 generic
@@ -300,7 +304,8 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                 if ((itemAlias && [itemAlias isEqualToString:folderName])
                     || (group && itemGroup && [itemGroup isEqualToString:group])
                     || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
-                    || CZFKBGroupContainsBid(itemGroup, bundleID)) {
+                    || CZFKBGroupContainsBid(itemGroup, bundleID)
+                    || CZFKBGroupContainsVendorPrefix(itemGroup, bundleID)) {
                     mine = YES;
                 } else if (itemGroup && CZFKBItemMatchesApp(item, bundleID, folderName, displayName)) {
                     mine = YES;
@@ -418,8 +423,9 @@ static NSInteger CZFKBStatImportTotal = 0;
 static NSInteger CZFKBStatImported = 0;
 static OSStatus CZFKBStatImportFail = 0;
 
-// isolated/team/lcDefaultGroup：写回分流用。隔离一律走传入
-// 的 group（= 共享组，旧行为不动）；非隔离才按原组分流。
+// isolated/team/lcDefaultGroup：写回分流用。3.8.316 起隔离
+// 也分流厂商组（见函数内注释），只有进程默认组仍只在非
+// 隔离时走 lcDefaultGroup；其余一律按原组分流（换团队前缀）。
 static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderName, BOOL isolated, NSString *team, NSString *lcDefaultGroup) {
     NSString *path = [home stringByAppendingPathComponent:@"CZFKeychainImport.plist"];
     NSData *data = [NSData dataWithContentsOfFile:path];
@@ -440,39 +446,45 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
             // 创建/修改时间是系统盖的，带着写会被整条拒绝
             [item removeObjectForKey:(__bridge NSString *)kSecAttrCreationDate];
             [item removeObjectForKey:(__bridge NSString *)kSecAttrModificationDate];
-            // 写回目标分流（非隔离才分流，隔离一律走传入的
-            // group = 共享组，旧行为不动）：
+            // 写回目标分流（3.8.316：隔离容器也分流厂商组——
+            // 以前 `if (!isolated)` 整块跳过，隔离时所有条目
+            // 都写进共享组；闲鱼这类 App 的令牌在厂商组
+            // （TEAM.com.taobao.shared），App 按厂商组查，
+            // 共享组里的那份读不到，恢复后仍未登录。厂商组
+            // 是 App 自身 entitlement 里的组，只同厂商 App
+            // 能读，不会串到别家，隔离下分流安全；只有进程
+            // 默认组（.com.kdt.livecontainer）仍只在非隔离
+            // 时走 lcDefaultGroup，隔离时留在共享组（防串
+            // 登录的原意不动）：
             // - 原组是进程默认组（任意团队前缀 + .com.kdt.livecontainer）
             //   → 写回当前进程默认组（团队前缀换成当前团队）；
             //   App 不带组名读写时落的就是这里，写别处它读不到。
             // - 原组是共享组 → 保留组号、只换当前团队前缀（App
             //   显式指定共享组时读的就是这个确切组，钩子关不改
             //   写，写进游客默认组反而读不到）。
-            // - 其他 → 传入的 group（旧行为）。
+            // - 其他 → 厂商/自定义组，保留后缀、只换当前团队前缀。
             NSString *target = group;
             BOOL isLCDefaultItem = NO;
-            if (!isolated) {
-                NSString *origGroup = raw[(__bridge NSString *)kSecAttrAccessGroup];
-                if ([origGroup isKindOfClass:NSString.class]) {
-                    if ([origGroup hasSuffix:@".com.kdt.livecontainer"]) {
-                        if (lcDefaultGroup) { target = lcDefaultGroup; isLCDefaultItem = YES; }
-                    } else {
-                        NSRange sharedRange = [origGroup rangeOfString:@".com.kdt.livecontainer.shared"];
-                        if (sharedRange.location != NSNotFound && team.length) {
-                            target = [team stringByAppendingString:[origGroup substringFromIndex:sharedRange.location]];
-                        } else if (team.length) {
-                            // 自定义组（厂商共享组等）：原组既不是进程默认组
-                            // 也不是共享组 → 保留后缀、只换当前团队前缀。
-                            // 原组是旧团队默认组时换完正好等于 writeGroup，
-                            // 与旧 else 行为一致；原组是厂商组时写回 App
-                            // 显式指定的那个组，App 才能读到（旧 else 写默认
-                            // 组，App 按厂商组查就扑空——自定义组令牌恢复后
-                            // 仍未登录的半截修复）。无点/无团队时 target 保
-                            // 持传入的 group（旧行为）。
-                            NSRange dot = [origGroup rangeOfString:@"."];
-                            if (dot.location != NSNotFound) {
-                                target = [team stringByAppendingString:[origGroup substringFromIndex:dot.location]];
-                            }
+            NSString *origGroup = raw[(__bridge NSString *)kSecAttrAccessGroup];
+            if ([origGroup isKindOfClass:NSString.class]) {
+                if ([origGroup hasSuffix:@".com.kdt.livecontainer"]) {
+                    if (!isolated && lcDefaultGroup) { target = lcDefaultGroup; isLCDefaultItem = YES; }
+                } else {
+                    NSRange sharedRange = [origGroup rangeOfString:@".com.kdt.livecontainer.shared"];
+                    if (sharedRange.location != NSNotFound && team.length) {
+                        target = [team stringByAppendingString:[origGroup substringFromIndex:sharedRange.location]];
+                    } else if (team.length) {
+                        // 自定义组（厂商共享组等）：原组既不是进程默认组
+                        // 也不是共享组 → 保留后缀、只换当前团队前缀。
+                        // 原组是旧团队默认组时换完正好等于 writeGroup，
+                        // 与旧 else 行为一致；原组是厂商组时写回 App
+                        // 显式指定的那个组，App 才能读到（旧 else 写默认
+                        // 组，App 按厂商组查就扑空——自定义组令牌恢复后
+                        // 仍未登录的半截修复）。无点/无团队时 target 保
+                        // 持传入的 group（旧行为）。
+                        NSRange dot = [origGroup rangeOfString:@"."];
+                        if (dot.location != NSNotFound) {
+                            target = [team stringByAppendingString:[origGroup substringFromIndex:dot.location]];
                         }
                     }
                 }
@@ -520,9 +532,14 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
             }
         }
     }
-    // 处理完就删：失败的条目不值得每次启动重试，免得一份坏
-    // 快照反复拖慢打开
-    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    // 3.8.316：0 条导入时留文件重试——以前处理完一律删，
+    // 写失败（组不对/权限不对）的快照就此丢掉，用户只能
+    // 重新恢复；路由修好后下次启动重试可能成功。解析失败
+    // 的坏文件照旧删，免得反复拖慢打开。
+    BOOL parsedOK = [parsed isKindOfClass:NSArray.class];
+    if (!(parsedOK && imported == 0)) {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    }
     CZFKBStatImported = imported;
     return imported;
 }

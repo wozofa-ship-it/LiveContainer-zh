@@ -3065,6 +3065,13 @@ final class CZFPinnedAppsStore: ObservableObject {
         pinnedIds.insert(key, at: destination)
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
     }
+
+    // 3.8.316：导入设置后重读——UserDefaults 被外部写回后内存
+    // 里的 pinnedIds 还是旧的，界面看着像没恢复；跟排序的
+    // reloadSortSettings 同款，导入时调一下即直接生效。
+    func reload() {
+        pinnedIds = LCUtils.appGroupUserDefault.stringArray(forKey: defaultsKey) ?? []
+    }
     /// 旧版按包名存的固定项迁移（只跑一次）：单实例的包名直转
     /// 成该实例的键（用户的固定保留）；多实例的包名无法断定
     /// 当初固定的是哪一个，原键保留不猜（解析时查不到自然掉，
@@ -3775,6 +3782,9 @@ struct SourcesPanelView: View {
     // 3.8.310：自定义快捷方式列表（可添加多个单独图标，存在
     // UserDefaults 数组里；@State 持有当前快照，增删后刷新）。
     @State private var customShortcuts: [String] = []
+    // 3.8.316：快捷行拖动调序——正在拖的快捷条目（同固定区
+    // draggedPinKey 的路，拖过目标即换位、松手即定）。
+    @State private var draggedShortcutKey: String?
     // 3.8.311：App 设置快捷方式的开关状态快照（key 是完整条目串，
     // 值是开/关；打开面板、增删、点按切换后刷新，角标颜色用它）。
     @State private var settingStates: [String: Bool] = [:]
@@ -4219,6 +4229,16 @@ struct SourcesPanelView: View {
                                 refreshSettingStates()
                             }
                         }
+                        // 3.8.316：按住拖动调序（同固定区拖动换位）。
+                        .onDrag {
+                            draggedShortcutKey = item
+                            return NSItemProvider(object: item as NSString)
+                        }
+                        .onDrop(of: [.text], delegate: CZFCustomShortcutReorderDelegate(
+                            targetIndex: customShortcuts.firstIndex(of: item) ?? 0,
+                            items: $customShortcuts,
+                            draggedKey: $draggedShortcutKey
+                        ))
                     } else if let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
                               let app = app(forPinKey: pinKey),
                               let setting = CZFPanelAppSetting(rawValue: key) {
@@ -4258,6 +4278,16 @@ struct SourcesPanelView: View {
                                 refreshSettingStates()
                             }
                         }
+                        // 3.8.316：按住拖动调序（同固定区拖动换位）。
+                        .onDrag {
+                            draggedShortcutKey = item
+                            return NSItemProvider(object: item as NSString)
+                        }
+                        .onDrop(of: [.text], delegate: CZFCustomShortcutReorderDelegate(
+                            targetIndex: customShortcuts.firstIndex(of: item) ?? 0,
+                            items: $customShortcuts,
+                            draggedKey: $draggedShortcutKey
+                        ))
                     }
                 }
                 // 加号：添加一个自定义快捷方式（点开选页单）
@@ -4277,9 +4307,13 @@ struct SourcesPanelView: View {
             // 斥距离还是那么大，要跟 App 面板搜索框同距——
             // 搜索框下沿是 8；又 17:29 令上下距离一样。改成
             // 上 8 下 8，对称，贴紧上下两端）。
+            // 3.8.316：用户 20:22 截图——快捷行整体偏右，往左
+            // 挪 4pt（稍微）。居中 Spacer 对称时视觉仍偏右，
+            // 加号在末尾会把重心往右带一点。
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 8)
+            .offset(x: -4)
             .onAppear {
                 vpnCoreRunning = CZFVPNManager.shared.isRunning
                 CZFPanelCustomShortcuts.migrateIfNeeded()
@@ -5365,6 +5399,34 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
 //   _dataUUID，key 是 CZFPanelAppSetting 的 rawValue），
 //   开关类点按直接切换，多选项类点按打开该 App 的设置页。
 // 存 UserDefaults 数组，按添加顺序排；长按图标可移除。
+// 3.8.316：快捷行拖动调序代理——同 CZFPinnedReorderDelegate
+// 的路：拖过目标即换位。items 是面板的 @State 镜像，换位后
+// 同时写回 CZFPanelCustomShortcuts（UserDefaults），下次打
+// 开面板与导出设置都按新顺序走。
+private struct CZFCustomShortcutReorderDelegate: DropDelegate {
+    let targetIndex: Int
+    @Binding var items: [String]
+    @Binding var draggedKey: String?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedKey = draggedKey,
+              items.indices.contains(targetIndex),
+              items[targetIndex] != draggedKey,
+              let from = items.firstIndex(of: draggedKey) else { return }
+        CZFPanelCustomShortcuts.move(from: from, to: targetIndex)
+        items = CZFPanelCustomShortcuts.items
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedKey = nil
+        return true
+    }
+}
+
 enum CZFPanelCustomShortcuts {
     static let key = "CZFPanelCustomShortcuts"
     private static let legacyKey = "CZFPanelCustomSettingsPage"
@@ -5403,6 +5465,18 @@ enum CZFPanelCustomShortcuts {
 
     static func remove(_ item: String) {
         items = items.filter { $0 != item }
+    }
+
+    // 3.8.316：拖动调序——同 CZFPinnedAppsStore.movePinned 的路
+    // （remove + insert），换位后直接写回 UserDefaults。
+    static func move(from source: Int, to destination: Int) {
+        var list = items
+        guard source != destination,
+              list.indices.contains(source),
+              destination >= 0, destination < list.count else { return }
+        let item = list.remove(at: source)
+        list.insert(item, at: destination)
+        items = list
     }
 
     // 旧版单自定义迁移：309 只存一个设置页 rawValue，第一次
