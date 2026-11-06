@@ -927,7 +927,10 @@ struct LCDataManagementView : View {
             // 3.8.317：用户 21:54 截图——从面板图标打开恢复时，内层
             // 恢复 sheet 顶部短一截（外层 sheet 还在呈现动画里就
             // 弹了内层，按未落定的容器布局）。改大号定额，强制满高。
-            .presentationDetents([.large])
+            // 3.8.317 修复：直接调 .presentationDetents 编不过
+            //（构建 #364 唯一红字，部署目标 15.0），走包了
+            // #available 的 czfPresentationDetentsLarge。
+            .czfPresentationDetentsLarge()
         }
         .sheet(isPresented: $showScheduleBackup) {
             NavigationView {

@@ -72,6 +72,18 @@ extension View {
     ) -> ModifiedContent {
         body(self)
     }
+
+    // 3.8.317 修复：.presentationDetents 是 iOS 16+ API，部署目标
+    // 15.0 下直接调用编不过（构建 #364 唯一红字）。包一层
+    // #available，iOS 15 走默认 sheet 高度，iOS 16+ 强制满高。
+    @ViewBuilder
+    func czfPresentationDetentsLarge() -> some View {
+        if #available(iOS 16.0, *) {
+            self.presentationDetents([.large])
+        } else {
+            self
+        }
+    }
 }
 
 public struct DocModifier: ViewModifier {
