@@ -202,16 +202,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         vpnPinging = true
         CZFVPNManager.shared.pingAllNodes { results, rejected in
             self.vpnPinging = false
-            var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
-            for (idx, r) in results.enumerated() { stored[idx] = r }
-            self.vpnPingResults = stored
             if rejected {
+                // 3.8.303：被拒那批全是失败，不是节点真不通——不覆写
+                // 旧结果（manager 的规矩：pingAllNodes/pingSingleNode
+                // 注释“界面不覆写旧结果”；设置页 startVPNPing
+                // 被拒时也是不覆写、不落盘）。原来无条件先存结果，
+                // 核心在跑时一测就把整表写成失败，菜单全挂“失败”，
+                // 跟设置页的毫秒数对不上。旧结果留着，菜单继续显示
+                // 上次真测的毫秒数；没测过就不挂后缀。
                 self.vpnPingMessage = "核心在跑，测速被占用——先停核心再测"
-            } else if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }) {
-                let name = CZFVPNManager.nodeDisplay(for: links[best.offset]).name
-                self.vpnPingMessage = "最快：\(name)（\(best.element.delay)ms），共测了 \(results.count) 个节点"
             } else {
-                self.vpnPingMessage = "全部节点测速失败"
+                var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+                for (idx, r) in results.enumerated() { stored[idx] = r }
+                self.vpnPingResults = stored
+                if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }) {
+                    let name = CZFVPNManager.nodeDisplay(for: links[best.offset]).name
+                    self.vpnPingMessage = "最快：\(name)（\(best.element.delay)ms），共测了 \(results.count) 个节点"
+                } else {
+                    self.vpnPingMessage = "全部节点测速失败"
+                }
             }
             afterPing?(results)
         }
