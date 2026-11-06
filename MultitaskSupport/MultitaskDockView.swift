@@ -3123,17 +3123,34 @@ struct PinnedAppsStripView: View {
     // 固定区顺序跟固定顺序走（不再跟列表排序走）：按住拖动
     // 换位改的就是这个顺序；已删 App 的残留键自然掉。
     private var pinnedItems: [PinnedStripItem] {
-        pinnedStore.pinnedIds.compactMap { id in
+        // 3.8.295：按 pinKey 去重（保留第一项）——同一 App 可能同
+        // 时以 pinKey 与 src: 键固定；src: 的已装项 295 后也解成
+        // .installed，pinKey 与普通固定项相同，ForEach(id: pinKey)
+        // 会重复 id（固定区出现两个相同图标、拖动错位）。
+        var seenKeys = Set<String>()
+        return pinnedStore.pinnedIds.compactMap { id in
             if id.hasPrefix("src:") {
+                let bundleID = String(id.dropFirst(4))
+                // 3.8.295：源固定项优先解析为已装 App——已装的走本
+                // 地图标（清晰、不用联网），且 App 面板没有源解析
+                // 器也能显示（之前只走 resolver，App 面板直接跳
+                // 过，源 App 在 App 面板永远固定不上；源面板里远
+                // 程图标下不来时也只剩灰块，看着像没固定上）。没
+                // 装的才走源解析（点按走安装）。已装查找含隐藏
+                // App（sortedApps 只有可见 App，隐藏的在另一份
+                // sortedHiddenApps；源行 isInstalled 查的是两者之和）。
+                if let app = (sortManager.sortedApps + sortManager.sortedHiddenApps).first(where: { $0.appInfo.bundleIdentifier() == bundleID }) {
+                    return .installed(app)
+                }
                 guard let resolver = sourceAppResolver else { return nil }
-                guard let app = resolver(String(id.dropFirst(4))) else { return nil }
+                guard let app = resolver(bundleID) else { return nil }
                 return .source(app)
             }
             if let app = sortManager.sortedApps.first(where: { CZFPinnedAppsStore.pinKey(for: $0) == id }) {
                 return .installed(app)
             }
             return nil
-        }
+        }.filter { item in seenKeys.insert(item.pinKey).inserted }
     }
     // 3.8.291：固定区图标——已装走 RunningAppIcon，源固定项
     // 走 iconURL 的 AsyncImage（与源行同款写法）。
@@ -4427,24 +4444,34 @@ private struct RunningAppIcon: View {
                     .fill(Color.gray.opacity(0.3))
             }
         }
-        .onAppear {
-            // 缓存命中也写回 @State（审计建议）：body 与 onAppear 是
-            // 同一主线程 pass，若缓存恰在两者之间被别的行写进来，
-            // 光 return 不设 State，灰块要等下次父视图重渲染才消失。
-            if let cached = cachedIcon {
-                if icon == nil { self.icon = cached }
-                return
+        .onAppear { loadIcon() }
+        // 3.8.295：再加 task 兜底——只靠 onAppear 时，若面板宿主
+        // 在图标进缓存前就把视图建好、onAppear 已跑过，灰块要等
+        // 父视图下次重渲染才消失；task 在视图重现与 cacheKey 变
+        // 化时都会再跑一次，缓存一到就写回 @State。loadIcon 幂
+        // 等（先查缓存命中直接用），两处触发不重复解图标。
+        .task(id: cacheKey) { loadIcon() }
+    }
+
+    private func loadIcon() {
+        // 已有图标不重复加载。
+        if icon != nil { return }
+        // 缓存命中也写回 @State（审计建议）：body 与 onAppear 是
+        // 同一主线程 pass，若缓存恰在两者之间被别的行写进来，
+        // 光 return 不设 State，灰块要等下次父视图重渲染才消失。
+        if let cached = cachedIcon {
+            self.icon = cached
+            return
+        }
+        guard let appInfo = appInfo else { return }
+        let key = cacheKey
+        DispatchQueue.global(qos: .userInitiated).async {
+            let loaded = appInfo.iconIsDarkIcon(false)
+            if let loaded = loaded, !key.isEmpty {
+                IconCacheManager.shared.setIcon(loaded, for: key)
             }
-            guard let appInfo = appInfo else { return }
-            let key = cacheKey
-            DispatchQueue.global(qos: .userInitiated).async {
-                let loaded = appInfo.iconIsDarkIcon(false)
-                if let loaded = loaded, !key.isEmpty {
-                    IconCacheManager.shared.setIcon(loaded, for: key)
-                }
-                DispatchQueue.main.async {
-                    self.icon = loaded
-                }
+            DispatchQueue.main.async {
+                self.icon = loaded
             }
         }
     }
