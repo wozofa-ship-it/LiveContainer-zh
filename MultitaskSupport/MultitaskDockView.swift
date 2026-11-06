@@ -3907,9 +3907,9 @@ struct SourcesPanelView: View {
             }
         } label: {
             Image(systemName: vpnCoreRunning ? "shield.fill" : "shield")
-                .font(.system(size: 20))
+                .font(.system(size: 22))
                 .foregroundStyle(vpnCoreRunning ? .green : .secondary)
-                .frame(width: 36, height: 36)
+                .frame(width: 40, height: 40)
                 .background(Color(UIColor.secondarySystemBackground))
                 .clipShape(Circle())
         } primaryAction: {
@@ -3973,6 +3973,12 @@ struct SourcesPanelView: View {
         case .keepAlive: return isKeepAliveOn(for: app)
         case .jit: return app.uiIsJITNeeded
         case .fixPicker: return app.uiFixFilePickerNew
+        case .useLCBundleId: return app.uiUseLCBundleId
+        case .hideLiveContainer: return app.uiHideLiveContainer
+        case .classicMode: return app.uiClassicMode
+        case .spoofSDK: return app.uiSpoofSDKVersion
+        case .symlinkInbox: return app.uiDoSymlinkInbox
+        case .dontInjectTweak: return app.uiDontInjectTweakLoader
         case .openSettings: return nil
         }
     }
@@ -4007,6 +4013,12 @@ struct SourcesPanelView: View {
         case .keepAlive: toggleKeepAlive(for: app)
         case .jit: app.uiIsJITNeeded.toggle()
         case .fixPicker: app.uiFixFilePickerNew.toggle()
+        case .useLCBundleId: app.uiUseLCBundleId.toggle()
+        case .hideLiveContainer: app.uiHideLiveContainer.toggle()
+        case .classicMode: app.uiClassicMode.toggle()
+        case .spoofSDK: app.uiSpoofSDKVersion.toggle()
+        case .symlinkInbox: app.uiDoSymlinkInbox.toggle()
+        case .dontInjectTweak: app.uiDontInjectTweakLoader.toggle()
         case .openSettings: break
         }
         refreshSettingStates()
@@ -4165,7 +4177,13 @@ struct SourcesPanelView: View {
             // 快捷图标行（固定在运行条下方、不随列表滚动）
             // 3.8.309：三个小图标，大小一样、间距平均；VPN 点按
             // 开关、长按选节点（与 App 页盾牌同款 Menu）。
+            // 3.8.312：用户 18:29/18:31 两度改主意——不要左对
+            // 齐，要居中（17:07 的“从左边排起”已作废，17:29
+            // 的居中令为准）；图标 36→40 稍大一点；上下间距
+            // 改成一样的 8（跟 App 面板搜索框下沿的 8 同距）。
             HStack(spacing: 16) {
+                // 居中（两端 Spacer 把整行推到中间）。
+                Spacer()
                 // VPN：点按开关核心，长按弹节点菜单
                 panelVPNMenu
                 // 数据管理：直开数据管理设置页
@@ -4173,9 +4191,9 @@ struct SourcesPanelView: View {
                     openSettingsPage("datamanagement")
                 } label: {
                     Image(systemName: "externaldrive.fill")
-                        .font(.system(size: 20))
+                        .font(.system(size: 22))
                         .foregroundStyle(.blue)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 40, height: 40)
                         .background(Color(UIColor.secondarySystemBackground))
                         .clipShape(Circle())
                 }
@@ -4191,9 +4209,9 @@ struct SourcesPanelView: View {
                             openSettingsPage(page.rawValue)
                         } label: {
                             Image(systemName: page.icon)
-                                .font(.system(size: 20))
+                                .font(.system(size: 22))
                                 .foregroundStyle(.blue)
-                                .frame(width: 36, height: 36)
+                                .frame(width: 40, height: 40)
                                 .background(Color(UIColor.secondarySystemBackground))
                                 .clipShape(Circle())
                         }
@@ -4217,14 +4235,14 @@ struct SourcesPanelView: View {
                         } label: {
                             ZStack(alignment: .bottomTrailing) {
                                 RunningAppIcon(appInfo: app.appInfo)
-                                    .frame(width: 36, height: 36)
+                                    .frame(width: 40, height: 40)
                                     .clipShape(Circle())
                                 Circle()
                                     .fill(settingBadgeColor(for: item, setting: setting))
-                                    .frame(width: 18, height: 18)
+                                    .frame(width: 20, height: 20)
                                     .overlay(
                                         Image(systemName: setting.icon)
-                                            .font(.system(size: 9, weight: .bold))
+                                            .font(.system(size: 10, weight: .bold))
                                             .foregroundColor(.white)
                                     )
                                     .offset(x: 2, y: 2)
@@ -4244,23 +4262,21 @@ struct SourcesPanelView: View {
                     showCustomSettingsPicker = true
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 20))
+                        .font(.system(size: 22))
                         .foregroundStyle(.blue)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 40, height: 40)
                         .background(Color(UIColor.secondarySystemBackground))
                         .clipShape(Circle())
                 }
-                // 左对齐（3.8.310：用户斥三个图标排中间丑，
-                // 从左边排起——Spacer 把整行推到左边）。
                 Spacer()
             }
-            // 快捷行与固定区的间距（3.8.310：用户 17:05 截图斥
-            // “那么靠近固定 APP 下面那么宽”——固定区底只留 2pt、
-            // 快捷行又没顶距，两行贴在一起；下面底距 8pt 又显宽。
-            // 改成上 12 下 4，上下拉开、贴紧列表）。
+            // 快捷行与固定区/列表的间距（3.8.312：用户 18:29
+            // 斥距离还是那么大，要跟 App 面板搜索框同距——
+            // 搜索框下沿是 8；又 17:29 令上下距离一样。改成
+            // 上 8 下 8，对称，贴紧上下两端）。
             .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
+            .padding(.top, 8)
+            .padding(.bottom, 8)
             .onAppear {
                 vpnCoreRunning = CZFVPNManager.shared.isRunning
                 CZFPanelCustomShortcuts.migrateIfNeeded()
@@ -4307,9 +4323,12 @@ struct SourcesPanelView: View {
     private var sourcesPanelList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
+                LazyVStack(alignment: .leading, spacing: 10) {
                     // 滚回顶部锚点（条子已挪到 ScrollView 外面，
                     // 这里留个 0 高锚点，调出面板仍滚回最顶部）
+                    // 3.8.312：间距 16→10（与 App 面板列表同距；
+                    // 快捷行下沿到第一个源名的距离 = 快捷行底距
+                    // 8 + 这 10，跟着收紧）。
                     Color.clear.frame(height: 0).id("czfSourcesPanelTop")
                     if viewModel.sources.isEmpty {
                         Text("还没有添加源")
@@ -5391,6 +5410,18 @@ enum CZFPanelAppSetting: String, CaseIterable {
     case jit = "jit"
     case fixPicker = "fixpicker"
     case openSettings = "opensettings"
+    // 3.8.312：设置页再加设置——把 App 设置页里剩下
+    // 的纯开关也放进快捷方式（都是 LCAppModel 上带 didSet
+    // 直写 appInfo 的布尔开关，点按直接 toggle 即生效，
+    // 与已有的 fixNotify/fixPicker/jit 同款；锁定/隐藏
+    // 不加——它俩要走 setLocked/toggleHidden 异步流程，
+    // 还有刷脸与 delegate 关导航，直接 toggle 会不同步）。
+    case useLCBundleId = "uselcbundleid"
+    case hideLiveContainer = "hidelivecontainer"
+    case classicMode = "classicmode"
+    case spoofSDK = "spoofsdk"
+    case symlinkInbox = "symlinkinbox"
+    case dontInjectTweak = "dontinjecttweak"
 
     var title: String {
         switch self {
@@ -5401,6 +5432,12 @@ enum CZFPanelAppSetting: String, CaseIterable {
         case .jit: return "JIT 启动"
         case .fixPicker: return "修复文件选择器"
         case .openSettings: return "打开 App 设置页"
+        case .useLCBundleId: return "用 LC Bundle ID"
+        case .hideLiveContainer: return "隐藏 LiveContainer"
+        case .classicMode: return "兼容模式"
+        case .spoofSDK: return "伪装 SDK 版本"
+        case .symlinkInbox: return "软链 Inbox"
+        case .dontInjectTweak: return "不注入 TweakLoader"
         }
     }
 
@@ -5413,6 +5450,12 @@ enum CZFPanelAppSetting: String, CaseIterable {
         case .jit: return "bolt.fill"
         case .fixPicker: return "folder.fill"
         case .openSettings: return "gearshape.fill"
+        case .useLCBundleId: return "app.badge"
+        case .hideLiveContainer: return "eye.slash"
+        case .classicMode: return "rectangle.on.rectangle"
+        case .spoofSDK: return "hammer.fill"
+        case .symlinkInbox: return "link"
+        case .dontInjectTweak: return "nosign"
         }
     }
 

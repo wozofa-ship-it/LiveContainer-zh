@@ -2071,9 +2071,11 @@ struct LCDataManagementView : View {
             }
         }
         } else {
-            // 登录态档：容器整棵树里 ≤5MB 的小文件（Library、
-            // Documents、LCAppGroup 等全扫；单容器封顶 300MB），
-            // 组容器同规则；钥匙串快照在下面照旧备
+            // 登录态档：登录关键文件（偏好设置、Documents、
+            // SQLite 库、plist、Cookie/WebKit/会话相关）先全拷、
+            // 不计预算，其余文件按大小升序、单容器封顶 300MB
+            // （见 copyLoginStateFiles）；组容器同规则；钥匙串
+            // 快照在下面照旧备
             for container in app.uiContainers {
                 let srcURL = container.containerURL
                 if fm.fileExists(atPath: srcURL.path) {
@@ -4133,8 +4135,38 @@ struct LCDataManagementView : View {
         // 出来（只收前 50 条防 2985 个全列出把报告撑爆，数照全计）。
         var skippedPaths: [String] = []
         var copied: [String] = []
-        let entries = loginStateEntries(in: src, fm: fm).sorted { $0.size < $1.size }
-        for e in entries {
+        // 3.8.312：登录关键文件优先——以前按大小升序拷、300MB
+        // 封顶，假设“会话文件普遍小”。但红果这类 App 的登录态
+        // 落在单个大文件里（大 SQLite 库 / WebView 存储），按大
+        // 小排后面被截断：登录态备份恢复后登录过期，完整备份
+        // （整容器全拷）却能直接登录。登录关键文件先全拷、不
+        // 计入 300MB 预算；其余文件仍按大小升序、300MB 封顶。
+        func isLoginCritical(_ rel: String) -> Bool {
+            let lower = rel.lowercased()
+            if lower.hasPrefix("library/preferences/") || lower.hasPrefix("documents/") { return true }
+            if lower.hasSuffix(".db") || lower.hasSuffix(".sqlite") || lower.hasSuffix(".sqlite3")
+                || lower.hasSuffix(".sqlite-wal") || lower.hasSuffix(".sqlite-shm") || lower.hasSuffix(".plist") { return true }
+            if lower.contains("cookie") || lower.contains("webkit") || lower.contains("session")
+                || lower.contains("token") || lower.contains("account") || lower.contains("login")
+                || lower.contains("auth") { return true }
+            return false
+        }
+        let entries = loginStateEntries(in: src, fm: fm)
+        let priority = entries.filter { isLoginCritical($0.rel) }
+        let regular = entries.filter { !isLoginCritical($0.rel) }.sorted { $0.size < $1.size }
+        // 先拷登录关键文件（不计预算，必拷）
+        for e in priority {
+            let d = dst.appendingPathComponent(e.rel)
+            try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if (try? fm.copyItem(at: e.src, to: d)) != nil {
+                copied.append(e.rel)
+                if e.rel != "LCContainerInfo.plist" {
+                    count += 1
+                }
+            }
+        }
+        // 再拷其余文件，按大小升序、300MB 封顶
+        for e in regular {
             if bytes + e.size > 300 * 1024 * 1024 {
                 skipped += 1
                 if skippedPaths.count < 50 { skippedPaths.append(e.rel) }
