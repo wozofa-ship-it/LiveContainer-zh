@@ -596,7 +596,17 @@ struct LCDataManagementView : View {
         .onChange(of: showScheduleBackup) { _ in czfDismissIfDirectEntryDone() }
         .onChange(of: showBackupScopeDialog) { _ in czfDismissIfDirectEntryDone() }
         .onChange(of: showRestoreScopeDialog) { _ in czfDismissIfDirectEntryDone() }
-        .confirmationDialog("备份范围", isPresented: $showBackupScopeDialog, titleVisibility: .visible) {
+        // 3.8.340：范围框改 .alert——339 的根因找错了。339 以为
+        // “范围框挂在父视图（Form）上，盖在全屏选页上面不受
+        // 影响”，但用户 16:38 截图实证：点备份/恢复还是没弹窗。
+        // 真根因是 SwiftUI 单视图一次只能呈现一个东西：Form 上
+        // 挂着两个 confirmationDialog + 两个 fullScreenCover，
+        // 选页全屏盖着时 Form 已在呈现，confirmationDialog 再
+        // 设 true 会被系统直接吞掉（337/338 的“关页+弹框撞
+        // 转场”是同一根因的另一面）。alert 走窗口层、不占
+        // Form 的呈现位，选页/预览盖着也能弹出来；按钮和
+        // 逻辑一字不动，只换呈现方式。
+        .alert(Text("备份范围"), isPresented: $showBackupScopeDialog) {
             Button("只备份登录态") {
                 let apps = pendingBackupApps
                 // 3.8.339：用户选了范围才关选页（选页一直盖在下面
@@ -618,7 +628,7 @@ struct LCDataManagementView : View {
         // 恢复范围弹窗优化：说明不再把两个选项的解释挤成一整段
         // （扫一眼分不清）；安全的选项只留一句说明，危险的选项
         // 标红、后果直接写进按钮上，点之前就看得见
-        .confirmationDialog("恢复范围", isPresented: $showRestoreScopeDialog, titleVisibility: .visible) {
+        .alert(Text("恢复范围"), isPresented: $showRestoreScopeDialog) {
             Button("只恢复登录态") {
                 // 3.8.339：同备份范围框——用户选了范围才把上面
                 // 盖着的几层页一起关掉（恢复页/预览页/多选页，
@@ -644,7 +654,8 @@ struct LCDataManagementView : View {
         // sheet 帧自带顶边距，公开 API 去不掉）。改 fullScreenCover
         // 顶满整屏；代价是没了下滑关闭手势，所以左上角补一个
         // “取消”按钮（没它用户改主意就关不掉面板了）。内容、
-        // 备份按钮流程一字不动，范围确认框挂在父视图上不受影响。
+        // 备份按钮流程一字不动。范围框 3.8.340 起改 .alert
+        // （见上面），不再是挂父视图的 confirmationDialog。
         .fullScreenCover(isPresented: $showBackupSelect) {
             NavigationView {
                 List(sharedModel.apps + sharedModel.hiddenApps, id: \.self) { app in
@@ -680,11 +691,11 @@ struct LCDataManagementView : View {
                                     backupSelectedIDs = Set((sharedModel.apps + sharedModel.hiddenApps).map { Self.instanceKey(for: $0) })
                                 }
                             }
-                            // 3.8.339：先关选页再弹范围框，两个转场撞在一起，
-                            // 范围框会被系统吞掉、用户看不到弹窗（338 的 0.3 秒
-                            // 延迟只保了直进自动关闭，没保住这个转场冲突）。
-                            // 改法：选页先不关，范围框直接盖在选页上面；
-                            // 用户选了范围再关选页（见范围框按钮里）。
+                            // 3.8.340：选页先不关，范围框（alert）直接盖在
+                            // 选页上面；用户选了范围再关选页（见范围框按钮里）。
+                            // 339 的“关页+弹框撞转场”诊断是错的，真根因是
+                            // Form 已在呈现选页、confirmationDialog 被吞
+                            // （见上面 alert 的注释）；alert 不占呈现位。
                             Button("lc.settings.backup".loc) {
                                 pendingBackupApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
                                     backupSelectedIDs.contains(Self.instanceKey(for: $0))
@@ -918,7 +929,11 @@ struct LCDataManagementView : View {
                 // v216：恢复前备份清单预览（恢复 sheet 内再叠一层
                 // sheet；“恢复”走恢复行同一条路：关预览、关恢复
                 // sheet、设 pendingRestoreURL、弹 scope 弹窗）
-                .sheet(isPresented: $showBackupPreview) {
+                // 3.8.340：预览也改真全屏——339 只改了恢复选页，
+                // 预览还是半屏 sheet，用户 16:38 截图实证：预览
+                // 顶上露一截、底下恢复页从缝里透出来，看着还是
+                // “俩个页面”。预览左上角已有“取消”按钮。
+                .fullScreenCover(isPresented: $showBackupPreview) {
                     NavigationView {
                         Group {
                             if previewLoading && previewItems.isEmpty {
@@ -945,8 +960,8 @@ struct LCDataManagementView : View {
                             }
                             ToolbarItem(placement: .confirmationAction) {
                                 Button("恢复") {
-                                    // 3.8.339：预览页和恢复页先不关，
-                                    // 范围框盖在最上面，选了范围再一起关
+                                    // 3.8.340：预览页和恢复页先不关，
+                                    // 范围框（alert）盖在最上面，选了范围再一起关
                                     //（见恢复范围框按钮里）。
                                     if let url = previewFolderURL {
                                         pendingRestoreURL = url
@@ -964,7 +979,9 @@ struct LCDataManagementView : View {
                 // 单预览同款嵌套，不关恢复 sheet；“删除”先弹
                 // 自己的确认框再删，锁了的跳过并报数；“恢复”
                 // 走范围弹窗，一键恢复全部已挪到列表顶部单独一行）
-                .sheet(isPresented: $showSelectBackups) {
+                // 3.8.340：多选页也改真全屏（同预览的修法，半屏
+                // sheet 顶上露缝、底下恢复页透出来就是“俩个页面”）。
+                .fullScreenCover(isPresented: $showSelectBackups) {
                     NavigationView {
                         List {
                             if selectBackupFolders.isEmpty {
