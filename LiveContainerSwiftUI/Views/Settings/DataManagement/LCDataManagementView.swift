@@ -233,9 +233,12 @@ struct LCDataManagementView : View {
     @State private var pendingDeleteBackupURL: URL? = nil
     
     @EnvironmentObject private var sharedModel : SharedModel
-    // 3.8.344：本场景的 SceneDelegate（与 LCTabView、TextFieldAlertModifier
-    // 同款取法）。presentScopeAlert 改锚定它，不再全局 first-match 找窗口。
-    @EnvironmentObject private var sceneDelegate: SceneDelegate
+    // 3.8.348：删 @EnvironmentObject sceneDelegate——独立 hosting
+    // + fullScreenCover 下环境注入不可靠，347 在 ensureSourcesOverlay
+    // 里手动注仍闪退（访问缺失的 @EnvironmentObject 直接 fatal
+    // error）。presentScopeAlert 改函数内现取前台场景的 delegate，
+    // 不再依赖环境。347 的注入留着：源面板 .sheet 弹的
+    // LCAppSettingsView 的 textFieldAlert 还要它。
 
     // 备份选 App 的全选状态：列表里 App 全勾上了才算全选。
     private var allBackupSelected: Bool {
@@ -2847,25 +2850,26 @@ struct LCDataManagementView : View {
             }
             alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showRestoreScopeDialog = false })
         }
-        // 3.8.344：342/343 的 UIKit 弹框死在窗口查找上——
-        // connectedScenes 与 scene.windows 都是无序集合，first
-        // 匹配在多场景/多窗口（主窗 + 多任务浮动面板）下会拿错
-        // 窗，框弹到用户看不见的 VC 上；guard 通过、跟踪位 stuck
-        // true（白页）、框不可见，六版里 342/343 全是这个死法。
-        // 改锚定本场景的 SceneDelegate.window（与 TextFieldAlertModifier
-        // 同款取法，167 行），从它起走 presented 链；present 前
-        // 校验 top.view.window != nil，不在窗口层级里就不弹、
-        // 清跟踪位返回，不再静默白纸。同步 present（调用方已在主
-        // 线程且无转场进行中；.backupAll 在 onAppearFunc 里已等
-        // 0.5 秒让 sheet 落定），去掉 343 的 async 包裹。
-        // 兜底：sceneDelegate.window 为 nil 时才退到全局查找。
-        // 3.8.346：nil 时先按 delegate 身份找回本场景——
-        // connectedScenes 里 delegate === sceneDelegate 的那个
-        // 就是本场景（多场景下也不会拿错别人的窗），取它的
-        // keyWindow、回填 sceneDelegate.window（sceneDidBecomeActive
-        // 刷新后这里通常已非 nil，这步只是补漏）；还拿不到才退
-        // 全局查找。
-        if sceneDelegate.window == nil {
+        // 3.8.348：不再依赖 @EnvironmentObject sceneDelegate——
+        // 独立 hosting + fullScreenCover 下环境注入不可靠，347
+        // 在 ensureSourcesOverlay 里手动注仍闪退（访问缺失的
+        // @EnvironmentObject 直接 fatal error）。改函数内现取：
+        // 前台场景的 delegate 就是本场景的 SceneDelegate（所有
+        // 场景的 delegateClass 都是 SceneDelegate，见 AppDelegate
+        // configurationForConnecting），取它的 window 锚定；取不
+        // 到（无前台场景）直接走全局查找兜底。342/343 的教训还
+        // 在：connectedScenes 与 scene.windows 都是无序集合，
+        // first 匹配在多场景/多窗口下会拿错窗，所以只认前台场景
+        // 的 delegate，不认任意 first。present 前校验
+        // top.view.window != nil，不在窗口层级里就不弹、清跟踪位
+        // 返回。同步 present（调用方已在主线程且无转场进行中；
+        // .backupAll 在 onAppearFunc 里已等 0.5 秒让 sheet 落定，
+        // 去掉 343 的 async 包裹）。
+        // 3.8.346 的补漏还在：delegate.window 为 nil 时取本场景
+        // 的 keyWindow/首个可见窗回填（sceneDidBecomeActive 刷新
+        // 后通常已非 nil，这步只是补漏）；还拿不到才退全局查找。
+        let sceneDelegate = (UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene)?.delegate as? SceneDelegate
+        if let sceneDelegate = sceneDelegate, sceneDelegate.window == nil {
             if let ownScene = UIApplication.shared.connectedScenes.first(where: { ($0.delegate as? SceneDelegate) === sceneDelegate }) as? UIWindowScene,
                let keyWindow = ownScene.keyWindow ?? ownScene.windows.first(where: { !$0.isHidden }) {
                 sceneDelegate.window = keyWindow
@@ -2876,7 +2880,7 @@ struct LCDataManagementView : View {
             while let presented = top.presentedViewController { top = presented }
             return top
         }
-        if let window = sceneDelegate.window, let root = window.rootViewController {
+        if let window = sceneDelegate?.window, let root = window.rootViewController {
             let top = topViewController(from: root)
             if top.view.window != nil {
                 top.present(alert, animated: true)
