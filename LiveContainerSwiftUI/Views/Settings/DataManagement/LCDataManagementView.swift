@@ -512,10 +512,17 @@ struct LCDataManagementView : View {
         // 内容透明，内层页没弹出来之前用户只看到一张白纸，不
         // 会看到数据管理列表（“别弹窗俩个出来”）。正常进页时
         // initialSheet 为 nil，三行全按原样。
+        // 3.8.343：opacity 不能写死 initialSheet != nil 就 0——
+        // 内层页/范围框万一没弹出来（342 实证：.backupAll
+        // 只走 presentScopeAlert，init 不开页；UIKit 弹框
+        // 也可能被丢），用户就永远卡在一张白纸上。改成只在
+        // 内层页或范围框真的开着时才藏本页；都没开时显示本
+        // 页内容（再由 czfDismissIfDirectEntryDone 关页回
+        // App 页），永不白纸。
         .navigationTitle(initialSheet == nil ? "lc.settings.dataManagement".loc : "")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarHidden(initialSheet != nil)
-        .opacity(initialSheet == nil ? 1 : 0)
+        .opacity(initialSheet != nil && (showBackupSelect || showRestoreSelect || showScheduleBackup || showBackupScopeDialog || showRestoreScopeDialog) ? 0 : 1)
         .alert("lc.common.error".loc, isPresented: $errorShow){
             // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
             // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。
@@ -2786,11 +2793,23 @@ struct LCDataManagementView : View {
             }
             alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showRestoreScopeDialog = false })
         }
+        // 3.8.343：342 实证 UIKit 弹框也会被丢——顶层 VC 还在
+        // 转场中时 present 会被系统忽略，且 guard 失败时跟踪位
+        // 仍为 true，本页 opacity 0 永远白纸。三处加固：① 没
+        // keyWindow 时退到场景里第一个可见窗口（多任务下 key
+        // 可能在别的窗）；② present 包一层 async，避开转场中
+        // 的丢弃；③ 拿不到窗口/根 VC 时把跟踪位清回 false，
+        // 本页恢复可见、直进收尾正常关页，不卡白纸。
         guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-              let window = scene.windows.first(where: { $0.isKeyWindow }),
-              var top = window.rootViewController else { return }
+              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first(where: { !$0.isHidden }),
+              var top = window.rootViewController else {
+            if isBackup { showBackupScopeDialog = false } else { showRestoreScopeDialog = false }
+            return
+        }
         while let presented = top.presentedViewController { top = presented }
-        top.present(alert, animated: true)
+        DispatchQueue.main.async {
+            top.present(alert, animated: true)
+        }
     }
     private func doBackupScope(loginOnly: Bool) {
         UserDefaults.standard.set(loginOnly, forKey: "LCBackupLastLoginOnly")

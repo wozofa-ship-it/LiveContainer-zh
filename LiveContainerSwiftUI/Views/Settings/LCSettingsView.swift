@@ -469,6 +469,8 @@ struct LCSettingsView: View {
                     Text("lc.settings.selected32BitEmulator".loc)
                 }
             }
+        } header: {
+            Text("模拟器")
         }
     }
 
