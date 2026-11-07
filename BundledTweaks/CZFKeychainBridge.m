@@ -155,6 +155,9 @@ static NSInteger CZFKBStatEntitled = 0;
 static NSInteger CZFKBStatAlias = 0;
 static NSInteger CZFKBStatDefault = 0;
 static NSInteger CZFKBStatLCDefault = 0;
+// 厂商组显式路由记账（见 CZFKBExport 末尾）：只计前四路
+// 没捞到的新增条目，进 exported 总数公式。
+static NSInteger CZFKBStatVendor = 0;
 // 自定义组记账（信息性：已含在上面某一路里，不进总数公式）
 // 归属过滤计数（信息性：被排除的条目总数，未计入任何一路）
 static NSInteger CZFKBStatCustom = 0;
@@ -379,6 +382,7 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
     CZFKBStatAlias = 0;
     CZFKBStatDefault = 0;
     CZFKBStatLCDefault = 0;
+    CZFKBStatVendor = 0;
     CZFKBStatCustom = 0;
     CZFKBStatExcluded = 0;
     for (NSString *cls in @[(__bridge NSString *)kSecClassGenericPassword, (__bridge NSString *)kSecClassInternetPassword]) {
@@ -439,6 +443,55 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                 (__bridge NSString *)kSecReturnAttributes: @YES,
                 (__bridge NSString *)kSecReturnData: @YES,
             }, &CZFKBStatLCDefault);
+        }
+        // 厂商共享组显式路由（闲鱼 4 条根因）：上面四路没有
+        // 一路按名查厂商组——获授权组表是宿主进程自己的组
+        // （游客的厂商组不在表里），原生写入的厂商组条目又
+        // 没有 alis，默认组/进程默认组是别的组。324 修的是
+        // 谓词（返回后才过滤），但查询根本没把厂商组条目捞
+        // 回来，谓词没机会跑，dump 里恒只有别处捞到的 4 条。
+        // 按 Bundle ID 厂商前缀直接拼组名显式查（与
+        // defaultGroup/lcDefaultGroup 同款构造名查询，不用
+        // 通配）：TEAM.<厂商>.shared。com.taobao 的 App 另
+        // 查 TEAM.com.alibaba.shared（阿里 SSO 同厂商族，
+        // 324 同款映射、移到查询层）。放最后，只计前四路没
+        // 捞到的新增条目（collect 内先去重再记账）；归属仍
+        // 走同一套谓词（厂商组已由 316/324 接住），不放宽。
+        // 进程没该组授权/组不存在时查询静默返回空，不崩。
+        if (bundleID.length) {
+            NSArray<NSString *> *bParts = [bundleID componentsSeparatedByString:@"."];
+            NSString *vendorPrefix = nil;
+            if (bParts.count >= 2) {
+                NSString *cand = [NSString stringWithFormat:@"%@.%@", bParts[0], bParts[1]];
+                if (cand.length >= 6) vendorPrefix = cand;
+            }
+            NSString *groupForTeam = group ?: defaultGroup;
+            if (!groupForTeam) groupForTeam = lcDefaultGroup;
+            NSString *teamPrefix = nil;
+            if (groupForTeam.length) {
+                NSArray<NSString *> *gParts = [groupForTeam componentsSeparatedByString:@"."];
+                if (gParts.count > 0) teamPrefix = gParts[0];
+            }
+            if (vendorPrefix && teamPrefix) {
+                collect(@{
+                    (__bridge NSString *)kSecClass: cls,
+                    (__bridge NSString *)kSecAttrAccessGroup: [NSString stringWithFormat:@"%@.%@.shared", teamPrefix, vendorPrefix],
+                    (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+                    (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
+                    (__bridge NSString *)kSecReturnAttributes: @YES,
+                    (__bridge NSString *)kSecReturnData: @YES,
+                }, &CZFKBStatVendor);
+                if ([vendorPrefix isEqualToString:@"com.taobao"]) {
+                    collect(@{
+                        (__bridge NSString *)kSecClass: cls,
+                        (__bridge NSString *)kSecAttrAccessGroup: [NSString stringWithFormat:@"%@.com.alibaba.shared", teamPrefix],
+                        (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+                        (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
+                        (__bridge NSString *)kSecReturnAttributes: @YES,
+                        (__bridge NSString *)kSecReturnData: @YES,
+                    }, &CZFKBStatVendor);
+                }
+            }
         }
     }
     // 空的也写：文件存在本身就是"桥跑过、快照为空"的凭据，
@@ -587,6 +640,7 @@ static void CZFKBRun(void) {
         CZFKBStatAlias = 0;
         CZFKBStatDefault = 0;
         CZFKBStatLCDefault = 0;
+        CZFKBStatVendor = 0;
         CZFKBStatCustom = 0;
         CZFKBStatExcluded = 0;
         // 等 LCBootstrap 把 HOME 指到容器、容器信息文件落位
@@ -687,11 +741,11 @@ static void CZFKBRun(void) {
         // 计数）；归属过滤掉含被排除的进程默认组/厂商组条目，
         // 两数相加才是该组实际捞到的总数。
         NSString *status = [NSString stringWithFormat:
-            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d",
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld 厂商组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d",
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
-            (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias + CZFKBStatDefault + CZFKBStatLCDefault),
-            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)CZFKBStatDefault, (long)CZFKBStatLCDefault,
+            (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias + CZFKBStatDefault + CZFKBStatLCDefault + CZFKBStatVendor),
+            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)CZFKBStatDefault, (long)CZFKBStatLCDefault, (long)CZFKBStatVendor,
             (long)CZFKBStatCustom, (long)CZFKBStatExcluded,
             isolated ? @"YES" : @"NO", defaultGroup ?: @"(nil)", writeGroup ?: @"(nil)", lcDefaultGroup ?: @"(nil)", (int)lcProbe,
             (long)CZFKBStatImported,
