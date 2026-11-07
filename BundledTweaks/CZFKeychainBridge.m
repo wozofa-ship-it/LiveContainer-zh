@@ -658,7 +658,13 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
             NSMutableDictionary *identity = [NSMutableDictionary dictionary];
             identity[(__bridge NSString *)kSecClass] = cls;
             identity[(__bridge NSString *)kSecAttrAccessGroup] = target;
-            for (NSString *k in @[(__bridge NSString *)kSecAttrAccount, (__bridge NSString *)kSecAttrService, (__bridge NSString *)kSecAttrGeneric]) {
+            // 3.8.346：先删后加的 identity 补上 kSecAttrServer——
+            // 与 345 导出侧去重 identity 五段格式一致
+            // （class|account|service|generic|server）；不补时
+            // 同 account 不同 server 的两条 InternetPassword
+            // 共用一个 identity，先删会误删后一条、恢复后只剩
+            // 一条，App 按 server 查另一条就扑空。
+            for (NSString *k in @[(__bridge NSString *)kSecAttrAccount, (__bridge NSString *)kSecAttrService, (__bridge NSString *)kSecAttrGeneric, (__bridge NSString *)kSecAttrServer]) {
                 if (item[k]) identity[k] = item[k];
             }
             SecItemDelete((__bridge CFDictionaryRef)identity);

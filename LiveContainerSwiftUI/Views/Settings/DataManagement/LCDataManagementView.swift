@@ -2859,6 +2859,18 @@ struct LCDataManagementView : View {
         // 线程且无转场进行中；.backupAll 在 onAppearFunc 里已等
         // 0.5 秒让 sheet 落定），去掉 343 的 async 包裹。
         // 兜底：sceneDelegate.window 为 nil 时才退到全局查找。
+        // 3.8.346：nil 时先按 delegate 身份找回本场景——
+        // connectedScenes 里 delegate === sceneDelegate 的那个
+        // 就是本场景（多场景下也不会拿错别人的窗），取它的
+        // keyWindow、回填 sceneDelegate.window（sceneDidBecomeActive
+        // 刷新后这里通常已非 nil，这步只是补漏）；还拿不到才退
+        // 全局查找。
+        if sceneDelegate.window == nil {
+            if let ownScene = UIApplication.shared.connectedScenes.first(where: { ($0.delegate as? SceneDelegate) === sceneDelegate }) as? UIWindowScene,
+               let keyWindow = ownScene.keyWindow ?? ownScene.windows.first(where: { !$0.isHidden }) {
+                sceneDelegate.window = keyWindow
+            }
+        }
         func topViewController(from root: UIViewController) -> UIViewController {
             var top = root
             while let presented = top.presentedViewController { top = presented }
@@ -4785,6 +4797,12 @@ struct LCDataManagementView : View {
                     let minimalKeys: [String] = [
                         kSecClass as String, kSecAttrAccount as String,
                         kSecAttrService as String, kSecAttrGeneric as String,
+                        // 3.8.346：恢复侧补 kSecAttrServer（与 345
+                        // 导出侧对称：InternetPassword 的标识常在
+                        // server 上，service 常为空；最小集丢了
+                        // server，App 按 server 查就找不到，静默
+                        // “恢复了但没登录”）。
+                        kSecAttrServer as String,
                         kSecAttrLabel as String, kSecAttrAccessible as String,
                         kSecValueData as String
                     ]

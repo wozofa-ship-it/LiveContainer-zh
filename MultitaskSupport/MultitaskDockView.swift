@@ -3794,6 +3794,22 @@ struct SourcesPanelView: View {
     // 3.8.311：多选项类快捷方式要打开的 App 设置页（sheet 用）。
     @State private var settingsApp: LCAppModel?
     @State private var showAppSettings: Bool = false
+    // 3.8.346：备份/恢复直进的单独页——源面板点备份/恢复四路
+    // （.restore/.selectbackup/.backupall/.schedulebackup）不再
+    // 走 deepLink + 设置页 sheet + 数据管理页的层层套（内层
+    // fullScreenCover 在外层 sheet 动画里被 SwiftUI 丢掉、344
+    // fallback 1.2 秒放弃、czfDismissIfDirectEntryDone 1.5 秒
+    // dismiss 整页回设置页：用户到不了弹框按钮，还看到设置页）。
+    // 改从源面板直接 fullScreenCover 整个 LCDataManagementView
+    // （initialSheet 对应值），零状态搬迁（82 个 @State 都在
+    // LCDataManagementView 自己身上，只依赖 sharedModel 与
+    // sceneDelegate 两个 @EnvironmentObject，系统自动注入）。
+    // 宿主是独立 UIHostingController（其 view 是目标窗口的子
+    // 视图，见 ensureSourcesOverlay），fullScreenCover 从它
+    // present，盖满目标窗口；closePanel 只隐藏宿主 view（不摘
+    // 除、不释放），cover 不受影响。czfDismissIfDirectEntryDone
+    // 里的 dismiss() 在 cover 里同样关掉 cover，回源面板。
+    @State private var czfDirectDataPage: CZFSettingsPage? = nil
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -3946,7 +3962,17 @@ struct SourcesPanelView: View {
     // 3.8.308：直开某设置页——先关面板、切到设置页签、
     // 再把 deepLink 交给设置页（LCSettingsView.handleURL
     // 按 host 弹对应页面；host 不认就只停在设置页）。
+    // 3.8.346：备份/恢复四路（.restore/.selectbackup/
+    // .backupall/.schedulebackup）不再走 deepLink——改直
+    // 接 fullScreenCover 单独页（见 czfDirectDataPage 注释），
+    // 不进设置页 sheet、不套数据管理页；其余路由一字不动。
     private func openSettingsPage(_ page: String) {
+        if let czfPage = CZFSettingsPage(rawValue: page),
+           czfPage == .restore || czfPage == .selectbackup || czfPage == .backupall || czfPage == .schedulebackup {
+            closePanel()
+            czfDirectDataPage = czfPage
+            return
+        }
         closePanel()
         DataManager.shared.model.selectedTab = .settings
         DataManager.shared.model.deepLink = URL(string: "livecontainer://\(page)")
@@ -4358,6 +4384,26 @@ struct SourcesPanelView: View {
                 // 多选项类马上开页会跟选页单的 sheet 抢呈现；
                 // 加完点图标再用，一眼看清。
                 refreshSettingStates()
+            }
+        }
+        // 3.8.346：备份/恢复单独页——直接 fullScreenCover 整个
+        // LCDataManagementView(initialSheet:)，跳过设置页 sheet
+        // （见 czfDirectDataPage 注释）。NavigationView 包一层
+        // 才能放“关闭”按钮（LCSettingsView:309 的 sheet toolbar
+        // 绕开后就没了）；点关闭清 @State 关 cover。标题用
+        // CZFSettingsPage.title（恢复数据/选择备份/备份全部/
+        // 定时备份）。LCDataManagementView 自己的 Form 内层
+        // fullScreenCover（备份选页/恢复选页）照常挂在它身上。
+        .fullScreenCover(item: $czfDirectDataPage) { page in
+            NavigationView {
+                page.destinationView
+                    .navigationTitle(page.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") { czfDirectDataPage = nil }
+                        }
+                    }
             }
         }
     }
