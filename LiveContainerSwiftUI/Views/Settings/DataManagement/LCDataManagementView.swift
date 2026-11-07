@@ -134,6 +134,11 @@ struct LCDataManagementView : View {
     @State private var backupSelectedIDs = Set<String>()
     @State private var showBackupScopeDialog = false
     @State private var showRestoreScopeDialog = false
+    // 3.8.344 根因 2：直进内层页是否真弹出来的确认位。init 置
+    // true 的盖子可能在外层 sheet 动画中被丢弃且无回调；盖子
+    // 内容 onAppear 时置 true，onAppearFunc 0.6 秒后检查它——
+    // 仍 false 说明盖子丢了，才做 false→true 重 present。
+    @State private var czfDirectCoverAppeared = false
     @State private var pendingRestoreURL: URL? = nil
     @State private var pendingRestoreAll = false
     // 选择性多选（3.8.283：选择备份双动作——勾中了能删能恢复）：
@@ -228,6 +233,9 @@ struct LCDataManagementView : View {
     @State private var pendingDeleteBackupURL: URL? = nil
     
     @EnvironmentObject private var sharedModel : SharedModel
+    // 3.8.344：本场景的 SceneDelegate（与 LCTabView、TextFieldAlertModifier
+    // 同款取法）。presentScopeAlert 改锚定它，不再全局 first-match 找窗口。
+    @EnvironmentObject private var sceneDelegate: SceneDelegate
 
     // 备份选 App 的全选状态：列表里 App 全勾上了才算全选。
     private var allBackupSelected: Bool {
@@ -663,6 +671,7 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
+                .onAppear { czfDirectCoverAppeared = true }
                 .navigationTitle("lc.settings.backupSelected".loc)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -819,6 +828,7 @@ struct LCDataManagementView : View {
                 .id(backupListVersion)
                 .navigationTitle("lc.settings.restoreBackup".loc)
                 .onAppear {
+                    czfDirectCoverAppeared = true
                     backupFolderList = backupFolders(fromExternal: false)
                     externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
                     lockedBackupNames = Self.lockedBackupNameSet()
@@ -1137,6 +1147,7 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
+                .onAppear { czfDirectCoverAppeared = true }
                 .navigationTitle("定时备份")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -1265,6 +1276,41 @@ struct LCDataManagementView : View {
                 case .scheduleBackup:
                     self.loadScheduleSettings()
                     self.showScheduleBackup = true
+                }
+            }
+        }
+        // 3.8.344 根因 2：init 置 true 的盖子可能在外层 sheet
+        // 动画（约 0.35 秒）中被 SwiftUI 丢弃，且 didApplyInitialSheet
+        // 已为 true 堵死上面兜底，无任何重试，白页永久化。0.6 秒
+        // 后检查确认位：盖子内容 onAppear 置过 true 说明已出来，
+        // 不动；仍 false 说明丢了，做 false→true 跳变（分两个
+        // runloop，先 false 再 async true）强制重 present；再
+        // 0.6 秒后仍没出来就把开关清回 false，让 opacity 公式放
+        // 本页恢复可见（用户可手动点），永不永久白纸。
+        if didApplyInitialSheet, let sheet = initialSheet {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                guard !self.czfDirectCoverAppeared else { return }
+                switch sheet {
+                case .restore:
+                    self.showRestoreSelect = false
+                    DispatchQueue.main.async { self.showRestoreSelect = true }
+                case .backupSelect:
+                    self.showBackupSelect = false
+                    DispatchQueue.main.async { self.showBackupSelect = true }
+                case .scheduleBackup:
+                    self.showScheduleBackup = false
+                    DispatchQueue.main.async { self.showScheduleBackup = true }
+                case .backupAll, .none:
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    guard !self.czfDirectCoverAppeared else { return }
+                    switch sheet {
+                    case .restore: self.showRestoreSelect = false
+                    case .backupSelect: self.showBackupSelect = false
+                    case .scheduleBackup: self.showScheduleBackup = false
+                    case .backupAll, .none: break
+                    }
                 }
             }
         }
@@ -2793,23 +2839,43 @@ struct LCDataManagementView : View {
             }
             alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showRestoreScopeDialog = false })
         }
-        // 3.8.343：342 实证 UIKit 弹框也会被丢——顶层 VC 还在
-        // 转场中时 present 会被系统忽略，且 guard 失败时跟踪位
-        // 仍为 true，本页 opacity 0 永远白纸。三处加固：① 没
-        // keyWindow 时退到场景里第一个可见窗口（多任务下 key
-        // 可能在别的窗）；② present 包一层 async，避开转场中
-        // 的丢弃；③ 拿不到窗口/根 VC 时把跟踪位清回 false，
-        // 本页恢复可见、直进收尾正常关页，不卡白纸。
+        // 3.8.344：342/343 的 UIKit 弹框死在窗口查找上——
+        // connectedScenes 与 scene.windows 都是无序集合，first
+        // 匹配在多场景/多窗口（主窗 + 多任务浮动面板）下会拿错
+        // 窗，框弹到用户看不见的 VC 上；guard 通过、跟踪位 stuck
+        // true（白页）、框不可见，六版里 342/343 全是这个死法。
+        // 改锚定本场景的 SceneDelegate.window（与 TextFieldAlertModifier
+        // 同款取法，167 行），从它起走 presented 链；present 前
+        // 校验 top.view.window != nil，不在窗口层级里就不弹、
+        // 清跟踪位返回，不再静默白纸。同步 present（调用方已在主
+        // 线程且无转场进行中；.backupAll 在 onAppearFunc 里已等
+        // 0.5 秒让 sheet 落定），去掉 343 的 async 包裹。
+        // 兜底：sceneDelegate.window 为 nil 时才退到全局查找。
+        func topViewController(from root: UIViewController) -> UIViewController {
+            var top = root
+            while let presented = top.presentedViewController { top = presented }
+            return top
+        }
+        if let window = sceneDelegate.window, let root = window.rootViewController {
+            let top = topViewController(from: root)
+            if top.view.window != nil {
+                top.present(alert, animated: true)
+                return
+            }
+            NSLog("[LC] presentScopeAlert: sceneDelegate top VC not in window hierarchy, fallback to global lookup")
+        }
         guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
               let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first(where: { !$0.isHidden }),
-              var top = window.rootViewController else {
+              let root = window.rootViewController else {
             if isBackup { showBackupScopeDialog = false } else { showRestoreScopeDialog = false }
             return
         }
-        while let presented = top.presentedViewController { top = presented }
-        DispatchQueue.main.async {
-            top.present(alert, animated: true)
+        let top = topViewController(from: root)
+        guard top.view.window != nil else {
+            if isBackup { showBackupScopeDialog = false } else { showRestoreScopeDialog = false }
+            return
         }
+        top.present(alert, animated: true)
     }
     private func doBackupScope(loginOnly: Bool) {
         UserDefaults.standard.set(loginOnly, forKey: "LCBackupLastLoginOnly")
