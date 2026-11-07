@@ -472,47 +472,50 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Label("更多工具", systemImage: topToolsExpanded ? "chevron.left" : "chevron.right")
             }
         }
-        // 3.8.333：ToolbarContentBuilder 的 if（buildIf）是 iOS 16+
-        // 才有的，部署目标 15.0，332 构建红字就是它。包一层
-        // #available（buildLimitedAvailability 是 iOS 14+ 就有的），
-        // 里面的 if 在 iOS 16+ 上下文里才用 buildIf，15 上整段
-        // 跳过——15 上这三个工具不显示（设置页/模块页里还有
-        // 数据管理与 VPN，多选只在 16+ 顶栏），用户在 iOS 26
-        // 上收起/展开正常。
-        if #available(iOS 16.0, *) {
+        // 3.8.334：333 的 #available 修法是错的——ToolbarContentBuilder
+        // 在 iOS 15 上只认 buildBlock，if / if-else / if #available
+        // 全都要 iOS 16+（buildIf 与 buildLimitedAvailability 都是
+        // 16+ 才有的），包 #available 也救不了，333 红字还是它。
+        // 正确修法：ToolbarContentBuilder 这一层一个 if 都不留，
+        // 三个工具照常摆在 builder 里，if 下沉到每个 ToolbarItem
+        // 的内容里（那是 @ViewBuilder，buildIf 是 iOS 13+ 就有的）。
+        // 收起时内容为空，ToolbarItem 不占位；展开时照常显示。
+        // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
+        // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
+        // 停止核心”同一套调用；状态从 shared.isRunning 读，
+        // 点按后刷新，不靠猜）。
+        ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded {
-                // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
-                // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
-                // 停止核心”同一套调用；状态从 shared.isRunning 读，
-                // 点按后刷新，不靠猜）。
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        LCDataManagementView()
-                    } label: {
-                        Label("数据管理", systemImage: "folder")
-                    }
+                NavigationLink {
+                    LCDataManagementView()
+                } label: {
+                    Label("数据管理", systemImage: "folder")
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    // 3.8.283：长按菜单不显示（用户 282 真机报）：
-                    // ToolbarItem 里的 Button + contextMenu 长按不
-                    // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
-                    // 点按走 primaryAction 开关核心，长按出菜单——
-                    // 这才是工具栏上点按+长按的标准写法，菜单内容不变。
-                    // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
-                    // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
-                    // 这里只留一行调用。
-                    vpnShieldMenu
-                }
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            // 3.8.283：长按菜单不显示（用户 282 真机报）：
+            // ToolbarItem 里的 Button + contextMenu 长按不
+            // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
+            // 点按走 primaryAction 开关核心，长按出菜单——
+            // 这才是工具栏上点按+长按的标准写法，菜单内容不变。
+            // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
+            // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
+            // 这里只留一行调用。
+            if topToolsExpanded {
+                vpnShieldMenu
+            }
+        }
 
-                // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
-                // 整行点按即勾选；关时清空勾选。
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        batchMode.toggle()
-                        if !batchMode { batchSelectedIDs.removeAll() }
-                    } label: {
-                        Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
-                    }
+        // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
+        // 整行点按即勾选；关时清空勾选。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded {
+                Button {
+                    batchMode.toggle()
+                    if !batchMode { batchSelectedIDs.removeAll() }
+                } label: {
+                    Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
                 }
             }
         }
