@@ -607,46 +607,34 @@ struct LCDataManagementView : View {
         // Form 的呈现位，选页/预览盖着也能弹出来；按钮和
         // 逻辑一字不动，只换呈现方式。
         .alert(Text("备份范围"), isPresented: $showBackupScopeDialog) {
-            Button("只备份登录态") {
-                let apps = pendingBackupApps
-                // 3.8.339：用户选了范围才关选页（选页一直盖在下面
-                // 等着，点取消就回到选页接着挑，不丢已勾的 App）。
-                showBackupSelect = false
-                showRestoreSelect = false
-                Task { await backupApps(apps, loginOnly: true) }
-            }
-            Button("完整备份（数据 + 登录态）") {
-                let apps = pendingBackupApps
-                showBackupSelect = false
-                showRestoreSelect = false
-                Task { await backupApps(apps, loginOnly: false) }
+            // 3.8.341：范围记忆——上次那个选项排第一（没选过时
+            // 保持原顺序，登录态在前），点第一个就是上次的选择。
+            if lastBackupLoginOnly == false {
+                Button("完整备份（数据 + 登录态）") { doBackupScope(loginOnly: false) }
+                Button("只备份登录态") { doBackupScope(loginOnly: true) }
+            } else {
+                Button("只备份登录态") { doBackupScope(loginOnly: true) }
+                Button("完整备份（数据 + 登录态）") { doBackupScope(loginOnly: false) }
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
         } message: {
-            Text(existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
+            Text(lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
         }
         // 恢复范围弹窗优化：说明不再把两个选项的解释挤成一整段
         // （扫一眼分不清）；安全的选项只留一句说明，危险的选项
         // 标红、后果直接写进按钮上，点之前就看得见
         .alert(Text("恢复范围"), isPresented: $showRestoreScopeDialog) {
-            Button("只恢复登录态") {
-                // 3.8.339：同备份范围框——用户选了范围才把上面
-                // 盖着的几层页一起关掉（恢复页/预览页/多选页，
-                // 没开的关了也没事），再开始恢复。
-                showRestoreSelect = false
-                showBackupPreview = false
-                showSelectBackups = false
-                startPendingRestore(loginOnly: true)
-            }
-            Button("恢复全部数据（会覆盖当前数据）", role: .destructive) {
-                showRestoreSelect = false
-                showBackupPreview = false
-                showSelectBackups = false
-                startPendingRestore(loginOnly: false)
+            // 3.8.341：范围记忆——同备份框，上次那个选项排第一。
+            if lastRestoreLoginOnly == false {
+                Button("恢复全部数据（会覆盖当前数据）", role: .destructive) { doRestoreScope(loginOnly: false) }
+                Button("只恢复登录态") { doRestoreScope(loginOnly: true) }
+            } else {
+                Button("只恢复登录态") { doRestoreScope(loginOnly: true) }
+                Button("恢复全部数据（会覆盖当前数据）", role: .destructive) { doRestoreScope(loginOnly: false) }
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
         } message: {
-            Text(restoreTargetText() + "只恢复登录态：只写回登录，现有数据不动。")
+            Text(lastRestoreScopeHint() + restoreTargetText() + "只恢复登录态：只写回登录，现有数据不动。")
         }
         // 真全屏：325 的 sheet + large detent 顶上仍留一条缝——
         // sheet 的 large 本来就不是全屏，顶边留边距+圆角，底下
@@ -2737,6 +2725,43 @@ struct LCDataManagementView : View {
     // 里就没有最新令牌，恢复后登录回不来（红果短剧就是这个坑）。
     // 只读各容器的 CZFKeychainDump.plist（与 backupOneAppSync
     // 同一路），不触发 iCloud 下载、不写任何东西。
+    // 3.8.341：范围记忆——用户选了范围就记下来（UserDefaults），
+    // 下次弹框把上次那个选项排第一、文案里写清“上次选的是”，
+    // 点第一个就是上次的选择；没选过时保持原顺序（登录态在前）。
+    // 只记选择、不跳过弹框：恢复“全部数据”是覆盖操作，弹框
+    // 是最后一道确认，不能省。
+    private var lastBackupLoginOnly: Bool? {
+        UserDefaults.standard.object(forKey: "LCBackupLastLoginOnly") as? Bool
+    }
+    private var lastRestoreLoginOnly: Bool? {
+        UserDefaults.standard.object(forKey: "LCRestoreLastLoginOnly") as? Bool
+    }
+    private func lastBackupScopeHint() -> String {
+        guard let last = lastBackupLoginOnly else { return "" }
+        return "上次选的是：" + (last ? "只备份登录态" : "完整备份") + "。\n"
+    }
+    private func lastRestoreScopeHint() -> String {
+        guard let last = lastRestoreLoginOnly else { return "" }
+        return "上次选的是：" + (last ? "只恢复登录态" : "恢复全部数据") + "。\n"
+    }
+    private func doBackupScope(loginOnly: Bool) {
+        UserDefaults.standard.set(loginOnly, forKey: "LCBackupLastLoginOnly")
+        let apps = pendingBackupApps
+        // 用户选了范围才关选页（选页一直盖在下面等着，
+        // 点取消就回到选页接着挑，不丢已勾的 App）。
+        showBackupSelect = false
+        showRestoreSelect = false
+        Task { await backupApps(apps, loginOnly: loginOnly) }
+    }
+    private func doRestoreScope(loginOnly: Bool) {
+        UserDefaults.standard.set(loginOnly, forKey: "LCRestoreLastLoginOnly")
+        // 用户选了范围才把上面盖着的几层页一起关掉
+        // （恢复页/预览页/多选页，没开的关了也没事），再开始恢复。
+        showRestoreSelect = false
+        showBackupPreview = false
+        showSelectBackups = false
+        startPendingRestore(loginOnly: loginOnly)
+    }
     func keychainSnapshotWarningText() -> String {
         let fm = FileManager.default
         var lines: [String] = []

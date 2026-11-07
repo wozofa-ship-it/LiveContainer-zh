@@ -664,6 +664,12 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
 
 static void CZFKBRun(void) {
     @try {
+        // 3.8.341：导出计时——用户问导出提速，先量再定。串行队
+        // 列不能动（3.8.318 正确性要求），但要先知道慢在哪：
+        // 等 HOME、探针、导入、导出各占多少，下次看回执的
+        // timing 字段就知道并行有没有意义。
+        CFAbsoluteTime czfkbT0 = CFAbsoluteTimeGetCurrent();
+        CFAbsoluteTime czfkbTHome = 0, czfkbTProbe = 0, czfkbTImport = 0, czfkbTExport = 0;
         // 导出计数每遍重数：一次启动桥跑两遍（构造函数+启动
         // 完成通知），不重置回执会翻倍（真机出过 exported=200
         // 而实际 100 条）
@@ -692,6 +698,7 @@ static void CZFKBRun(void) {
             usleep(50000); // 0.05 秒一轮，上限约 6 秒
         }
         if (!home) return; // 不在游客容器里（宿主自载等场景），什么都不做
+        czfkbTHome = CFAbsoluteTimeGetCurrent();
         NSInteger groupId = [info[@"keychainGroupId"] integerValue];
         NSString *team = CZFKBTeamIdentifier();
         NSString *group = CZFKBGroupString(team, groupId);
@@ -810,10 +817,13 @@ static void CZFKBRun(void) {
                 }
             }
         }
+        // 探针段结束（共享组/默认组/厂商组/class 探针全跑完）。
+        czfkbTProbe = CFAbsoluteTimeGetCurrent();
         NSInteger imported = 0;
         if (writeGroup) {
             imported = CZFKBImport(home, writeGroup, folderName, isolated, team, lcDefaultGroup);
         }
+        czfkbTImport = CFAbsoluteTimeGetCurrent();
         // 3.8.310：bundleID/displayName 隔离也传（以前隔离传 nil、
         // 归属谓词退化成旧 4 项，厂商共享组里的令牌全被排除——
         // 红果这类 App 令牌在厂商组、服务名又是厂商通用名，旧
@@ -823,6 +833,7 @@ static void CZFKBRun(void) {
         // defaultGroup/lcDefaultGroup 隔离仍传 nil，进程默认组
         // 照旧不碰，隔离的防串号底线不动）。
         CZFKBExport(home, entitled ?: @[], group, folderName, defaultGroup, lcDefaultGroup, bundleID, displayName);
+        czfkbTExport = CFAbsoluteTimeGetCurrent();
         // 状态回执：宿主备份弹窗直接带出来，桥跑没跑、组对
         // 不对、条目在不在，一行定案
         BOOL inEntitled = group && [entitled containsObject:group];
@@ -857,7 +868,7 @@ static void CZFKBRun(void) {
         }
         NSString *excludedServicesStr = [[CZFKBDiagExcludedServices.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@"|"];
         NSString *status = [NSString stringWithFormat:
-            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld 厂商组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d keptGroups=%@ excludedGroups=%@ excludedServices=%@ vendorProbe=%d/%d vendorInEntitled=%@/%@ classProbe=%ld/%ld/%ld",
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld 厂商组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d keptGroups=%@ excludedGroups=%@ excludedServices=%@ vendorProbe=%d/%d vendorInEntitled=%@/%@ classProbe=%ld/%ld/%ld timing=%@",
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
             (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias + CZFKBStatDefault + CZFKBStatLCDefault + CZFKBStatVendor),
@@ -869,7 +880,13 @@ static void CZFKBRun(void) {
             keptGroupsStr ?: @"", excludedGroupsStr ?: @"", excludedServicesStr ?: @"",
             (int)vendorProbeTaobao, (int)vendorProbeAlibaba,
             vendorTaobaoInEntitled ? @"YES" : @"NO", vendorAlibabaInEntitled ? @"YES" : @"NO",
-            (long)classProbeKey, (long)classProbeCert, (long)classProbeIdentity];
+            (long)classProbeKey, (long)classProbeCert, (long)classProbeIdentity,
+            [NSString stringWithFormat:@"总%ldms(等HOME%ldms 探针%ldms 导入%ldms 导出%ldms)",
+                (long)((CFAbsoluteTimeGetCurrent() - czfkbT0) * 1000),
+                (long)((czfkbTHome - czfkbT0) * 1000),
+                (long)((czfkbTProbe - czfkbTHome) * 1000),
+                (long)((czfkbTImport - czfkbTProbe) * 1000),
+                (long)((czfkbTExport - czfkbTImport) * 1000)]];
         [status writeToFile:[home stringByAppendingPathComponent:@"CZFKeychainBridgeStatus.txt"]
                  atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch (NSException *e) {

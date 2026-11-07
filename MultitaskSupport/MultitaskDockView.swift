@@ -4184,14 +4184,17 @@ struct SourcesPanelView: View {
                 },
                 onInstallSourceApp: { app in installFromPanel(app: app) }
             )
-            // 运行条固定在顶部，不随列表滚动（与 App 面板一致）；
-            // 没打开的 App 时整条不显示，不占地方。
-            if !dockManager.apps.isEmpty {
-                RunningAppsStripView { closePanel() }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .padding(.bottom, 10)
-            }
+            // 运行条固定在顶部，不随列表滚动（与 App 面板一致）。
+            // 3.8.341：去掉“没打开 App 就不显示”的条件——用户
+            // 16:49 点名源面板也要收起/最小化/关闭全部：没运行
+            // App 时三个按钮照样要能点（收起面板、最小化、关
+            // 全部），不能因为没运行 App 就把整条藏掉。没运行
+            // App 时 RunningAppsStripView 自己把三个按钮均分
+            // 整行，不占多余地方；与 App 面板同款无条件显示。
+            RunningAppsStripView { closePanel() }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
             // 快捷图标行（固定在运行条下方、不随列表滚动）
             // 3.8.309：三个小图标，大小一样、间距平均；VPN 点按
             // 开关、长按选节点（与 App 页盾牌同款 Menu）。
