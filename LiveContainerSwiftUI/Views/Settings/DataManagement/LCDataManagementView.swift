@@ -818,10 +818,22 @@ struct LCDataManagementView : View {
                 // 在 sheet 内是唯一弹窗，不抢占
                 .alert("确定删除这个备份？", isPresented: $showDeleteBackupConfirm) {
                     Button("删除", role: .destructive) {
-                        if let url = pendingDeleteBackupURL {
-                            deleteBackup(at: url)
-                        }
+                        let url = pendingDeleteBackupURL
                         pendingDeleteBackupURL = nil
+                        // 闪退修（325 没盖住这条：单删仍崩 Invalid update
+                        // section 3，7→7、删 1 个）：325 只修了
+                        // deleteBackup 里的数据源（从磁盘重载），但
+                        // 没修执行时机——alert 确认按钮里同步改
+                        // backupFolderList，List 的 diff 与 alert
+                        // 消失合并成一次更新，UICollectionView 拿
+                        // 到“删了 1 个”却看到数据源还是 7 条，直接
+                        // 崩。挪到下一轮 runloop：alert 先消失，
+                        // 列表再单独更新 7→6，两次干净更新，不再合并。
+                        if let url {
+                            DispatchQueue.main.async {
+                                deleteBackup(at: url)
+                            }
+                        }
                     }
                     Button("lc.common.cancel".loc, role: .cancel) {
                         pendingDeleteBackupURL = nil
