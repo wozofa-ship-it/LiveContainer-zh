@@ -1300,7 +1300,7 @@ struct LCDataManagementView : View {
                 case .scheduleBackup:
                     self.showScheduleBackup = false
                     DispatchQueue.main.async { self.showScheduleBackup = true }
-                case .backupAll, .none:
+                case .backupAll:
                     return
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -1309,7 +1309,7 @@ struct LCDataManagementView : View {
                     case .restore: self.showRestoreSelect = false
                     case .backupSelect: self.showBackupSelect = false
                     case .scheduleBackup: self.showScheduleBackup = false
-                    case .backupAll, .none: break
+                    case .backupAll: break
                     }
                 }
             }
