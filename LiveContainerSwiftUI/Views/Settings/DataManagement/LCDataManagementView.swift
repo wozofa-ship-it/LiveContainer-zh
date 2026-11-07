@@ -617,6 +617,10 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
+                // 面板高一点：默认 sheet 只有半屏高，App 一多就得滑
+                // 着找；改满高，一屏多看几个（iOS 16+ 才有 detents，
+                // 15 走默认，见 czfPresentationDetentsLarge）。
+                .czfPresentationDetentsLarge()
                 .navigationTitle("lc.settings.backupSelected".loc)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
@@ -2019,8 +2023,16 @@ struct LCDataManagementView : View {
             if let externalRoot = Self.externalBackupFolderURL() {
                 try? FileManager.default.removeItem(at: externalRoot.appendingPathComponent(backupURL.lastPathComponent))
             }
-            backupFolderList.removeAll { $0 == backupURL }
-            externalBackupFolderList.removeAll { $0 == backupURL }
+            // 闪退修（删文件 Invalid update，section 3 本地备份
+            // 7→7 但删了 1 个）：原来用 removeAll { $0 == url }
+            // 逐条删，URL 写法稍有出入（iCloud 书签解析的
+            // /private 前缀、编码差异）就会漏删，数据源还剩
+            // 7 条、List 却已按删了 1 条算，直接崩。改成删完
+            // 从磁盘重载两张列表（与 deleteAllBackups /
+            // deleteSelectedBackups 同款），以磁盘为准，数一定
+            // 对得上；锁了/删失败时不走这里，数组不动。
+            backupFolderList = backupFolders(fromExternal: false)
+            externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
             // 反馈只写 sheet 底部的提示行：不关 sheet、不弹外
             // 层提示——删完留在列表里继续操作，跨层弹提示是
             // 前两版按钮点不动的根源
