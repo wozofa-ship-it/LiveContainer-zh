@@ -1656,15 +1656,16 @@ private struct LCSourceAppDetailView: View {
                             .font(.callout)
                     }
                 }
-                // 3.8.307：版本行可点下载——原来只是展示，
-                // 点了没反应。先关详情单再下载：分享框从
-                // rootVC 弹出，不与详情单叠在一起（与源面
-                // 板历史版本单同款）。
+                // 旧版点按跳到该旧版的下载页：原来是 Button 关单
+                // 后台静默下载，140MB 下完前全程没反馈，用户
+                // 看着就是“点了没反应”。改 NavigationLink 推一
+                // 个旧版页（版本号/日期/大小/描述 + 该版下载
+                // 地址 + 下载按钮），点下载走“下载地址”栏同款
+                // （先关详情单再下该版的包）。
                 Section(header: Text("版本信息")) {
                     ForEach(app.versions) { version in
-                        Button {
-                            dismiss()
-                            onDownloadVersion(version.downloadURL)
+                        NavigationLink {
+                            LCSourceAppVersionDetailView(app: app, version: version, onDownloadVersion: onDownloadVersion)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(version.version)
@@ -1686,7 +1687,6 @@ private struct LCSourceAppDetailView: View {
                             }
                             .padding(.vertical, 2)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 if let downloadURL = app.latestVersion?.downloadURL {
@@ -1733,6 +1733,63 @@ private struct LCSourceAppDetailView: View {
                 }
             }
         }
+    }
+}
+
+// 旧版下载页：版本行 NavigationLink 推进来，只看这一个旧版、
+// 只下这一个旧版的包（downloadURL 是该版自己的，不是最新版）。
+// 下载按钮走“下载地址”栏同款：先关详情单再下载，分享框从
+// rootVC 弹出，不与详情单叠在一起。
+private struct LCSourceAppVersionDetailView: View {
+    let app: AltStoreSourceApp
+    let version: AltStoreSourceAppVersion
+    let onDownloadVersion: (URL) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(app.name)
+                        .font(.headline)
+                    Text("版本 \(version.version)")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    if let date = version.releaseDate {
+                        Text(date, style: .date)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if let size = version.size {
+                        Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if let vdesc = version.localizedDescription, !vdesc.isEmpty {
+                        Text(vdesc)
+                            .font(.callout)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            Section(header: Text("下载地址")) {
+                Button {
+                    dismiss()
+                    onDownloadVersion(version.downloadURL)
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.down.circle")
+                        Text(version.downloadURL.absoluteString)
+                            .font(.caption)
+                            .lineLimit(2)
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.blue)
+            }
+        }
+        .navigationTitle(version.version)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
