@@ -417,6 +417,166 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .foregroundStyle(vpnCoreRunning ? .green : .secondary)
     }
+    // 3.8.330：顶栏抽出来——body 1911 行，328 的收起/展开
+    // 让编译器 type-check 超时（构建 378 红字）。顶栏整段
+    // 抽到 @ToolbarContentBuilder，body 里只留一行调用；
+    // 图标、菜单、点按长按语义一字不动。
+    @ToolbarContentBuilder
+    private var appListToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            if sharedModel.multiLCStatus != 2 {
+                if !installprogressVisible {
+                    Menu {
+                        
+                        Button("lc.appList.installFromIpa".loc, systemImage: "doc.badge.plus", action: {
+                            choosingIPA = true
+                        })
+                        Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
+                            Task{ await startInstallFromUrl() }
+                        })
+                    } label: {
+                        Label("add", systemImage: "plus")
+                    }
+                    
+                } else {
+                    ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
+                }
+            }
+        }
+        ToolbarItem(placement: .topBarLeading) {
+            if(UserDefaults.sideStoreExist()) {
+                Button {
+                    LCUtils.openSideStore(delegate: self)
+                } label: {
+                    IconImageView(icon: BuiltInSideStoreAppInfo.shared.iconIsDarkIcon(darkModeIcon))
+                        .frame(width: UIFont.preferredFont(forTextStyle: .body).lineHeight, height: UIFont.preferredFont(forTextStyle: .body).lineHeight)
+
+                }
+            } else {
+                Button("Help", systemImage: "questionmark") {
+                    helpPresent = true
+                }
+            }
+            
+
+        }
+        
+        // 顶栏三个工具收起/展开：默认只露一个箭头，点箭头
+        // 展开显示数据管理/VPN/多选，再点收起；箭头在左，
+        // 三个图标在它右边展开，其余图标（+、?、链接、排序）
+        // 不动，三个功能本身也不动。
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                withAnimation { topToolsExpanded.toggle() }
+            } label: {
+                Label("更多工具", systemImage: topToolsExpanded ? "chevron.left" : "chevron.right")
+            }
+        }
+        if topToolsExpanded {
+            // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
+            // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
+            // 停止核心”同一套调用；状态从 shared.isRunning 读，
+            // 点按后刷新，不靠猜）。
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink {
+                    LCDataManagementView()
+                } label: {
+                    Label("数据管理", systemImage: "folder")
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                // 3.8.283：长按菜单不显示（用户 282 真机报）：
+                // ToolbarItem 里的 Button + contextMenu 长按不
+                // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
+                // 点按走 primaryAction 开关核心，长按出菜单——
+                // 这才是工具栏上点按+长按的标准写法，菜单内容不变。
+                // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
+                // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
+                // 这里只留一行调用。
+                vpnShieldMenu
+            }
+
+            // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
+            // 整行点按即勾选；关时清空勾选。
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    batchMode.toggle()
+                    if !batchMode { batchSelectedIDs.removeAll() }
+                } label: {
+                    Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
+                }
+            }
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Button("lc.appList.openLink".loc, systemImage: "link", action: {
+                Task { await onOpenWebViewTapped() }
+            })
+        }
+        
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                // 优3（3.8.277）：排序切换那一下不做全量动画——
+                // 列表带 .animation(.easeInOut, value: filteredApps)，
+                // 直接改 appSortType 会让整列重排闪动。自定义
+                // Binding 在 setter 里用 disablesAnimations 的
+                // transaction 包住写值，搜索输入的动画抑制
+                //（searchContext.isTyping 那套）一行不动。
+                Picker("Sort by", selection: Binding(
+                    get: { sharedAppSortManager.appSortType },
+                    set: { newValue in
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            sharedAppSortManager.appSortType = newValue
+                        }
+                    }
+                )) {
+                    ForEach(AppSortType.allCases, id: \.self) { sortType in
+                        Label(sortType.displayName, systemImage: sortType.systemImage)
+                            .tag(sortType)
+                    }
+                }
+                .onChange(of: sharedAppSortManager.appSortType) { newValue in
+                    if sharedAppSortManager.appSortType == .custom {
+                        // 自定义排序页是 sheet，用 withAnimation
+                        // 单独给它动画——上面关动画的 transaction
+                        // 别把它也压成无动画弹出。
+                        withAnimation { customSortViewPresent = true }
+                    }
+                }
+                if sharedAppSortManager.appSortType == .custom {
+                    Divider()
+                    
+                    Button {
+                        customSortViewPresent = true
+                    } label: {
+                        Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
+                    }
+                }
+                // 新1（3.8.277）：排序方案切换——选方案即把
+                // 该方案的顺序写进 customSortOrder 并置
+                // .custom（switchScheme 里做，带关动画）。
+                Divider()
+                Picker("排序方案", selection: Binding(
+                    get: { sharedAppSortManager.currentSchemeName },
+                    set: { sharedAppSortManager.switchScheme(to: $0) }
+                )) {
+                    ForEach(sharedAppSortManager.schemes.keys.sorted(), id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+                Button {
+                    sortSchemesViewPresent = true
+                } label: {
+                    Label("管理排序方案…", systemImage: "folder.badge.gearshape")
+                }
+            } label: {
+                Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
+            }
+        }
+    }
+
 
     // 优2（3.8.277）：列表内拖动重排——正在拖的 App 唯一 ID（松手提交用）。
     @State private var dragReorderID: String? = nil
@@ -941,160 +1101,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             
             .navigationTitle("lc.appList.myApps".loc)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if sharedModel.multiLCStatus != 2 {
-                        if !installprogressVisible {
-                            Menu {
-                                
-                                Button("lc.appList.installFromIpa".loc, systemImage: "doc.badge.plus", action: {
-                                    choosingIPA = true
-                                })
-                                Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
-                                    Task{ await startInstallFromUrl() }
-                                })
-                            } label: {
-                                Label("add", systemImage: "plus")
-                            }
-                            
-                        } else {
-                            ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
-                        }
-                    }
-                }
-                ToolbarItem(placement: .topBarLeading) {
-                    if(UserDefaults.sideStoreExist()) {
-                        Button {
-                            LCUtils.openSideStore(delegate: self)
-                        } label: {
-                            IconImageView(icon: BuiltInSideStoreAppInfo.shared.iconIsDarkIcon(darkModeIcon))
-                                .frame(width: UIFont.preferredFont(forTextStyle: .body).lineHeight, height: UIFont.preferredFont(forTextStyle: .body).lineHeight)
-
-                        }
-                    } else {
-                        Button("Help", systemImage: "questionmark") {
-                            helpPresent = true
-                        }
-                    }
-                    
-
-                }
-                
-                // 顶栏三个工具收起/展开：默认只露一个箭头，点箭头
-                // 展开显示数据管理/VPN/多选，再点收起；箭头在左，
-                // 三个图标在它右边展开，其余图标（+、?、链接、排序）
-                // 不动，三个功能本身也不动。
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        withAnimation { topToolsExpanded.toggle() }
-                    } label: {
-                        Label("更多工具", systemImage: topToolsExpanded ? "chevron.left" : "chevron.right")
-                    }
-                }
-                if topToolsExpanded {
-                    // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
-                    // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
-                    // 停止核心”同一套调用；状态从 shared.isRunning 读，
-                    // 点按后刷新，不靠猜）。
-                    ToolbarItem(placement: .topBarTrailing) {
-                        NavigationLink {
-                            LCDataManagementView()
-                        } label: {
-                            Label("数据管理", systemImage: "folder")
-                        }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        // 3.8.283：长按菜单不显示（用户 282 真机报）：
-                        // ToolbarItem 里的 Button + contextMenu 长按不
-                        // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
-                        // 点按走 primaryAction 开关核心，长按出菜单——
-                        // 这才是工具栏上点按+长按的标准写法，菜单内容不变。
-                        // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
-                        // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
-                        // 这里只留一行调用。
-                        vpnShieldMenu
-                    }
-
-                    // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
-                    // 整行点按即勾选；关时清空勾选。
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            batchMode.toggle()
-                            if !batchMode { batchSelectedIDs.removeAll() }
-                        } label: {
-                            Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
-                        }
-                    }
-                }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("lc.appList.openLink".loc, systemImage: "link", action: {
-                        Task { await onOpenWebViewTapped() }
-                    })
-                }
-                
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        // 优3（3.8.277）：排序切换那一下不做全量动画——
-                        // 列表带 .animation(.easeInOut, value: filteredApps)，
-                        // 直接改 appSortType 会让整列重排闪动。自定义
-                        // Binding 在 setter 里用 disablesAnimations 的
-                        // transaction 包住写值，搜索输入的动画抑制
-                        //（searchContext.isTyping 那套）一行不动。
-                        Picker("Sort by", selection: Binding(
-                            get: { sharedAppSortManager.appSortType },
-                            set: { newValue in
-                                var transaction = Transaction()
-                                transaction.disablesAnimations = true
-                                withTransaction(transaction) {
-                                    sharedAppSortManager.appSortType = newValue
-                                }
-                            }
-                        )) {
-                            ForEach(AppSortType.allCases, id: \.self) { sortType in
-                                Label(sortType.displayName, systemImage: sortType.systemImage)
-                                    .tag(sortType)
-                            }
-                        }
-                        .onChange(of: sharedAppSortManager.appSortType) { newValue in
-                            if sharedAppSortManager.appSortType == .custom {
-                                // 自定义排序页是 sheet，用 withAnimation
-                                // 单独给它动画——上面关动画的 transaction
-                                // 别把它也压成无动画弹出。
-                                withAnimation { customSortViewPresent = true }
-                            }
-                        }
-                        if sharedAppSortManager.appSortType == .custom {
-                            Divider()
-                            
-                            Button {
-                                customSortViewPresent = true
-                            } label: {
-                                Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
-                            }
-                        }
-                        // 新1（3.8.277）：排序方案切换——选方案即把
-                        // 该方案的顺序写进 customSortOrder 并置
-                        // .custom（switchScheme 里做，带关动画）。
-                        Divider()
-                        Picker("排序方案", selection: Binding(
-                            get: { sharedAppSortManager.currentSchemeName },
-                            set: { sharedAppSortManager.switchScheme(to: $0) }
-                        )) {
-                            ForEach(sharedAppSortManager.schemes.keys.sorted(), id: \.self) { name in
-                                Text(name).tag(name)
-                            }
-                        }
-                        Button {
-                            sortSchemesViewPresent = true
-                        } label: {
-                            Label("管理排序方案…", systemImage: "folder.badge.gearshape")
-                        }
-                    } label: {
-                        Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
-                    }
-                }
-            }
+            .toolbar { appListToolbar }
         }
         // 新4（3.8.277）：批量操作底栏——多选模式时才出现。备份/
         // 隐藏直接跑；删除先弹一次确认（删 App / 删 App 及其数据
