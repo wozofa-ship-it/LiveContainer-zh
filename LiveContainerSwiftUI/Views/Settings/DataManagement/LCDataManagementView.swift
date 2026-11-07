@@ -599,10 +599,16 @@ struct LCDataManagementView : View {
         .confirmationDialog("备份范围", isPresented: $showBackupScopeDialog, titleVisibility: .visible) {
             Button("只备份登录态") {
                 let apps = pendingBackupApps
+                // 3.8.339：用户选了范围才关选页（选页一直盖在下面
+                // 等着，点取消就回到选页接着挑，不丢已勾的 App）。
+                showBackupSelect = false
+                showRestoreSelect = false
                 Task { await backupApps(apps, loginOnly: true) }
             }
             Button("完整备份（数据 + 登录态）") {
                 let apps = pendingBackupApps
+                showBackupSelect = false
+                showRestoreSelect = false
                 Task { await backupApps(apps, loginOnly: false) }
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
@@ -614,9 +620,18 @@ struct LCDataManagementView : View {
         // 标红、后果直接写进按钮上，点之前就看得见
         .confirmationDialog("恢复范围", isPresented: $showRestoreScopeDialog, titleVisibility: .visible) {
             Button("只恢复登录态") {
+                // 3.8.339：同备份范围框——用户选了范围才把上面
+                // 盖着的几层页一起关掉（恢复页/预览页/多选页，
+                // 没开的关了也没事），再开始恢复。
+                showRestoreSelect = false
+                showBackupPreview = false
+                showSelectBackups = false
                 startPendingRestore(loginOnly: true)
             }
             Button("恢复全部数据（会覆盖当前数据）", role: .destructive) {
+                showRestoreSelect = false
+                showBackupPreview = false
+                showSelectBackups = false
                 startPendingRestore(loginOnly: false)
             }
             Button("lc.common.cancel".loc, role: .cancel) {}
@@ -665,11 +680,15 @@ struct LCDataManagementView : View {
                                     backupSelectedIDs = Set((sharedModel.apps + sharedModel.hiddenApps).map { Self.instanceKey(for: $0) })
                                 }
                             }
+                            // 3.8.339：先关选页再弹范围框，两个转场撞在一起，
+                            // 范围框会被系统吞掉、用户看不到弹窗（338 的 0.3 秒
+                            // 延迟只保了直进自动关闭，没保住这个转场冲突）。
+                            // 改法：选页先不关，范围框直接盖在选页上面；
+                            // 用户选了范围再关选页（见范围框按钮里）。
                             Button("lc.settings.backup".loc) {
                                 pendingBackupApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
                                     backupSelectedIDs.contains(Self.instanceKey(for: $0))
                                 }
-                                showBackupSelect = false
                                 showBackupScopeDialog = true
                             }
                             // 零勾选禁用确认：以前零勾选也能走完还报
@@ -680,7 +699,11 @@ struct LCDataManagementView : View {
                 }
             }
         }
-        .sheet(isPresented: $showRestoreSelect) {
+        // 3.8.339：恢复页改真全屏——原来是半屏 sheet，直进时
+        // 顶上露一截空白壳（数据管理页 opacity 0），用户看
+        // 着就是“俩个页面”（用户 16:07 报）。备份选页 329
+        // 起就是全屏，恢复页跟它一致；左上角已有“取消”按钮。
+        .fullScreenCover(isPresented: $showRestoreSelect) {
             NavigationView {
                 // 恢复合一：本地 + iCloud 同屏两个区，不再先弹
                 // “选哪个文件夹”再进单源列表；文件夹选择与
@@ -691,7 +714,8 @@ struct LCDataManagementView : View {
                     // 到）；副标题写清恢复的是全部本地备份。
                     Section {
                         Button {
-                            showRestoreSelect = false
+                            // 3.8.339：先不关恢复页，范围框盖在上面
+                            //（同备份按钮的修法，关页+弹框撞转场会吞框）。
                             pendingRestoreURL = nil
                             pendingRestoreAll = true
                             showRestoreScopeDialog = true
@@ -731,7 +755,8 @@ struct LCDataManagementView : View {
                             }
                         }
                         Button {
-                            showRestoreSelect = false
+                            // 3.8.339：向导页盖在恢复页上面，先不关
+                            // 恢复页（同款转场冲突，向导会被吞掉）。
                             beginMigrationWizard()
                         } label: {
                             HStack {
@@ -761,7 +786,8 @@ struct LCDataManagementView : View {
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                                 Button("去备份") {
-                                    showRestoreSelect = false
+                                    // 3.8.339：先不关恢复页，备份范围框
+                                    // 盖在上面（同款转场冲突）。
                                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
                                     showBackupScopeDialog = true
                                 }
@@ -919,12 +945,13 @@ struct LCDataManagementView : View {
                             }
                             ToolbarItem(placement: .confirmationAction) {
                                 Button("恢复") {
-                                    showBackupPreview = false
+                                    // 3.8.339：预览页和恢复页先不关，
+                                    // 范围框盖在最上面，选了范围再一起关
+                                    //（见恢复范围框按钮里）。
                                     if let url = previewFolderURL {
                                         pendingRestoreURL = url
                                         pendingRestoreAll = false
                                         showRestoreScopeDialog = true
-                                        showRestoreSelect = false
                                     }
                                 }
                                 .disabled(previewFolderURL == nil)
@@ -1005,8 +1032,8 @@ struct LCDataManagementView : View {
                                             pendingRestoreFolders = selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }
                                             pendingRestoreAll = false
                                             pendingRestoreURL = nil
-                                            showSelectBackups = false
-                                            showRestoreSelect = false
+                                            // 3.8.339：多选页和恢复页先不关，
+                                            // 范围框盖在上面，选了范围再一起关。
                                             showRestoreScopeDialog = true
                                         }
                                     }
@@ -2029,7 +2056,8 @@ struct LCDataManagementView : View {
             }
             .buttonStyle(.plain)
             Button {
-                showRestoreSelect = false
+                // 3.8.339：恢复页先不关，范围框盖在上面
+                //（同款转场冲突，关页+弹框会吞框）。
                 pendingRestoreURL = folderURL
                 pendingRestoreAll = false
                 showRestoreScopeDialog = true
