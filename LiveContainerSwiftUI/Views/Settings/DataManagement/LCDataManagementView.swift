@@ -527,10 +527,18 @@ struct LCDataManagementView : View {
         // 内层页或范围框真的开着时才藏本页；都没开时显示本
         // 页内容（再由 czfDismissIfDirectEntryDone 关页回
         // App 页），永不白纸。
+        // 3.8.345：上面这套 opacity 是白顶的根因——视频实证
+        // （2026-11-07 19:12）：恢复页/备份选页打开时顶部
+        // 先白一大块、约 1 秒后才正常。盖子是 fullScreenCover
+        // 本来就不透明，盖上后本页自然被遮住，根本不需要
+        // opacity 藏；opacity 一置 0，盖子上滑动画还没盖到
+        // 顶部时，顶部露出的就是透明本页后面的白底。删掉
+        // opacity，动画过程里用户看到的是本页内容（正常），
+        // 盖子盖满后本页自然被遮；盖子关掉后本页恢复可见，
+        // 再由 czfDismissIfDirectEntryDone 关页回 App 页。
         .navigationTitle(initialSheet == nil ? "lc.settings.dataManagement".loc : "")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarHidden(initialSheet != nil)
-        .opacity(initialSheet != nil && (showBackupSelect || showRestoreSelect || showScheduleBackup || showBackupScopeDialog || showRestoreScopeDialog) ? 0 : 1)
         .alert("lc.common.error".loc, isPresented: $errorShow){
             // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
             // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。

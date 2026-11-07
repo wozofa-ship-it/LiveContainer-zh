@@ -169,6 +169,10 @@ static NSMutableSet *CZFKBDiagExcludedGroups = nil;
 static NSMutableSet *CZFKBDiagExcludedServices = nil;
 static NSMutableSet *CZFKBDiagKeptGroups = nil;
 static NSMutableDictionary *CZFKBDiagExcludedGroupCounts = nil;
+// 3.8.345：被滤条目按条记“组|服务|账号”（去重后前 20 条）。
+// 旧的 excludedGroups/excludedServices 是两个独立集合，对不上
+// “哪个服务在哪个组里”，下次备份一次就能定位令牌在哪。
+static NSMutableArray *CZFKBDiagExcludedItems = nil;
 
 // 归属过滤（单开通用修复，隔离容器不用）：
 // 组名是否以点分段为单位完整包含 Bundle ID（防 com.example.app
@@ -215,6 +219,12 @@ static BOOL CZFKBGroupContainsVendorPrefix(NSString *group, NSString *bid) {
         for (NSUInteger i = 0; i + 1 < gParts.count; i++) {
             if ([gParts[i] isEqualToString:@"com"] && [gParts[i + 1] isEqualToString:@"alibaba"]) return YES;
         }
+        // 3.8.345：同上，支付宝登录的令牌落在 com.alipay.*
+        // 共享组——支付宝与淘宝同一阿里账号体系（SSO 互通），
+        // 闲鱼支付宝登录的令牌就在这。只加这一条映射。
+        for (NSUInteger i = 0; i + 1 < gParts.count; i++) {
+            if ([gParts[i] isEqualToString:@"com"] && [gParts[i + 1] isEqualToString:@"alipay"]) return YES;
+        }
     }
     return NO;
 }
@@ -257,6 +267,10 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
         (__bridge NSString *)kSecAttrAccount,
         (__bridge NSString *)kSecAttrGeneric,
         (__bridge NSString *)kSecAttrLabel,
+        // 3.8.345：InternetPassword 条目的标识往往在 server
+        //（如 passport.alibaba.com），service 常为空；不看
+        // server 时这类条目字段检查永远 miss。补上。
+        (__bridge NSString *)kSecAttrServer,
     ];
     for (NSString *k in keys) {
         id v = item[k];
@@ -277,6 +291,9 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
         // 不加这条就被排除）。只认 com.taobao→com.alibaba 这一
         // 条映射，其他厂商不动。
         if ([vendorPrefix isEqualToString:@"com.taobao"] && [f localizedCaseInsensitiveContainsString:@"com.alibaba"]) return YES;
+        // 3.8.345：同上，字段含 com.alipay 也算归属（支付宝
+        // 登录令牌的服务名/组是 com.alipay.*，与淘宝同一账号体系）。
+        if ([vendorPrefix isEqualToString:@"com.taobao"] && [f localizedCaseInsensitiveContainsString:@"com.alipay"]) return YES;
     }
     return NO;
 }
@@ -314,11 +331,17 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             NSString *itemAlias = item[@"alis"];
             NSString *cls = item[(__bridge NSString *)kSecClass] ?: (__bridge NSString *)kSecClassGenericPassword;
             NSDictionary *clean = CZFKBCleanItem(item, cls);
-            NSString *identity = [NSString stringWithFormat:@"%@|%@|%@|%@",
+            NSString *identity = [NSString stringWithFormat:@"%@|%@|%@|%@|%@",
                 cls,
                 clean[(__bridge NSString *)kSecAttrAccount] ?: @"",
                 clean[(__bridge NSString *)kSecAttrService] ?: @"",
-                clean[(__bridge NSString *)kSecAttrGeneric] ?: @""];
+                clean[(__bridge NSString *)kSecAttrGeneric] ?: @"",
+                // 3.8.345：InternetPassword 条目 service 常为空、
+                // generic 常为 nil，两个同 account 不同 server 的
+                // 条目 identity 相同，后者会被去重丢掉；无 account/
+                // service/generic 的纯数据条目同理全坍缩成一条。
+                // server 拼进去，区分不同 server 的条目。
+                clean[(__bridge NSString *)kSecAttrServer] ?: @""];
             // 身份字段多为字符串；NSData 的 description 是内容
             // 的十六进制，同样能区分。撞键只会误丢内容相同的
             // 重复条，不丢数据
@@ -376,6 +399,19 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                     if ([svc isKindOfClass:NSString.class] && svc.length && CZFKBDiagExcludedServices.count < 10) {
                         [CZFKBDiagExcludedServices addObject:svc];
                     }
+                    // 3.8.345：按条记“组|服务|账号”（去重后前 20 条，
+                    // 只读诊断）。server 也拼上（InternetPassword
+                    // 的标识常在 server 上，service 为空时三元组
+                    // 里服务那格是空的，靠 server 定位）。
+                    if (CZFKBDiagExcludedItems.count < 20) {
+                        NSString *acct = item[(__bridge NSString *)kSecAttrAccount];
+                        if (![acct isKindOfClass:NSString.class]) acct = @"";
+                        NSString *srvr = item[(__bridge NSString *)kSecAttrServer];
+                        if (![srvr isKindOfClass:NSString.class]) srvr = @"";
+                        NSString *svc2 = ([svc isKindOfClass:NSString.class] ? svc : @"");
+                        [CZFKBDiagExcludedItems addObject:[NSString stringWithFormat:@"%@|%@|%@|%@",
+                            (itemGroup ?: @"(nil)"), svc2, acct, srvr]];
+                    }
                     if (itemGroup) {
                         NSNumber *n = CZFKBDiagExcludedGroupCounts[itemGroup];
                         CZFKBDiagExcludedGroupCounts[itemGroup] = @([n integerValue] + 1);
@@ -416,6 +452,7 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
     CZFKBDiagExcludedServices = [NSMutableSet set];
     CZFKBDiagKeptGroups = [NSMutableSet set];
     CZFKBDiagExcludedGroupCounts = [NSMutableDictionary dictionary];
+    CZFKBDiagExcludedItems = [NSMutableArray array];
     for (NSString *cls in @[(__bridge NSString *)kSecClassGenericPassword, (__bridge NSString *)kSecClassInternetPassword]) {
         // 主路：逐个获授权组查。游客钩子写条目时把组改成本
         // 容器的组，那个组必在这张表里；团队前缀对不上也不
@@ -795,9 +832,31 @@ static void CZFKBRun(void) {
         // （只回 attributes、不取 data、不进 all）。
         // 注意：group/lcDefaultGroup 可能为 nil，字面量数组塞 nil
         // 会直接崩，先拼成可变数组再循环。
+        // 3.8.345：扩到厂商组与默认组——旧探针全 0 排除不了
+        // “厂商组/默认组里有 Key”这个位置（令牌可能是密钥类，
+        // 本体放文件、密钥放钥匙串）。厂商组名从上面同款算式
+        // 现拼（taobao/alibaba 两组），只读探针、不取 data。
         NSMutableArray *probeGroups = [NSMutableArray array];
         if (group.length) [probeGroups addObject:group];
         if (lcDefaultGroup.length) [probeGroups addObject:lcDefaultGroup];
+        if (defaultGroup.length) [probeGroups addObject:defaultGroup];
+        if (bundleID.length) {
+            NSArray<NSString *> *bParts2 = [bundleID componentsSeparatedByString:@"."];
+            NSString *groupForTeam2 = group ?: defaultGroup;
+            if (!groupForTeam2) groupForTeam2 = lcDefaultGroup;
+            NSString *teamPrefix2 = nil;
+            if (groupForTeam2.length) {
+                NSArray<NSString *> *gParts2 = [groupForTeam2 componentsSeparatedByString:@"."];
+                if (gParts2.count > 0) teamPrefix2 = gParts2[0];
+            }
+            if (bParts2.count >= 2 && teamPrefix2) {
+                NSString *vp2 = [NSString stringWithFormat:@"%@.%@", bParts2[0], bParts2[1]];
+                if (vp2.length >= 6) {
+                    [probeGroups addObject:[NSString stringWithFormat:@"%@.%@.shared", teamPrefix2, vp2]];
+                    [probeGroups addObject:[NSString stringWithFormat:@"%@.com.alibaba.shared", teamPrefix2]];
+                }
+            }
+        }
         for (id cls in @[(__bridge NSString *)kSecClassKey, (__bridge NSString *)kSecClassCertificate, (__bridge NSString *)kSecClassIdentity]) {
             NSInteger *slot = [cls isEqual:(__bridge id)kSecClassKey] ? &classProbeKey
                 : [cls isEqual:(__bridge id)kSecClassCertificate] ? &classProbeCert : &classProbeIdentity;
@@ -867,8 +926,10 @@ static void CZFKBRun(void) {
             excludedGroupsStr = [parts componentsJoinedByString:@"|"];
         }
         NSString *excludedServicesStr = [[CZFKBDiagExcludedServices.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@"|"];
+        // 3.8.345：被滤条目按条拼串（前 20 条，形如 组|服务|账号|server）。
+        NSString *excludedItemsStr = [CZFKBDiagExcludedItems componentsJoinedByString:@"; "];
         NSString *status = [NSString stringWithFormat:
-            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld 厂商组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d keptGroups=%@ excludedGroups=%@ excludedServices=%@ vendorProbe=%d/%d vendorInEntitled=%@/%@ classProbe=%ld/%ld/%ld timing=%@",
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld 厂商组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d keptGroups=%@ excludedGroups=%@ excludedServices=%@ excludedItems=%@ vendorProbe=%d/%d vendorInEntitled=%@/%@ classProbe=%ld/%ld/%ld timing=%@",
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
             (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias + CZFKBStatDefault + CZFKBStatLCDefault + CZFKBStatVendor),
@@ -877,7 +938,7 @@ static void CZFKBRun(void) {
             isolated ? @"YES" : @"NO", defaultGroup ?: @"(nil)", writeGroup ?: @"(nil)", lcDefaultGroup ?: @"(nil)", (int)lcProbe,
             (long)CZFKBStatImported,
             (long)CZFKBStatImportTotal, (int)CZFKBStatImportFail,
-            keptGroupsStr ?: @"", excludedGroupsStr ?: @"", excludedServicesStr ?: @"",
+            keptGroupsStr ?: @"", excludedGroupsStr ?: @"", excludedServicesStr ?: @"", excludedItemsStr ?: @"",
             (int)vendorProbeTaobao, (int)vendorProbeAlibaba,
             vendorTaobaoInEntitled ? @"YES" : @"NO", vendorAlibabaInEntitled ? @"YES" : @"NO",
             (long)classProbeKey, (long)classProbeCert, (long)classProbeIdentity,
