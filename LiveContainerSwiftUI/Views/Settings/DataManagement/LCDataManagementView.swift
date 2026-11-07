@@ -165,6 +165,14 @@ struct LCDataManagementView : View {
     // 卡住的可能；sheet 内的事就在 sheet 内交代，不跨层弹提示
     @State private var restoreSheetNotice: String? = nil
     @State private var backupFolderList: [URL] = []
+    // 3.8.335：删备份闪退第三修（325 数据层 + 326 时机层都没盖住，
+    // 334 又崩 Invalid update section 3，iCloud 区 7→7 却删了 1 个）：
+    // List 的版本号，删备份时 +1 强制 List 整体重建、不走 diff——
+    // SwiftUI 的 UICollectionView diff 在备份列表上三番五次算错
+    // （iCloud 删完重载仍见文件、URL 写法差异、排序抖动都可能
+    // 让 diff 与数据源对不上），重建直接绕过整类问题。代价是
+    // 删完列表滚回顶部，删备份时可接受。
+    @State private var backupListVersion = 0
     // 3.8.281：锁了的备份文件夹名（界面用；UserDefaults 是真源，
     // 恢复 sheet 打开时同步一次，锁/解锁时两边一起写）。
     @State private var lockedBackupNames: Set<String> = []
@@ -763,6 +771,10 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
+                // 3.8.335：删备份闪退第三修——List 身份绑版本号，
+                // 删备份时 +1 强制整体重建、不走 diff，绕过
+                // Invalid update 整类问题（见 backupListVersion）。
+                .id(backupListVersion)
                 .navigationTitle("lc.settings.restoreBackup".loc)
                 .onAppear {
                     backupFolderList = backupFolders(fromExternal: false)
@@ -2053,6 +2065,16 @@ struct LCDataManagementView : View {
             // 对得上；锁了/删失败时不走这里，数组不动。
             backupFolderList = backupFolders(fromExternal: false)
             externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
+            // 3.8.335 第三修：334 又崩在 iCloud 区——删完重载
+            // 仍见文件（iCloud 同步滞后、目录枚举残留），数据源
+            // 7→7、List 却按删了 1 个算。重载后再按名字硬性
+            // 剔掉已删那条（按 lastPathComponent，不靠 URL 相等），
+            // 数一定对得上；再 +1 逼 List 整体重建、不走 diff，
+            // 两道保险，整类 Invalid update 绕过去。
+            let deletedName = backupURL.lastPathComponent
+            backupFolderList.removeAll { $0.lastPathComponent == deletedName }
+            externalBackupFolderList.removeAll { $0.lastPathComponent == deletedName }
+            backupListVersion += 1
             // 反馈只写 sheet 底部的提示行：不关 sheet、不弹外
             // 层提示——删完留在列表里继续操作，跨层弹提示是
             // 前两版按钮点不动的根源
@@ -2078,6 +2100,8 @@ struct LCDataManagementView : View {
         }
         backupFolderList = backupFolders(fromExternal: false)
         externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
+        // 3.8.335：同 deleteBackup，List 重建、不走 diff。
+        backupListVersion += 1
         restoreSheetNotice = "已删除 \(deleted) 个备份" + (lockedSkipped > 0 ? "，\(lockedSkipped) 个已锁定未删" : "")
     }
 
@@ -2108,6 +2132,8 @@ struct LCDataManagementView : View {
         }
         backupFolderList = backupFolders(fromExternal: false)
         externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
+        // 3.8.335：同 deleteBackup，List 重建、不走 diff。
+        backupListVersion += 1
         selectedBackupFolderURLs.removeAll()
         showSelectBackups = false
         restoreSheetNotice = "已删除 \(deleted) 个备份" + (lockedSkipped > 0 ? "，\(lockedSkipped) 个已锁定未删" : "")

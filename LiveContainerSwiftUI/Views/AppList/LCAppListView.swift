@@ -480,17 +480,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 三个工具照常摆在 builder 里，if 下沉到每个 ToolbarItem
         // 的内容里（那是 @ViewBuilder，buildIf 是 iOS 13+ 就有的）。
         // 收起时内容为空，ToolbarItem 不占位；展开时照常显示。
-        // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
-        // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
-        // 停止核心”同一套调用；状态从 shared.isRunning 读，
-        // 点按后刷新，不靠猜）。
+        // 3.8.335：数据管理常驻顶栏，不再收进折叠里——用户
+        // 13:11 视频：去数据管理要先点设置、再点数据管理，
+        // 两层设置页叠着，关掉一个后面还有一个。文件夹图标
+        // 常驻，点一下直进数据管理，就一页。VPN/多选仍收起。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
-                NavigationLink {
-                    LCDataManagementView()
-                } label: {
-                    Label("数据管理", systemImage: "folder")
-                }
+            NavigationLink {
+                LCDataManagementView()
+            } label: {
+                Label("数据管理", systemImage: "folder")
             }
         }
         ToolbarItem(placement: .topBarTrailing) {
