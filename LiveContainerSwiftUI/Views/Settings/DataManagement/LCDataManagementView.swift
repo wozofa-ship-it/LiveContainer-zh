@@ -96,6 +96,15 @@ enum LCDataManagementInitialSheet {
     case backupSelect
     case backupAll
     case scheduleBackup
+    // 3.8.349：只备某一个 App，直出范围框——复用 .backupAll
+    // 的 onAppearFunc 路（pendingBackupApps + 0.5 秒后
+    // presentScopeAlert），不经过选页。目标 App 不放在
+    // enum 里（要带 LCAppModel 就丢了 CaseIterable/raw
+    // String），走 init 的 directBackupApps 参数；面板的
+    // 备份快捷方式（appbackup: 条目）点按时把 App 传进来。
+    // directBackupApps 为空时 onAppearFunc 不弹框（绝不
+    // 退回“全部 App”，用户只要那一个）。
+    case backupScope
 }
 
 struct LCDataManagementView : View {
@@ -104,6 +113,10 @@ struct LCDataManagementView : View {
     @State var appeared = false
     // 3.8.313：直开某动作（见 LCDataManagementInitialSheet）。
     let initialSheet: LCDataManagementInitialSheet?
+    // 3.8.349：.backupScope 直出范围框要备的 App（只含目标
+    // 一个，不含全部；init 参数传进来，plain let，init 里
+    // 直接赋值，不读 sharedModel）。不走 .backupScope 时为空。
+    let directBackupApps: [LCAppModel]
     @State private var didApplyInitialSheet = false
     
     @StateObject private var appFolderRemovalAlert = YesNoHelper()
@@ -250,8 +263,9 @@ struct LCDataManagementView : View {
         !selectBackupFolders.isEmpty && selectBackupFolders.allSatisfy { selectedBackupFolderURLs.contains($0) }
     }
 
-    init(initialSheet: LCDataManagementInitialSheet? = nil) {
+    init(initialSheet: LCDataManagementInitialSheet? = nil, directBackupApps: [LCAppModel] = []) {
         self.initialSheet = initialSheet
+        self.directBackupApps = directBackupApps
         _folderPaths = State(initialValue: [
             LCFolderPath(path: LCPath.docPath, desc: "Private Container"),
             LCFolderPath(path: LCPath.lcGroupDocPath, desc: "App Group Container"),
@@ -266,7 +280,10 @@ struct LCDataManagementView : View {
         // 经过白壳；didApplyInitialSheet 一并置 true，
         // onAppearFunc 不再重复开。.backupAll 是范围框
         // （UIKit 弹，要 sharedModel 填 pendingBackupApps，
-        // init 里拿不到），仍走 onAppearFunc。
+        // init 里拿不到），仍走 onAppearFunc；.backupScope
+        // 同款（范围框 + directBackupApps 已在 init 里拿到，
+        // 但 presentScopeAlert 要等外层 cover 落定才能弹，
+        // 也走 onAppearFunc 的 0.5 秒路）。
         switch initialSheet {
         case .restore:
             _showRestoreSelect = State(initialValue: true)
@@ -277,7 +294,7 @@ struct LCDataManagementView : View {
         case .scheduleBackup:
             _showScheduleBackup = State(initialValue: true)
             _didApplyInitialSheet = State(initialValue: true)
-        case .backupAll, .none:
+        case .backupAll, .backupScope, .none:
             break
         }
     }
@@ -1284,6 +1301,17 @@ struct LCDataManagementView : View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         self.presentScopeAlert(isBackup: true)
                     }
+                case .backupScope:
+                    // 3.8.349：只备 directBackupApps 里那一个
+                    // App，直出范围框。空数组绝不弹（也不退回
+                    // 全部 App）；空时本页是空壳，收尾五路全
+                    // false 会由 czfDismissIfDirectEntryDone
+                    // 关掉，不留白页。
+                    guard !self.directBackupApps.isEmpty else { return }
+                    self.pendingBackupApps = self.directBackupApps
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.presentScopeAlert(isBackup: true)
+                    }
                 case .scheduleBackup:
                     self.loadScheduleSettings()
                     self.showScheduleBackup = true
@@ -1313,6 +1341,10 @@ struct LCDataManagementView : View {
                     DispatchQueue.main.async { self.showScheduleBackup = true }
                 case .backupAll:
                     return
+                case .backupScope:
+                    // 范围框是 UIKit 弹框、不占盖子，没有重
+                    // present 一说，同 .backupAll 直接返回。
+                    return
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     guard !self.czfDirectCoverAppeared else { return }
@@ -1321,6 +1353,7 @@ struct LCDataManagementView : View {
                     case .backupSelect: self.showBackupSelect = false
                     case .scheduleBackup: self.showScheduleBackup = false
                     case .backupAll: break
+                    case .backupScope: break
                     }
                 }
             }

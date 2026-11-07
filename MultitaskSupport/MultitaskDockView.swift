@@ -3824,6 +3824,12 @@ struct SourcesPanelView: View {
     // 除、不释放），cover 不受影响。czfDismissIfDirectEntryDone
     // 里的 dismiss() 在 cover 里同样关掉 cover，回源面板。
     @State private var czfDirectDataPage: CZFSettingsPage? = nil
+    // 3.8.349：.backupScope 直出范围框要备的那个 App（面板
+    // 快捷行 appbackup: 条目点按时填，cover 里随
+    // czfDirectDataPage 一起传给 LCDataManagementView；
+    // 只在 page == .backupScope 时读，其余四路不用，残留
+    // 不清也不影响——点按时每次都重填。“关闭”按钮里顺手清掉。
+    @State private var czfDirectBackupApp: LCAppModel? = nil
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -3982,7 +3988,7 @@ struct SourcesPanelView: View {
     // 不进设置页 sheet、不套数据管理页；其余路由一字不动。
     private func openSettingsPage(_ page: String) {
         if let czfPage = CZFSettingsPage(rawValue: page),
-           czfPage == .restore || czfPage == .selectbackup || czfPage == .backupall || czfPage == .schedulebackup {
+           czfPage == .restore || czfPage == .selectbackup || czfPage == .backupall || czfPage == .schedulebackup || czfPage == .backupScope {
             closePanel()
             czfDirectDataPage = czfPage
             return
@@ -4337,6 +4343,51 @@ struct SourcesPanelView: View {
                                 items: $customShortcuts,
                                 draggedKey: $draggedShortcutKey
                             ))
+                        } else if let pinKey = CZFPanelCustomShortcuts.backupPinKey(from: item),
+                                  let app = app(forPinKey: pinKey) {
+                            // 3.8.349：只备这一个 App 的快捷方式——
+                            // 图标是该 App 自己的图标（40 圆，同设定类
+                            // 分支），右下角蓝底备份角标（20 圆、内收
+                            // 4pt，同 3.8.314 的角标几何）；点按先填
+                            // czfDirectBackupApp 再开 .backupScope
+                            // 直进 cover，范围框直出，不经过选页。
+                            // App 解析不到就不渲染（同设定类分支）。
+                            Button {
+                                czfDirectBackupApp = app
+                                czfDirectDataPage = .backupScope
+                            } label: {
+                                ZStack(alignment: .bottomTrailing) {
+                                    RunningAppIcon(appInfo: app.appInfo)
+                                        .frame(width: 40, height: 40)
+                                        .clipShape(Circle())
+                                    Circle()
+                                        .fill(.blue)
+                                        .frame(width: 20, height: 20)
+                                        .overlay(
+                                            Image(systemName: "archivebox.fill")
+                                                .font(.system(size: 10, weight: .bold))
+                                                .foregroundColor(.white)
+                                        )
+                                        .offset(x: -4, y: -4)
+                                }
+                            }
+                            .contextMenu {
+                                Button("移除此快捷方式", role: .destructive) {
+                                    CZFPanelCustomShortcuts.remove(item)
+                                    customShortcuts = CZFPanelCustomShortcuts.items
+                                    refreshSettingStates()
+                                }
+                            }
+                            // 3.8.316：按住拖动调序（同固定区拖动换位）。
+                            .onDrag {
+                                draggedShortcutKey = item
+                                return NSItemProvider(object: item as NSString)
+                            }
+                            .onDrop(of: [.text], delegate: CZFCustomShortcutReorderDelegate(
+                                targetIndex: customShortcuts.firstIndex(of: item) ?? 0,
+                                items: $customShortcuts,
+                                draggedKey: $draggedShortcutKey
+                            ))
                         }
                     }
                     // 加号：添加一个自定义快捷方式（点开选页单）
@@ -4410,12 +4461,12 @@ struct SourcesPanelView: View {
         // fullScreenCover（备份选页/恢复选页）照常挂在它身上。
         .fullScreenCover(item: $czfDirectDataPage) { page in
             NavigationView {
-                page.destinationView
+                page.destinationView(forDirectBackupApp: czfDirectBackupApp)
                     .navigationTitle(page.title)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("关闭") { czfDirectDataPage = nil }
+                            Button("关闭") { czfDirectDataPage = nil; czfDirectBackupApp = nil }
                         }
                     }
             }
@@ -5396,6 +5447,14 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
     case selectbackup
     case backupall
     case schedulebackup
+    // 3.8.349：只备某一个 App，直出范围框——与 .backupall
+    // 同款直进 cover，但 pendingBackupApps 只含目标 App
+    // （App 由面板的 appbackup: 快捷条目在点按时填进
+    // czfDirectBackupApp，再经 destinationView(forDirectBackupApp:)
+    // 传给 LCDataManagementView；enum 本身不带 App，不丢
+    // CaseIterable/raw String）。裸 page:backupScope 条目
+    // 建不出来（选单里已滤掉），万一没 App 就退到选页。
+    case backupScope
     // 3.8.317：快捷方式再加设置功能——插件/源/应用三
     // 个主页面此前不在选单里，点开是同款 sheet。
     case tweaks
@@ -5418,6 +5477,7 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .selectbackup: return "选择备份"
         case .backupall: return "备份全部"
         case .schedulebackup: return "定时备份"
+        case .backupScope: return "备份"
         case .tweaks: return "插件管理"
         case .sources: return "源管理"
         case .apps: return "应用管理"
@@ -5437,6 +5497,7 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .selectbackup: return "checkmark.circle.fill"
         case .backupall: return "doc.on.doc"
         case .schedulebackup: return "clock.fill"
+        case .backupScope: return "archivebox.fill"
         case .tweaks: return "puzzlepiece"
         case .sources: return "books.vertical"
         case .apps: return "square.stack.3d.up.fill"
@@ -5457,10 +5518,29 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .selectbackup: LCDataManagementView(initialSheet: .backupSelect)
         case .backupall: LCDataManagementView(initialSheet: .backupAll)
         case .schedulebackup: LCDataManagementView(initialSheet: .scheduleBackup)
+        case .backupScope:
+            // 裸 .backupScope 没有 App 可备（App 只在点按
+            // appbackup: 条目时经 destinationView(forDirectBackupApp:)
+            // 传），退到选页，不留空壳；直出范围框只走下面那个 func。
+            LCDataManagementView(initialSheet: .backupSelect)
         case .tweaks: LCTweaksView()
         case .sources: LCSourcesView()
         case .apps: LCAppListView()
         case .keepalive: CZFKeepAliveShortcutView()
+        }
+    }
+
+    // 3.8.349：直进 cover 用的目的页——只有 .backupScope
+    // 且 App 在时才走直出范围框（initialSheet: .backupScope，
+    // directBackupApps 只含这一个 App）；其余情况一律回
+    // 上面那个 var（.backupScope 没 App 时 var 里已退到选页）。
+    // 设置页 sheet（LCSettingsView:304）仍用 var，不动。
+    @ViewBuilder
+    func destinationView(forDirectBackupApp app: LCAppModel?) -> some View {
+        if self == .backupScope, let app = app {
+            LCDataManagementView(initialSheet: .backupScope, directBackupApps: [app])
+        } else {
+            destinationView
         }
     }
 }
@@ -5542,10 +5622,20 @@ enum CZFPanelCustomShortcuts {
 
     static func pageItem(_ raw: String) -> String { "page:\(raw)" }
     static func settingItem(pinKey: String, key: String) -> String { "setting:\(pinKey):\(key)" }
+    // 3.8.349：只备某一个 App 的快捷方式——条目里只存
+    // pinKey（包名_dataUUID，同 setting: 条目），点按时
+    // app(forPinKey:) 解析回 LCAppModel，直出范围框。
+    // 与 setting: 条目同款：App 删了/解析不到就不渲染。
+    static func backupItem(pinKey: String) -> String { "appbackup:\(pinKey)" }
 
     static func pageRaw(from item: String) -> String? {
         guard item.hasPrefix("page:") else { return nil }
         return String(item.dropFirst(5))
+    }
+
+    static func backupPinKey(from item: String) -> String? {
+        guard item.hasPrefix("appbackup:") else { return nil }
+        return String(item.dropFirst(10))
     }
 
     static func settingPinKeyAndKey(from item: String) -> (pinKey: String, key: String)? {
@@ -5680,7 +5770,11 @@ private struct CZFPanelCustomSettingsPicker: View {
         NavigationView {
             List {
                 Section("设置页") {
-                    ForEach(CZFSettingsPage.allCases) { page in
+                    // 3.8.349：.backupScope 不列出来——它没有 App
+                    // 就退到选页，裸 page:backupScope 条目建出来
+                    // 也没意义；只备某 App 走下面“App 设置”里的
+                    // “备份此 App”（appbackup: 条目）。
+                    ForEach(CZFSettingsPage.allCases.filter { $0 != .backupScope }) { page in
                         let item = CZFPanelCustomShortcuts.pageItem(page.rawValue)
                         Button {
                             onPick(item)
@@ -5738,6 +5832,26 @@ private struct CZFPanelAppSettingListView: View {
 
     var body: some View {
         List {
+            // 3.8.349：只备这一个 App——点按建 appbackup:
+            // 条目（只存 pinKey），快捷行里点它就直出范围框，
+            // 不经过选页。只加图标，不马上执行（同开关类）。
+            Section("备份") {
+                let item = CZFPanelCustomShortcuts.backupItem(pinKey: pinKey)
+                Button {
+                    onPick(item)
+                } label: {
+                    HStack {
+                        Image(systemName: "archivebox.fill")
+                            .foregroundColor(.blue)
+                        Text("备份此 App")
+                        Spacer()
+                        if CZFPanelCustomShortcuts.contains(item) {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                }
+            }
             Section("开关") {
                 ForEach(CZFPanelAppSetting.allCases.filter { $0.isToggle }, id: \.self) { setting in
                     let item = CZFPanelCustomShortcuts.settingItem(pinKey: pinKey, key: setting.rawValue)
