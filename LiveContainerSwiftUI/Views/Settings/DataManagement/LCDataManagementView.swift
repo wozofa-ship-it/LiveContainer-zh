@@ -246,6 +246,29 @@ struct LCDataManagementView : View {
             LCFolderPath(path: LCPath.lcGroupDocPath, desc: "App Group Container"),
             LCFolderPath(path: Bundle.main.bundleURL, desc: "LiveContainer Bundle"),
         ])
+        // 3.8.342：直进白页闪根因——内层页在 onAppear 里
+        // asyncAfter(0.0) 才开，外层 sheet 滑入动画 + 内层
+        // cover 滑入动画两段加起来，白壳暴露约 1 秒（用户
+        // 17:02 视频第 5→7 帧实证；338 注释“白页只剩一帧”
+        // 只算了 runloop，没算两段动画）。改在 init 里就把
+        // 内层页开关置 true，内层页随外层页一起呈现，不再
+        // 经过白壳；didApplyInitialSheet 一并置 true，
+        // onAppearFunc 不再重复开。.backupAll 是范围框
+        // （UIKit 弹，要 sharedModel 填 pendingBackupApps，
+        // init 里拿不到），仍走 onAppearFunc。
+        switch initialSheet {
+        case .restore:
+            _showRestoreSelect = State(initialValue: true)
+            _didApplyInitialSheet = State(initialValue: true)
+        case .backupSelect:
+            _showBackupSelect = State(initialValue: true)
+            _didApplyInitialSheet = State(initialValue: true)
+        case .scheduleBackup:
+            _showScheduleBackup = State(initialValue: true)
+            _didApplyInitialSheet = State(initialValue: true)
+        case .backupAll, .none:
+            break
+        }
     }
     
     var body: some View {
@@ -377,7 +400,7 @@ struct LCDataManagementView : View {
                 // 在上面走着时入口全灰，跑完自动恢复。
                 Button {
                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
-                    showBackupScopeDialog = true
+                    presentScopeAlert(isBackup: true)
                 } label: {
                     HStack {
                         LCSettingsIcon(systemName: "doc.on.doc", color: .blue)
@@ -596,46 +619,16 @@ struct LCDataManagementView : View {
         .onChange(of: showScheduleBackup) { _ in czfDismissIfDirectEntryDone() }
         .onChange(of: showBackupScopeDialog) { _ in czfDismissIfDirectEntryDone() }
         .onChange(of: showRestoreScopeDialog) { _ in czfDismissIfDirectEntryDone() }
-        // 3.8.340：范围框改 .alert——339 的根因找错了。339 以为
-        // “范围框挂在父视图（Form）上，盖在全屏选页上面不受
-        // 影响”，但用户 16:38 截图实证：点备份/恢复还是没弹窗。
-        // 真根因是 SwiftUI 单视图一次只能呈现一个东西：Form 上
-        // 挂着两个 confirmationDialog + 两个 fullScreenCover，
-        // 选页全屏盖着时 Form 已在呈现，confirmationDialog 再
-        // 设 true 会被系统直接吞掉（337/338 的“关页+弹框撞
-        // 转场”是同一根因的另一面）。alert 走窗口层、不占
-        // Form 的呈现位，选页/预览盖着也能弹出来；按钮和
-        // 逻辑一字不动，只换呈现方式。
-        .alert(Text("备份范围"), isPresented: $showBackupScopeDialog) {
-            // 3.8.341：范围记忆——上次那个选项排第一（没选过时
-            // 保持原顺序，登录态在前），点第一个就是上次的选择。
-            if lastBackupLoginOnly == false {
-                Button("完整备份（数据 + 登录态）") { doBackupScope(loginOnly: false) }
-                Button("只备份登录态") { doBackupScope(loginOnly: true) }
-            } else {
-                Button("只备份登录态") { doBackupScope(loginOnly: true) }
-                Button("完整备份（数据 + 登录态）") { doBackupScope(loginOnly: false) }
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {}
-        } message: {
-            Text(lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
-        }
-        // 恢复范围弹窗优化：说明不再把两个选项的解释挤成一整段
-        // （扫一眼分不清）；安全的选项只留一句说明，危险的选项
-        // 标红、后果直接写进按钮上，点之前就看得见
-        .alert(Text("恢复范围"), isPresented: $showRestoreScopeDialog) {
-            // 3.8.341：范围记忆——同备份框，上次那个选项排第一。
-            if lastRestoreLoginOnly == false {
-                Button("恢复全部数据（会覆盖当前数据）", role: .destructive) { doRestoreScope(loginOnly: false) }
-                Button("只恢复登录态") { doRestoreScope(loginOnly: true) }
-            } else {
-                Button("只恢复登录态") { doRestoreScope(loginOnly: true) }
-                Button("恢复全部数据（会覆盖当前数据）", role: .destructive) { doRestoreScope(loginOnly: false) }
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {}
-        } message: {
-            Text(lastRestoreScopeHint() + restoreTargetText() + "只恢复登录态：只写回登录，现有数据不动。")
-        }
+        // 3.8.342：范围框不再挂 SwiftUI .alert——340 的前提是错的。
+        // .alert 和 .confirmationDialog 都是由所挂视图的 VC 用
+        // UIAlertController 呈现，与 fullScreenCover 共用同一个
+        // 呈现位；盖子盖着时 Form 的 VC 已在呈现，alert 再设
+        // true 会被系统丢掉（4 版 × 2 种类型全灭；盖内 alert
+        // 行 881/1051 正常，证实是挂载点不是弹窗类型）。
+        // 改走 presentScopeAlert（见文件下方）：直接取最顶层 VC
+        // 弹 UIAlertController，不占 SwiftUI 的呈现位，几层盖子
+        // 都盖不住。showBackupScopeDialog/showRestoreScopeDialog
+        // 仍保留，只作“框开着”的跟踪位（直进收尾五路检查用）。
         // 真全屏：325 的 sheet + large detent 顶上仍留一条缝——
         // sheet 的 large 本来就不是全屏，顶边留边距+圆角，底下
         // 的设置页总从缝里露出来，detent 再调也盖不住（系统
@@ -688,7 +681,7 @@ struct LCDataManagementView : View {
                                 pendingBackupApps = (sharedModel.apps + sharedModel.hiddenApps).filter {
                                     backupSelectedIDs.contains(Self.instanceKey(for: $0))
                                 }
-                                showBackupScopeDialog = true
+                                presentScopeAlert(isBackup: true)
                             }
                             // 零勾选禁用确认：以前零勾选也能走完还报
                             // 成功（空跑一趟）；现在没勾就不让点。
@@ -717,7 +710,7 @@ struct LCDataManagementView : View {
                             //（同备份按钮的修法，关页+弹框撞转场会吞框）。
                             pendingRestoreURL = nil
                             pendingRestoreAll = true
-                            showRestoreScopeDialog = true
+                            presentScopeAlert(isBackup: false)
                         } label: {
                             HStack {
                                 LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
@@ -788,7 +781,7 @@ struct LCDataManagementView : View {
                                     // 3.8.339：先不关恢复页，备份范围框
                                     // 盖在上面（同款转场冲突）。
                                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
-                                    showBackupScopeDialog = true
+                                    presentScopeAlert(isBackup: true)
                                 }
                             }
                             .padding(.vertical, 4)
@@ -954,7 +947,7 @@ struct LCDataManagementView : View {
                                     if let url = previewFolderURL {
                                         pendingRestoreURL = url
                                         pendingRestoreAll = false
-                                        showRestoreScopeDialog = true
+                                        presentScopeAlert(isBackup: false)
                                     }
                                 }
                                 .disabled(previewFolderURL == nil)
@@ -1039,7 +1032,7 @@ struct LCDataManagementView : View {
                                             pendingRestoreURL = nil
                                             // 3.8.339：多选页和恢复页先不关，
                                             // 范围框盖在上面，选了范围再一起关。
-                                            showRestoreScopeDialog = true
+                                            presentScopeAlert(isBackup: false)
                                         }
                                     }
                                     .disabled(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.isEmpty)
@@ -1242,8 +1235,13 @@ struct LCDataManagementView : View {
         // 改 0.1 秒，内层页几乎立刻出来。
         // 3.8.338：0.1 秒还是闪白页——推入动画 0.35 秒里空壳
         // 先滑进来，内层页 0.1 秒后才弹，用户就看到一张白页
-        // （用户 15:12 视频）。改 0 秒，内层页下一轮 runloop
-        // 就弹出来盖住空壳，白页只剩一帧、看不见。
+        // 3.8.342：直进内层页改在 init 里开（见 init 注释），
+        // 这里只剩 .backupAll 兜底——范围框走 UIKit 顶层 VC，
+        // 但设置 sheet 还在滑入动画中时顶层 VC 未落定，
+        // 直接弹可能被系统丢掉；等 0.5 秒让 sheet 落定再弹。
+        // 其余三路（.restore/.backupSelect/.scheduleBackup）
+        // 已在 init 里开好、didApplyInitialSheet 为 true，
+        // 这里的 switch 是兜底（init 万一没开上时再开一次）。
         if !didApplyInitialSheet, let sheet = initialSheet {
             didApplyInitialSheet = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.0) {
@@ -1254,7 +1252,9 @@ struct LCDataManagementView : View {
                     self.showBackupSelect = true
                 case .backupAll:
                     self.pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
-                    self.showBackupScopeDialog = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.presentScopeAlert(isBackup: true)
+                    }
                 case .scheduleBackup:
                     self.loadScheduleSettings()
                     self.showScheduleBackup = true
@@ -2065,7 +2065,7 @@ struct LCDataManagementView : View {
                 //（同款转场冲突，关页+弹框会吞框）。
                 pendingRestoreURL = folderURL
                 pendingRestoreAll = false
-                showRestoreScopeDialog = true
+                presentScopeAlert(isBackup: false)
             } label: {
                 HStack {
                     Image(systemName: "arrow.clockwise.circle")
@@ -2743,6 +2743,54 @@ struct LCDataManagementView : View {
     private func lastRestoreScopeHint() -> String {
         guard let last = lastRestoreLoginOnly else { return "" }
         return "上次选的是：" + (last ? "只恢复登录态" : "恢复全部数据") + "。\n"
+    }
+    // 3.8.342：范围框走 UIKit 顶层 VC 弹 UIAlertController——
+    // SwiftUI .alert/.confirmationDialog 都是由所挂视图的 VC
+    // 呈现，与 fullScreenCover 共用同一个呈现位；盖子盖着时
+    // Form 的 VC 已在呈现，alert 再设 true 会被系统丢掉
+    // （4 版 × 2 种类型全灭；盖内 alert 行 881/1051 正常，
+    // 证实是挂载点不是弹窗类型）。直接取最顶层 VC 弹，
+    // 不占 SwiftUI 的呈现位，几层盖子都盖不住。标题/文案/
+    // 按钮顺序与原来 SwiftUI 的 alert 一字不动（含 341 的
+    // 范围记忆：上次那个选项排第一）。showBackupScopeDialog/
+    // showRestoreScopeDialog 只作“框开着”的跟踪位（直进收尾
+    // 五路检查用），点按钮时清掉。
+    private func presentScopeAlert(isBackup: Bool) {
+        let title = isBackup ? "备份范围" : "恢复范围"
+        let message: String
+        if isBackup {
+            message = lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。"
+        } else {
+            message = lastRestoreScopeHint() + restoreTargetText() + "只恢复登录态：只写回登录，现有数据不动。"
+        }
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        // 3.8.341 范围记忆：上次那个选项排第一（没选过时登录态在前）。
+        if isBackup {
+            showBackupScopeDialog = true
+            if lastBackupLoginOnly == false {
+                alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: false) })
+                alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: true) })
+            } else {
+                alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: true) })
+                alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: false) })
+            }
+            alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showBackupScopeDialog = false })
+        } else {
+            showRestoreScopeDialog = true
+            if lastRestoreLoginOnly == false {
+                alert.addAction(UIAlertAction(title: "恢复全部数据（会覆盖当前数据）", style: .destructive) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: false) })
+                alert.addAction(UIAlertAction(title: "只恢复登录态", style: .default) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: true) })
+            } else {
+                alert.addAction(UIAlertAction(title: "只恢复登录态", style: .default) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: true) })
+                alert.addAction(UIAlertAction(title: "恢复全部数据（会覆盖当前数据）", style: .destructive) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: false) })
+            }
+            alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showRestoreScopeDialog = false })
+        }
+        guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+              let window = scene.windows.first(where: { $0.isKeyWindow }),
+              var top = window.rootViewController else { return }
+        while let presented = top.presentedViewController { top = presented }
+        top.present(alert, animated: true)
     }
     private func doBackupScope(loginOnly: Bool) {
         UserDefaults.standard.set(loginOnly, forKey: "LCBackupLastLoginOnly")

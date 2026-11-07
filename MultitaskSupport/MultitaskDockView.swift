@@ -4383,9 +4383,9 @@ struct SourcesPanelView: View {
                             // 搜不到的节不渲染（源名命中则整节保留，见 matchedApps）
                             if !matchedApps(for: source).isEmpty {
                                 VStack(alignment: .leading, spacing: 10) {
-                                    Text(source.name)
-                                        .font(.headline)
-                                        .padding(.horizontal)
+                                    // 3.8.342：源名标题去掉（用户 17:12 亲令，
+                                    // “解剖自我 🅥”那行不要，App 直接列出来，
+                                    // 照他发的截图那样）。
                                     ForEach(matchedApps(for: source)) { app in
                                         SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) }, onDownloadVersion: { version in downloadFromPanel(url: version.downloadURL) })
                                             .padding(.horizontal)
@@ -4578,13 +4578,8 @@ private struct SourcePanelRow: View {
         return FileManager.default.fileExists(atPath: pluginURL.path)
     }
 
-    private var metadataText: String {
-        guard let latest = app.latestVersion else {
-            return app.bundleIdentifier
-        }
-        return "\(latest.version) • \(app.bundleIdentifier)"
-    }
-
+    // 3.8.342：metadataText 删——行只留名字，版本/Bundle ID
+    // 不再显示（见 body），留着是死代码。
     // 3.8.292：行长按菜单抽成独立 @ViewBuilder 子表达式——
     // body 已很大（291 在 .contextMenu 处报 type '()' cannot
     // conform to 'View'，类型检查器扛不住）；内容一字不动，
@@ -4723,7 +4718,13 @@ private struct SourcePanelRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        // 3.8.342：跟 App 面板一样干净整洁（用户 17:19 亲令）——
+        // 只留名字一行，版本号/Bundle ID/描述全删（App 面板行
+        // AppCardRow 只显名字，用户早定“版本号/包名/UUID 不再
+        // 显示”）；图标 48→52、HStack 间距 12→8、名字改
+        // subheadline 不加粗，与 AppCardRow 同款。按钮不动，
+        // 还是下载/安装/打开/更新。
+        HStack(spacing: 8) {
             AsyncImage(url: app.iconURL) { phase in
                 if let image = phase.image {
                     image.resizable().scaledToFill()
@@ -4731,24 +4732,13 @@ private struct SourcePanelRow: View {
                     Color.gray.opacity(0.25)
                 }
             }
-            .frame(width: 48, height: 48)
+            .frame(width: 52, height: 52)
             // #15：圆角统一 12，跟顶部状态栏条/面板行同款（原来这里 10）
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(app.name)
-                    .font(.system(size: 15)).bold()
-                    .lineLimit(1)
-                Text(metadataText)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                if let subtitle = app.subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-            }
+            Text(app.name)
+                .font(.subheadline)
+                .foregroundColor(.primary)
+                .lineLimit(1)
             Spacer()
             rowActionButtons
         }
