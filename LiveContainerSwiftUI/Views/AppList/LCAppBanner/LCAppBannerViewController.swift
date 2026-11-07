@@ -167,20 +167,15 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
     }
 
-    // 新3（3.8.277）：启动偏好按 App 记忆。键 LCAppLastLaunchMode：
-    // [唯一 ID: "large"/"small"/"minimized"]，存 App Group。读是
-    // 现读（无缓存），恢复写回后下次点启动即生效，不用 reload。
+    // 启动偏好记忆（3.8.277 新3）：键 LCAppLastLaunchMode：
+    // [唯一 ID: "large"/"small"/"minimized"]，存 App Group。
+    // 小窗口/最小化按钮点时写；启动按钮不再读它——启动一律
+    // 大窗口（用户亲定；3.8.277 让启动按记忆开，点过一次小
+    // 窗后每次启动都开小窗，已废）。读函数已删，只留写。
     private static let lastLaunchModeKey = "LCAppLastLaunchMode"
 
     private enum LaunchMode: String {
         case large, small, minimized
-    }
-
-    private static func lastLaunchMode(for model: LCAppModel) -> LaunchMode {
-        guard let id = LCAppSortManager.shared.getUniqueIdentifier(for: model),
-              let raw = LCUtils.appGroupUserDefault.dictionary(forKey: lastLaunchModeKey)?[id] as? String,
-              let mode = LaunchMode(rawValue: raw) else { return .large }
-        return mode
     }
 
     private static func setLastLaunchMode(_ mode: LaunchMode, for model: LCAppModel) {
@@ -256,30 +251,22 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
         Task { [weak self] in
             guard let self else { return }
-            // 新3（3.8.277）：启动按钮按记忆的方式开——上次小窗口/
-            // 最小化就按那个方式起（走同名方法，新起 + 尺寸一次
-            // 做到位）；没记忆保持默认大窗口（原有新开路拉满）。
+            // 启动一律大窗口（用户亲定：启动=大窗，小窗口按钮=
+            // 小窗，两按钮不得都开小窗）。3.8.277 新3 让启动按
+            // 记忆开——上次点过小窗口/最小化，记忆就是 small/
+            // minimized，下次点启动就跟着开小窗/最小化，正是本
+            // 次回归。记忆只写不读，启动不再读它。
             // 已在跑的带回逻辑在上面已处理（return），到这里的
             // 都是要新起的；带回不记偏好，免得一次带回冲掉偏好。
-            // iOS 15 没有多任务窗口：别处备份恢复来的小窗口/
-            // 最小化偏好在 15 上会静默无操作（同名方法直接 return），
-            // #available 守在这里，落回默认大窗口。
-            let rememberedMode = Self.lastLaunchMode(for: self.configuration.model)
-            if rememberedMode == .small, #available(iOS 16.0, *) {
-                await MainActor.run { [weak self] in self?.smallWindowButtonTapped() }
-            } else if rememberedMode == .minimized, #available(iOS 16.0, *) {
-                await MainActor.run { [weak self] in self?.minimizeButtonTapped() }
-            } else {
-                Self.setLastLaunchMode(.large, for: self.configuration.model)
-                await self.runApp()
-                // 新开路拉满（3.8.240）：App 没在跑时启动只管起新窗、
-                // 起完没人拉满——上次关时是小窗就还是小窗，3.8.238
-                // 只修了在跑的带回拉满。起完等新窗进 dock 再拉满一次，
-                // 不管上次关时大小；小窗/最小化按钮不走这里。
-                await MainActor.run {
-                    if #available(iOS 16.0, *) {
-                        self.pollAndMaximizeFreshWindow()
-                    }
+            Self.setLastLaunchMode(.large, for: self.configuration.model)
+            await self.runApp()
+            // 新开路拉满（3.8.240）：App 没在跑时启动只管起新窗、
+            // 起完没人拉满——上次关时是小窗就还是小窗，3.8.238
+            // 只修了在跑的带回拉满。起完等新窗进 dock 再拉满一次，
+            // 不管上次关时大小；小窗/最小化按钮不走这里。
+            await MainActor.run {
+                if #available(iOS 16.0, *) {
+                    self.pollAndMaximizeFreshWindow()
                 }
             }
         }
@@ -411,8 +398,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func minimizeButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
-        // 新3：记偏好——下次点“启动”按最小化开（runButtonTapped
-        // 读）。记的是点的意图，启动失败也不改回。
+        // 新3：记偏好（启动不再读它，只写；启动一律大窗口）。
+        // 记的是点的意图，启动失败也不改回。
         Self.setLastLaunchMode(.minimized, for: configuration.model)
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；60 次内没出现就停（启动失败已由
@@ -471,8 +458,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func smallWindowButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
-        // 新3：记偏好——下次点“启动”按小窗口开（runButtonTapped
-        // 读）。记的是点的意图，启动失败也不改回。
+        // 新3：记偏好（启动不再读它，只写；启动一律大窗口）。
+        // 记的是点的意图，启动失败也不改回。
         Self.setLastLaunchMode(.small, for: configuration.model)
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；60 次内没出现就停（启动失败已由
