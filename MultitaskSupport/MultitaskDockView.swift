@@ -2355,15 +2355,29 @@ extension Notification.Name {
         backdrop.isHidden = true
         backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.czfSourcesBackdropTapped)))
         window.addSubview(backdrop)
-        let rootView = AnyView(
-            SourcesPanelView()
-                .environmentObject(self)
-                // 3.8.311：App 设置页（LCAppSettingsView）要
-                // SharedModel 作 @EnvironmentObject，面板是独立
-                // hosting，不注会崩；注的是全 App 同一个实例。
-                .environmentObject(DataManager.shared.model)
-                .environment(\.czfPanelClose) { [weak self] in self?.dismissSourcesOverlay() }
-        )
+        let base = SourcesPanelView()
+            .environmentObject(self)
+            // 3.8.311：App 设置页（LCAppSettingsView）要
+            // SharedModel 作 @EnvironmentObject，面板是独立
+            // hosting，不注会崩；注的是全 App 同一个实例。
+            .environmentObject(DataManager.shared.model)
+            .environment(\.czfPanelClose) { [weak self] in self?.dismissSourcesOverlay() }
+        // 3.8.347：346 的直接 cover 让 LCDataManagementView 落到
+        // 独立 hosting 里——它要 sceneDelegate 作 @EnvironmentObject
+        // （238 行，presentScopeAlert 里读 sceneDelegate.window），
+        // 根视图只注了 dockManager 与 SharedModel，没注就闪退
+        // （与 311 注 SharedModel 同款：独立 hosting 不注会崩）。
+        // window.windowScene?.delegate 就是本场景的 SceneDelegate，
+        // 与主层级里 SwiftUI 自动注的是同一个实例；取不到就不注，
+        // 宁可弹框走全局查找兜底也不 force unwrap。
+        // 链式 environmentObject 每次都换类型，不能用同一个 var
+        // 反复赋值，包两层 AnyView 分支。
+        let rootView: AnyView
+        if let sceneDelegate = window.windowScene?.delegate as? SceneDelegate {
+            rootView = AnyView(base.environmentObject(sceneDelegate))
+        } else {
+            rootView = AnyView(base)
+        }
         let host = UIHostingController(rootView: rootView)
         // 3.8.289：宿主底色放透明——源面板走液态玻璃时，玻璃
         // 要直接采客 App 当底；不放透明玻璃会被宿主默认底色盖住。
