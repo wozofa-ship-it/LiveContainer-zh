@@ -523,22 +523,32 @@ struct LCTweakFolderView : View {
 }
 
 struct LCTweaksView: View {
-    // 模块分两处放：本机（Documents/Tweaks）和共享（App Group），
+    // 模块分三处：本机（Documents/Tweaks）、共享（App Group）、VPN。
     // 转共享后文件夹搬去了共享处，不切过去就永远看不到、也开不回来。
-    @State private var showShared = false
+    // VPN 分段是原设置页 VPN 区整段搬过来（3.8.328），设置页不再留；
+    // CZFVPN 那行开关不动（它只是模块开关，VPN 设置是另一回事）。
+    private enum TweakTab: Hashable {
+        case local, shared, vpn
+    }
+    @State private var selectedTab: TweakTab = .local
 
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                Picker("", selection: $showShared) {
-                    Text("本机").tag(false)
-                    Text("共享").tag(true)
+                Picker("", selection: $selectedTab) {
+                    Text("本机").tag(TweakTab.local)
+                    Text("共享").tag(TweakTab.shared)
+                    Text("VPN").tag(TweakTab.vpn)
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
                 .padding(.vertical, 8)
-                LCTweakFolderView(baseUrl: showShared ? LCPath.lcGroupTweakPath : LCPath.tweakPath, isRoot: true)
-                    .id(showShared)
+                if selectedTab == .vpn {
+                    CZFVPNSettingsView()
+                } else {
+                    LCTweakFolderView(baseUrl: selectedTab == .shared ? LCPath.lcGroupTweakPath : LCPath.tweakPath, isRoot: true)
+                        .id(selectedTab)
+                }
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())

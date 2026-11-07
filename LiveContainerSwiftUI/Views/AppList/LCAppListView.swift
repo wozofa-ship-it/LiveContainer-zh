@@ -117,6 +117,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 走数据管理页）。选中集存唯一 ID，不存下标——搜索过滤
     // 与排序变化都不会串选。
     @State private var batchMode = false
+    // 顶栏三个工具（数据管理/VPN/多选）收起/展开：默认收起，点
+    // 箭头展开、再点收起；只管显隐，三个功能本身不动。
+    @State private var topToolsExpanded = false
     // 3.8.281：顶部 VPN 开关用的核心运行状态（CZFVPNManager 不是
     // ObservableObject，本地 @State 存一份，进页/点按后从
     // shared.isRunning 刷新，与设置页同款读法）。
@@ -977,37 +980,50 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
                 }
                 
-                // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
-                // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
-                // 停止核心”同一套调用；状态从 shared.isRunning 读，
-                // 点按后刷新，不靠猜）。
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        LCDataManagementView()
-                    } label: {
-                        Label("数据管理", systemImage: "folder")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    // 3.8.283：长按菜单不显示（用户 282 真机报）：
-                    // ToolbarItem 里的 Button + contextMenu 长按不
-                    // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
-                    // 点按走 primaryAction 开关核心，长按出菜单——
-                    // 这才是工具栏上点按+长按的标准写法，菜单内容不变。
-                    // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
-                    // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
-                    // 这里只留一行调用。
-                    vpnShieldMenu
-                }
-
-                // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
-                // 整行点按即勾选；关时清空勾选。
+                // 顶栏三个工具收起/展开：默认只露一个箭头，点箭头
+                // 展开显示数据管理/VPN/多选，再点收起；箭头在左，
+                // 三个图标在它右边展开，其余图标（+、?、链接、排序）
+                // 不动，三个功能本身也不动。
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        batchMode.toggle()
-                        if !batchMode { batchSelectedIDs.removeAll() }
+                        withAnimation { topToolsExpanded.toggle() }
                     } label: {
-                        Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
+                        Label("更多工具", systemImage: topToolsExpanded ? "chevron.left" : "chevron.right")
+                    }
+                }
+                if topToolsExpanded {
+                    // 3.8.281：顶部两个快捷入口——数据管理（直接进数据
+                    // 管理页）与 VPN 开关（起停核心，与设置页“启动核心/
+                    // 停止核心”同一套调用；状态从 shared.isRunning 读，
+                    // 点按后刷新，不靠猜）。
+                    ToolbarItem(placement: .topBarTrailing) {
+                        NavigationLink {
+                            LCDataManagementView()
+                        } label: {
+                            Label("数据管理", systemImage: "folder")
+                        }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        // 3.8.283：长按菜单不显示（用户 282 真机报）：
+                        // ToolbarItem 里的 Button + contextMenu 长按不
+                        // 出菜单（工具栏手势抢占）。改 Menu + primaryAction：
+                        // 点按走 primaryAction 开关核心，长按出菜单——
+                        // 这才是工具栏上点按+长按的标准写法，菜单内容不变。
+                        // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
+                        // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
+                        // 这里只留一行调用。
+                        vpnShieldMenu
+                    }
+
+                    // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
+                    // 整行点按即勾选；关时清空勾选。
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            batchMode.toggle()
+                            if !batchMode { batchSelectedIDs.removeAll() }
+                        } label: {
+                            Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
+                        }
                     }
                 }
 
