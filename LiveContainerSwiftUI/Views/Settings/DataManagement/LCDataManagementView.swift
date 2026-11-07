@@ -598,7 +598,14 @@ struct LCDataManagementView : View {
         } message: {
             Text(restoreTargetText() + "只恢复登录态：只写回登录，现有数据不动。")
         }
-        .sheet(isPresented: $showBackupSelect) {
+        // 真全屏：325 的 sheet + large detent 顶上仍留一条缝——
+        // sheet 的 large 本来就不是全屏，顶边留边距+圆角，底下
+        // 的设置页总从缝里露出来，detent 再调也盖不住（系统
+        // sheet 帧自带顶边距，公开 API 去不掉）。改 fullScreenCover
+        // 顶满整屏；代价是没了下滑关闭手势，所以左上角补一个
+        // “取消”按钮（没它用户改主意就关不掉面板了）。内容、
+        // 备份按钮流程一字不动，范围确认框挂在父视图上不受影响。
+        .fullScreenCover(isPresented: $showBackupSelect) {
             NavigationView {
                 List(sharedModel.apps + sharedModel.hiddenApps, id: \.self) { app in
                     HStack {
@@ -617,12 +624,13 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
-                // 面板高一点：默认 sheet 只有半屏高，App 一多就得滑
-                // 着找；改满高，一屏多看几个（iOS 16+ 才有 detents，
-                // 15 走默认，见 czfPresentationDetentsLarge）。
-                .czfPresentationDetentsLarge()
                 .navigationTitle("lc.settings.backupSelected".loc)
                 .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("lc.common.cancel".loc) {
+                            showBackupSelect = false
+                        }
+                    }
                     ToolbarItem(placement: .confirmationAction) {
                         HStack {
                             Button(allBackupSelected ? "取消全选" : "全选") {
