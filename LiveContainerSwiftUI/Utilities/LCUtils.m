@@ -496,9 +496,11 @@
 }
 
 + (NSString *)getVersionInfo {
-    return [NSString stringWithFormat:@"Version %@-%@ 解剖自我 🅥修改版",
-            NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"],
-            NSBundle.mainBundle.infoDictionary[@"LCVersionInfo"]];
+    // 3.8.336：页脚改成“解剖自我 🅥 LiveContainer 版本号”
+    // （用户 13:16 截图圈定）；只用短版本号，不再拼
+    // Release/提交号/修改版。
+    return [NSString stringWithFormat:@"解剖自我 🅥 LiveContainer %@",
+            NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]];
 }
 
 + (NSData*)bookmarkForURL:(NSURL*) url {
