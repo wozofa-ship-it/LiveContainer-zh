@@ -196,6 +196,16 @@ static BOOL CZFKBGroupContainsVendorPrefix(NSString *group, NSString *bid) {
     for (NSUInteger i = 0; i + 1 < gParts.count; i++) {
         if ([gParts[i] isEqualToString:bParts[0]] && [gParts[i + 1] isEqualToString:bParts[1]]) return YES;
     }
+    // 厂商族（阿里系）：Bundle ID 厂商是 com.taobao 的 App，
+    // 登录走阿里统一账号（SSO），令牌也可能落在 com.alibaba.*
+    // 共享组——与 com.taobao 同一厂商账号体系，跨厂商不命中。
+    // 只认这一条映射，不 blanket 放宽。修前：com.alibaba.*
+    // 组全 miss；修后：com.taobao 的 App 收 com.alibaba.* 组。
+    if ([bParts[0] isEqualToString:@"com"] && [bParts[1] isEqualToString:@"taobao"]) {
+        for (NSUInteger i = 0; i + 1 < gParts.count; i++) {
+            if ([gParts[i] isEqualToString:@"com"] && [gParts[i + 1] isEqualToString:@"alibaba"]) return YES;
+        }
+    }
     return NO;
 }
 
@@ -251,6 +261,12 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
         if (displayName.length >= 3 && [f localizedCaseInsensitiveContainsString:displayName]) return YES;
         if (displayName.length >= 3 && f.length >= 4 && [displayName localizedCaseInsensitiveContainsString:f]) return YES;
         if (vendorPrefix.length && [f localizedCaseInsensitiveContainsString:vendorPrefix]) return YES;
+        // 厂商族（阿里系，见 CZFKBGroupContainsVendorPrefix）：
+        // com.taobao 的 App，字段含 com.alibaba 也算归属（服务名
+        // 是阿里通用名、组是阿里共享组时，两条都不含 com.taobao，
+        // 不加这条就被排除）。只认 com.taobao→com.alibaba 这一
+        // 条映射，其他厂商不动。
+        if ([vendorPrefix isEqualToString:@"com.taobao"] && [f localizedCaseInsensitiveContainsString:@"com.alibaba"]) return YES;
     }
     return NO;
 }
