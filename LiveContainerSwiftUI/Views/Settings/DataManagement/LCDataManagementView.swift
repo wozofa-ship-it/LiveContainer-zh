@@ -124,6 +124,10 @@ struct LCDataManagementView : View {
     // 3.8.307：恢复列表排序/筛选——0=时间（新→旧）、1=名字
     // （A→Z）；只看登录态是筛选（manifest scope == "login"）。
     // @State 不落盘，每次打开恢复 sheet 都是默认态。
+    // 3.8.337：直进（initialSheet）时本页只是个空壳，内层页关
+    // 掉后本页也跟着关——用户点快捷方式/文件夹只想看内层那一页，
+    // 不想关掉内层后还剩一个数据管理页（“别弹窗俩个出来”）。
+    @Environment(\.dismiss) private var dismiss
     @State private var backupSortMode: Int = 0
     @State private var backupLoginOnlyFilter: Bool = false
     @State private var showBackupSelect = false
@@ -481,8 +485,14 @@ struct LCDataManagementView : View {
                 }
             }
         }
-        .navigationTitle("lc.settings.dataManagement".loc)
+        // 3.8.337：直进时本页只是空壳——标题留空、导航栏藏掉、
+        // 内容透明，内层页没弹出来之前用户只看到一张白纸，不
+        // 会看到数据管理列表（“别弹窗俩个出来”）。正常进页时
+        // initialSheet 为 nil，三行全按原样。
+        .navigationTitle(initialSheet == nil ? "lc.settings.dataManagement".loc : "")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarHidden(initialSheet != nil)
+        .opacity(initialSheet == nil ? 1 : 0)
         .alert("lc.common.error".loc, isPresented: $errorShow){
             // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
             // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。
@@ -579,6 +589,13 @@ struct LCDataManagementView : View {
         .onAppear {
             onAppearFunc()
         }
+        // 3.8.337：直进收尾——五路内层页/弹窗任一关上时都查一遍
+        // 是不是全关了，全关了本页也关（见 czfDismissIfDirectEntryDone）。
+        .onChange(of: showRestoreSelect) { _ in czfDismissIfDirectEntryDone() }
+        .onChange(of: showBackupSelect) { _ in czfDismissIfDirectEntryDone() }
+        .onChange(of: showScheduleBackup) { _ in czfDismissIfDirectEntryDone() }
+        .onChange(of: showBackupScopeDialog) { _ in czfDismissIfDirectEntryDone() }
+        .onChange(of: showRestoreScopeDialog) { _ in czfDismissIfDirectEntryDone() }
         .confirmationDialog("备份范围", isPresented: $showBackupScopeDialog, titleVisibility: .visible) {
             Button("只备份登录态") {
                 let apps = pendingBackupApps
@@ -1150,6 +1167,19 @@ struct LCDataManagementView : View {
         }
     }
     
+    // 3.8.337：直进收尾——initialSheet 触发的内层页/弹窗全关了，
+    // 本页也关掉（回 App 页）。只在直进时跑；正常进数据管理页
+    // 时 initialSheet 为 nil，一律不关。判“全关”不是判某一个，
+    // 是五路全 false——备份选页点“备份”会先关选页再弹范围框，
+    // 只看选页会误关，范围框开着时不关。
+    private func czfDismissIfDirectEntryDone() {
+        guard initialSheet != nil else { return }
+        guard didApplyInitialSheet else { return }
+        guard !showRestoreSelect, !showBackupSelect, !showScheduleBackup,
+              !showBackupScopeDialog, !showRestoreScopeDialog else { return }
+        dismiss()
+    }
+
     func onAppearFunc() {
         if !appeared {
             for app in sharedModel.apps {
@@ -1166,9 +1196,12 @@ struct LCDataManagementView : View {
         // 3.8.317：一个 runloop 不够——外层 sheet 呈现动画约
         // 0.35 秒，内层在动画中途弹会按未落定的容器布局，
         // 顶部短一截（用户 21:54 截图）。改 0.5 秒，等落定。
+        // 3.8.337：直进时本页是空壳（opacity 0），0.5 秒白屏
+        // 太久；NavigationLink 推入没有外层 sheet 动画要等，
+        // 改 0.1 秒，内层页几乎立刻出来。
         if !didApplyInitialSheet, let sheet = initialSheet {
             didApplyInitialSheet = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 switch sheet {
                 case .restore:
                     self.showRestoreSelect = true

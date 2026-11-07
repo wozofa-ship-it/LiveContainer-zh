@@ -480,15 +480,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 三个工具照常摆在 builder 里，if 下沉到每个 ToolbarItem
         // 的内容里（那是 @ViewBuilder，buildIf 是 iOS 13+ 就有的）。
         // 收起时内容为空，ToolbarItem 不占位；展开时照常显示。
-        // 3.8.335：数据管理常驻顶栏，不再收进折叠里——用户
-        // 13:11 视频：去数据管理要先点设置、再点数据管理，
-        // 两层设置页叠着，关掉一个后面还有一个。文件夹图标
-        // 常驻，点一下直进数据管理，就一页。VPN/多选仍收起。
+        // 3.8.337：文件夹图标直进恢复备份，不再停数据管理页——
+        // 用户 14:11 视频：点文件夹先弹数据管理、再弹恢复备份，
+        // 要直接弹恢复备份。用 initialSheet=.restore：数据管理
+        // 页一出现就自动弹恢复备份（现成机制，0.5 秒后弹）。
+        // 用户 14:17：顶栏全藏、只留展开箭头——文件夹也收进
+        // 折叠里（点箭头才出来），默认只剩一个“>”。
         ToolbarItem(placement: .topBarTrailing) {
-            NavigationLink {
-                LCDataManagementView()
-            } label: {
-                Label("数据管理", systemImage: "folder")
+            if topToolsExpanded {
+                NavigationLink {
+                    LCDataManagementView(initialSheet: .restore)
+                } label: {
+                    Label("数据管理", systemImage: "folder")
+                }
             }
         }
         ToolbarItem(placement: .topBarTrailing) {
@@ -518,13 +522,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.337：用户 14:17 顶栏全藏只留展开箭头——链接也收进
+        // 折叠里，默认不显示，点箭头才出来。
         ToolbarItem(placement: .topBarTrailing) {
-            Button("lc.appList.openLink".loc, systemImage: "link", action: {
-                Task { await onOpenWebViewTapped() }
-            })
+            if topToolsExpanded {
+                Button("lc.appList.openLink".loc, systemImage: "link", action: {
+                    Task { await onOpenWebViewTapped() }
+                })
+            }
         }
-        
+
+        // 3.8.337：同上，排序菜单也收进折叠里。
         ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded {
             Menu {
                 // 优3（3.8.277）：排序切换那一下不做全量动画——
                 // 列表带 .animation(.easeInOut, value: filteredApps)，
@@ -583,6 +593,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
             } label: {
                 Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
+            }
             }
         }
     }
