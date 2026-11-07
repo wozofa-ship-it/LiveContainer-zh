@@ -1172,12 +1172,21 @@ struct LCDataManagementView : View {
     // 时 initialSheet 为 nil，一律不关。判“全关”不是判某一个，
     // 是五路全 false——备份选页点“备份”会先关选页再弹范围框，
     // 只看选页会误关，范围框开着时不关。
+    // 3.8.338 修：立刻判会误关——点“备份”那一下，选页关和范围
+    // 框弹是两次状态变化，onChange 先看到选页关了、范围框还没
+    // 弹出来，当场判全关就把本页关了，范围框挂在本页身上、跟着
+    // 一起没了，用户就看不到弹窗（用户 15:16 报）。改延迟 0.3
+    // 秒再判，等范围框弹出来再看，就不会误关；用户点取消关页
+    // 时多等 0.3 秒才回 App 页，几乎感觉不到。
     private func czfDismissIfDirectEntryDone() {
         guard initialSheet != nil else { return }
         guard didApplyInitialSheet else { return }
-        guard !showRestoreSelect, !showBackupSelect, !showScheduleBackup,
-              !showBackupScopeDialog, !showRestoreScopeDialog else { return }
-        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard self.initialSheet != nil else { return }
+            guard !self.showRestoreSelect, !self.showBackupSelect, !self.showScheduleBackup,
+                  !self.showBackupScopeDialog, !self.showRestoreScopeDialog else { return }
+            self.dismiss()
+        }
     }
 
     func onAppearFunc() {
@@ -1199,9 +1208,13 @@ struct LCDataManagementView : View {
         // 3.8.337：直进时本页是空壳（opacity 0），0.5 秒白屏
         // 太久；NavigationLink 推入没有外层 sheet 动画要等，
         // 改 0.1 秒，内层页几乎立刻出来。
+        // 3.8.338：0.1 秒还是闪白页——推入动画 0.35 秒里空壳
+        // 先滑进来，内层页 0.1 秒后才弹，用户就看到一张白页
+        // （用户 15:12 视频）。改 0 秒，内层页下一轮 runloop
+        // 就弹出来盖住空壳，白页只剩一帧、看不见。
         if !didApplyInitialSheet, let sheet = initialSheet {
             didApplyInitialSheet = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.0) {
                 switch sheet {
                 case .restore:
                     self.showRestoreSelect = true
