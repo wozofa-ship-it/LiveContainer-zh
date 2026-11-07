@@ -5348,6 +5348,8 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
     case tweaks
     case sources
     case apps
+    // 后台保活：点快捷方式直接开关，不用进设置页再翻找。
+    case keepalive
 
     var id: String { rawValue }
 
@@ -5366,6 +5368,7 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .tweaks: return "插件管理"
         case .sources: return "源管理"
         case .apps: return "应用管理"
+        case .keepalive: return "后台保活"
         }
     }
 
@@ -5384,6 +5387,7 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .tweaks: return "puzzlepiece"
         case .sources: return "books.vertical"
         case .apps: return "square.stack.3d.up.fill"
+        case .keepalive: return "heart.fill"
         }
     }
 
@@ -5403,6 +5407,36 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .tweaks: LCTweaksView()
         case .sources: LCSourcesView()
         case .apps: LCAppListView()
+        case .keepalive: CZFKeepAliveShortcutView()
+        }
+    }
+}
+
+// 后台保活快捷方式的目的页：只放保活开关本身（与设置页
+// keepAliveSection 同款：同一把 @AppStorage 键
+// LCKeepAliveEnabled，同一套 onChange/onAppear 同步），
+// 点快捷方式直接开关，不用进设置页再翻找。
+private struct CZFKeepAliveShortcutView: View {
+    @AppStorage("LCKeepAliveEnabled") private var keepAliveEnabled = true
+
+    var body: some View {
+        Form {
+            Section(header: Text("后台保活")) {
+                Toggle(isOn: $keepAliveEnabled) {
+                    HStack {
+                        LCSettingsIcon(systemName: "heart.fill", color: .red)
+                        Text("保活（无声音频）")
+                    }
+                }
+                .onChange(of: keepAliveEnabled) { newValue in
+                    LCSettingsView.syncKeepAliveTweak(enabled: newValue, forceSign: false)
+                    CZFHostKeepAlive.shared.refresh()
+                }
+                .onAppear {
+                    LCSettingsView.syncKeepAliveTweak(enabled: keepAliveEnabled, forceSign: false)
+                    CZFHostKeepAlive.shared.refresh()
+                }
+            }
         }
     }
 }
