@@ -4,8 +4,9 @@
 // 且不报错），但游客自己读自己的令牌一直正常——导出和写回
 // 干脆都搬进游客进程里做，宿主只搬文件：
 //   导出：每次进程启动，把本容器的钥匙串条目（通用/互联网
-//         密码两类）写成 CZFKeychainDump.plist 放在容器根
-//         目录，宿主备份时直接读这份文件
+//         密码 + 密钥/身份/证书五类，3.8.352）写成
+//         CZFKeychainDump.plist 放在容器根目录，宿主备份时
+//         直接读这份文件
 //   写回：宿主恢复时把快照放成 CZFKeychainImport.plist；
 //         进程启动时先把它写回钥匙串（删同键再加，组号、
 //         别名都按本容器现算），删掉文件，再做一次导出——
@@ -150,14 +151,16 @@ static NSDictionary *CZFKBCleanItem(NSDictionary *item, NSString *cls) {
     return clean;
 }
 
-// 导出各路的新增条数（去重后按来源记账），写进状态回执
-static NSInteger CZFKBStatEntitled = 0;
+// 3.8.352：导出各路的新增条数（去重后按来源记账），写进状态回执。
+// 通配符一查覆盖全部有权组，旧逐组+默认组+进程默认组+厂商组
+// 四路全是它的子集，不再分开记（旧四路统计量已删）。
+// exported 总数 = 通配符 + 别名 + 密钥类。
+static NSInteger CZFKBStatWildcard = 0;
 static NSInteger CZFKBStatAlias = 0;
-static NSInteger CZFKBStatDefault = 0;
-static NSInteger CZFKBStatLCDefault = 0;
-// 厂商组显式路由记账（见 CZFKBExport 末尾）：只计前四路
-// 没捞到的新增条目，进 exported 总数公式。
-static NSInteger CZFKBStatVendor = 0;
+// 密钥类（Key/Identity/Certificate）带 data 收进快照的条数。
+static NSInteger CZFKBStatKeyClass = 0;
+// 密钥类探针命中归属、但 data 读不到的条数（只记诊断，不报错）。
+static NSInteger CZFKBStatKeyNoData = 0;
 // 自定义组记账（信息性：已含在上面某一路里，不进总数公式）
 // 归属过滤计数（信息性：被排除的条目总数，未计入任何一路）
 static NSInteger CZFKBStatCustom = 0;
@@ -173,6 +176,14 @@ static NSMutableDictionary *CZFKBDiagExcludedGroupCounts = nil;
 // 旧的 excludedGroups/excludedServices 是两个独立集合，对不上
 // “哪个服务在哪个组里”，下次备份一次就能定位令牌在哪。
 static NSMutableArray *CZFKBDiagExcludedItems = nil;
+// 3.8.352：被滤条目的 alis+service（去重后前 10 条，只读
+// 诊断）。alis 为空记 (nil)——经钩子写的条目都该带 alis，
+// 没 alis 说明不是钩子写的，本身就是定位线索。
+static NSMutableArray *CZFKBDiagExcludedAlis = nil;
+static NSMutableSet *CZFKBDiagExcludedAlisSeen = nil;
+// 3.8.352：密钥类无数据条目按条记“组|服务|账号|alis”（去重
+// 后前 10 条，只读诊断）。
+static NSMutableArray *CZFKBDiagNoDataItems = nil;
 
 // 归属过滤（单开通用修复，隔离容器不用）：
 // 组名是否以点分段为单位完整包含 Bundle ID（防 com.example.app
@@ -298,6 +309,67 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
     return NO;
 }
 
+// 3.8.352：去重 identity 字段值——NSString 原样，NSData 取
+// description（十六进制），与 generic 旧处理一致；其余为空。
+static NSString *CZFKBIdentityField(id v) {
+    if ([v isKindOfClass:NSString.class]) return (NSString *)v;
+    if ([v isKindOfClass:NSData.class]) return [(NSData *)v description];
+    if ([v isKindOfClass:NSNumber.class]) return [(NSNumber *)v stringValue];
+    return @"";
+}
+
+// 3.8.352：去重 identity（collect 与密钥类第二遍共用，同一
+// 条目两次算出的 identity 必须一致）。旧五段（class|account|
+// service|generic|server）+ 类专属字段：Key/Cert/Identity 没
+// 有 account/service/server，旧五段全空会坍缩成一条；补
+// applicationLabel/keyType/keyClass/publicKeyHash。identity
+// 只用于当次导出的去重，不落盘，格式变了无影响。
+static NSString *CZFKBItemIdentity(NSDictionary *clean, NSString *cls) {
+    return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%@|%@",
+        cls,
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrAccount]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrService]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrGeneric]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrServer]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrApplicationLabel]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrKeyType]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrKeyClass]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrPublicKeyHash])];
+}
+
+// 3.8.352：同 App 其他分身容器的文件夹名（alis 归属用）。
+// 容器文件夹名就是 SecItem 钩子盖的 alis；分身与本容器同父
+// 目录（dataPath 或 AppGroup），各带 LCContainerInfo.plist。
+// 只认 appIdentifier 与本容器相同的——别的 App 的容器也在
+// 同一父目录下，不筛会把别家 alis 当成自家、串号。读不到或
+// 无分身返回空数组，谓词退化成旧行为。只读文件系统，不写。
+static NSArray<NSString *> *CZFKBSiblingFolderNames(NSString *home, NSString *bundleID) {
+    if (!home.length || !bundleID.length) return @[];
+    NSString *parent = [home stringByDeletingLastPathComponent];
+    NSString *selfName = home.lastPathComponent;
+    NSError *err = nil;
+    NSArray<NSString *> *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:parent error:&err];
+    if (!names) return @[];
+    NSMutableArray<NSString *> *ans = [NSMutableArray array];
+    for (NSString *name in names) {
+        if ([name isEqualToString:selfName]) continue;
+        NSString *plist = [[parent stringByAppendingPathComponent:name] stringByAppendingPathComponent:@"LCContainerInfo.plist"];
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plist];
+        if (!dict) continue;
+        id bid = dict[@"appIdentifier"];
+        if ([bid isKindOfClass:NSString.class] && [bid isEqualToString:bundleID]) {
+            [ans addObject:name];
+        }
+    }
+    return ans;
+}
+
+// 3.8.352：alis 是否在给定文件夹名集合里（空集合返回 NO）。
+static BOOL CZFKBAlisInFolders(NSString *alis, NSArray<NSString *> *folders) {
+    if (!alis.length || folders.count == 0) return NO;
+    return [folders containsObject:alis];
+}
+
 // defaultGroup：非隔离容器才传（= <团队>.<Bundle ID>）；
 // 隔离容器传 nil，归属谓词与旧版一字不差，共享组路不动。
 // lcDefaultGroup：进程默认组（= application-identifier），
@@ -316,7 +388,11 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
     NSMutableArray *all = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableSet *seenExcluded = [NSMutableSet set];
-    void (^collect)(NSDictionary *, NSInteger *) = ^(NSDictionary *query, NSInteger *stat) {
+    // 3.8.352：分身文件夹名（alis 归属用，见 CZFKBSiblingFolderNames）。
+    NSArray<NSString *> *siblingFolders = CZFKBSiblingFolderNames(home, bundleID);
+    // 3.8.352：密钥类探针命中归属的属性字典（第二遍逐条取 data 用）。
+    NSMutableArray *keyProbeHits = [NSMutableArray array];
+    void (^collect)(NSDictionary *, NSInteger *, BOOL) = ^(NSDictionary *query, NSInteger *stat, BOOL probeOnly) {
         CFTypeRef result = nil;
         OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
         if (status != errSecSuccess || !result) return;
@@ -331,20 +407,10 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             NSString *itemAlias = item[@"alis"];
             NSString *cls = item[(__bridge NSString *)kSecClass] ?: (__bridge NSString *)kSecClassGenericPassword;
             NSDictionary *clean = CZFKBCleanItem(item, cls);
-            NSString *identity = [NSString stringWithFormat:@"%@|%@|%@|%@|%@",
-                cls,
-                clean[(__bridge NSString *)kSecAttrAccount] ?: @"",
-                clean[(__bridge NSString *)kSecAttrService] ?: @"",
-                clean[(__bridge NSString *)kSecAttrGeneric] ?: @"",
-                // 3.8.345：InternetPassword 条目 service 常为空、
-                // generic 常为 nil，两个同 account 不同 server 的
-                // 条目 identity 相同，后者会被去重丢掉；无 account/
-                // service/generic 的纯数据条目同理全坍缩成一条。
-                // server 拼进去，区分不同 server 的条目。
-                clean[(__bridge NSString *)kSecAttrServer] ?: @""];
-            // 身份字段多为字符串；NSData 的 description 是内容
-            // 的十六进制，同样能区分。撞键只会误丢内容相同的
-            // 重复条，不丢数据
+            // 3.8.352：identity 走 CZFKBItemIdentity（旧五段 +
+            // 类专属字段；3.8.345 的 server 仍在里面）。
+            NSString *identity = CZFKBItemIdentity(clean, cls);
+            // 撞键只会误丢内容相同的重复条，不丢数据
             BOOL mine = NO;
             if (!bundleID.length) {
                 // 无 bundleID（隔离容器传 nil；或非隔离容器 plist
@@ -356,7 +422,10 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                 mine = (group && itemGroup && [itemGroup isEqualToString:group])
                     || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
                     || (lcDefaultGroup && itemGroup && [itemGroup isEqualToString:lcDefaultGroup])
-                    || (itemAlias && [itemAlias isEqualToString:folderName]);
+                    || (itemAlias && [itemAlias isEqualToString:folderName])
+                    // 3.8.352：alis 是分身容器的文件夹名也算归属——
+                    // 令牌写在分身容器组里，组过滤会当成别人的丢掉。
+                    || (itemAlias && CZFKBAlisInFolders(itemAlias, siblingFolders));
             } else {
                 // 非隔离：专属组（本容器共享组、默认组、含 Bundle ID
                 // 的组）组本身就是归属证明，全收；其他组（进程默认
@@ -369,6 +438,7 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                 // 通用服务名的条目会被排除（残留缺口，见回执注释），
                 // 但快照不再含其他单开 App 的条目。
                 if ((itemAlias && [itemAlias isEqualToString:folderName])
+                    || (itemAlias && CZFKBAlisInFolders(itemAlias, siblingFolders))
                     || (group && itemGroup && [itemGroup isEqualToString:group])
                     || (defaultGroup && itemGroup && [itemGroup isEqualToString:defaultGroup])
                     || CZFKBGroupContainsBid(itemGroup, bundleID)
@@ -412,6 +482,16 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                         [CZFKBDiagExcludedItems addObject:[NSString stringWithFormat:@"%@|%@|%@|%@",
                             (itemGroup ?: @"(nil)"), svc2, acct, srvr]];
                     }
+                    // 3.8.352：被滤条目的 alis+service（去重后前
+                    // 10 条，只读诊断）。alis 为空记 (nil)。
+                    if (CZFKBDiagExcludedAlis.count < 10) {
+                        NSString *svc3 = ([svc isKindOfClass:NSString.class] ? svc : @"");
+                        NSString *pair = [NSString stringWithFormat:@"%@|%@", (itemAlias ?: @"(nil)"), svc3];
+                        if (![CZFKBDiagExcludedAlisSeen containsObject:pair]) {
+                            [CZFKBDiagExcludedAlisSeen addObject:pair];
+                            [CZFKBDiagExcludedAlis addObject:pair];
+                        }
+                    }
                     if (itemGroup) {
                         NSNumber *n = CZFKBDiagExcludedGroupCounts[itemGroup];
                         CZFKBDiagExcludedGroupCounts[itemGroup] = @([n integerValue] + 1);
@@ -421,7 +501,13 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             }
             if ([seen containsObject:identity]) continue;
             [seen addObject:identity];
-            [all addObject:clean];
+            // 3.8.352：探针路（密钥类）只记属性字典，不进快照；
+            // data 第二遍逐条取（见 CZFKBExport 末尾）。
+            if (probeOnly) {
+                [keyProbeHits addObject:clean];
+            } else {
+                [all addObject:clean];
+            }
             if (stat) *stat += 1;
             // 3.8.337 诊断：记收进来条目的组名（去重后前 10 个；
             // 就 4 条，全列出来，看它们到底在哪个组）。
@@ -440,11 +526,10 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
             }
         }
     };
-    CZFKBStatEntitled = 0;
+    CZFKBStatWildcard = 0;
     CZFKBStatAlias = 0;
-    CZFKBStatDefault = 0;
-    CZFKBStatLCDefault = 0;
-    CZFKBStatVendor = 0;
+    CZFKBStatKeyClass = 0;
+    CZFKBStatKeyNoData = 0;
     CZFKBStatCustom = 0;
     CZFKBStatExcluded = 0;
     // 3.8.337 诊断容器复位（每轮导出清零，与上面 stat 同款）。
@@ -453,111 +538,110 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
     CZFKBDiagKeptGroups = [NSMutableSet set];
     CZFKBDiagExcludedGroupCounts = [NSMutableDictionary dictionary];
     CZFKBDiagExcludedItems = [NSMutableArray array];
-    for (NSString *cls in @[(__bridge NSString *)kSecClassGenericPassword, (__bridge NSString *)kSecClassInternetPassword]) {
-        // 主路：逐个获授权组查。游客钩子写条目时把组改成本
-        // 容器的组，那个组必在这张表里；团队前缀对不上也不
-        // 影响——表里是签名写死的原串
-        for (NSString *g in entitledGroups) {
-            collect(@{
-                (__bridge NSString *)kSecClass: cls,
-                (__bridge NSString *)kSecAttrAccessGroup: g,
-                (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-                (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
-                (__bridge NSString *)kSecReturnAttributes: @YES,
-                (__bridge NSString *)kSecReturnData: @YES,
-            }, &CZFKBStatEntitled);
-        }
-        // 兜底按别名查（存入时盖的容器文件夹名）
+    CZFKBDiagExcludedAlis = [NSMutableArray array];
+    CZFKBDiagExcludedAlisSeen = [NSMutableSet set];
+    CZFKBDiagNoDataItems = [NSMutableArray array];
+    // 3.8.352：查询改通配符 + 类别扩到 5 类。
+    // 通配符：不带 kSecAttrAccessGroup，iOS 搜全部有权组——
+    // 旧逐组+默认组+进程默认组+厂商组四路全是它的子集，一查
+    // 全覆盖；逐组查还会在某组无权时整组 -34018（Apple 官方
+    // 语义，上游 removeKeyChain 的通配符删法同款）。entitledGroups
+    // 参数不再逐组迭代（签名不动，免改调用方；CZFKBRun 里
+    // inEntitled 判定仍用它）。
+    // GP/IP 带 data 直收；Key/Identity/Certificate 先只读属
+    // 性探针（kSecReturnData=@NO），归属命中的再单条取 data
+    // ——一条不可导出 Key 的 data 失败只记诊断，不毒掉整组。
+    // 别名路由保留作安全网（通常 0 条新货，去重后不重复记账）。
+    // 查询数从 2 类 × 500+ 次（逐组）降到 5 类 × 2 次 + 逐条取数。
+    NSArray<NSString *> *allClasses = @[
+        (__bridge NSString *)kSecClassGenericPassword,
+        (__bridge NSString *)kSecClassInternetPassword,
+        (__bridge NSString *)kSecClassKey,
+        (__bridge NSString *)kSecClassIdentity,
+        (__bridge NSString *)kSecClassCertificate,
+    ];
+    for (NSString *cls in allClasses) {
+        BOOL isKeyClass = [cls isEqualToString:(__bridge NSString *)kSecClassKey]
+            || [cls isEqualToString:(__bridge NSString *)kSecClassIdentity]
+            || [cls isEqualToString:(__bridge NSString *)kSecClassCertificate];
+        // 主路：通配符（不带 accessGroup）。
+        collect(@{
+            (__bridge NSString *)kSecClass: cls,
+            (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+            (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
+            (__bridge NSString *)kSecReturnAttributes: @YES,
+            (__bridge NSString *)kSecReturnData: isKeyClass ? @NO : @YES,
+        }, isKeyClass ? NULL : &CZFKBStatWildcard, isKeyClass);
+        // 兜底按别名查（存入时盖的容器文件夹名）。
         collect(@{
             (__bridge NSString *)kSecClass: cls,
             @"alis": folderName,
             (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
             (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
             (__bridge NSString *)kSecReturnAttributes: @YES,
-            (__bridge NSString *)kSecReturnData: @YES,
-        }, &CZFKBStatAlias);
-        // 非隔离加一查默认组：默认组若已在授权表里，逐组扫
-        // 已捞到、去重后这里不重复记账；若不在表里，只有这
-        // 一查能捞到。隔离容器 defaultGroup 为 nil，直接跳过。
-        if (defaultGroup) {
-            collect(@{
-                (__bridge NSString *)kSecClass: cls,
-                (__bridge NSString *)kSecAttrAccessGroup: defaultGroup,
-                (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-                (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
-                (__bridge NSString *)kSecReturnAttributes: @YES,
-                (__bridge NSString *)kSecReturnData: @YES,
-            }, &CZFKBStatDefault);
-        }
-        // 进程默认组：钩子关时 App 不带组名的 SecItem 调用落
-        // 到进程自己的默认组（= application-identifier，即
-        // <团队>.com.kdt.livecontainer，宿主与游客共用、所有
-        // 单开 App 共用）。桥此前从未查过它——单开 App 的令
-        // 牌最可能就在这里。隔离容器 lcDefaultGroup 为 nil，
-        // 直接跳过（钩子开时写操作已改写到共享组，不走这里；
-        // 且隔离容器绝不碰共享的进程默认组，防串登录）。
-        // 注意：此组是共享存储，导出时逐条目归属过滤（见 collect
-        // 内谓词：字段指向本 App 才收），不归属的排除、不进快照
-        // （防串号；旧版 v218 是全收，快照会含其他单开 App 的条目，
-        // 现收紧）。写回时归属后的条目原样写回同一共享组（见
-        // CZFKBImport），不盖 alis（见导入注释）。回执里进程默认
-        // 组计数现为归属后计数（不再是全量），归属过滤掉的数另计。
-        if (lcDefaultGroup) {
-            collect(@{
-                (__bridge NSString *)kSecClass: cls,
-                (__bridge NSString *)kSecAttrAccessGroup: lcDefaultGroup,
-                (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-                (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
-                (__bridge NSString *)kSecReturnAttributes: @YES,
-                (__bridge NSString *)kSecReturnData: @YES,
-            }, &CZFKBStatLCDefault);
-        }
-        // 厂商共享组显式路由（闲鱼 4 条根因）：上面四路没有
-        // 一路按名查厂商组——获授权组表是宿主进程自己的组
-        // （游客的厂商组不在表里），原生写入的厂商组条目又
-        // 没有 alis，默认组/进程默认组是别的组。324 修的是
-        // 谓词（返回后才过滤），但查询根本没把厂商组条目捞
-        // 回来，谓词没机会跑，dump 里恒只有别处捞到的 4 条。
-        // 按 Bundle ID 厂商前缀直接拼组名显式查（与
-        // defaultGroup/lcDefaultGroup 同款构造名查询，不用
-        // 通配）：TEAM.<厂商>.shared。com.taobao 的 App 另
-        // 查 TEAM.com.alibaba.shared（阿里 SSO 同厂商族，
-        // 324 同款映射、移到查询层）。放最后，只计前四路没
-        // 捞到的新增条目（collect 内先去重再记账）；归属仍
-        // 走同一套谓词（厂商组已由 316/324 接住），不放宽。
-        // 进程没该组授权/组不存在时查询静默返回空，不崩。
-        if (bundleID.length) {
-            NSArray<NSString *> *bParts = [bundleID componentsSeparatedByString:@"."];
-            NSString *vendorPrefix = nil;
-            if (bParts.count >= 2) {
-                NSString *cand = [NSString stringWithFormat:@"%@.%@", bParts[0], bParts[1]];
-                if (cand.length >= 6) vendorPrefix = cand;
+            (__bridge NSString *)kSecReturnData: isKeyClass ? @NO : @YES,
+        }, isKeyClass ? NULL : &CZFKBStatAlias, isKeyClass);
+    }
+    // 3.8.352：密钥类第二遍——探针命中的逐条取 data。
+    // 单条查询：类 + 组 + 标识属性，只取一条；不可导出 Key
+    // 取 data 失败只记诊断（CZFKBStatKeyNoData + 按条记），
+    // 不进快照、不报错、不影响其他条。
+    {
+        NSMutableSet *secondSeen = [NSMutableSet set];
+        for (NSDictionary *attrs in keyProbeHits) {
+            NSString *kcls = attrs[(__bridge NSString *)kSecClass];
+            NSMutableDictionary *q = [NSMutableDictionary dictionary];
+            q[(__bridge NSString *)kSecClass] = kcls;
+            NSString *g = attrs[(__bridge NSString *)kSecAttrAccessGroup];
+            if ([g isKindOfClass:NSString.class]) q[(__bridge NSString *)kSecAttrAccessGroup] = g;
+            // 标识属性：有哪个带哪个（Key 靠 applicationLabel，
+            // 证书靠 publicKeyHash，通用靠 account/service/
+            // server；再加 keyType/keyClass/label，查得越细，
+            // 两条探针命中撞到同一条的可能越小）。
+            for (NSString *k in @[(__bridge NSString *)kSecAttrAccount,
+                                  (__bridge NSString *)kSecAttrService,
+                                  (__bridge NSString *)kSecAttrServer,
+                                  (__bridge NSString *)kSecAttrLabel,
+                                  (__bridge NSString *)kSecAttrApplicationLabel,
+                                  (__bridge NSString *)kSecAttrKeyType,
+                                  (__bridge NSString *)kSecAttrKeyClass,
+                                  (__bridge NSString *)kSecAttrPublicKeyHash]) {
+                if (attrs[k]) q[k] = attrs[k];
             }
-            NSString *groupForTeam = group ?: defaultGroup;
-            if (!groupForTeam) groupForTeam = lcDefaultGroup;
-            NSString *teamPrefix = nil;
-            if (groupForTeam.length) {
-                NSArray<NSString *> *gParts = [groupForTeam componentsSeparatedByString:@"."];
-                if (gParts.count > 0) teamPrefix = gParts[0];
+            q[(__bridge NSString *)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
+            q[(__bridge NSString *)kSecMatchLimit] = (__bridge NSString *)kSecMatchLimitAll;
+            q[(__bridge NSString *)kSecReturnAttributes] = @YES;
+            q[(__bridge NSString *)kSecReturnData] = @YES;
+            BOOL gotData = NO;
+            CFTypeRef result = nil;
+            OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)q, &result);
+            if (st == errSecSuccess && result) {
+                NSArray *arr = (__bridge_transfer NSArray *)result;
+                if ([arr isKindOfClass:NSArray.class]) {
+                    for (NSDictionary *item in arr) {
+                        if (![item isKindOfClass:NSDictionary.class]) continue;
+                        if (!item[(__bridge NSString *)kSecValueData]) continue;
+                        NSDictionary *clean2 = CZFKBCleanItem(item, kcls);
+                        NSString *id2 = CZFKBItemIdentity(clean2, kcls);
+                        if ([secondSeen containsObject:id2]) continue;
+                        [secondSeen addObject:id2];
+                        [all addObject:clean2];
+                        CZFKBStatKeyClass += 1;
+                        gotData = YES;
+                    }
+                }
             }
-            if (vendorPrefix && teamPrefix) {
-                collect(@{
-                    (__bridge NSString *)kSecClass: cls,
-                    (__bridge NSString *)kSecAttrAccessGroup: [NSString stringWithFormat:@"%@.%@.shared", teamPrefix, vendorPrefix],
-                    (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-                    (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
-                    (__bridge NSString *)kSecReturnAttributes: @YES,
-                    (__bridge NSString *)kSecReturnData: @YES,
-                }, &CZFKBStatVendor);
-                if ([vendorPrefix isEqualToString:@"com.taobao"]) {
-                    collect(@{
-                        (__bridge NSString *)kSecClass: cls,
-                        (__bridge NSString *)kSecAttrAccessGroup: [NSString stringWithFormat:@"%@.com.alibaba.shared", teamPrefix],
-                        (__bridge NSString *)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-                        (__bridge NSString *)kSecMatchLimit: (__bridge NSString *)kSecMatchLimitAll,
-                        (__bridge NSString *)kSecReturnAttributes: @YES,
-                        (__bridge NSString *)kSecReturnData: @YES,
-                    }, &CZFKBStatVendor);
+            if (!gotData) {
+                CZFKBStatKeyNoData += 1;
+                if (CZFKBDiagNoDataItems.count < 10) {
+                    NSString *g2 = ([g isKindOfClass:NSString.class] ? g : @"(nil)");
+                    NSString *svc4 = attrs[(__bridge NSString *)kSecAttrService];
+                    if (![svc4 isKindOfClass:NSString.class]) svc4 = @"";
+                    NSString *acct2 = attrs[(__bridge NSString *)kSecAttrAccount];
+                    if (![acct2 isKindOfClass:NSString.class]) acct2 = @"";
+                    NSString *alis2 = attrs[@"alis"];
+                    if (![alis2 isKindOfClass:NSString.class]) alis2 = @"(nil)";
+                    [CZFKBDiagNoDataItems addObject:[NSString stringWithFormat:@"%@|%@|%@|%@", g2, svc4, acct2, alis2]];
                 }
             }
         }
@@ -675,6 +759,15 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
                 // 全量属性写不进（不管什么错）：退到最小属性集
                 // 再试一次（快照里可能带着原进程上下文的键，
                 // 换个进程写会被系统整条拒绝）
+                // 3.8.354：最小属性集按类补齐——352 起导出含
+                // Key/证书类，旧最小集只有 GP/IP 形状
+                // （account/service/generic/label/accessible/
+                // 组/alis/data），Key 项重试时缺 keyType/
+                // keyClass/applicationLabel、证书项缺
+                // certificateType/certificateEncoding，
+                // SecItemAdd 必败、条目悄悄丢掉（只记首个失败
+                // 码）。按类补上这几项，其余一字不动；Identity
+                // 类无 data 可写（要 SecIdentityRef），不补。
                 NSMutableDictionary *minimal = [NSMutableDictionary dictionary];
                 for (NSString *k in @[(__bridge NSString *)kSecClass, (__bridge NSString *)kSecAttrAccount,
                                       (__bridge NSString *)kSecAttrService, (__bridge NSString *)kSecAttrGeneric,
@@ -682,6 +775,15 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
                                       (__bridge NSString *)kSecAttrAccessGroup, @"alis",
                                       (__bridge NSString *)kSecValueData]) {
                     if (item[k]) minimal[k] = item[k];
+                }
+                if ([cls isEqualToString:(__bridge NSString *)kSecClassKey]) {
+                    for (NSString *k in @[(__bridge NSString *)kSecAttrKeyType, (__bridge NSString *)kSecAttrKeyClass, (__bridge NSString *)kSecAttrApplicationLabel]) {
+                        if (item[k]) minimal[k] = item[k];
+                    }
+                } else if ([cls isEqualToString:(__bridge NSString *)kSecClassCertificate]) {
+                    for (NSString *k in @[(__bridge NSString *)kSecAttrCertificateType, (__bridge NSString *)kSecAttrCertificateEncoding]) {
+                        if (item[k]) minimal[k] = item[k];
+                    }
                 }
                 SecItemDelete((__bridge CFDictionaryRef)identity);
                 OSStatus retry = SecItemAdd((__bridge CFDictionaryRef)minimal, nil);
@@ -716,11 +818,10 @@ static void CZFKBRun(void) {
         // 导出计数每遍重数：一次启动桥跑两遍（构造函数+启动
         // 完成通知），不重置回执会翻倍（真机出过 exported=200
         // 而实际 100 条）
-        CZFKBStatEntitled = 0;
+        CZFKBStatWildcard = 0;
         CZFKBStatAlias = 0;
-        CZFKBStatDefault = 0;
-        CZFKBStatLCDefault = 0;
-        CZFKBStatVendor = 0;
+        CZFKBStatKeyClass = 0;
+        CZFKBStatKeyNoData = 0;
         CZFKBStatCustom = 0;
         CZFKBStatExcluded = 0;
         // 等 LCBootstrap 把 HOME 指到容器、容器信息文件落位
@@ -934,17 +1035,21 @@ static void CZFKBRun(void) {
         NSString *excludedServicesStr = [[CZFKBDiagExcludedServices.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@"|"];
         // 3.8.345：被滤条目按条拼串（前 20 条，形如 组|服务|账号|server）。
         NSString *excludedItemsStr = [CZFKBDiagExcludedItems componentsJoinedByString:@"; "];
+        // 3.8.352：被滤条目的 alis+service（前 10 条，形如 alis|服务）；
+        // 密钥类无数据条目（前 10 条，形如 组|服务|账号|alis）。
+        NSString *excludedAlisStr = [CZFKBDiagExcludedAlis componentsJoinedByString:@"; "];
+        NSString *noDataItemsStr = [CZFKBDiagNoDataItems componentsJoinedByString:@"; "];
         NSString *status = [NSString stringWithFormat:
-            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（逐组%ld 别名%ld 默认组%ld 进程默认组%ld 厂商组%ld；自定义组%ld 归属过滤掉%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d keptGroups=%@ excludedGroups=%@ excludedServices=%@ excludedItems=%@ vendorProbe=%d/%d vendorInEntitled=%@/%@ classProbe=%ld/%ld/%ld timing=%@",
+            @"team=%@ groupId=%ld group=%@ entitled=%lu组 computedInEntitled=%@ probe=%d exported=%ld（通配符%ld 别名%ld 密钥类%ld；自定义组%ld 归属过滤掉%ld 密钥无数据%ld） isolated=%@ defaultGroup=%@ writeGroup=%@ lcDefaultGroup=%@ lcProbe=%d imported=%ld/%ld fail=%d keptGroups=%@ excludedGroups=%@ excludedServices=%@ excludedItems=%@ excludedAlis=%@ noDataItems=%@ vendorProbe=%d/%d vendorInEntitled=%@/%@ classProbe=%ld/%ld/%ld timing=%@",
             team ?: @"(nil)", (long)groupId, group ?: @"(nil)",
             (unsigned long)entitled.count, inEntitled ? @"YES" : @"NO",
-            (int)probe, (long)(CZFKBStatEntitled + CZFKBStatAlias + CZFKBStatDefault + CZFKBStatLCDefault + CZFKBStatVendor),
-            (long)CZFKBStatEntitled, (long)CZFKBStatAlias, (long)CZFKBStatDefault, (long)CZFKBStatLCDefault, (long)CZFKBStatVendor,
-            (long)CZFKBStatCustom, (long)CZFKBStatExcluded,
+            (int)probe, (long)(CZFKBStatWildcard + CZFKBStatAlias + CZFKBStatKeyClass),
+            (long)CZFKBStatWildcard, (long)CZFKBStatAlias, (long)CZFKBStatKeyClass,
+            (long)CZFKBStatCustom, (long)CZFKBStatExcluded, (long)CZFKBStatKeyNoData,
             isolated ? @"YES" : @"NO", defaultGroup ?: @"(nil)", writeGroup ?: @"(nil)", lcDefaultGroup ?: @"(nil)", (int)lcProbe,
             (long)CZFKBStatImported,
             (long)CZFKBStatImportTotal, (int)CZFKBStatImportFail,
-            keptGroupsStr ?: @"", excludedGroupsStr ?: @"", excludedServicesStr ?: @"", excludedItemsStr ?: @"",
+            keptGroupsStr ?: @"", excludedGroupsStr ?: @"", excludedServicesStr ?: @"", excludedItemsStr ?: @"", excludedAlisStr ?: @"", noDataItemsStr ?: @"",
             (int)vendorProbeTaobao, (int)vendorProbeAlibaba,
             vendorTaobaoInEntitled ? @"YES" : @"NO", vendorAlibabaInEntitled ? @"YES" : @"NO",
             (long)classProbeKey, (long)classProbeCert, (long)classProbeIdentity,

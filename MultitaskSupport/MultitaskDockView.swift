@@ -3814,15 +3814,16 @@ struct SourcesPanelView: View {
     // fullScreenCover 在外层 sheet 动画里被 SwiftUI 丢掉、344
     // fallback 1.2 秒放弃、czfDismissIfDirectEntryDone 1.5 秒
     // dismiss 整页回设置页：用户到不了弹框按钮，还看到设置页）。
-    // 改从源面板直接 fullScreenCover 整个 LCDataManagementView
+    // 3.8.350：改从源面板直接 sheet 整个 LCDataManagementView
     // （initialSheet 对应值），零状态搬迁（82 个 @State 都在
     // LCDataManagementView 自己身上，只依赖 sharedModel 与
     // sceneDelegate 两个 @EnvironmentObject，系统自动注入）。
     // 宿主是独立 UIHostingController（其 view 是目标窗口的子
-    // 视图，见 ensureSourcesOverlay），fullScreenCover 从它
-    // present，盖满目标窗口；closePanel 只隐藏宿主 view（不摘
-    // 除、不释放），cover 不受影响。czfDismissIfDirectEntryDone
+    // 视图，见 ensureSourcesOverlay），sheet 从它 present，
+    // 圆角、不盖满（同设置页数据管理 sheet）；closePanel 只隐藏宿主 view（不摘
     // 里的 dismiss() 在 cover 里同样关掉 cover，回源面板。
+    // 3.8.350：改 sheet（见下方 .sheet 注释），“cover”指
+    // 本页的呈现（sheet/fullScreenCover 通称），收尾逻辑不动。
     @State private var czfDirectDataPage: CZFSettingsPage? = nil
     // 3.8.349：.backupScope 直出范围框要备的那个 App（面板
     // 快捷行 appbackup: 条目点按时填，cover 里随
@@ -3982,13 +3983,19 @@ struct SourcesPanelView: View {
     // 3.8.308：直开某设置页——先关面板、切到设置页签、
     // 再把 deepLink 交给设置页（LCSettingsView.handleURL
     // 按 host 弹对应页面；host 不认就只停在设置页）。
-    // 3.8.346：备份/恢复四路（.restore/.selectbackup/
-    // .backupall/.schedulebackup）不再走 deepLink——改直
-    // 接 fullScreenCover 单独页（见 czfDirectDataPage 注释），
-    // 不进设置页 sheet、不套数据管理页；其余路由一字不动。
+    // 3.8.351：面板快捷方式的设置页一律直出 sheet，不再跑去
+    // 设置——用户 01:13 视频亲证：点“后台保活”快捷方式被甩
+    // 到设置页。原先只有备份四路走 czfDirectDataPage，其余
+    // 页走 selectedTab=.settings + deepLink，观感就是“跑去
+    // 设置”。现全部 CZFSettingsPage 都走直出 sheet（与设置
+    // 页的 .sheet(item: $deepLinkSettingsPage) 同款结构：
+    // NavigationView 包 destinationView，左上“关闭”）。
+    // destinationView 本就覆盖全部 15 个 case（数据管理/
+    // 多任务/JIT/多开/存储/备份/恢复四路/插件/源/应用/
+    // 保活），直出不缺页。非 CZFSettingsPage 的 raw（理论
+    // 上没有）才走老路 deepLink，保证不丢路由。
     private func openSettingsPage(_ page: String) {
-        if let czfPage = CZFSettingsPage(rawValue: page),
-           czfPage == .restore || czfPage == .selectbackup || czfPage == .backupall || czfPage == .schedulebackup || czfPage == .backupScope {
+        if let czfPage = CZFSettingsPage(rawValue: page) {
             closePanel()
             czfDirectDataPage = czfPage
             return
@@ -4451,15 +4458,14 @@ struct SourcesPanelView: View {
                 refreshSettingStates()
             }
         }
-        // 3.8.346：备份/恢复单独页——直接 fullScreenCover 整个
-        // LCDataManagementView(initialSheet:)，跳过设置页 sheet
-        // （见 czfDirectDataPage 注释）。NavigationView 包一层
-        // 才能放“关闭”按钮（LCSettingsView:309 的 sheet toolbar
-        // 绕开后就没了）；点关闭清 @State 关 cover。标题用
-        // CZFSettingsPage.title（恢复数据/选择备份/备份全部/
-        // 定时备份）。LCDataManagementView 自己的 Form 内层
-        // fullScreenCover（备份选页/恢复选页）照常挂在它身上。
-        .fullScreenCover(item: $czfDirectDataPage) { page in
+        // 3.8.353：sheet 下滑关闭也清 czfDirectBackupApp——
+        // 之前只有关闭按钮清它，下滑关 sheet 时 SwiftUI 只把
+        // czfDirectDataPage 置 nil，czfDirectBackupApp 残留。
+        // 虽然点按每次都重填（3830 注释），残留不致错，但
+        // 状态不一致就是隐患：下次直进非 backupScope 页时
+        // destinationView(forDirectBackupApp:) 仍带着上个 App。
+        // onDismiss 里清掉，关闭按钮与下滑关行为一致。
+        .sheet(item: $czfDirectDataPage, onDismiss: { czfDirectBackupApp = nil }) { page in
             NavigationView {
                 page.destinationView(forDirectBackupApp: czfDirectBackupApp)
                     .navigationTitle(page.title)
