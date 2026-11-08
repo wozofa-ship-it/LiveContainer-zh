@@ -2898,7 +2898,16 @@ struct LCDataManagementView : View {
         // 11:02 实证）。改下一 runloop + 0.1 秒再 present，等 view
         // 进层级；present 的闭包里抓 alertWindow 强引用，防 window
         // 在延时里被释放。
-        let alertWindow = UIWindow(frame: UIScreen.main.bounds)
+        // 3.8.358：357 还是不弹，根因不是延时——是窗口根本没进
+        // scene。iOS 13+ 上 UIWindow(frame:) 建的窗口不挂任何
+        // scene，makeKeyAndVisible 也显示不出来，rootVC 的 view
+        // 永不在层级里，present 再怎么延时也被悄悄丢掉（用户
+        // 11:45 实证：357 点备份没反应）。改挂前台 windowScene
+        // 建窗，窗口才是真的可见窗口，present 才能落上去。拿不到
+        // 前台 scene 时直接 return，不建僵尸窗口。
+        guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene else { return }
+        let alertWindow = UIWindow(windowScene: scene)
+        alertWindow.frame = scene.coordinateSpace.bounds
         alertWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
         alertWindow.rootViewController = UIViewController()
         alertWindow.makeKeyAndVisible()
