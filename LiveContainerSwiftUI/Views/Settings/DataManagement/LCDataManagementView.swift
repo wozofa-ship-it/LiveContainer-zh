@@ -2678,12 +2678,56 @@ struct LCDataManagementView : View {
         return "\(name)：\(parts.joined(separator: " · "))"
     }
 
+    /// 3.8.374：备份前强制刷新钥匙串快照。快照只在客 App 启动/切后台时由桥重写，
+    /// 登录后没切后台就备份、读到的还是启动时的旧 dump，恢复时先删再加把活令牌
+    /// 换成旧值，直接掉线（373 实测：21:08 快照是重登前拍的，18 条全是旧令牌）。
+    /// 照抄恢复的关窗模式：关掉本次要备的各容器窗口，客 App 切后台触发 CZFKBRun
+    /// 重写 dump，轮询 mtime 至多等 5 秒，前进即新鲜，超时按旧值继续（回执已报
+    /// 快照时间，用户看得见）。同时解决文件侧滞后（关窗时 App 落盘再拷）。
+    static func refreshKeychainSnapshot(for app: LCAppModel) async {
+        let fm = FileManager.default
+        var before: [URL: Date] = [:]
+        for container in app.uiContainers {
+            let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
+            if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
+               let mdate = attrs[.modificationDate] as? Date {
+                before[dumpURL] = mdate
+            }
+        }
+        if #available(iOS 16.0, *) {
+            for container in app.uiContainers {
+                MultitaskDockManager.shared.closeAppWindow(uuid: container.folderName)
+            }
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            var refreshed = false
+            for container in app.uiContainers {
+                let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
+                if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
+                   let mdate = attrs[.modificationDate] as? Date {
+                    if let old = before[dumpURL] {
+                        if mdate > old { refreshed = true }
+                    } else {
+                        refreshed = true
+                    }
+                }
+            }
+            if refreshed { return }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+
     func backupApps(_ apps: [LCAppModel], loginOnly: Bool = false) async {
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
             errorInfo = "lc.settings.backupFail".loc
             errorShow = true
             return
+        }
+        // 3.8.374：备份前先刷快照（见 refreshKeychainSnapshot），别读旧 dump
+        for app in apps {
+            await Self.refreshKeychainSnapshot(for: app)
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
         // 初始进度也写清第一个 App 的名字（循环里每 App 都会
@@ -5537,6 +5581,10 @@ struct LCDataManagementView : View {
             migrated.contains(Self.instanceKey(for: $0))
         }
         guard !selected.isEmpty else { return }
+        // 3.8.374：定时备份同样先刷快照，别读旧 dump
+        for app in selected {
+            await Self.refreshKeychainSnapshot(for: app)
+        }
         let didBackup: Bool = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
