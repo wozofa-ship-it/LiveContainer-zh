@@ -18,6 +18,10 @@ final class ShareExtensionViewModel: ObservableObject {
     var privateDocAccessing = false
     var appGroupRootURL: URL?
     weak var currentContext: NSExtensionContext?
+    // 3.8.367：响应链打开的起点，由 ShareExtensionHandler 设为
+    // 它自己（UIViewController）。链往上走 view → window →
+    // UIApplication，拿到真 UIApplication 才能调 open。
+    weak var launchResponder: UIResponder?
 
     init() {
         sharedDefaults = UserDefaults(suiteName: LCSharedUtils.appGroupID())
@@ -434,7 +438,7 @@ final class ShareExtensionViewModel: ObservableObject {
             // 先走系统 sanctioned 的 NSExtensionContext.openURL，
             // 失败再回落旧 Launcher；两路都失败就留面板报错。
             let ctx = context ?? currentContext
-            if await Self.openLaunchURL(launchURL, context: ctx) {
+            if await openLaunchURL(launchURL, context: ctx) {
                 ctx?.completeRequest(returningItems: nil, completionHandler: nil)
             } else {
                 errorMessage = "lc.shareExtension.error.openFailed".loc
@@ -444,15 +448,22 @@ final class ShareExtensionViewModel: ObservableObject {
         }
     }
 
-    /// 打开 LiveContainer：先走 NSExtensionContext.openURL（系统
-    /// sanctioned 路），失败再回落 LSApplicationWorkspace。
-    /// 返回是否真正打开；两路都失败返回 false，调用方留面板报错。
-    private static func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
+    /// 打开 LiveContainer（3.8.367）：三路按序试，返回是否真正打开。
+    /// 第一路响应链：iOS 26 下 LSApplicationWorkspace 从扩展调被拦、
+    /// NSExtensionContext.open 又不在 Share 扩展的支持列表里，两路
+    /// 都打不开。Apollo-Reborn PR #307 实证：走响应链拿到的
+    /// UIApplication.openURL:options:completionHandler: 在 iOS 26.5
+    /// 真机上能打开。链从 launchResponder（宿主视图控制器）往上走
+    /// view → window → UIApplication，5 秒超时。
+    /// 第二路 context.open，第三路旧 Launcher（LSApplicationWorkspace）。
+    /// 三路都失败返回 false，调用方留面板报错。
+    private func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
+        if await openViaResponderChain(url) { return true }
         if let context {
-            // 3.8.366：第一路加 3 秒超时竞速。context.open 的回调
+            // 3.8.366：第二路加 3 秒超时竞速。context.open 的回调
             // 在 Share 扩展上可能永远不回（系统不支持的扩展点），
             // 原先 withCheckedContinuation 会无限挂起、面板卡死；
-            // 3 秒未回调按 false 走回落（第二路已有 5 秒信号量超时）。
+            // 3 秒未回调按 false 走回落（第三路已有 5 秒信号量超时）。
             // 回调与超时谁先到谁 resume，锁保证只 resume 一次
             //（重复 resume 会 trap）。
             let opened: Bool = await withCheckedContinuation { cont in
@@ -478,6 +489,33 @@ final class ShareExtensionViewModel: ObservableObject {
         return await Task.detached {
             LCShareExtensionLauncher.openURL(fromShareExtension: url)
         }.value
+    }
+
+    /// 响应链打开：从 launchResponder 往上走 nextResponder，碰到
+    /// UIApplication 就调它的 open（带 5 秒超时竞速）。链断了或
+    /// open 回 false 就返回 false，让调用方走下一路。
+    private func openViaResponderChain(_ url: URL) async -> Bool {
+        var current: UIResponder? = launchResponder
+        while let responder = current {
+            if let app = responder as? UIApplication {
+                let opened: Bool = await withCheckedContinuation { cont in
+                    let lock = NSLock()
+                    var done = false
+                    func resumeOnce(_ value: Bool) {
+                        lock.lock()
+                        defer { lock.unlock() }
+                        guard !done else { return }
+                        done = true
+                        cont.resume(returning: value)
+                    }
+                    app.open(url, options: [:]) { success in resumeOnce(success) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { resumeOnce(false) }
+                }
+                return opened
+            }
+            current = responder.next
+        }
+        return false
     }
 
     func shouldShowInstallAction() -> Bool {
@@ -511,7 +549,7 @@ final class ShareExtensionViewModel: ObservableObject {
             }
 
             let ctx = context ?? currentContext
-            if await Self.openLaunchURL(installURL, context: ctx) {
+            if await openLaunchURL(installURL, context: ctx) {
                 ctx?.completeRequest(returningItems: nil, completionHandler: nil)
             } else {
                 errorMessage = "lc.shareExtension.error.openFailed".loc
@@ -562,7 +600,7 @@ final class ShareExtensionViewModel: ObservableObject {
         }
 
         let ctx = context ?? currentContext
-        if await Self.openLaunchURL(launchURL, context: ctx) {
+        if await openLaunchURL(launchURL, context: ctx) {
             ctx?.completeRequest(returningItems: nil, completionHandler: nil)
         } else {
             errorMessage = "lc.shareExtension.error.openFailed".loc

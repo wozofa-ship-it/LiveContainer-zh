@@ -3816,6 +3816,11 @@ struct SourcesPanelView: View {
     // 3.8.311：App 设置快捷方式的开关状态快照（key 是完整条目串，
     // 值是开/关；打开面板、增删、点按切换后刷新，角标颜色用它）。
     @State private var settingStates: [String: Bool] = [:]
+    // 3.8.367：后台保活快捷方式开关状态（与设置页 keepAliveSection
+    // 和 CZFKeepAliveShortcutView 同一把 @AppStorage 键
+    // LCKeepAliveEnabled；快捷行里保活点按直接切换，图标绿=开、
+    // 灰=关，不再开页）。
+    @AppStorage("LCKeepAliveEnabled") private var keepAliveEnabled = true
     // 3.8.311：多选项类快捷方式要打开的 App 设置页（sheet 用）。
     @State private var settingsApp: LCAppModel?
     @State private var showAppSettings: Bool = false
@@ -4369,11 +4374,19 @@ struct SourcesPanelView: View {
                         if let raw = CZFPanelCustomShortcuts.pageRaw(from: item),
                            let page = CZFSettingsPage(rawValue: raw) {
                             Button {
-                                openSettingsPage(page.rawValue)
+                                if page == .keepalive {
+                                    // 3.8.367：保活快捷方式改成开关形式——
+                                    // 点按直接切换，不开页；图标绿=开、灰=关。
+                                    keepAliveEnabled.toggle()
+                                    LCSettingsView.syncKeepAliveTweak(enabled: keepAliveEnabled, forceSign: false)
+                                    CZFHostKeepAlive.shared.refresh()
+                                } else {
+                                    openSettingsPage(page.rawValue)
+                                }
                             } label: {
                                 Image(systemName: page.icon)
                                     .font(.system(size: 22))
-                                    .foregroundStyle(.blue)
+                                    .foregroundStyle(page == .keepalive ? (keepAliveEnabled ? Color.green : Color.gray) : Color.blue)
                                     .frame(width: 40, height: 40)
                                     .background(Color(UIColor.secondarySystemBackground))
                                     .clipShape(Circle())

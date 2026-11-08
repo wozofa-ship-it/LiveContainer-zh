@@ -7,6 +7,9 @@ final class ShareExtensionHandler: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        // 3.8.367：响应链打开的起点。ViewModel 拿这个往上走
+        // nextResponder 找 UIApplication（view → window → app）。
+        viewModel.launchResponder = self
         let root = ShareExtensionRootView(viewModel: viewModel, extensionContext: extensionContext)
         let host = UIHostingController(rootView: root)
         self.host = host
