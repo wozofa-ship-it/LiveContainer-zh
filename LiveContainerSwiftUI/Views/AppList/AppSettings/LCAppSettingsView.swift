@@ -616,6 +616,11 @@ struct LCAppSettingsView: View {
                             Text("lc.appSettings.fixLocalNotification".loc)
                         }
                     }
+                    if #available(iOS 26.0, *) {
+                        Toggle(isOn: $model.uiFixBackgroundTaskIdentifiers) {
+                            Text("lc.appSettings.fixBackgroundTaskIdentifiers".loc)
+                        }
+                    }
                     Toggle(isOn: $model.uiUseLCBundleId) {
                         HStack {
                             LCSettingsIcon(systemName: "app.badge", color: .blue)

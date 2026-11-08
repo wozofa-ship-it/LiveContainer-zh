@@ -83,6 +83,11 @@ class LCAppModel: ObservableObject, Hashable {
             appInfo.fixLocalNotification = uiFixLocalNotification
         }
     }
+    @Published var uiFixBackgroundTaskIdentifiers : Bool {
+        didSet {
+            appInfo.fixBackgroundTaskIdentifiers = uiFixBackgroundTaskIdentifiers
+        }
+    }
     
     @Published var uiHideLiveContainer : Bool {
         didSet {
@@ -211,6 +216,7 @@ class LCAppModel: ObservableObject, Hashable {
         self.uiUseLCBundleId = appInfo.doUseLCBundleId
         self.uiFixFilePickerNew = appInfo.fixFilePickerNew
         self.uiFixLocalNotification = appInfo.fixLocalNotification
+        self.uiFixBackgroundTaskIdentifiers = appInfo.fixBackgroundTaskIdentifiers
         self.uiHideLiveContainer = appInfo.hideLiveContainer
         self.uiDontInjectTweakLoader = appInfo.dontInjectTweakLoader
         self.uiTweakLoaderInjectFailed = appInfo.info()["LCTweakLoaderCantInject"] as? Bool ?? false
