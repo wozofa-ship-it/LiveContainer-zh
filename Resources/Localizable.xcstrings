@@ -28386,6 +28386,23 @@
         }
       }
     },
+    "lc.shareExtension.error.openFailed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open LiveContainer. Please open it manually and try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打不开 LiveContainer，请手动打开 LiveContainer 再试。"
+          }
+        }
+      }
+    },
     "lc.signer.crashDuringSignErr": {
       "extractionState": "manual",
       "localizations": {

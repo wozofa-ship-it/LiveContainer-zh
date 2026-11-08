@@ -55,13 +55,18 @@ static Class _LSOpenConfigurationClass;
             success = success1;
             dispatch_semaphore_signal(sema);
         }];
-        dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+        // 3.8.363：5 秒超时，别无限等。iOS 26 下 completion 可能
+        // 不回，无限等会把扩展卡死；超时按失败走回落。
+        dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
     }
     if(!success) {
-        [workspace openURL:url];
+        success = [workspace openURL:url];
     }
 
-    return true;
+    // 3.8.363：以前这里永远 return true，打开失败也静默关面板，
+    // 用户只看到回 QQ、Live 没到前台。改返真实结果，调用方
+    // 失败时留面板报错。
+    return success;
 }
 
 + (BOOL)canOpenURLFromShareExtension:(NSURL *)url {

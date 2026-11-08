@@ -419,7 +419,7 @@ final class ShareExtensionViewModel: ObservableObject {
             }
 
             if app.isBuiltInSideStore {
-                try launchBuiltInSideStore(context: context)
+                try await launchBuiltInSideStore(context: context)
                 return
             }
 
@@ -429,11 +429,36 @@ final class ShareExtensionViewModel: ObservableObject {
                 throw ShareExtensionError("Unable to build launch URL.")
             }
 
-            LCShareExtensionLauncher.openURL(fromShareExtension: launchURL)
-            (context ?? currentContext)?.completeRequest(returningItems: nil, completionHandler: nil)
+            // 3.8.363：iOS 26 下 LSApplicationWorkspace 从扩展里调
+            // 会被拦，旧代码还永远返回 true、失败也静默关面板。
+            // 先走系统 sanctioned 的 NSExtensionContext.openURL，
+            // 失败再回落旧 Launcher；两路都失败就留面板报错。
+            let ctx = context ?? currentContext
+            if await Self.openLaunchURL(launchURL, context: ctx) {
+                ctx?.completeRequest(returningItems: nil, completionHandler: nil)
+            } else {
+                errorMessage = "lc.shareExtension.error.openFailed".loc
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// 打开 LiveContainer：先走 NSExtensionContext.openURL（系统
+    /// sanctioned 路），失败再回落 LSApplicationWorkspace。
+    /// 返回是否真正打开；两路都失败返回 false，调用方留面板报错。
+    private static func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
+        if let context {
+            let opened = await withCheckedContinuation { cont in
+                context.openURL(url) { success in
+                    cont.resume(returning: success)
+                }
+            }
+            if opened { return true }
+        }
+        return await Task.detached {
+            LCShareExtensionLauncher.openURL(fromShareExtension: url)
+        }.value
     }
 
     func shouldShowInstallAction() -> Bool {
@@ -466,8 +491,12 @@ final class ShareExtensionViewModel: ObservableObject {
                 throw ShareExtensionError("Unable to build install URL.")
             }
 
-            LCShareExtensionLauncher.openURL(fromShareExtension: installURL)
-            (context ?? currentContext)?.completeRequest(returningItems: nil, completionHandler: nil)
+            let ctx = context ?? currentContext
+            if await Self.openLaunchURL(installURL, context: ctx) {
+                ctx?.completeRequest(returningItems: nil, completionHandler: nil)
+            } else {
+                errorMessage = "lc.shareExtension.error.openFailed".loc
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -489,7 +518,7 @@ final class ShareExtensionViewModel: ObservableObject {
         }
     }
 
-    private func launchBuiltInSideStore(context: NSExtensionContext?) throws {
+    private func launchBuiltInSideStore(context: NSExtensionContext?) async throws {
         let launchURLString = try preparePayloadForLaunch()
 
         sharedDefaults?.set("livecontainer", forKey: "LCLaunchExtensionScheme")
@@ -513,8 +542,12 @@ final class ShareExtensionViewModel: ObservableObject {
             throw ShareExtensionError("Unable to build SideStore launch URL.")
         }
 
-        LCShareExtensionLauncher.openURL(fromShareExtension: launchURL)
-        (context ?? currentContext)?.completeRequest(returningItems: nil, completionHandler: nil)
+        let ctx = context ?? currentContext
+        if await Self.openLaunchURL(launchURL, context: ctx) {
+            ctx?.completeRequest(returningItems: nil, completionHandler: nil)
+        } else {
+            errorMessage = "lc.shareExtension.error.openFailed".loc
+        }
     }
 
     private func storeBookmark(for fileURL: URL) throws {
