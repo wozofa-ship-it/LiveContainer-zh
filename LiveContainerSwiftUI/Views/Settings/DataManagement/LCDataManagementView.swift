@@ -2866,7 +2866,7 @@ struct LCDataManagementView : View {
         // 3.8.355：防重入——已有范围框在屏上时不再建第二个窗口，
         // 否则静态只持后一个，前一个窗口漏掉、框卡在屏上关不掉。
         // （0.5 秒延时 + 手动点按钮两路可能撞上。）
-        guard Self.cafScopeAlertWindow == nil else { return }
+        guard Self.czfScopeAlertWindow == nil else { return }
         let title = isBackup ? "备份范围" : "恢复范围"
         let message: String
         if isBackup {
@@ -2889,10 +2889,10 @@ struct LCDataManagementView : View {
         alertWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
         alertWindow.rootViewController = UIViewController()
         alertWindow.makeKeyAndVisible()
-        Self.cafScopeAlertWindow = alertWindow
+        Self.czfScopeAlertWindow = alertWindow
         let dismissWindow: () -> Void = {
-            Self.cafScopeAlertWindow?.isHidden = true
-            Self.cafScopeAlertWindow = nil
+            Self.czfScopeAlertWindow?.isHidden = true
+            Self.czfScopeAlertWindow = nil
         }
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         // 3.8.341 范围记忆：上次那个选项排第一（没选过时登录态在前）。
