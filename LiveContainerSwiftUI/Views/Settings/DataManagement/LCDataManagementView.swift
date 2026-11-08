@@ -117,6 +117,10 @@ struct LCDataManagementView : View {
     // 一个，不含全部；init 参数传进来，plain let，init 里
     // 直接赋值，不读 sharedModel）。不走 .backupScope 时为空。
     let directBackupApps: [LCAppModel]
+    // 3.8.359：面板单独弹窗预选的范围（nil = 没预选，走原来的
+    // presentScopeAlert；非 nil = 面板已让用户选过，直接按它
+    // 备份，不再弹范围框）。
+    let preselectedLoginOnly: Bool?
     @State private var didApplyInitialSheet = false
     
     @StateObject private var appFolderRemovalAlert = YesNoHelper()
@@ -268,9 +272,10 @@ struct LCDataManagementView : View {
         !selectBackupFolders.isEmpty && selectBackupFolders.allSatisfy { selectedBackupFolderURLs.contains($0) }
     }
 
-    init(initialSheet: LCDataManagementInitialSheet? = nil, directBackupApps: [LCAppModel] = []) {
+    init(initialSheet: LCDataManagementInitialSheet? = nil, directBackupApps: [LCAppModel] = [], preselectedLoginOnly: Bool? = nil) {
         self.initialSheet = initialSheet
         self.directBackupApps = directBackupApps
+        self.preselectedLoginOnly = preselectedLoginOnly
         _folderPaths = State(initialValue: [
             LCFolderPath(path: LCPath.docPath, desc: "Private Container"),
             LCFolderPath(path: LCPath.lcGroupDocPath, desc: "App Group Container"),
@@ -1317,10 +1322,18 @@ struct LCDataManagementView : View {
                     // 全部 App）；空时本页是空壳，收尾五路全
                     // false 会由 czfDismissIfDirectEntryDone
                     // 关掉，不留白页。
+                    // 3.8.359：面板单独弹窗已预选范围时不
+                    // 再弹框，直接按预选备份。
                     guard !self.directBackupApps.isEmpty else { return }
                     self.pendingBackupApps = self.directBackupApps
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.presentScopeAlert(isBackup: true)
+                    if let loginOnly = self.preselectedLoginOnly {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            self.doBackupScope(loginOnly: loginOnly)
+                        }
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            self.presentScopeAlert(isBackup: true)
+                        }
                     }
                 case .scheduleBackup:
                     self.loadScheduleSettings()

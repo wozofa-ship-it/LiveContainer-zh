@@ -3831,6 +3831,14 @@ struct SourcesPanelView: View {
     // 只在 page == .backupScope 时读，其余四路不用，残留
     // 不清也不影响——点按时每次都重填。“关闭”按钮里顺手清掉。
     @State private var czfDirectBackupApp: LCAppModel? = nil
+    // 3.8.359：面板单独弹窗预选的范围（nil = 没预选；点备份
+    // 快捷方式时先弹确认框让用户选，选完再开页，页里直接按
+    // 预选备份、不再弹范围框）。随 sheet 关闭一起清掉。
+    @State private var czfPreselectedLoginOnly: Bool? = nil
+    // 3.8.359：面板备份范围确认框开关 + 待选的 App（点快捷
+    // 方式时填，确认框选完开页时用）。
+    @State private var czfShowBackupScopeDialog = false
+    @State private var czfScopeDialogApp: LCAppModel? = nil
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -4359,9 +4367,14 @@ struct SourcesPanelView: View {
                             // czfDirectBackupApp 再开 .backupScope
                             // 直进 cover，范围框直出，不经过选页。
                             // App 解析不到就不渲染（同设定类分支）。
+                            // 3.8.359：面板单独弹窗——点按先弹确认
+                            // 框选范围（完整/只登录态），选完再开页；
+                            // 页里按预选直接备份，不再弹范围框（面板
+                            // 直进的范围框 355–358 三版都没弹出来，
+                            // 改由面板自己弹，最可靠）。
                             Button {
-                                czfDirectBackupApp = app
-                                czfDirectDataPage = .backupScope
+                                czfScopeDialogApp = app
+                                czfShowBackupScopeDialog = true
                             } label: {
                                 ZStack(alignment: .bottomTrailing) {
                                     RunningAppIcon(appInfo: app.appInfo)
@@ -4465,17 +4478,40 @@ struct SourcesPanelView: View {
         // 状态不一致就是隐患：下次直进非 backupScope 页时
         // destinationView(forDirectBackupApp:) 仍带着上个 App。
         // onDismiss 里清掉，关闭按钮与下滑关行为一致。
-        .sheet(item: $czfDirectDataPage, onDismiss: { czfDirectBackupApp = nil }) { page in
+        .sheet(item: $czfDirectDataPage, onDismiss: { czfDirectBackupApp = nil; czfPreselectedLoginOnly = nil }) { page in
             NavigationView {
-                page.destinationView(forDirectBackupApp: czfDirectBackupApp)
+                page.destinationView(forDirectBackupApp: czfDirectBackupApp, preselectedLoginOnly: czfPreselectedLoginOnly)
                     .navigationTitle(page.title)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("关闭") { czfDirectDataPage = nil; czfDirectBackupApp = nil }
+                            Button("关闭") { czfDirectDataPage = nil; czfDirectBackupApp = nil; czfPreselectedLoginOnly = nil }
                         }
                     }
             }
+        }
+        // 3.8.359：面板备份范围确认框——点备份快捷方式时弹，
+        // 挂在面板本体上（一直在层级里），比数据管理页的
+        // onAppear + 延时可靠；选完再开页，页里按预选直接
+        // 备份，不再弹范围框。
+        .confirmationDialog("备份范围", isPresented: $czfShowBackupScopeDialog, titleVisibility: .visible) {
+            Button("完整备份（数据 + 登录态）") {
+                if let app = czfScopeDialogApp {
+                    czfPreselectedLoginOnly = false
+                    czfDirectBackupApp = app
+                    czfDirectDataPage = .backupScope
+                }
+                czfScopeDialogApp = nil
+            }
+            Button("只备份登录态") {
+                if let app = czfScopeDialogApp {
+                    czfPreselectedLoginOnly = true
+                    czfDirectBackupApp = app
+                    czfDirectDataPage = .backupScope
+                }
+                czfScopeDialogApp = nil
+            }
+            Button("取消", role: .cancel) { czfScopeDialogApp = nil }
         }
     }
 
@@ -5542,9 +5578,9 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
     // 上面那个 var（.backupScope 没 App 时 var 里已退到选页）。
     // 设置页 sheet（LCSettingsView:304）仍用 var，不动。
     @ViewBuilder
-    func destinationView(forDirectBackupApp app: LCAppModel?) -> some View {
+    func destinationView(forDirectBackupApp app: LCAppModel?, preselectedLoginOnly: Bool? = nil) -> some View {
         if self == .backupScope, let app = app {
-            LCDataManagementView(initialSheet: .backupScope, directBackupApps: [app])
+            LCDataManagementView(initialSheet: .backupScope, directBackupApps: [app], preselectedLoginOnly: preselectedLoginOnly)
         } else {
             destinationView
         }
