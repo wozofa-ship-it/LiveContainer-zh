@@ -665,7 +665,9 @@ static OSStatus CZFKBStatImportFail = 0;
 // isolated/team/lcDefaultGroup：写回分流用。3.8.316 起隔离
 // 也分流厂商组（见函数内注释），只有进程默认组仍只在非
 // 隔离时走 lcDefaultGroup；其余一律按原组分流（换团队前缀）。
-static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderName, BOOL isolated, NSString *team, NSString *lcDefaultGroup) {
+// containerGroup：当前容器组（.shared.54 这类），3.8.361
+// 起共享组条目恢复时写进它（见共享组分支注释）。
+static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderName, BOOL isolated, NSString *team, NSString *lcDefaultGroup, NSString *containerGroup) {
     NSString *path = [home stringByAppendingPathComponent:@"CZFKeychainImport.plist"];
     NSData *data = [NSData dataWithContentsOfFile:path];
     if (!data) return 0;
@@ -698,10 +700,15 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
             // - 原组是进程默认组（任意团队前缀 + .com.kdt.livecontainer）
             //   → 写回当前进程默认组（团队前缀换成当前团队）；
             //   App 不带组名读写时落的就是这里，写别处它读不到。
-            // - 原组是共享组 → 保留组号、只换当前团队前缀（App
-            //   显式指定共享组时读的就是这个确切组，钩子关不改
-            //   写，写进游客默认组反而读不到）。
-            // - 其他 → 厂商/自定义组，保留后缀、只换当前团队前缀。
+            // - 原组是共享组 → 3.8.361：写进当前容器组，不再
+            //   保留组号。运行时 hook 把客 App 的钥匙串查询
+            //   强制改写成当前容器组（SecItem.m：new_
+            //   SecItemCopyMatching 无条件把 kSecAttrAccessGroup
+            //   换成 .shared.54），恢复后留在 .shared 里的令
+            //   牌读不到，恢复 12/12 成功、闲鱼仍要登录。写
+            //   回当前容器组它才读得到；导出已按字段谓词滤
+            //   过，只属于本 App 的条目才会进这里，不串号。
+            //   containerGroup 为空时退回旧行为（保留组号）。
             NSString *target = group;
             BOOL isLCDefaultItem = NO;
             NSString *origGroup = raw[(__bridge NSString *)kSecAttrAccessGroup];
@@ -710,7 +717,9 @@ static NSInteger CZFKBImport(NSString *home, NSString *group, NSString *folderNa
                     if (!isolated && lcDefaultGroup) { target = lcDefaultGroup; isLCDefaultItem = YES; }
                 } else {
                     NSRange sharedRange = [origGroup rangeOfString:@".com.kdt.livecontainer.shared"];
-                    if (sharedRange.location != NSNotFound && team.length) {
+                    if (sharedRange.location != NSNotFound && containerGroup.length) {
+                        target = containerGroup;
+                    } else if (sharedRange.location != NSNotFound && team.length) {
                         target = [team stringByAppendingString:[origGroup substringFromIndex:sharedRange.location]];
                     } else if (team.length) {
                         // 自定义组（厂商共享组等）：原组既不是进程默认组
@@ -987,7 +996,7 @@ static void CZFKBRun(void) {
         czfkbTProbe = CFAbsoluteTimeGetCurrent();
         NSInteger imported = 0;
         if (writeGroup) {
-            imported = CZFKBImport(home, writeGroup, folderName, isolated, team, lcDefaultGroup);
+            imported = CZFKBImport(home, writeGroup, folderName, isolated, team, lcDefaultGroup, group);
         }
         czfkbTImport = CFAbsoluteTimeGetCurrent();
         // 3.8.310：bundleID/displayName 隔离也传（以前隔离传 nil、
@@ -1093,7 +1102,7 @@ static BOOL CZFKBTryImportEarly(void) {
         NSString *writeGroup = (!isolated && defaultGroup) ? defaultGroup : group;
         NSString *lcDefaultGroup = isolated ? nil : CZFKBApplicationIdentifierGroup(team);
         if (!writeGroup) return NO;
-        CZFKBImport(home, writeGroup, home.lastPathComponent, isolated, team, lcDefaultGroup);
+        CZFKBImport(home, writeGroup, home.lastPathComponent, isolated, team, lcDefaultGroup, group);
         return YES;
     } @catch (NSException *e) {
         return NO;
