@@ -1328,6 +1328,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                         .buttonStyle(.plain)
                     }
+                    // 手机桌面视图（3.8.381）：网格顶行“恢复原生”，
+                    // 点了切回列表视图（参照图同款显眼入口；排序
+                    // 菜单里的切换是同一开关的另一入口）。
+                    if !batchMode && czfAppListGridMode {
+                        HStack {
+                            Button {
+                                czfAppListGridMode = false
+                            } label: {
+                                Label("恢复原生", systemImage: "arrow.uturn.left")
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 4)
+                    }
                     // 手机桌面视图（3.8.380）：默认 4 列图标网格，
                     // 点图标启动；多选模式或切回列表视图时仍走旧行。
                     if batchMode || !czfAppListGridMode {

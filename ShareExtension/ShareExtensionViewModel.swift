@@ -27,6 +27,10 @@ final class ShareExtensionViewModel: ObservableObject {
     // 它自己（UIViewController）。链往上走 view → window →
     // UIApplication，拿到真 UIApplication 才能调 open。
     weak var launchResponder: UIResponder?
+    // 3.8.381：Action 扩展只走响应链（Apollo PR #307 实证）。
+    // Share 上 context.open 已证实走不通，Action 侧直接跳过
+    // 第二路；Share 保持默认 false，行为一字不动。
+    var responderChainOnly = false
     // 3.8.376 分路日志：本次打开尝试的诊断行（每路一到两行）。
     // 失败时拼进 errorMessage 让用户截图；同时写 NSLog 和
     // App Group 里的 CZFShareExtensionLog.txt（带时间戳）。
@@ -469,21 +473,27 @@ final class ShareExtensionViewModel: ObservableObject {
         }
     }
 
-    /// 打开 LiveContainer（3.8.367）：三路按序试，返回是否真正打开。
-    /// 第一路响应链：iOS 26 下 LSApplicationWorkspace 从扩展调被拦、
-    /// NSExtensionContext.open 又不在 Share 扩展的支持列表里，两路
-    /// 都打不开。Apollo-Reborn PR #307 实证：走响应链拿到的
+    /// 打开 LiveContainer（3.8.367）：按序试，返回是否真正打开。
+    /// 第一路响应链：Apollo-Reborn PR #307 实证，走响应链拿到的
     /// UIApplication.openURL:options:completionHandler: 在 iOS 26.5
     /// 真机上能打开。链从 launchResponder（宿主视图控制器）往上走
     /// view → window → UIApplication，5 秒超时。
-    /// 第二路 context.open，第三路旧 Launcher（LSApplicationWorkspace）。
-    /// 三路都失败返回 false，调用方留面板报错。
+    /// 第二路 context.open（Share 扩展不在 Apple 的支持列表里，
+    /// 只列 Today/iMessage；Action 扩展直接跳过这路）。
+    /// 第三路旧 Launcher（LSApplicationWorkspace）377 已删：iOS 26
+    /// 下它谎报成功。都失败返回 false，调用方留面板报错。
     private func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
         // 3.8.376：每路的真假都记下来，失败时 errorMessage 带诊断。
         shareDiagLines = []
         let r1 = await openViaResponderChain(url)
         czfShareLog("resp=\(r1)")
         if r1 { return true }
+        // 3.8.381：Action 扩展只走响应链，第二路直接跳过。
+        if responderChainOnly {
+            czfShareLog("ctx=skipped(action)")
+            czfShareLog("ws=skipped")
+            return false
+        }
         if let context {
             // 3.8.366：第二路加 3 秒超时竞速。context.open 的回调
             // 在 Share 扩展上可能永远不回（系统不支持的扩展点），

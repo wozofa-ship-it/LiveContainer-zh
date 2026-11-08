@@ -1,0 +1,10 @@
+//
+//  ActionExtension.xcconfig
+//  LiveContainer
+//
+//  Created by CZF on 2026/11/9.
+//
+
+#include "Global.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = $(LIVECONTAINER_BUNDLE_IDENTIFIER).ActionExtension
