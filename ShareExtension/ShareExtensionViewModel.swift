@@ -1,10 +1,11 @@
 import Combine
 import Foundation
 import LocalAuthentication
-// 3.8.369：补 import UIKit——367 的 launchResponder 用了
-// UIResponder/UIApplication，UIKit 不 import 编译器不认这两个
-// 类型，Archive 三处红字（106/113/120 行）。Handler 有 UIKit
-// 不代表 ViewModel 有，每个 Swift 文件要自己 import。
+import UIKit
+// 3.8.370：367 的 launchResponder 用了 UIResponder/
+// UIApplication，但这文件没 import UIKit，编译器三处不认，
+// 367/368 的 Archive 全挂。369 只加了注释、漏了真正的
+// import 语句——这次是实打实的 import UIKit 行。
 
 @MainActor
 final class ShareExtensionViewModel: ObservableObject {
