@@ -514,11 +514,14 @@ final class ShareExtensionViewModel: ObservableObject {
         } else {
             czfShareLog("ctx=nil")
         }
-        let r3 = await Task.detached {
-            LCShareExtensionLauncher.openURL(fromShareExtension: url)
-        }.value
-        czfShareLog("ws=\(r3)")
-        return r3
+        // 3.8.377：删第三路 LSApplicationWorkspace——iOS 26 下它和
+        // 旧 openURL: 一样谎报成功（拦了仍返 YES），面板关了 App
+        // 却没拉起来（用户 22:31 视频：点闲鱼只震一下）。前两路
+        // 失败就老实报 false、留面板显示分路诊断，不再让第三路
+        // 假成功把面板关掉。真能打开只靠前两路（Apollo 实证
+        // 响应链在 iOS 26.5 能开）。
+        czfShareLog("ws=skipped")
+        return false
     }
 
     /// 响应链打开：从 launchResponder 往上走 nextResponder，碰到

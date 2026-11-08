@@ -410,6 +410,24 @@ class LCAppModel: ObservableObject, Hashable {
             }
             appInfo.containers = uiContainers;
             newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: group)
+            // 3.8.377：卸载重装后首次启动新建容器时，把磁盘上已有容器里的
+            // CZFKeychainImport.plist 带过来——恢复时排队文件只写进了旧容器
+            // 37EDAD10（375 的恢复时循环是空操作：恢复时根本不存在第二个
+            // 容器），新容器里没有，桥就读不到令牌。只补缺的，不覆盖已有的。
+            do {
+                let containerDir = newContainer.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
+                let dst = newContainer.containerURL.appendingPathComponent("CZFKeychainImport.plist")
+                if !FileManager.default.fileExists(atPath: dst.path),
+                   let entries = try? FileManager.default.contentsOfDirectory(at: containerDir, includingPropertiesForKeys: nil) {
+                    for entry in entries where entry.lastPathComponent != newName {
+                        let src = entry.appendingPathComponent("CZFKeychainImport.plist")
+                        if FileManager.default.fileExists(atPath: src.path) {
+                            try? FileManager.default.copyItem(at: src, to: dst)
+                            break
+                        }
+                    }
+                }
+            }
             appInfo.dataUUID = newName
             uiDefaultDataFolder = newName
             if isMultiOpen {
