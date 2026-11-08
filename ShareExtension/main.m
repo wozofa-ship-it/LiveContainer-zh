@@ -61,10 +61,9 @@ static Class _LSOpenConfigurationClass;
         // 不回，无限等会把扩展卡死；超时按失败走回落。
         dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
     }
-    if(!success) {
-        success = [workspace openURL:url];
-    }
-
+    // 3.8.373：删 [workspace openURL:url] 回落。iOS 26 下从扩展调它被拦
+    // 仍返回 YES（假成功），调用方以为打开了就 completeRequest 关面板，
+    // 实际 Live 从没被拉起。只返 openApplication 的真实结果，失败留面板报错。
     // 3.8.363：以前这里永远 return true，打开失败也静默关面板，
     // 用户只看到回 QQ、Live 没到前台。改返真实结果，调用方
     // 失败时留面板报错。
