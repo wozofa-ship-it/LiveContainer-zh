@@ -450,7 +450,12 @@ final class ShareExtensionViewModel: ObservableObject {
     private static func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
         if let context {
             let opened = await withCheckedContinuation { cont in
-                context.openURL(url) { success in
+                // 3.8.363 修正：Swift 里叫 open，不是 openURL
+                //（openURL 是 ObjC 名，Swift 下没这个成员，363
+                // 构建就是挂在这里）。Share 扩展不在 Apple 的
+                // open 支持列表里（只列 Today/iMessage），可能
+                // 直接返回 false，失败就走下面的回落。
+                context.open(url) { success in
                     cont.resume(returning: success)
                 }
             }
