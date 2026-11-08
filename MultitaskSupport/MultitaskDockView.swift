@@ -3851,10 +3851,15 @@ struct SourcesPanelView: View {
     // 快捷方式时先弹确认框让用户选，选完再开页，页里直接按
     // 预选备份、不再弹范围框）。随 sheet 关闭一起清掉。
     @State private var czfPreselectedLoginOnly: Bool? = nil
-    // 3.8.359：面板备份范围确认框开关 + 待选的 App（点快捷
-    // 方式时填，确认框选完开页时用）。
-    @State private var czfShowBackupScopeDialog = false
-    @State private var czfScopeDialogApp: LCAppModel? = nil
+    // 3.8.382：面板备份范围框的独立 alert 窗口（静态持有）。
+    // 368 的 SwiftUI .confirmationDialog 仍弹不出——根因不是
+    // 挂载点（按钮上已无其他 presentation），是面板宿主本身：
+    // 面板是独立 hosting 控制器（ensureSourcesOverlay 里
+    // window.addSubview，不走 present），不在 root 的 presented
+    // 链里，dialog 经宿主 VC 呈现被悄悄丢掉（设置路 355/357/
+    // 358 已证实并改走独立窗口，面板一直没跟进）。独立窗口不
+    // 依赖任何 VC 层级，windowLevel 高于 alert 必盖最上。
+    private static var czfPanelScopeAlertWindow: UIWindow?
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -4221,6 +4226,49 @@ struct SourcesPanelView: View {
     // 警告看不到；快照过期时备份里没有最新登录态，用户还以为备上了。
     // 单 App 版同款检查（无快照 / 快照为空 / 超过 1 天），只读文件、
     // 不改备份流程；没警告时返回空串，dialog 不显示 message。
+    // 3.8.382：面板备份范围框改走独立 alert 窗口（同设置路
+    // presentScopeAlert 的窗口做法）。点备份快捷方式时弹框选
+    // 范围，选完填 czfPreselectedLoginOnly/czfDirectBackupApp
+    // 再开 .backupScope 页（页里按预选直接备份，不再弹框）。
+    // 框的标题/选项/文案与原来 dialog 一字不动（只留快照警告）。
+    // 重入只拦已弹出的框，僵尸窗口先清，永不毒化（同 357）。
+    private func presentPanelBackupScopeAlert(for app: LCAppModel) {
+        if let old = Self.czfPanelScopeAlertWindow {
+            if old.rootViewController?.presentedViewController != nil { return }
+            old.isHidden = true
+            Self.czfPanelScopeAlertWindow = nil
+        }
+        guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene else { return }
+        let alertWindow = UIWindow(windowScene: scene)
+        alertWindow.frame = scene.coordinateSpace.bounds
+        alertWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
+        alertWindow.rootViewController = UIViewController()
+        alertWindow.makeKeyAndVisible()
+        Self.czfPanelScopeAlertWindow = alertWindow
+        let dismissWindow: () -> Void = {
+            Self.czfPanelScopeAlertWindow?.isHidden = true
+            Self.czfPanelScopeAlertWindow = nil
+        }
+        let warning = czfBackupSnapshotWarning(for: app)
+        let alert = UIAlertController(title: "备份范围", message: warning.isEmpty ? nil : warning, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in
+            dismissWindow()
+            self.czfPreselectedLoginOnly = false
+            self.czfDirectBackupApp = app
+            self.czfDirectDataPage = .backupScope
+        })
+        alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in
+            dismissWindow()
+            self.czfPreselectedLoginOnly = true
+            self.czfDirectBackupApp = app
+            self.czfDirectDataPage = .backupScope
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in dismissWindow() })
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            alertWindow.rootViewController?.present(alert, animated: true)
+        }
+    }
+
     private func czfBackupSnapshotWarning(for app: LCAppModel) -> String {
         let fm = FileManager.default
         var hasDump = false
@@ -4453,8 +4501,7 @@ struct SourcesPanelView: View {
                             // 直进的范围框 355–358 三版都没弹出来，
                             // 改由面板自己弹，最可靠）。
                             Button {
-                                czfScopeDialogApp = app
-                                czfShowBackupScopeDialog = true
+                                presentPanelBackupScopeAlert(for: app)
                             } label: {
                                 ZStack(alignment: .bottomTrailing) {
                                     RunningAppIcon(appInfo: app.appInfo)
@@ -4471,39 +4518,10 @@ struct SourcesPanelView: View {
                                         .offset(x: -4, y: -4)
                                 }
                             }
-                            // 3.8.368：备份范围确认框改挂到触发按钮上。
-                            // 根因：body 根视图挂着 3 个 .sheet + 1 个
-                            // .alert，dialog 挂在根视图上被静默吞掉
-                            //（366 以为根视图没有 presentation，错）。
-                            // 按钮本身没有任何 presentation，dialog
-                            // 挂这里一定能弹。快照过期警告照 366 拼进
-                            // message。
-                            .confirmationDialog("备份范围", isPresented: $czfShowBackupScopeDialog, titleVisibility: .visible) {
-                                Button("完整备份（数据 + 登录态）") {
-                                    if let app = czfScopeDialogApp {
-                                        czfPreselectedLoginOnly = false
-                                        czfDirectBackupApp = app
-                                        czfDirectDataPage = .backupScope
-                                    }
-                                    czfScopeDialogApp = nil
-                                }
-                                Button("只备份登录态") {
-                                    if let app = czfScopeDialogApp {
-                                        czfPreselectedLoginOnly = true
-                                        czfDirectBackupApp = app
-                                        czfDirectDataPage = .backupScope
-                                    }
-                                    czfScopeDialogApp = nil
-                                }
-                                Button("取消", role: .cancel) { czfScopeDialogApp = nil }
-                            } message: {
-                                if let app = czfScopeDialogApp {
-                                    let w = czfBackupSnapshotWarning(for: app)
-                                    if !w.isEmpty {
-                                        Text(w)
-                                    }
-                                }
-                            }
+                            // 3.8.382：范围框改走独立 alert 窗口
+                            //（presentPanelBackupScopeAlert，见上
+                            // 方）。368 的 SwiftUI dialog 挂按钮上仍
+                            // 弹不出（面板宿主不在 root 链里），已删。
                             .contextMenu {
                                 Button("移除此快捷方式", role: .destructive) {
                                     CZFPanelCustomShortcuts.remove(item)
