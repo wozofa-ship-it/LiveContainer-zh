@@ -455,7 +455,7 @@ final class ShareExtensionViewModel: ObservableObject {
             // 3 秒未回调按 false 走回落（第二路已有 5 秒信号量超时）。
             // 回调与超时谁先到谁 resume，锁保证只 resume 一次
             //（重复 resume 会 trap）。
-            let opened = await withCheckedContinuation { cont in
+            let opened: Bool = await withCheckedContinuation { cont in
                 // 3.8.363 修正：Swift 里叫 open，不是 openURL
                 //（openURL 是 ObjC 名，Swift 下没这个成员，363
                 // 构建就是挂在这里）。Share 扩展不在 Apple 的
