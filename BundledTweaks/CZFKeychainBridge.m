@@ -306,6 +306,22 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
         // 登录令牌的服务名/组是 com.alipay.*，与淘宝同一账号体系）。
         if ([vendorPrefix isEqualToString:@"com.taobao"] && [f localizedCaseInsensitiveContainsString:@"com.alipay"]) return YES;
     }
+    // 3.8.362：阿里通用服务名兜底。361 实测证明令牌不在已导出
+    // 的 12 条里——它在被滤的 127 条里，服务名是阿里安全 SDK
+    // 的通用词（YTKA/Soft/trackId），字段里不含 com.taobao/
+    // com.alibaba/com.alipay/闲鱼，上面五字段全 miss。只对
+    // 阿里系 App（vendorPrefix com.taobao）放行这三个服务名
+    // 的精确匹配，其他厂商不动；只认 service 字段，不认
+    // account/generic（那俩太泛）。
+    if ([vendorPrefix isEqualToString:@"com.taobao"]) {
+        id svc = item[(__bridge NSString *)kSecAttrService];
+        if ([svc isKindOfClass:NSString.class]) {
+            NSString *s = (NSString *)svc;
+            if ([s caseInsensitiveCompare:@"YTKA"] == NSOrderedSame ||
+                [s caseInsensitiveCompare:@"Soft"] == NSOrderedSame ||
+                [s caseInsensitiveCompare:@"trackId"] == NSOrderedSame) return YES;
+        }
+    }
     return NO;
 }
 
