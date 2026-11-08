@@ -5007,7 +5007,9 @@ private struct RunningAppsStripView: View {
                 .padding(.vertical, 6)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
+                    // 3.8.365：按钮间距 12→8（用户 15:34 截图圈出
+                    // 收起/最小化/放大/关闭全部之间太空）。
+                    HStack(spacing: 8) {
                         collapseStripButton
                         minimizeAllStripButton
                         maximizeStripButton
