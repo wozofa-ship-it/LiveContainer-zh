@@ -149,6 +149,10 @@
 		<string>$(AppIdentifierPrefix)com.kdt.livecontainer.shared.125</string>
 		<string>$(AppIdentifierPrefix)com.kdt.livecontainer.shared.126</string>
 		<string>$(AppIdentifierPrefix)com.kdt.livecontainer.shared.127</string>
+		<string>$(AppIdentifierPrefix)com.taobao.fleamarket8</string>
+		<string>$(AppIdentifierPrefix)com.taobao.shared</string>
+		<string>$(AppIdentifierPrefix)com.alibaba.shared</string>
+		<string>$(AppIdentifierPrefix)com.alipay.shared</string>
 	</array>
 </dict>
 </plist>
