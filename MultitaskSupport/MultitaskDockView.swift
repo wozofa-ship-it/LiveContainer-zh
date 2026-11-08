@@ -5761,9 +5761,12 @@ enum CZFPanelCustomShortcuts {
     static let key = "CZFPanelCustomShortcuts"
     private static let legacyKey = "CZFPanelCustomSettingsPage"
 
+    // 3.8.379：改存 App Group（LCUtils.appGroupUserDefault）——标准库
+    // 随 App 卸载一起删，卸载重装后快捷方式全丢（378 证实：列表是空的，
+    // 不是 pinKey 失效）；App Group 不随卸载删，列表能活下来。
     static var items: [String] {
-        get { UserDefaults.standard.stringArray(forKey: key) ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: key) }
+        get { LCUtils.appGroupUserDefault.stringArray(forKey: key) ?? [] }
+        set { LCUtils.appGroupUserDefault.set(newValue, forKey: key) }
     }
 
     static func pageItem(_ raw: String) -> String { "page:\(raw)" }
@@ -5824,6 +5827,20 @@ enum CZFPanelCustomShortcuts {
     // 3.8.311：310 的 "app:" 启动快捷是误读（用户不要），
     // 一并清掉，不留死条目。
     static func migrateIfNeeded() {
+        // 3.8.379：标准库里的旧列表只在共享区还没有值时搬一次；搬完
+        // 或共享区已有值时，清掉标准库那份残留（共享区就是标准库本身
+        // 的回落情况除外，那时删了等于删了正在用的列表）。之后读写只
+        // 走共享区，两边不再各一份。378 及之前写在标准库里的列表靠这
+        // 一步活下来（含用户 378 上刚重加的条目）；全新安装时两边都空。
+        let shared = LCUtils.appGroupUserDefault
+        let standard = UserDefaults.standard
+        if shared.stringArray(forKey: key) == nil,
+           let old = standard.stringArray(forKey: key), !old.isEmpty {
+            shared.set(old, forKey: key)
+        }
+        if shared !== standard {
+            standard.removeObject(forKey: key)
+        }
         let cleaned = items.filter { !$0.hasPrefix("app:") }
         if cleaned.count != items.count {
             items = cleaned

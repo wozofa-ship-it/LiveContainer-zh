@@ -1572,6 +1572,10 @@ struct LCDataManagementView : View {
         // 里（CZFPinnedAppsStore 读 App Group），不进这张表导入时
         // 按 CZF 前缀误写标准库，固定区读不到等于没恢复（同上）。
         "CZFPinnedPanelApps",
+        // 新5（3.8.379）：面板快捷行 CZFPanelCustomShortcuts 也改存
+        // App Group（同上），不进这张表导入时按 CZF 前缀误写标准库，
+        // 面板读不到等于没恢复。
+        "CZFPanelCustomShortcuts",
     ]
 
     // 注意：@discardableResult 必须紧贴 func 写，中间不能插

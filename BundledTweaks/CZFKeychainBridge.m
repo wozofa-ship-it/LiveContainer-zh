@@ -685,7 +685,27 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                     if (![acct2 isKindOfClass:NSString.class]) acct2 = @"";
                     NSString *alis2 = attrs[@"alis"];
                     if (![alis2 isKindOfClass:NSString.class]) alis2 = @"(nil)";
-                    [CZFKBDiagNoDataItems addObject:[NSString stringWithFormat:@"%@|%@|%@|%@", g2, svc4, acct2, alis2]];
+                    // 3.8.379：读不出 data 的密钥类条目，把钥匙的身份也记下来
+                    // （label/applicationLabel/keyType），否则回执只知道有
+                    // 一把钥匙读不出来，不知道是哪一把、闲鱼登录要不要它。
+                    // applicationLabel 是 SHA-1 摘要（NSData），拼十六进制。
+                    NSString *label2 = attrs[(__bridge NSString *)kSecAttrLabel];
+                    if (![label2 isKindOfClass:NSString.class]) label2 = @"";
+                    NSString *keyType2 = attrs[(__bridge NSString *)kSecAttrKeyType];
+                    if (![keyType2 isKindOfClass:NSString.class]) keyType2 = @"";
+                    NSString *appLabel2 = @"";
+                    id appLabelRaw = attrs[(__bridge NSString *)kSecAttrApplicationLabel];
+                    if ([appLabelRaw isKindOfClass:NSString.class]) {
+                        appLabel2 = appLabelRaw;
+                    } else if ([appLabelRaw isKindOfClass:NSData.class]) {
+                        const unsigned char *bytes = (const unsigned char *)[(NSData *)appLabelRaw bytes];
+                        NSMutableString *hex = [NSMutableString string];
+                        for (NSUInteger i = 0; i < [(NSData *)appLabelRaw length]; i++) {
+                            [hex appendFormat:@"%02x", bytes[i]];
+                        }
+                        appLabel2 = hex;
+                    }
+                    [CZFKBDiagNoDataItems addObject:[NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@", g2, svc4, acct2, alis2, label2, appLabel2, keyType2]];
                 }
             }
         }
