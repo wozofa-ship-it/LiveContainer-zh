@@ -4052,6 +4052,18 @@ struct SourcesPanelView: View {
             .first { CZFPinnedAppsStore.pinKey(for: $0) == pinKey }
     }
 
+    // 3.8.378：pinKey 是“包名_dataUUID”，卸载重装后 dataUUID 变了，
+    // 存的旧 pinKey 就解析不到、快捷按钮直接不渲染（用户 22:36
+    // 视频：面板里根本没有闲鱼备份按钮）。先精确匹配，多开实例
+    // 不串；匹配不上时按包名兜底，取该包名的当前实例。
+    private func app(forPinKeyWithBundleFallback pinKey: String) -> LCAppModel? {
+        if let app = app(forPinKey: pinKey) { return app }
+        let bundleID = pinKey.split(separator: "_").dropLast().joined(separator: "_")
+        guard !bundleID.isEmpty else { return nil }
+        return (LCAppSortManager.shared.sortedApps + LCAppSortManager.shared.sortedHiddenApps)
+            .first { ($0.appInfo.bundleIdentifier() ?? "") == bundleID }
+    }
+
     // 3.8.311：App 设置快捷方式——开关类点按直接切换，
     // 多选项类点按打开该 App 的设置页（用户 17:34 亲定）。
 
@@ -4378,7 +4390,7 @@ struct SourcesPanelView: View {
                                 draggedKey: $draggedShortcutKey
                             ))
                         } else if let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
-                                  let app = app(forPinKey: pinKey),
+                                  let app = app(forPinKeyWithBundleFallback: pinKey),
                                   let setting = CZFPanelAppSetting(rawValue: key) {
                             Button {
                                 if setting.isToggle {
@@ -4427,7 +4439,7 @@ struct SourcesPanelView: View {
                                 draggedKey: $draggedShortcutKey
                             ))
                         } else if let pinKey = CZFPanelCustomShortcuts.backupPinKey(from: item),
-                                  let app = app(forPinKey: pinKey) {
+                                  let app = app(forPinKeyWithBundleFallback: pinKey) {
                             // 3.8.349：只备这一个 App 的快捷方式——
                             // 图标是该 App 自己的图标（40 圆，同设定类
                             // 分支），右下角蓝底备份角标（20 圆、内收
