@@ -4531,6 +4531,12 @@ struct LCDataManagementView : View {
                 if writeResult.imported > 0 {
                     restoredExtras = true
                 }
+                // 3.8.375：删后重装时 App 会先装出一个新容器（随机组），恢复再把旧容器
+                // 补回来；宿主直写只写目标容器，若启动进了新容器，令牌就 orphan。
+                // 照排队文件同款，写进 App 全部容器各自的组（只写、不计入回执数）。
+                for container in app.uiContainers where container.folderName != target.folderName {
+                    _ = await Self.importKeychainItems(items, container: container)
+                }
                 // 宿主写回在这台机上同样靠不住（同一套 SecItem，
                 // 读恒空的前车之鉴）：快照同时放进容器，游客
                 // 下次打开时由进程内的钥匙串桥在 App 读令牌之前

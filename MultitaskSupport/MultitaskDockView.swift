@@ -5647,7 +5647,7 @@ enum CZFSettingsPage: String, CaseIterable, Identifiable {
         case .jit: LCJITLessDiagnoseView()
         case .multilc: LCMultiLCManagementView()
         case .storage: LCStorageManagementView()
-        case .backup: LCDataManagementView()
+        case .backup: LCDataManagementView(initialSheet: .backupSelect)
         case .restore: LCDataManagementView(initialSheet: .restore)
         case .selectbackup: LCDataManagementView(initialSheet: .backupSelect)
         case .backupall: LCDataManagementView(initialSheet: .backupAll)
