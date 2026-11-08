@@ -358,8 +358,11 @@ static NSString *CZFKBIdentityField(id v) {
 // 有 account/service/server，旧五段全空会坍缩成一条；补
 // applicationLabel/keyType/keyClass/publicKeyHash。identity
 // 只用于当次导出的去重，不落盘，格式变了无影响。
+// 3.8.383：补第 10 段 kSecAttrAccessGroup——裸钥匙（无上面
+// 9 段里的任何字段）仍会坍缩；组名是最稳的区分段，.shared.54
+// 与 defaultGroup 里的同款裸钥匙不再合成一条，跨组不再漏试。
 static NSString *CZFKBItemIdentity(NSDictionary *clean, NSString *cls) {
-    return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%@|%@",
+    return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%@|%@|%@",
         cls,
         CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrAccount]),
         CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrService]),
@@ -368,7 +371,8 @@ static NSString *CZFKBItemIdentity(NSDictionary *clean, NSString *cls) {
         CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrApplicationLabel]),
         CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrKeyType]),
         CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrKeyClass]),
-        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrPublicKeyHash])];
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrPublicKeyHash]),
+        CZFKBIdentityField(clean[(__bridge NSString *)kSecAttrAccessGroup])];
 }
 
 // 3.8.352：同 App 其他分身容器的文件夹名（alis 归属用）。
@@ -1132,6 +1136,13 @@ static void CZFKBRun(void) {
                 (long)((czfkbTProbe - czfkbTHome) * 1000),
                 (long)((czfkbTImport - czfkbTProbe) * 1000),
                 (long)((czfkbTExport - czfkbTImport) * 1000)]];
+        // 3.8.383：钥匙不可导出时在回执里写明——探到钥匙但一把没
+        // 备出，恢复后需重新登录一次重建钥匙（不可导出的钥匙无
+        // 任何 API 能读出，继续改导出逻辑是死路）。回执每次备份
+        // 都展示，用户恢复后不登录也不再是“悄悄失败”。
+        if (classProbeKey > 0 && CZFKBStatKeyClass == 0) {
+            status = [status stringByAppendingFormat:@"\n钥匙不可导出：探到%ld把钥匙，0把能备出（不可导出钥匙无任何API能读出）；恢复后需重新登录一次重建钥匙。", (long)classProbeKey];
+        }
         [status writeToFile:[home stringByAppendingPathComponent:@"CZFKeychainBridgeStatus.txt"]
                  atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch (NSException *e) {
