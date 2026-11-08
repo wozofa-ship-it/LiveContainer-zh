@@ -1329,6 +1329,17 @@ extension Notification.Name {
         maximizeWindow(uuid: front.appUUID)
     }
 
+    // 3.8.359：快捷面板放大开关——台前 App 最大化/小窗口
+    // 来回切（vc.maximizeWindow() 本身就是切换式的）；没前
+    // 台 App 时空操作。
+    @objc public func toggleMaximizeFrontmostWindow() {
+        guard let front = czfFrontmostApp(),
+              let vc = front.view?._viewDelegate() as? DecoratedAppSceneViewController else { return }
+        DispatchQueue.main.async {
+            vc.maximizeWindow()
+        }
+    }
+
     // 小窗口打开指定 App（状态栏长按用，用户定：长按是小窗口
     // 不是最小化）：同样借切换式的 maximizeWindow()——已最大化
     // 时调一次正好还原成小窗口；本来就是小窗口的不动。
@@ -4987,6 +4998,8 @@ private struct RunningAppsStripView: View {
                     Spacer()
                     minimizeAllStripButton
                     Spacer()
+                    maximizeStripButton
+                    Spacer()
                     closeAllStripButton
                     Spacer()
                 }
@@ -4997,6 +5010,7 @@ private struct RunningAppsStripView: View {
                     HStack(spacing: 12) {
                         collapseStripButton
                         minimizeAllStripButton
+                        maximizeStripButton
                         closeAllStripButton
                         // 分隔线定死 64 高（46 图标+4 间距+约
                         // 14 文字行高）：原来 50 比图标+文字矮
@@ -5053,6 +5067,15 @@ private struct RunningAppsStripView: View {
     private var closeAllStripButton: some View {
         fixedButton(systemImage: "xmark", tile: Color.red.opacity(0.12), glyph: .red, label: "关闭全部") {
             dockManager.closeAllWindows()
+            onSwitch()
+        }
+    }
+    // 3.8.359：快捷面板放大开关——台前 App 最大化/小窗口
+    // 来回切；图标与 App 窗口右上角那个绿色放大钮同款
+    // （arrow.up.left.and.arrow.down.right）。
+    private var maximizeStripButton: some View {
+        fixedButton(systemImage: "arrow.up.left.and.arrow.down.right", tile: Color(.systemGray5), glyph: .primary, label: "放大") {
+            dockManager.toggleMaximizeFrontmostWindow()
             onSwitch()
         }
     }
