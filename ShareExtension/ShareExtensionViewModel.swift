@@ -449,15 +449,29 @@ final class ShareExtensionViewModel: ObservableObject {
     /// 返回是否真正打开；两路都失败返回 false，调用方留面板报错。
     private static func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
         if let context {
+            // 3.8.366：第一路加 3 秒超时竞速。context.open 的回调
+            // 在 Share 扩展上可能永远不回（系统不支持的扩展点），
+            // 原先 withCheckedContinuation 会无限挂起、面板卡死；
+            // 3 秒未回调按 false 走回落（第二路已有 5 秒信号量超时）。
+            // 回调与超时谁先到谁 resume，锁保证只 resume 一次
+            //（重复 resume 会 trap）。
             let opened = await withCheckedContinuation { cont in
                 // 3.8.363 修正：Swift 里叫 open，不是 openURL
                 //（openURL 是 ObjC 名，Swift 下没这个成员，363
                 // 构建就是挂在这里）。Share 扩展不在 Apple 的
                 // open 支持列表里（只列 Today/iMessage），可能
                 // 直接返回 false，失败就走下面的回落。
-                context.open(url) { success in
-                    cont.resume(returning: success)
+                let lock = NSLock()
+                var done = false
+                func resumeOnce(_ value: Bool) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !done else { return }
+                    done = true
+                    cont.resume(returning: value)
                 }
+                context.open(url) { success in resumeOnce(success) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { resumeOnce(false) }
             }
             if opened { return true }
         }

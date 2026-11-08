@@ -32,6 +32,8 @@ static Class _LSOpenConfigurationClass;
         bundleIdToLaunch = NSBundle.mainBundle.bundleIdentifier.stringByDeletingPathExtension;
     } else {
         bundleIdToLaunch = [NSUserDefaults.lcSharedDefaults stringForKey:[NSString stringWithFormat:@"LCBundleID.%@", scheme]];
+        // 3.8.366：LCBundleID.<scheme> 只在多开（multiLCStatus == 2）时才写，单开设备上为 nil；nil 传给 openApplicationWithBundleIdentifier: 必失败。回落到主 bundle ID。
+        if (!bundleIdToLaunch) bundleIdToLaunch = NSBundle.mainBundle.bundleIdentifier.stringByDeletingPathExtension;
     }
 
     __block BOOL success = NO;

@@ -310,16 +310,34 @@ static BOOL CZFKBItemMatchesApp(NSDictionary *item, NSString *bundleID, NSString
     // 的 12 条里——它在被滤的 127 条里，服务名是阿里安全 SDK
     // 的通用词（YTKA/Soft/trackId），字段里不含 com.taobao/
     // com.alibaba/com.alipay/闲鱼，上面五字段全 miss。只对
-    // 阿里系 App（vendorPrefix com.taobao）放行这三个服务名
-    // 的精确匹配，其他厂商不动；只认 service 字段，不认
-    // account/generic（那俩太泛）。
-    if ([vendorPrefix isEqualToString:@"com.taobao"]) {
+    // 阿里系 App（vendorPrefix com.taobao/com.alibaba/com.alipay）
+    // 放行这三个服务名的精确匹配，其他厂商不动；只认 service
+    // 字段，不认 account/generic（那俩太泛）。
+    // 3.8.366：放宽——阿里系 App 的 vendorPrefix 不一定是
+    // com.taobao（支付宝系是 com.alipay、阿里系是 com.alibaba），
+    // 三者都放行；其余一字不动。
+    if ([vendorPrefix isEqualToString:@"com.taobao"] || [vendorPrefix isEqualToString:@"com.alibaba"] || [vendorPrefix isEqualToString:@"com.alipay"]) {
         id svc = item[(__bridge NSString *)kSecAttrService];
         if ([svc isKindOfClass:NSString.class]) {
             NSString *s = (NSString *)svc;
-            if ([s caseInsensitiveCompare:@"YTKA"] == NSOrderedSame ||
-                [s caseInsensitiveCompare:@"Soft"] == NSOrderedSame ||
-                [s caseInsensitiveCompare:@"trackId"] == NSOrderedSame) return YES;
+            // 3.8.366：服务名归一化再比对。364/365 真机实测：服务名在回执里
+            // 显示为 Soft 的条目仍被排除——caseInsensitiveCompare 是精确
+            // 相等，存储值带不可见字符（首尾空白/换行/零宽字符）时必然
+            // miss，而回执的 "|" 拼串看不出这些字符。只留 ASCII 字母数字
+            // 再比对：YTKA/Soft/trackId 三个名本身全是字母数字，归一化不
+            // 改变它们；仍是精确相等（不是子串），"Microsoft" 这类含 soft
+            // 子串的服务名不会误收。谓词里只有这一处是精确相等，其余全是
+            // containsString——所以只有这里会被不可见字符打穿。
+            NSMutableString *norm = [NSMutableString stringWithCapacity:s.length];
+            for (NSUInteger i = 0; i < s.length; i++) {
+                unichar c = [s characterAtIndex:i];
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+                    [norm appendFormat:@"%C", c];
+                }
+            }
+            if ([norm caseInsensitiveCompare:@"YTKA"] == NSOrderedSame ||
+                [norm caseInsensitiveCompare:@"Soft"] == NSOrderedSame ||
+                [norm caseInsensitiveCompare:@"trackId"] == NSOrderedSame) return YES;
         }
     }
     return NO;
@@ -495,8 +513,18 @@ static void CZFKBExport(NSString *home, NSArray<NSString *> *entitledGroups, NSS
                         NSString *srvr = item[(__bridge NSString *)kSecAttrServer];
                         if (![srvr isKindOfClass:NSString.class]) srvr = @"";
                         NSString *svc2 = ([svc isKindOfClass:NSString.class] ? svc : @"");
+                        // 3.8.366：诊断里记 service 原始字节——364/365
+                        // 实测显示为 Soft 的条目仍被排除，疑似带不可见
+                        // 字符；"|" 拼串看不出，记长度 + UTF-8 十六进制
+                        // 一次看清。只改诊断拼串，不碰谓词。
+                        NSMutableString *svcHex = [NSMutableString string];
+                        const char *svcUtf8 = [svc2 UTF8String];
+                        for (size_t i = 0; svcUtf8[i] != '\0'; i++) {
+                            [svcHex appendFormat:@"%02x", (unsigned char)svcUtf8[i]];
+                        }
+                        NSString *svcDiag = [NSString stringWithFormat:@"%@(len=%lu,hex=%@)", svc2, (unsigned long)svc2.length, svcHex];
                         [CZFKBDiagExcludedItems addObject:[NSString stringWithFormat:@"%@|%@|%@|%@",
-                            (itemGroup ?: @"(nil)"), svc2, acct, srvr]];
+                            (itemGroup ?: @"(nil)"), svcDiag, acct, srvr]];
                     }
                     // 3.8.352：被滤条目的 alis+service（去重后前
                     // 10 条，只读诊断）。alis 为空记 (nil)。

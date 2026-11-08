@@ -309,7 +309,429 @@ struct LCDataManagementView : View {
         }
     }
     
+    // 3.8.366：恢复页直进只弹一次——恢复内容抽成 restoreBackupContent，
+    // 直进（initialSheet == .restore）时 body 直接返回它，不再经
+    // 数据管理壳 + fullScreenCover 两层；正常进页时仍走下面的
+    // fullScreenCover，内容同一份，两路行为一致。
+    @ViewBuilder private var restoreBackupContent: some View {
+        NavigationView {
+            // 恢复合一：本地 + iCloud 同屏两个区，不再先弹
+            // “选哪个文件夹”再进单源列表；文件夹选择与
+            // 换机迁移放最顶上（3.8.282）
+            List {
+                // 3.8.307：一键恢复全部挪到列表顶部单独一行
+                //（原来藏在工具栏“全部”菜单里，翻半天才找
+                // 到）；副标题写清恢复的是全部本地备份。
+                Section {
+                    Button {
+                        // 3.8.339：先不关恢复页，范围框盖在上面
+                        //（同备份按钮的修法，关页+弹框撞转场会吞框）。
+                        pendingRestoreURL = nil
+                        pendingRestoreAll = true
+                        presentScopeAlert(isBackup: false)
+                    } label: {
+                        HStack {
+                            LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("一键恢复全部")
+                                Text("恢复全部本地备份（本地 + iCloud）")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+                // 3.8.282：选文件夹与换机迁移都放最顶上
+                //（用户 2026-11-06 亲令：文件夹选择原来在
+                // iCloud 区最底下、迁移向导在 sheet 最底下，
+                // 两个都挪到最前面）
+                Section {
+                    if Self.externalBackupFolderURL() != nil {
+                        Button {
+                            showRestoreSheetFolderPicker = true
+                        } label: {
+                            HStack {
+                                Label("重新选择 iCloud 备份文件夹", systemImage: "folder")
+                                Spacer()
+                                Text(Self.externalBackupFolderURL()?.lastPathComponent ?? "")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    } else {
+                        Button("选择 iCloud 备份文件夹") {
+                            showRestoreSheetFolderPicker = true
+                        }
+                    }
+                    Button {
+                        // 3.8.339：向导页盖在恢复页上面，先不关
+                        // 恢复页（同款转场冲突，向导会被吞掉）。
+                        beginMigrationWizard()
+                    } label: {
+                        HStack {
+                            LCSettingsIcon(systemName: "arrow.triangle.2.circlepath", color: .purple)
+                            Text("换机迁移向导")
+                        }
+                    }
+                }
+                // 3.8.307：恢复列表排序/筛选——时间（新→旧）
+                // / 名字（A→Z）二选一 + 只看登录态开关。
+                Section {
+                    Picker("排序", selection: $backupSortMode) {
+                        Text("时间").tag(0)
+                        Text("名字").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("只看登录态", isOn: $backupLoginOnlyFilter)
+                }
+                // 3.8.307：两边都空时给空状态 + 去备份按钮
+                //（原来每区各一句“暂无备份”，没处可点）。
+                if backupFolderList.isEmpty && externalBackupFolderList.isEmpty {
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("还没有备份")
+                                .font(.headline)
+                            Text("先备份一次，恢复时才能在这里选")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Button("去备份") {
+                                // 3.8.339：先不关恢复页，备份范围框
+                                // 盖在上面（同款转场冲突）。
+                                pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
+                                presentScopeAlert(isBackup: true)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                Section("本地备份") {
+                    if sortedLocalBackups.isEmpty {
+                        Text(backupFolderList.isEmpty ? "暂无备份" : "没有符合筛选的备份")
+                            .foregroundColor(.secondary)
+                    }
+                    ForEach(sortedLocalBackups, id: \.self) { folderURL in
+                        restoreRow(for: folderURL)
+                    }
+                }
+                Section("iCloud 备份") {
+                    if sortedExternalBackups.isEmpty {
+                        Text(externalBackupFolderList.isEmpty ? "暂无备份" : "没有符合筛选的备份")
+                            .foregroundColor(.secondary)
+                    }
+                    ForEach(sortedExternalBackups, id: \.self) { folderURL in
+                        restoreRow(for: folderURL)
+                    }
+                }
+            }
+            // 3.8.335：删备份闪退第三修——List 身份绑版本号，
+            // 删备份时 +1 强制整体重建、不走 diff，绕过
+            // Invalid update 整类问题（见 backupListVersion）。
+            .id(backupListVersion)
+            .navigationTitle("lc.settings.restoreBackup".loc)
+            .onAppear {
+                czfDirectCoverAppeared = true
+                backupFolderList = backupFolders(fromExternal: false)
+                externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
+                lockedBackupNames = Self.lockedBackupNameSet()
+                restoreSheetNotice = nil
+                refreshBackupSizes()
+            }
+            .toolbar {
+                ToolbarItem(placement: .bottomBar) {
+                    // sheet 内操作反馈优先显示（删备份的结果
+                    // 在这里交代，不跨层弹外层提示）；无反馈
+                    // 时显示备份总占用
+                    if let notice = restoreSheetNotice {
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if backupSizes.count == backupFolderList.count + externalBackupFolderList.count && !(backupFolderList.isEmpty && externalBackupFolderList.isEmpty) {
+                        Text("本地 \(backupFolderList.count) 个 · iCloud \(externalBackupFolderList.count) 个，共占用 \(backupSizeText(backupSizes.values.reduce(0, +)))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("lc.common.cancel".loc) {
+                        // 3.8.366：直进时 body 本身就是恢复页（无盖子），
+                        // 取消直接 dismiss 整页回 App 页；正常进页时
+                        // 恢复页是盖子，关盖子回数据管理页。
+                        if initialSheet == .restore {
+                            dismiss()
+                        } else {
+                            showRestoreSelect = false
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Menu {
+                        Button {
+                            showSelectBackups = true
+                        } label: {
+                            Label("选择备份…", systemImage: "checkmark.circle")
+                        }
+                        Button {
+                            presentExportPickerForAll()
+                        } label: {
+                            Label("一键导出全部", systemImage: "square.and.arrow.up")
+                        }
+                        Button(role: .destructive) {
+                            showDeleteAllBackupsConfirm = true
+                        } label: {
+                            Label("一键删除全部", systemImage: "trash")
+                        }
+                    } label: {
+                        Text("全部")
+                    }
+                }
+            }
+            .confirmationDialog("确定删除全部备份？", isPresented: $showDeleteAllBackupsConfirm, titleVisibility: .visible) {
+                Button("删除全部", role: .destructive) {
+                    deleteAllBackups()
+                }
+                Button("lc.common.cancel".loc, role: .cancel) {}
+            } message: {
+                Text("将删除本地 \(backupFolderList.count) 个 + iCloud \(externalBackupFolderList.count) 个备份，此操作不可恢复")
+            }
+            // 单个删除改用 alert：同页已有两个 confirmationDialog
+            // 时确认框会一闪而过（多 dialog 同层抢占）；alert
+            // 在 sheet 内是唯一弹窗，不抢占
+            .alert("确定删除这个备份？", isPresented: $showDeleteBackupConfirm) {
+                Button("删除", role: .destructive) {
+                    let url = pendingDeleteBackupURL
+                    pendingDeleteBackupURL = nil
+                    // 闪退修（325 没盖住这条：单删仍崩 Invalid update
+                    // section 3，7→7、删 1 个）：325 只修了
+                    // deleteBackup 里的数据源（从磁盘重载），但
+                    // 没修执行时机——alert 确认按钮里同步改
+                    // backupFolderList，List 的 diff 与 alert
+                    // 消失合并成一次更新，UICollectionView 拿
+                    // 到“删了 1 个”却看到数据源还是 7 条，直接
+                    // 崩。挪到下一轮 runloop：alert 先消失，
+                    // 列表再单独更新 7→6，两次干净更新，不再合并。
+                    if let url {
+                        DispatchQueue.main.async {
+                            deleteBackup(at: url)
+                        }
+                    }
+                }
+                Button("lc.common.cancel".loc, role: .cancel) {
+                    pendingDeleteBackupURL = nil
+                }
+            } message: {
+                // 3.8.307：写清本地 + iCloud 份一起删（306
+                // 起单删就两边都清，文案不写用户以为只删一边）
+                Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」（本地 + iCloud 份一起删），此操作不可恢复")
+            }
+            // iCloud 未设时在 sheet 内直接选文件夹：选完
+            // 刷新 iCloud 列表 + 体积，不用关 sheet 重进
+            .sheet(isPresented: $showRestoreSheetFolderPicker) {
+                FolderPickerView { url in
+                    saveExternalBackupFolder(url)
+                    externalBackupFolderList = backupFolders(fromExternal: true)
+                    refreshBackupSizes()
+                }
+            }
+            // v216：恢复前备份清单预览（恢复 sheet 内再叠一层
+            // sheet；“恢复”走恢复行同一条路：关预览、关恢复
+            // sheet、设 pendingRestoreURL、弹 scope 弹窗）
+            // 3.8.340：预览也改真全屏——339 只改了恢复选页，
+            // 预览还是半屏 sheet，用户 16:38 截图实证：预览
+            // 顶上露一截、底下恢复页从缝里透出来，看着还是
+            // “俩个页面”。预览左上角已有“取消”按钮。
+            .fullScreenCover(isPresented: $showBackupPreview) {
+                NavigationView {
+                    Group {
+                        if previewLoading && previewItems.isEmpty {
+                            VStack(spacing: 12) {
+                                ProgressView()
+                                Text("正在加载清单…")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            List {
+                                ForEach(previewItems, id: \.folderName) { item in
+                                    previewRow(for: item)
+                                }
+                            }
+                        }
+                    }
+                    .navigationTitle("备份清单预览")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { showBackupPreview = false }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("恢复") {
+                                // 3.8.340：预览页和恢复页先不关，
+                                // 范围框（alert）盖在最上面，选了范围再一起关
+                                //（见恢复范围框按钮里）。
+                                if let url = previewFolderURL {
+                                    pendingRestoreURL = url
+                                    pendingRestoreAll = false
+                                    presentScopeAlert(isBackup: false)
+                                }
+                            }
+                            .disabled(previewFolderURL == nil)
+                        }
+                    }
+                }
+            }
+            // 选择性多选（3.8.283：选择备份双动作）：恢复
+            // sheet 内再叠一层 sheet（与文件夹 picker、清
+            // 单预览同款嵌套，不关恢复 sheet；“删除”先弹
+            // 自己的确认框再删，锁了的跳过并报数；“恢复”
+            // 走范围弹窗，一键恢复全部已挪到列表顶部单独一行）
+            // 3.8.340：多选页也改真全屏（同预览的修法，半屏
+            // sheet 顶上露缝、底下恢复页透出来就是“俩个页面”）。
+            .fullScreenCover(isPresented: $showSelectBackups) {
+                NavigationView {
+                    List {
+                        if selectBackupFolders.isEmpty {
+                            Text("暂无备份")
+                                .foregroundColor(.secondary)
+                        }
+                        ForEach(selectBackupFolders, id: \.self) { folderURL in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    HStack(spacing: 4) {
+                                        Text(folderURL.lastPathComponent)
+                                            .font(.headline)
+                                        // 3.8.281：锁了的备份挂 🔒
+                                        if lockedBackupNames.contains(folderURL.lastPathComponent) {
+                                            Image(systemName: "lock.fill")
+                                                .font(.caption)
+                                                .foregroundColor(.orange)
+                                        }
+                                    }
+                                    Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Image(systemName: selectedBackupFolderURLs.contains(folderURL) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(.blue)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if selectedBackupFolderURLs.contains(folderURL) {
+                                    selectedBackupFolderURLs.remove(folderURL)
+                                } else {
+                                    selectedBackupFolderURLs.insert(folderURL)
+                                }
+                            }
+                        }
+                    }
+                    .navigationTitle("选择备份")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .onAppear {
+                        selectBackupFolders = mergedBackupFolders()
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("lc.common.cancel".loc) { showSelectBackups = false }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            // 3.8.283：选择备份双动作（用户纠正 282 的
+                            // 单删）：勾中了既能删也能恢复——删除先确认
+                            // 再删（锁了的跳过并报数），恢复走范围弹窗
+                            HStack {
+                                Button(allSelectBackupsSelected ? "取消全选" : "全选") {
+                                    if allSelectBackupsSelected {
+                                        selectedBackupFolderURLs.removeAll()
+                                    } else {
+                                        selectedBackupFolderURLs = Set(selectBackupFolders)
+                                    }
+                                }
+                                HStack {
+                                    Button("删除", role: .destructive) {
+                                        showDeleteMultiSelectConfirm = true
+                                    }
+                                    Button("恢复") {
+                                        pendingRestoreFolders = selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }
+                                        pendingRestoreAll = false
+                                        pendingRestoreURL = nil
+                                        // 3.8.339：多选页和恢复页先不关，
+                                        // 范围框盖在上面，选了范围再一起关。
+                                        presentScopeAlert(isBackup: false)
+                                    }
+                                }
+                                .disabled(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.isEmpty)
+                            }
+                        }
+                    }
+                    // 3.8.282：多选删备份的确认框（挂在选择备份 sheet 里，
+                    // 才能盖在它上面弹；已锁定的不会删，文案里先说清）
+                    .alert("确定删除所选备份？", isPresented: $showDeleteMultiSelectConfirm) {
+                        Button("删除", role: .destructive) {
+                            deleteSelectedBackups()
+                        }
+                        Button("lc.common.cancel".loc, role: .cancel) {}
+                    } message: {
+                        // 3.8.307：写清本地 + iCloud 份一起删
+                        //（306 起多选删就两边都清，文案不写
+                        // 用户以为只删一边）
+                        Text("将删除所选的 \(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.count) 个备份（本地 + iCloud 份一起删），已锁定的不会删，此操作不可恢复")
+                    }
+                }
+            }
+        }
+        // 3.8.317：用户 21:54 截图——从面板图标打开恢复时，内层
+        // 恢复 sheet 顶部短一截（外层 sheet 还在呈现动画里就
+        // 弹了内层，按未落定的容器布局）。改大号定额，强制满高。
+        // 3.8.317 修复：直接调 .presentationDetents 编不过
+        //（构建 #364 唯一红字，部署目标 15.0），走包了
+        // #available 的 czfPresentationDetentsLarge。
+        .czfPresentationDetentsLarge()
+    }
+
     var body: some View {
+        // 3.8.366：恢复页直进只弹一次——initialSheet == .restore 时
+        // body 直接就是恢复页（restoreBackupContent），不再先 present
+        // 数据管理壳、再盖 fullScreenCover；点一次只弹一页，
+        // 点取消直接 dismiss 回 App 页。正常进页仍走下面的 Form。
+        if initialSheet == .restore {
+            restoreBackupContent
+                .onAppear { onAppearFunc() }
+                .alert("lc.common.error".loc, isPresented: $errorShow){
+                    // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
+                    // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。
+                    // 为空时 builder 仍为空，走默认“好”按钮，行为不变。
+                    if !pendingNoDataFolders.isEmpty {
+                        ForEach(pendingNoDataFolders) { entry in
+                            Button("在文件 App 里打开「\(entry.name)」") {
+                                openFolderInFiles(entry.folder)
+                                pendingNoDataFolders = []
+                            }
+                        }
+                        Button("好", role: .cancel) {
+                            pendingNoDataFolders = []
+                        }
+                    }
+                } message: {
+                    Text(errorInfo)
+                }
+                .alert("lc.common.success".loc, isPresented: $successShow){
+                    if !pendingNoDataFolders.isEmpty {
+                        ForEach(pendingNoDataFolders) { entry in
+                            Button("在文件 App 里打开「\(entry.name)」") {
+                                openFolderInFiles(entry.folder)
+                                pendingNoDataFolders = []
+                            }
+                        }
+                        Button("好", role: .cancel) {
+                            pendingNoDataFolders = []
+                        }
+                    }
+                } message: {
+                    Text(successInfo)
+                }
+        } else {
 
         Form {
             // #20：储存总览已拆成独立文件 LCStorageOverviewSection
@@ -755,373 +1177,7 @@ struct LCDataManagementView : View {
         // 着就是“俩个页面”（用户 16:07 报）。备份选页 329
         // 起就是全屏，恢复页跟它一致；左上角已有“取消”按钮。
         .fullScreenCover(isPresented: $showRestoreSelect) {
-            NavigationView {
-                // 恢复合一：本地 + iCloud 同屏两个区，不再先弹
-                // “选哪个文件夹”再进单源列表；文件夹选择与
-                // 换机迁移放最顶上（3.8.282）
-                List {
-                    // 3.8.307：一键恢复全部挪到列表顶部单独一行
-                    //（原来藏在工具栏“全部”菜单里，翻半天才找
-                    // 到）；副标题写清恢复的是全部本地备份。
-                    Section {
-                        Button {
-                            // 3.8.339：先不关恢复页，范围框盖在上面
-                            //（同备份按钮的修法，关页+弹框撞转场会吞框）。
-                            pendingRestoreURL = nil
-                            pendingRestoreAll = true
-                            presentScopeAlert(isBackup: false)
-                        } label: {
-                            HStack {
-                                LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("一键恢复全部")
-                                    Text("恢复全部本地备份（本地 + iCloud）")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                    }
-                    // 3.8.282：选文件夹与换机迁移都放最顶上
-                    //（用户 2026-11-06 亲令：文件夹选择原来在
-                    // iCloud 区最底下、迁移向导在 sheet 最底下，
-                    // 两个都挪到最前面）
-                    Section {
-                        if Self.externalBackupFolderURL() != nil {
-                            Button {
-                                showRestoreSheetFolderPicker = true
-                            } label: {
-                                HStack {
-                                    Label("重新选择 iCloud 备份文件夹", systemImage: "folder")
-                                    Spacer()
-                                    Text(Self.externalBackupFolderURL()?.lastPathComponent ?? "")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                }
-                            }
-                        } else {
-                            Button("选择 iCloud 备份文件夹") {
-                                showRestoreSheetFolderPicker = true
-                            }
-                        }
-                        Button {
-                            // 3.8.339：向导页盖在恢复页上面，先不关
-                            // 恢复页（同款转场冲突，向导会被吞掉）。
-                            beginMigrationWizard()
-                        } label: {
-                            HStack {
-                                LCSettingsIcon(systemName: "arrow.triangle.2.circlepath", color: .purple)
-                                Text("换机迁移向导")
-                            }
-                        }
-                    }
-                    // 3.8.307：恢复列表排序/筛选——时间（新→旧）
-                    // / 名字（A→Z）二选一 + 只看登录态开关。
-                    Section {
-                        Picker("排序", selection: $backupSortMode) {
-                            Text("时间").tag(0)
-                            Text("名字").tag(1)
-                        }
-                        .pickerStyle(.segmented)
-                        Toggle("只看登录态", isOn: $backupLoginOnlyFilter)
-                    }
-                    // 3.8.307：两边都空时给空状态 + 去备份按钮
-                    //（原来每区各一句“暂无备份”，没处可点）。
-                    if backupFolderList.isEmpty && externalBackupFolderList.isEmpty {
-                        Section {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("还没有备份")
-                                    .font(.headline)
-                                Text("先备份一次，恢复时才能在这里选")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Button("去备份") {
-                                    // 3.8.339：先不关恢复页，备份范围框
-                                    // 盖在上面（同款转场冲突）。
-                                    pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
-                                    presentScopeAlert(isBackup: true)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
-                    }
-                    Section("本地备份") {
-                        if sortedLocalBackups.isEmpty {
-                            Text(backupFolderList.isEmpty ? "暂无备份" : "没有符合筛选的备份")
-                                .foregroundColor(.secondary)
-                        }
-                        ForEach(sortedLocalBackups, id: \.self) { folderURL in
-                            restoreRow(for: folderURL)
-                        }
-                    }
-                    Section("iCloud 备份") {
-                        if sortedExternalBackups.isEmpty {
-                            Text(externalBackupFolderList.isEmpty ? "暂无备份" : "没有符合筛选的备份")
-                                .foregroundColor(.secondary)
-                        }
-                        ForEach(sortedExternalBackups, id: \.self) { folderURL in
-                            restoreRow(for: folderURL)
-                        }
-                    }
-                }
-                // 3.8.335：删备份闪退第三修——List 身份绑版本号，
-                // 删备份时 +1 强制整体重建、不走 diff，绕过
-                // Invalid update 整类问题（见 backupListVersion）。
-                .id(backupListVersion)
-                .navigationTitle("lc.settings.restoreBackup".loc)
-                .onAppear {
-                    czfDirectCoverAppeared = true
-                    backupFolderList = backupFolders(fromExternal: false)
-                    externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
-                    lockedBackupNames = Self.lockedBackupNameSet()
-                    restoreSheetNotice = nil
-                    refreshBackupSizes()
-                }
-                .toolbar {
-                    ToolbarItem(placement: .bottomBar) {
-                        // sheet 内操作反馈优先显示（删备份的结果
-                        // 在这里交代，不跨层弹外层提示）；无反馈
-                        // 时显示备份总占用
-                        if let notice = restoreSheetNotice {
-                            Text(notice)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        } else if backupSizes.count == backupFolderList.count + externalBackupFolderList.count && !(backupFolderList.isEmpty && externalBackupFolderList.isEmpty) {
-                            Text("本地 \(backupFolderList.count) 个 · iCloud \(externalBackupFolderList.count) 个，共占用 \(backupSizeText(backupSizes.values.reduce(0, +)))")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("lc.common.cancel".loc) {
-                            showRestoreSelect = false
-                        }
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Menu {
-                            Button {
-                                showSelectBackups = true
-                            } label: {
-                                Label("选择备份…", systemImage: "checkmark.circle")
-                            }
-                            Button {
-                                presentExportPickerForAll()
-                            } label: {
-                                Label("一键导出全部", systemImage: "square.and.arrow.up")
-                            }
-                            Button(role: .destructive) {
-                                showDeleteAllBackupsConfirm = true
-                            } label: {
-                                Label("一键删除全部", systemImage: "trash")
-                            }
-                        } label: {
-                            Text("全部")
-                        }
-                    }
-                }
-                .confirmationDialog("确定删除全部备份？", isPresented: $showDeleteAllBackupsConfirm, titleVisibility: .visible) {
-                    Button("删除全部", role: .destructive) {
-                        deleteAllBackups()
-                    }
-                    Button("lc.common.cancel".loc, role: .cancel) {}
-                } message: {
-                    Text("将删除本地 \(backupFolderList.count) 个 + iCloud \(externalBackupFolderList.count) 个备份，此操作不可恢复")
-                }
-                // 单个删除改用 alert：同页已有两个 confirmationDialog
-                // 时确认框会一闪而过（多 dialog 同层抢占）；alert
-                // 在 sheet 内是唯一弹窗，不抢占
-                .alert("确定删除这个备份？", isPresented: $showDeleteBackupConfirm) {
-                    Button("删除", role: .destructive) {
-                        let url = pendingDeleteBackupURL
-                        pendingDeleteBackupURL = nil
-                        // 闪退修（325 没盖住这条：单删仍崩 Invalid update
-                        // section 3，7→7、删 1 个）：325 只修了
-                        // deleteBackup 里的数据源（从磁盘重载），但
-                        // 没修执行时机——alert 确认按钮里同步改
-                        // backupFolderList，List 的 diff 与 alert
-                        // 消失合并成一次更新，UICollectionView 拿
-                        // 到“删了 1 个”却看到数据源还是 7 条，直接
-                        // 崩。挪到下一轮 runloop：alert 先消失，
-                        // 列表再单独更新 7→6，两次干净更新，不再合并。
-                        if let url {
-                            DispatchQueue.main.async {
-                                deleteBackup(at: url)
-                            }
-                        }
-                    }
-                    Button("lc.common.cancel".loc, role: .cancel) {
-                        pendingDeleteBackupURL = nil
-                    }
-                } message: {
-                    // 3.8.307：写清本地 + iCloud 份一起删（306
-                    // 起单删就两边都清，文案不写用户以为只删一边）
-                    Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」（本地 + iCloud 份一起删），此操作不可恢复")
-                }
-                // iCloud 未设时在 sheet 内直接选文件夹：选完
-                // 刷新 iCloud 列表 + 体积，不用关 sheet 重进
-                .sheet(isPresented: $showRestoreSheetFolderPicker) {
-                    FolderPickerView { url in
-                        saveExternalBackupFolder(url)
-                        externalBackupFolderList = backupFolders(fromExternal: true)
-                        refreshBackupSizes()
-                    }
-                }
-                // v216：恢复前备份清单预览（恢复 sheet 内再叠一层
-                // sheet；“恢复”走恢复行同一条路：关预览、关恢复
-                // sheet、设 pendingRestoreURL、弹 scope 弹窗）
-                // 3.8.340：预览也改真全屏——339 只改了恢复选页，
-                // 预览还是半屏 sheet，用户 16:38 截图实证：预览
-                // 顶上露一截、底下恢复页从缝里透出来，看着还是
-                // “俩个页面”。预览左上角已有“取消”按钮。
-                .fullScreenCover(isPresented: $showBackupPreview) {
-                    NavigationView {
-                        Group {
-                            if previewLoading && previewItems.isEmpty {
-                                VStack(spacing: 12) {
-                                    ProgressView()
-                                    Text("正在加载清单…")
-                                        .font(.subheadline)
-                                        .foregroundColor(.secondary)
-                                }
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            } else {
-                                List {
-                                    ForEach(previewItems, id: \.folderName) { item in
-                                        previewRow(for: item)
-                                    }
-                                }
-                            }
-                        }
-                        .navigationTitle("备份清单预览")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("取消") { showBackupPreview = false }
-                            }
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("恢复") {
-                                    // 3.8.340：预览页和恢复页先不关，
-                                    // 范围框（alert）盖在最上面，选了范围再一起关
-                                    //（见恢复范围框按钮里）。
-                                    if let url = previewFolderURL {
-                                        pendingRestoreURL = url
-                                        pendingRestoreAll = false
-                                        presentScopeAlert(isBackup: false)
-                                    }
-                                }
-                                .disabled(previewFolderURL == nil)
-                            }
-                        }
-                    }
-                }
-                // 选择性多选（3.8.283：选择备份双动作）：恢复
-                // sheet 内再叠一层 sheet（与文件夹 picker、清
-                // 单预览同款嵌套，不关恢复 sheet；“删除”先弹
-                // 自己的确认框再删，锁了的跳过并报数；“恢复”
-                // 走范围弹窗，一键恢复全部已挪到列表顶部单独一行）
-                // 3.8.340：多选页也改真全屏（同预览的修法，半屏
-                // sheet 顶上露缝、底下恢复页透出来就是“俩个页面”）。
-                .fullScreenCover(isPresented: $showSelectBackups) {
-                    NavigationView {
-                        List {
-                            if selectBackupFolders.isEmpty {
-                                Text("暂无备份")
-                                    .foregroundColor(.secondary)
-                            }
-                            ForEach(selectBackupFolders, id: \.self) { folderURL in
-                                HStack {
-                                    VStack(alignment: .leading) {
-                                        HStack(spacing: 4) {
-                                            Text(folderURL.lastPathComponent)
-                                                .font(.headline)
-                                            // 3.8.281：锁了的备份挂 🔒
-                                            if lockedBackupNames.contains(folderURL.lastPathComponent) {
-                                                Image(systemName: "lock.fill")
-                                                    .font(.caption)
-                                                    .foregroundColor(.orange)
-                                            }
-                                        }
-                                        Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
-                                            .font(.caption)
-                                            .foregroundColor(.gray)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    Image(systemName: selectedBackupFolderURLs.contains(folderURL) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundColor(.blue)
-                                }
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    if selectedBackupFolderURLs.contains(folderURL) {
-                                        selectedBackupFolderURLs.remove(folderURL)
-                                    } else {
-                                        selectedBackupFolderURLs.insert(folderURL)
-                                    }
-                                }
-                            }
-                        }
-                        .navigationTitle("选择备份")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .onAppear {
-                            selectBackupFolders = mergedBackupFolders()
-                        }
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("lc.common.cancel".loc) { showSelectBackups = false }
-                            }
-                            ToolbarItem(placement: .confirmationAction) {
-                                // 3.8.283：选择备份双动作（用户纠正 282 的
-                                // 单删）：勾中了既能删也能恢复——删除先确认
-                                // 再删（锁了的跳过并报数），恢复走范围弹窗
-                                HStack {
-                                    Button(allSelectBackupsSelected ? "取消全选" : "全选") {
-                                        if allSelectBackupsSelected {
-                                            selectedBackupFolderURLs.removeAll()
-                                        } else {
-                                            selectedBackupFolderURLs = Set(selectBackupFolders)
-                                        }
-                                    }
-                                    HStack {
-                                        Button("删除", role: .destructive) {
-                                            showDeleteMultiSelectConfirm = true
-                                        }
-                                        Button("恢复") {
-                                            pendingRestoreFolders = selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }
-                                            pendingRestoreAll = false
-                                            pendingRestoreURL = nil
-                                            // 3.8.339：多选页和恢复页先不关，
-                                            // 范围框盖在上面，选了范围再一起关。
-                                            presentScopeAlert(isBackup: false)
-                                        }
-                                    }
-                                    .disabled(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.isEmpty)
-                                }
-                            }
-                        }
-                        // 3.8.282：多选删备份的确认框（挂在选择备份 sheet 里，
-                        // 才能盖在它上面弹；已锁定的不会删，文案里先说清）
-                        .alert("确定删除所选备份？", isPresented: $showDeleteMultiSelectConfirm) {
-                            Button("删除", role: .destructive) {
-                                deleteSelectedBackups()
-                            }
-                            Button("lc.common.cancel".loc, role: .cancel) {}
-                        } message: {
-                            // 3.8.307：写清本地 + iCloud 份一起删
-                            //（306 起多选删就两边都清，文案不写
-                            // 用户以为只删一边）
-                            Text("将删除所选的 \(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.count) 个备份（本地 + iCloud 份一起删），已锁定的不会删，此操作不可恢复")
-                        }
-                    }
-                }
-            }
-            // 3.8.317：用户 21:54 截图——从面板图标打开恢复时，内层
-            // 恢复 sheet 顶部短一截（外层 sheet 还在呈现动画里就
-            // 弹了内层，按未落定的容器布局）。改大号定额，强制满高。
-            // 3.8.317 修复：直接调 .presentationDetents 编不过
-            //（构建 #364 唯一红字，部署目标 15.0），走包了
-            // #available 的 czfPresentationDetentsLarge。
-            .czfPresentationDetentsLarge()
+            restoreBackupContent
         }
         .sheet(isPresented: $showScheduleBackup) {
             NavigationView {
@@ -1251,6 +1307,7 @@ struct LCDataManagementView : View {
                 }
             }
         }
+        }
     }
     
     // 3.8.337：直进收尾——initialSheet 触发的内层页/弹窗全关了，
@@ -1354,8 +1411,10 @@ struct LCDataManagementView : View {
                 guard !self.czfDirectCoverAppeared else { return }
                 switch sheet {
                 case .restore:
-                    self.showRestoreSelect = false
-                    DispatchQueue.main.async { self.showRestoreSelect = true }
+                    // 3.8.366：直进时 body 本身就是恢复页，没有盖子
+                    // 可恢复，不翻开关（翻了也无盖子可弹，还可能
+                    // 误触 onChange 收尾）。
+                    break
                 case .backupSelect:
                     self.showBackupSelect = false
                     DispatchQueue.main.async { self.showBackupSelect = true }
@@ -1372,7 +1431,7 @@ struct LCDataManagementView : View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     guard !self.czfDirectCoverAppeared else { return }
                     switch sheet {
-                    case .restore: self.showRestoreSelect = false
+                    case .restore: break
                     case .backupSelect: self.showBackupSelect = false
                     case .scheduleBackup: self.showScheduleBackup = false
                     case .backupAll: break
@@ -2892,7 +2951,8 @@ struct LCDataManagementView : View {
         if isBackup {
             message = lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。"
         } else {
-            message = lastRestoreScopeHint() + restoreTargetText() + "只恢复登录态：只写回登录，现有数据不动。"
+            // 3.8.366：恢复顶号警告——361/364 实测：恢复把备份里 12 条旧令牌写进 .54，盖掉用户手动登录后的有效令牌导致掉线。恢复前先写清：登录态会被覆盖。只加文案，不改恢复流程。
+            message = lastRestoreScopeHint() + restoreTargetText() + "恢复会用备份里的登录态覆盖当前登录态。\n" + "只恢复登录态：只写回登录，现有数据不动。"
         }
         // 3.8.355：范围框改走独立 alert 窗口。348 的 top.present
         // 锚在 sceneDelegate.window 的 root 链上，但面板的 sheet

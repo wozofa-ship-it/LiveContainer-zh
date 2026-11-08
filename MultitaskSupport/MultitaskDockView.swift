@@ -4198,6 +4198,44 @@ struct SourcesPanelView: View {
         }
     }
 
+    // 3.8.366：面板备份范围框里补钥匙串快照警告。设置路
+    // presentScopeAlert 的文案里有 keychainSnapshotWarningText()，
+    // 但面板路预选后直接 doBackupScope、跳过 presentScopeAlert，
+    // 警告看不到；快照过期时备份里没有最新登录态，用户还以为备上了。
+    // 单 App 版同款检查（无快照 / 快照为空 / 超过 1 天），只读文件、
+    // 不改备份流程；没警告时返回空串，dialog 不显示 message。
+    private func czfBackupSnapshotWarning(for app: LCAppModel) -> String {
+        let fm = FileManager.default
+        var hasDump = false
+        var hasItems = false
+        var newestDate: Date? = nil
+        for container in app.uiContainers {
+            let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
+            guard let data = try? Data(contentsOf: dumpURL),
+                  let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
+            hasDump = true
+            if !items.isEmpty { hasItems = true }
+            if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
+               let mdate = attrs[.modificationDate] as? Date,
+               (newestDate == nil || mdate > newestDate!) {
+                newestDate = mdate
+            }
+        }
+        let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+        if !hasDump {
+            return "⚠️ 钥匙串快照提醒：\(name) 无快照（装桥后没打开过 App，备份里没有令牌）"
+        }
+        if !hasItems {
+            return "⚠️ 钥匙串快照提醒：\(name) 快照为空"
+        }
+        if let d = newestDate, Date().timeIntervalSince(d) > 24 * 3600 {
+            let fmt = DateFormatter()
+            fmt.dateFormat = "MM月d日 HH:mm"
+            return "⚠️ 钥匙串快照提醒：\(name) 快照是 \(fmt.string(from: d)) 的（超过 1 天没刷新，登录后先打开 App 切一次后台再备份）"
+        }
+        return ""
+    }
+
     var body: some View {
         // 3.8.304：滚动列表移出 GlassEffectContainer（与 App 面板同款
         // 原因：301 去行上玻璃治好滑动盖头，但容器里没玻璃的子视图会被
@@ -4228,6 +4266,43 @@ struct SourcesPanelView: View {
             } else {
                 Color(UIColor.systemBackground)
                     .ignoresSafeArea()
+            }
+        }
+        // 3.8.366：面板备份范围确认框从 sourcesPanelHeader 的
+        // VStack 挪到 body 根视图。359 挂在 header 上时一次没弹
+        // 出来：那个 VStack 上已有两个 .sheet（选页单 + 数据页），
+        // 按 292 的实证规则，同一视图多个 presentation 只有一个
+        // 能弹，dialog 被静默吞掉（340 同款：confirmationDialog
+        // 被占位的呈现吞掉）；且 header 在 iOS 26 下包在
+        // GlassEffectContainer 里。body 根视图上没有任何
+        // presentation 修饰符、也不在玻璃容器里，dialog 挂这里
+        // 一定能弹；状态还是 359 那三个 @State，按钮逻辑一字不动。
+        .confirmationDialog("备份范围", isPresented: $czfShowBackupScopeDialog, titleVisibility: .visible) {
+            Button("完整备份（数据 + 登录态）") {
+                if let app = czfScopeDialogApp {
+                    czfPreselectedLoginOnly = false
+                    czfDirectBackupApp = app
+                    czfDirectDataPage = .backupScope
+                }
+                czfScopeDialogApp = nil
+            }
+            Button("只备份登录态") {
+                if let app = czfScopeDialogApp {
+                    czfPreselectedLoginOnly = true
+                    czfDirectBackupApp = app
+                    czfDirectDataPage = .backupScope
+                }
+                czfScopeDialogApp = nil
+            }
+            Button("取消", role: .cancel) { czfScopeDialogApp = nil }
+        } message: {
+            // 3.8.366：快照过期警告拼进 dialog（见上方
+            // czfBackupSnapshotWarning）：快照没警告时不显示。
+            if let app = czfScopeDialogApp {
+                let w = czfBackupSnapshotWarning(for: app)
+                if !w.isEmpty {
+                    Text(w)
+                }
             }
         }
     }
@@ -4500,29 +4575,6 @@ struct SourcesPanelView: View {
                         }
                     }
             }
-        }
-        // 3.8.359：面板备份范围确认框——点备份快捷方式时弹，
-        // 挂在面板本体上（一直在层级里），比数据管理页的
-        // onAppear + 延时可靠；选完再开页，页里按预选直接
-        // 备份，不再弹范围框。
-        .confirmationDialog("备份范围", isPresented: $czfShowBackupScopeDialog, titleVisibility: .visible) {
-            Button("完整备份（数据 + 登录态）") {
-                if let app = czfScopeDialogApp {
-                    czfPreselectedLoginOnly = false
-                    czfDirectBackupApp = app
-                    czfDirectDataPage = .backupScope
-                }
-                czfScopeDialogApp = nil
-            }
-            Button("只备份登录态") {
-                if let app = czfScopeDialogApp {
-                    czfPreselectedLoginOnly = true
-                    czfDirectBackupApp = app
-                    czfDirectDataPage = .backupScope
-                }
-                czfScopeDialogApp = nil
-            }
-            Button("取消", role: .cancel) { czfScopeDialogApp = nil }
         }
     }
 
