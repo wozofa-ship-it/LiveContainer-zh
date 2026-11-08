@@ -27,6 +27,21 @@ final class ShareExtensionViewModel: ObservableObject {
     // 它自己（UIViewController）。链往上走 view → window →
     // UIApplication，拿到真 UIApplication 才能调 open。
     weak var launchResponder: UIResponder?
+    // 3.8.376 分路日志：本次打开尝试的诊断行（每路一到两行）。
+    // 失败时拼进 errorMessage 让用户截图；同时写 NSLog 和
+    // App Group 里的 CZFShareExtensionLog.txt（带时间戳）。
+    private var shareDiagLines: [String] = []
+
+    private func czfShareLog(_ line: String) {
+        shareDiagLines.append(line)
+        NSLog("[CZFShare] %@", line)
+        if let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LCSharedUtils.appGroupID()) {
+            let url = dir.appendingPathComponent("CZFShareExtensionLog.txt")
+            let prev = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let stamped = "\(Date()): \(line)\n"
+            try? (prev + stamped).write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
 
     init() {
         sharedDefaults = UserDefaults(suiteName: LCSharedUtils.appGroupID())
@@ -446,7 +461,8 @@ final class ShareExtensionViewModel: ObservableObject {
             if await openLaunchURL(launchURL, context: ctx) {
                 ctx?.completeRequest(returningItems: nil, completionHandler: nil)
             } else {
-                errorMessage = "lc.shareExtension.error.openFailed".loc
+                // 3.8.376：失败时把分路诊断拼进报错，用户截图就能定位。
+                errorMessage = "lc.shareExtension.error.openFailed".loc + "\n" + shareDiagLines.joined(separator: "\n")
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -463,7 +479,11 @@ final class ShareExtensionViewModel: ObservableObject {
     /// 第二路 context.open，第三路旧 Launcher（LSApplicationWorkspace）。
     /// 三路都失败返回 false，调用方留面板报错。
     private func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
-        if await openViaResponderChain(url) { return true }
+        // 3.8.376：每路的真假都记下来，失败时 errorMessage 带诊断。
+        shareDiagLines = []
+        let r1 = await openViaResponderChain(url)
+        czfShareLog("resp=\(r1)")
+        if r1 { return true }
         if let context {
             // 3.8.366：第二路加 3 秒超时竞速。context.open 的回调
             // 在 Share 扩展上可能永远不回（系统不支持的扩展点），
@@ -489,11 +509,16 @@ final class ShareExtensionViewModel: ObservableObject {
                 context.open(url) { success in resumeOnce(success) }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { resumeOnce(false) }
             }
+            czfShareLog("ctx=\(opened)")
             if opened { return true }
+        } else {
+            czfShareLog("ctx=nil")
         }
-        return await Task.detached {
+        let r3 = await Task.detached {
             LCShareExtensionLauncher.openURL(fromShareExtension: url)
         }.value
+        czfShareLog("ws=\(r3)")
+        return r3
     }
 
     /// 响应链打开：从 launchResponder 往上走 nextResponder，碰到
@@ -501,8 +526,17 @@ final class ShareExtensionViewModel: ObservableObject {
     /// open 回 false 就返回 false，让调用方走下一路。
     private func openViaResponderChain(_ url: URL) async -> Bool {
         var current: UIResponder? = launchResponder
+        // 3.8.376：记 launchResponder 是否 nil、链上每个类名、
+        // UIApplication 找到没有、app.open 回什么。
+        if current == nil {
+            czfShareLog("chain: launchResponder=nil")
+            return false
+        }
+        var chain: [String] = []
         while let responder = current {
+            chain.append(String(describing: type(of: responder)))
             if let app = responder as? UIApplication {
+                czfShareLog("chain: \(chain.joined(separator: "->"))")
                 let opened: Bool = await withCheckedContinuation { cont in
                     let lock = NSLock()
                     var done = false
@@ -516,10 +550,12 @@ final class ShareExtensionViewModel: ObservableObject {
                     app.open(url, options: [:]) { success in resumeOnce(success) }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { resumeOnce(false) }
                 }
+                czfShareLog("app.open=\(opened)")
                 return opened
             }
             current = responder.next
         }
+        czfShareLog("chain: \(chain.joined(separator: "->")) no UIApplication")
         return false
     }
 
@@ -557,7 +593,8 @@ final class ShareExtensionViewModel: ObservableObject {
             if await openLaunchURL(installURL, context: ctx) {
                 ctx?.completeRequest(returningItems: nil, completionHandler: nil)
             } else {
-                errorMessage = "lc.shareExtension.error.openFailed".loc
+                // 3.8.376：失败时把分路诊断拼进报错，用户截图就能定位。
+                errorMessage = "lc.shareExtension.error.openFailed".loc + "\n" + shareDiagLines.joined(separator: "\n")
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -608,7 +645,8 @@ final class ShareExtensionViewModel: ObservableObject {
         if await openLaunchURL(launchURL, context: ctx) {
             ctx?.completeRequest(returningItems: nil, completionHandler: nil)
         } else {
-            errorMessage = "lc.shareExtension.error.openFailed".loc
+            // 3.8.376：失败时把分路诊断拼进报错，用户截图就能定位。
+            errorMessage = "lc.shareExtension.error.openFailed".loc + "\n" + shareDiagLines.joined(separator: "\n")
         }
     }
 
