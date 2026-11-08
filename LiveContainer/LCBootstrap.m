@@ -525,8 +525,14 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     // 继续走原存储，两边各登各的。代价先说清：开钩子后新实例
     // 看不到旧共享钥匙串/App Group 里的旧登录，需要重登一次，
     // 这是隔离生效的表现，不是又坏了。
+    // 3.8.372：SecItem 钩子对所有 App 都装（NSFM 仍只给隔离容器）。
+    // 371 只加 entitlements 不起效：安装时重签的描述文件不含新加的阿里组，
+    // 371 实测 entitled 仍是 128、vendorProbe 仍 -34018、导出仍 15。
+    // 钥匙串想进备份，唯一路是钩子把它重定向到共享组（桥能读的 128 组里）。
+    // 只开 SecItem 不开 NSFM：后台“App已被终止”是 2026-10-19 禁三个钩子
+    // 的原因，NSFM（AppGroup 重定向）继续保持禁用以避开它。
+    SecItemGuestHooksInit();
     if ([guestContainerInfo[@"isolateAppGroup"] boolValue]) {
-        SecItemGuestHooksInit();
         NSFMGuestHooksInit();
     }
 
