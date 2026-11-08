@@ -147,11 +147,6 @@ struct LCDataManagementView : View {
     @State private var backupSelectedIDs = Set<String>()
     @State private var showBackupScopeDialog = false
     @State private var showRestoreScopeDialog = false
-    // 3.8.355：范围框独立 alert 窗口的持有位。presentScopeAlert
-    // 不再走 top.present（面板宿主不在 root 链里，弹了也被盖
-    // 住），改走自建 UIWindow；静态持有防 action 跑之前窗口
-    // 被释放，action 里 isHidden + 置 nil 收掉。
-    private static var czfScopeAlertWindow: UIWindow?
     // 3.8.344 根因 2：直进内层页是否真弹出来的确认位。init 置
     // true 的盖子可能在外层 sheet 动画中被丢弃且无回调；盖子
     // 内容 onAppear 时置 true，onAppearFunc 0.6 秒后检查它——
@@ -677,9 +672,8 @@ struct LCDataManagementView : View {
         // 呈现位；盖子盖着时 Form 的 VC 已在呈现，alert 再设
         // true 会被系统丢掉（4 版 × 2 种类型全灭；盖内 alert
         // 行 881/1051 正常，证实是挂载点不是弹窗类型）。
-        // 改走 presentScopeAlert（见文件下方）：3.8.355 起不再取
-        // 最顶层 VC（面板宿主不在 root 链里，取了也弹不到面板上），
-        // 改自建独立 alert 窗口弹，不占 SwiftUI 的呈现位，几层盖子
+        // 改走 presentScopeAlert（见文件下方）：直接取最顶层 VC
+        // 弹 UIAlertController，不占 SwiftUI 的呈现位，几层盖子
         // 都盖不住。showBackupScopeDialog/showRestoreScopeDialog
         // 仍保留，只作“框开着”的跟踪位（直进收尾五路检查用）。
         // 真全屏：325 的 sheet + large detent 顶上仍留一条缝——
@@ -2863,10 +2857,6 @@ struct LCDataManagementView : View {
     // showRestoreScopeDialog 只作“框开着”的跟踪位（直进收尾
     // 五路检查用），点按钮时清掉。
     private func presentScopeAlert(isBackup: Bool) {
-        // 3.8.355：防重入——已有范围框在屏上时不再建第二个窗口，
-        // 否则静态只持后一个，前一个窗口漏掉、框卡在屏上关不掉。
-        // （0.5 秒延时 + 手动点按钮两路可能撞上。）
-        guard Self.czfScopeAlertWindow == nil else { return }
         let title = isBackup ? "备份范围" : "恢复范围"
         let message: String
         if isBackup {
@@ -2874,50 +2864,79 @@ struct LCDataManagementView : View {
         } else {
             message = lastRestoreScopeHint() + restoreTargetText() + "只恢复登录态：只写回登录，现有数据不动。"
         }
-        // 3.8.355：范围框改走独立 alert 窗口。348 的 top.present
-        // 锚在 sceneDelegate.window 的 root 链上，但面板的 sheet
-        // 是独立 hosting 控制器（ensureSourcesOverlay 里
-        // window.addSubview(host.view)，不走 present），不在 root
-        // 的 presented 链里；top 是主 App 的顶层 VC，在面板 sheet
-        // 底下，alert 弹在它上面被面板盖住/丢掉——设置路 sheet 在
-        // 主层级里所以能弹，面板路弹不出（用户 09:07 三图实证：
-        // 设置备份弹窗+回执正常，图三快捷方式点完没弹窗）。
-        // 独立窗口不依赖任何 VC 层级，windowLevel 高于 alert 必定
-        // 盖在最上，设置路与面板路同款。窗口用静态持有，action 里
-        // 收掉（alert 只能走按钮关闭，必有 action 跑，窗口不会漏）。
-        let alertWindow = UIWindow(frame: UIScreen.main.bounds)
-        alertWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
-        alertWindow.rootViewController = UIViewController()
-        alertWindow.makeKeyAndVisible()
-        Self.czfScopeAlertWindow = alertWindow
-        let dismissWindow: () -> Void = {
-            Self.czfScopeAlertWindow?.isHidden = true
-            Self.czfScopeAlertWindow = nil
-        }
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         // 3.8.341 范围记忆：上次那个选项排第一（没选过时登录态在前）。
         if isBackup {
             showBackupScopeDialog = true
             if lastBackupLoginOnly == false {
-                alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in self.showBackupScopeDialog = false; dismissWindow(); self.doBackupScope(loginOnly: false) })
-                alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in self.showBackupScopeDialog = false; dismissWindow(); self.doBackupScope(loginOnly: true) })
+                alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: false) })
+                alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: true) })
             } else {
-                alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in self.showBackupScopeDialog = false; dismissWindow(); self.doBackupScope(loginOnly: true) })
-                alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in self.showBackupScopeDialog = false; dismissWindow(); self.doBackupScope(loginOnly: false) })
+                alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: true) })
+                alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in self.showBackupScopeDialog = false; self.doBackupScope(loginOnly: false) })
             }
-            alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showBackupScopeDialog = false; dismissWindow() })
+            alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showBackupScopeDialog = false })
         } else {
             showRestoreScopeDialog = true
             if lastRestoreLoginOnly == false {
-                alert.addAction(UIAlertAction(title: "恢复全部数据（会覆盖当前数据）", style: .destructive) { _ in self.showRestoreScopeDialog = false; dismissWindow(); self.doRestoreScope(loginOnly: false) })
-                alert.addAction(UIAlertAction(title: "只恢复登录态", style: .default) { _ in self.showRestoreScopeDialog = false; dismissWindow(); self.doRestoreScope(loginOnly: true) })
+                alert.addAction(UIAlertAction(title: "恢复全部数据（会覆盖当前数据）", style: .destructive) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: false) })
+                alert.addAction(UIAlertAction(title: "只恢复登录态", style: .default) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: true) })
             } else {
-                alert.addAction(UIAlertAction(title: "只恢复登录态", style: .default) { _ in self.showRestoreScopeDialog = false; dismissWindow(); self.doRestoreScope(loginOnly: true) })
-                alert.addAction(UIAlertAction(title: "恢复全部数据（会覆盖当前数据）", style: .destructive) { _ in self.showRestoreScopeDialog = false; dismissWindow(); self.doRestoreScope(loginOnly: false) })
+                alert.addAction(UIAlertAction(title: "只恢复登录态", style: .default) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: true) })
+                alert.addAction(UIAlertAction(title: "恢复全部数据（会覆盖当前数据）", style: .destructive) { _ in self.showRestoreScopeDialog = false; self.doRestoreScope(loginOnly: false) })
             }
-            alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showRestoreScopeDialog = false; dismissWindow() })
+            alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in self.showRestoreScopeDialog = false })
         }
-        alertWindow.rootViewController?.present(alert, animated: true)
+        // 3.8.348：不再依赖 @EnvironmentObject sceneDelegate——
+        // 独立 hosting + fullScreenCover 下环境注入不可靠，347
+        // 在 ensureSourcesOverlay 里手动注仍闪退（访问缺失的
+        // @EnvironmentObject 直接 fatal error）。改函数内现取：
+        // 前台场景的 delegate 就是本场景的 SceneDelegate（所有
+        // 场景的 delegateClass 都是 SceneDelegate，见 AppDelegate
+        // configurationForConnecting），取它的 window 锚定；取不
+        // 到（无前台场景）直接走全局查找兜底。342/343 的教训还
+        // 在：connectedScenes 与 scene.windows 都是无序集合，
+        // first 匹配在多场景/多窗口下会拿错窗，所以只认前台场景
+        // 的 delegate，不认任意 first。present 前校验
+        // top.view.window != nil，不在窗口层级里就不弹、清跟踪位
+        // 返回。同步 present（调用方已在主线程且无转场进行中；
+        // .backupAll 在 onAppearFunc 里已等 0.5 秒让 sheet 落定，
+        // 去掉 343 的 async 包裹）。
+        // 3.8.346 的补漏还在：delegate.window 为 nil 时取本场景
+        // 的 keyWindow/首个可见窗回填（sceneDidBecomeActive 刷新
+        // 后通常已非 nil，这步只是补漏）；还拿不到才退全局查找。
+        let sceneDelegate = (UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene)?.delegate as? SceneDelegate
+        if let sceneDelegate = sceneDelegate, sceneDelegate.window == nil {
+            if let ownScene = UIApplication.shared.connectedScenes.first(where: { ($0.delegate as? SceneDelegate) === sceneDelegate }) as? UIWindowScene,
+               let keyWindow = ownScene.keyWindow ?? ownScene.windows.first(where: { !$0.isHidden }) {
+                sceneDelegate.window = keyWindow
+            }
+        }
+        func topViewController(from root: UIViewController) -> UIViewController {
+            var top = root
+            while let presented = top.presentedViewController { top = presented }
+            return top
+        }
+        if let window = sceneDelegate?.window, let root = window.rootViewController {
+            let top = topViewController(from: root)
+            if top.view.window != nil {
+                top.present(alert, animated: true)
+                return
+            }
+            NSLog("[LC] presentScopeAlert: sceneDelegate top VC not in window hierarchy, fallback to global lookup")
+        }
+        guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first(where: { !$0.isHidden }),
+              let root = window.rootViewController else {
+            if isBackup { showBackupScopeDialog = false } else { showRestoreScopeDialog = false }
+            return
+        }
+        let top = topViewController(from: root)
+        guard top.view.window != nil else {
+            if isBackup { showBackupScopeDialog = false } else { showRestoreScopeDialog = false }
+            return
+        }
+        top.present(alert, animated: true)
     }
     private func doBackupScope(loginOnly: Bool) {
         UserDefaults.standard.set(loginOnly, forKey: "LCBackupLastLoginOnly")
