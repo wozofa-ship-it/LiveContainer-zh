@@ -4273,43 +4273,12 @@ struct SourcesPanelView: View {
                     .ignoresSafeArea()
             }
         }
-        // 3.8.366：面板备份范围确认框从 sourcesPanelHeader 的
-        // VStack 挪到 body 根视图。359 挂在 header 上时一次没弹
-        // 出来：那个 VStack 上已有两个 .sheet（选页单 + 数据页），
-        // 按 292 的实证规则，同一视图多个 presentation 只有一个
-        // 能弹，dialog 被静默吞掉（340 同款：confirmationDialog
-        // 被占位的呈现吞掉）；且 header 在 iOS 26 下包在
-        // GlassEffectContainer 里。body 根视图上没有任何
-        // presentation 修饰符、也不在玻璃容器里，dialog 挂这里
-        // 一定能弹；状态还是 359 那三个 @State，按钮逻辑一字不动。
-        .confirmationDialog("备份范围", isPresented: $czfShowBackupScopeDialog, titleVisibility: .visible) {
-            Button("完整备份（数据 + 登录态）") {
-                if let app = czfScopeDialogApp {
-                    czfPreselectedLoginOnly = false
-                    czfDirectBackupApp = app
-                    czfDirectDataPage = .backupScope
-                }
-                czfScopeDialogApp = nil
-            }
-            Button("只备份登录态") {
-                if let app = czfScopeDialogApp {
-                    czfPreselectedLoginOnly = true
-                    czfDirectBackupApp = app
-                    czfDirectDataPage = .backupScope
-                }
-                czfScopeDialogApp = nil
-            }
-            Button("取消", role: .cancel) { czfScopeDialogApp = nil }
-        } message: {
-            // 3.8.366：快照过期警告拼进 dialog（见上方
-            // czfBackupSnapshotWarning）：快照没警告时不显示。
-            if let app = czfScopeDialogApp {
-                let w = czfBackupSnapshotWarning(for: app)
-                if !w.isEmpty {
-                    Text(w)
-                }
-            }
-        }
+        // 3.8.368：366 的判断错了——body 根视图上其实挂着 3 个
+        // .sheet + 1 个 .alert，confirmationDialog 挂在这里仍被
+        // 静默吞掉（同一视图多个 presentation 只有一个能弹，292
+        // 实证）。dialog 改挂到触发它的那个备份按钮上（见下方
+        // appbackup: 分支），按钮本身没有任何 presentation，
+        // 一定能弹。
     }
 
     @ViewBuilder
@@ -4488,6 +4457,39 @@ struct SourcesPanelView: View {
                                                 .foregroundColor(.white)
                                         )
                                         .offset(x: -4, y: -4)
+                                }
+                            }
+                            // 3.8.368：备份范围确认框改挂到触发按钮上。
+                            // 根因：body 根视图挂着 3 个 .sheet + 1 个
+                            // .alert，dialog 挂在根视图上被静默吞掉
+                            //（366 以为根视图没有 presentation，错）。
+                            // 按钮本身没有任何 presentation，dialog
+                            // 挂这里一定能弹。快照过期警告照 366 拼进
+                            // message。
+                            .confirmationDialog("备份范围", isPresented: $czfShowBackupScopeDialog, titleVisibility: .visible) {
+                                Button("完整备份（数据 + 登录态）") {
+                                    if let app = czfScopeDialogApp {
+                                        czfPreselectedLoginOnly = false
+                                        czfDirectBackupApp = app
+                                        czfDirectDataPage = .backupScope
+                                    }
+                                    czfScopeDialogApp = nil
+                                }
+                                Button("只备份登录态") {
+                                    if let app = czfScopeDialogApp {
+                                        czfPreselectedLoginOnly = true
+                                        czfDirectBackupApp = app
+                                        czfDirectDataPage = .backupScope
+                                    }
+                                    czfScopeDialogApp = nil
+                                }
+                                Button("取消", role: .cancel) { czfScopeDialogApp = nil }
+                            } message: {
+                                if let app = czfScopeDialogApp {
+                                    let w = czfBackupSnapshotWarning(for: app)
+                                    if !w.isEmpty {
+                                        Text(w)
+                                    }
                                 }
                             }
                             .contextMenu {
