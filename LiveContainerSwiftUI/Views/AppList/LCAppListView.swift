@@ -139,13 +139,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 批量恢复范围单开关（同款：先弹范围单再跑）。
     @State private var batchRestoreScopeConfirm = false
     @State private var batchBusy = false
-    // 手机桌面视图（3.8.380）：网格开关（默认开）+ 网格单
-    // App 备份/删除范围单（点长按菜单先弹单再跑）。
-    @AppStorage("czfAppListGridMode", store: LCUtils.appGroupUserDefault) private var czfAppListGridMode = true
-    @State private var gridBackupApp: LCAppModel? = nil
-    @State private var gridBackupScopeConfirm = false
-    @State private var gridDeleteApp: LCAppModel? = nil
-    @State private var gridDeleteConfirm = false
     // 每行备份状态：实例唯一 ID → “已备份 · 日期”/“无备份”，
     // 进页时一次扫完 Backups 目录算好，行上只查表不扫盘；
     // 批量备份/恢复跑完后刷新。
@@ -598,14 +591,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 } label: {
                     Label("管理排序方案…", systemImage: "folder.badge.gearshape")
                 }
-                // 手机桌面视图（3.8.380）：网格/列表切换（默认网格），
-                // 与参照图的“恢复原生”同款回落口。
-                Divider()
-                Button {
-                    czfAppListGridMode.toggle()
-                } label: {
-                    Label(czfAppListGridMode ? "切换为列表视图" : "切换为网格视图", systemImage: czfAppListGridMode ? "list.bullet" : "square.grid.2x2")
-                }
             } label: {
                 Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
             }
@@ -616,9 +601,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     // 优2（3.8.277）：列表内拖动重排——正在拖的 App 唯一 ID（松手提交用）。
     @State private var dragReorderID: String? = nil
-
-    // 手机桌面视图（3.8.380）：4 列网格（四个一排）。
-    private let czfGridColumns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 4)
     
     @EnvironmentObject private var sharedModel : SharedModel
     @EnvironmentObject private var sharedAppSortManager : LCAppSortManager
@@ -764,257 +746,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         withTransaction(transaction) {
             manager.customSortOrder = newOrder
             manager.appSortType = .custom
-        }
-    }
-
-    // 手机桌面视图（3.8.380）：4 列图标网格的格子——图标
-    // 下 App 名；点图标启动，长按菜单改设置/备份/删除，
-    // 长按拖动换位置（commitDragReorder 同款；搜索时不挂
-    // 拖拽，显示是子集、拖了会丢位置）。
-    @ViewBuilder
-    private func appGridCell(for app: LCAppModel) -> some View {
-        let icon = app.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage()
-        let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-        let cell = VStack(spacing: 6) {
-            IconImageView(icon: icon)
-                .frame(width: 60, height: 60)
-            Text(name)
-                .font(.caption)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { launchGridApp(app) }
-        .contextMenu {
-            Button("打开设置") { openNavigationView(view: AnyView(LCAppSettingsView(model: app))) }
-            Button("最小化") { minimizeGridApp(app) }
-            Button("小窗口打开") { smallWindowGridApp(app) }
-            Button("备份此 App") { gridBackupApp = app; gridBackupScopeConfirm = true }
-            if let id = sharedAppSortManager.getUniqueIdentifier(for: app),
-               let status = backupStatusByID[id] {
-                Button(status) { }.disabled(true)
-            }
-            Button("删除", role: .destructive) { gridDeleteApp = app; gridDeleteConfirm = true }
-        }
-        if searchContext.debouncedQuery.isEmpty {
-            cell
-                .onDrag {
-                    if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
-                        dragReorderID = id
-                        return NSItemProvider(object: id as NSString)
-                    }
-                    return NSItemProvider()
-                }
-                .onDrop(of: [.text], delegate: LCAppReorderDropDelegate(
-                    targetApp: app,
-                    draggedID: { dragReorderID },
-                    commit: { dragged, target in commitDragReorder(draggedID: dragged, targetApp: target) }
-                ))
-        } else {
-            cell
-        }
-    }
-
-    // 网格点图标启动（3.8.380）：面板 launchApp 同款——
-    // 已在跑带回前台并拉满（启动=大窗口，用户亲定），没跑
-    // runApp 新起，起完轮询拉满（3.8.240 同款）。
-    private func launchGridApp(_ app: LCAppModel) {
-        if #available(iOS 16.0, *) {
-            let uuid: String? = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID
-            if let uuid, let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) {
-                let belongsToOther: Bool
-                if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                    belongsToOther = runningPath != app.appInfo.relativeBundlePath
-                } else {
-                    belongsToOther = true
-                }
-                if !belongsToOther {
-                    var brought = false
-                    if #available(iOS 16.1, *) {
-                        brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
-                    }
-                    if !brought {
-                        brought = MultitaskDockManager.shared.bringMultitaskViewToFront(uuid: uuid)
-                    }
-                    if brought || MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == uuid }) {
-                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController, !vc.isMaximized {
-                            vc.maximizeWindow()
-                        }
-                        return
-                    }
-                }
-            }
-        }
-        Task {
-            do {
-                try await app.runApp()
-            } catch {
-                await MainActor.run { errorInfo = error.localizedDescription; errorShow = true }
-                return
-            }
-            await MainActor.run {
-                if #available(iOS 16.0, *) { pollGridWindowMaximize(app: app) }
-            }
-        }
-    }
-
-    // 启动新开路拉满（3.8.380）：卡片 pollAndMaximizeFreshWindow
-    // 同款，0.1 秒×60 次轮询等新窗进 dock，归属按路径验；
-    // 拉满动画重入守卫吞掉的那次下个 tick 重试。
-    @available(iOS 16.0, *)
-    private func pollGridWindowMaximize(app: LCAppModel) {
-        let expectedPath = app.appInfo.relativeBundlePath
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            attempts += 1
-            let uuid: String? = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID
-            guard let uuid,
-                  let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
-                if attempts >= 60 { timer.invalidate() }
-                return
-            }
-            let owned: Bool
-            if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                owned = runningPath == expectedPath
-            } else {
-                owned = false
-            }
-            if !owned {
-                timer.invalidate()
-                return
-            }
-            guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
-                if attempts >= 60 { timer.invalidate() }
-                return
-            }
-            if !vc.isMaximized {
-                vc.maximizeWindow()
-            }
-            if vc.isMaximized || attempts >= 60 {
-                timer.invalidate()
-            }
-        }
-    }
-
-    // 网格长按菜单：最小化（3.8.380）——卡片 minimizeButtonTapped
-    // 同款：已在跑直接最小化；没跑先启动、轮询等窗出现再最小化。
-    private func minimizeGridApp(_ app: LCAppModel) {
-        guard #available(iOS 16.0, *) else { return }
-        let uuid: String? = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID
-        guard let uuid else { return }
-        let dockManager = MultitaskDockManager.shared
-        if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
-            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? true
-            if !belongsToOther {
-                dockManager.minimizeWindow(uuid: uuid)
-                return
-            }
-        }
-        let expectedPath = app.appInfo.relativeBundlePath
-        Task {
-            do {
-                try await app.runApp()
-            } catch {
-                await MainActor.run { errorInfo = error.localizedDescription; errorShow = true }
-            }
-        }
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            attempts += 1
-            if let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) {
-                let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == expectedPath } ?? false
-                if owned {
-                    MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
-                }
-                timer.invalidate()
-            } else if attempts >= 60 {
-                timer.invalidate()
-            }
-        }
-    }
-
-    // 网格长按菜单：小窗口打开（3.8.380）——卡片
-    // smallWindowButtonTapped 同款：已在跑且已最大化时用切
-    // 换式 maximizeWindow 压回小窗；没跑 runApp(multitask: true)。
-    private func smallWindowGridApp(_ app: LCAppModel) {
-        guard #available(iOS 16.0, *) else { return }
-        let uuid: String? = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID
-        guard let uuid else { return }
-        if let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) {
-            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? true
-            if !belongsToOther {
-                if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController, vc.isMaximized {
-                    vc.maximizeWindow()
-                }
-                return
-            }
-        }
-        Task {
-            do {
-                try await app.runApp(multitask: true, containerFolderName: uuid)
-            } catch {
-                await MainActor.run { errorInfo = error.localizedDescription; errorShow = true }
-            }
-        }
-    }
-
-    // 网格单 App 备份（3.8.380）：batchBackup 同款单条路
-    //（backupOneAppSync + 同步外部文件夹 + 刷新设置备份），
-    // 范围由确认框先选；跑完刷新行上备份状态。
-    private func gridBackup(loginOnly: Bool) async {
-        guard let app = gridBackupApp else { return }
-        gridBackupApp = nil
-        let fm = FileManager.default
-        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            errorInfo = "lc.settings.backupFail".loc
-            errorShow = true
-            return
-        }
-        let backupRoot = docsURL.appendingPathComponent("Backups")
-        let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-        let fail: String? = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let fm = FileManager.default
-                try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
-                let fname = LCDataManagementView.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
-                if LCDataManagementView.isBackupLocked(fname) {
-                    continuation.resume(returning: "\(name)（已锁定）")
-                    return
-                }
-                do {
-                    let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
-                    LCDataManagementView.syncBackupsToExternalFolder(appNames: [one.folderName], backupRoot: backupRoot)
-                    LCDataManagementView.writeCZFSettingsBackupDebounced()
-                    continuation.resume(returning: nil)
-                } catch {
-                    continuation.resume(returning: "\(name)：\(LCUtils.czfFriendlyError(error))")
-                }
-            }
-        }
-        if let fail {
-            errorInfo = fail
-            errorShow = true
-        } else {
-            refreshBackupStatus()
-        }
-    }
-
-    // 网格单 App 删除（3.8.380）：batchDelete 同款单条路
-    //（deleteAppFiles 删 .app 包 + 可选删数据容器与钥匙串，
-    // 删完 removeApp 从列表移除）；确认在调用前由确认框问清。
-    private func gridDelete(removeDataFolders: Bool) async {
-        guard let app = gridDeleteApp else { return }
-        gridDeleteApp = nil
-        let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-        do {
-            let failedC = try LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { model in
-                self.removeApp(app: model)
-            }
-            installInfo = "已删除 \(name)" + (failedC.isEmpty ? "" : "\n以下容器删除失败，已保留：\(failedC.joined(separator: "、"))")
-            installInfoShow = true
-        } catch {
-            errorInfo = "\(name)：\(LCUtils.czfFriendlyError(error))"
-            errorShow = true
         }
     }
 
@@ -1328,35 +1059,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                         .buttonStyle(.plain)
                     }
-                    // 手机桌面视图（3.8.381）：网格顶行“恢复原生”，
-                    // 点了切回列表视图（参照图同款显眼入口；排序
-                    // 菜单里的切换是同一开关的另一入口）。
-                    if !batchMode && czfAppListGridMode {
-                        HStack {
-                            Button {
-                                czfAppListGridMode = false
-                            } label: {
-                                Label("恢复原生", systemImage: "arrow.uturn.left")
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 4)
+                    ForEach(filteredApps, id: \.self) { app in
+                        appRow(for: app)
                     }
-                    // 手机桌面视图（3.8.380）：默认 4 列图标网格，
-                    // 点图标启动；多选模式或切回列表视图时仍走旧行。
-                    if batchMode || !czfAppListGridMode {
-                        ForEach(filteredApps, id: \.self) { app in
-                            appRow(for: app)
-                        }
-                        .transition(.scale)
-                    } else {
-                        LazyVGrid(columns: czfGridColumns, spacing: 16) {
-                            ForEach(filteredApps, id: \.self) { app in
-                                appGridCell(for: app)
-                            }
-                        }
-                        .transition(.scale)
-                    }
+                    .transition(.scale)
                 }
                 .padding()
                 .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredApps)
@@ -1370,23 +1076,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     if sharedModel.hiddenApps.count > 0 {
                         if sharedModel.isHiddenAppUnlocked {
                             LazyVStack {
-                                if batchMode || !czfAppListGridMode {
-                                    ForEach(filteredHiddenApps, id: \.self) { app in
-                                        // 3.8.281：隐藏行也走 appRow——多选模式时行首
-                                        // 挂勾选圈才能勾上；平时 appRow 的拖拽对隐藏
-                                        // 行是死的（commitDragReorder 只认可见 App，
-                                        // 拖隐藏行/往隐藏行上放都直接 no-op）。
-                                        appRow(for: app)
-                                    }
-                                    .transition(.scale)
-                                } else {
-                                    LazyVGrid(columns: czfGridColumns, spacing: 16) {
-                                        ForEach(filteredHiddenApps, id: \.self) { app in
-                                            appGridCell(for: app)
-                                        }
-                                    }
-                                    .transition(.scale)
+                                ForEach(filteredHiddenApps, id: \.self) { app in
+                                    // 3.8.281：隐藏行也走 appRow——多选模式时行首
+                                    // 挂勾选圈才能勾上；平时 appRow 的拖拽对隐藏
+                                    // 行是死的（commitDragReorder 只认可见 App，
+                                    // 拖隐藏行/往隐藏行上放都直接 no-op）。
+                                    appRow(for: app)
                                 }
+                                .transition(.scale)
                             }
                             .padding()
                             .transition(.opacity)
@@ -1508,30 +1205,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Button("取消", role: .cancel) { }
         } message: {
             Text("只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
-        }
-        // 手机桌面视图（3.8.380）：网格单 App 备份范围单
-        //（与批量备份同款两选项）；选了范围才跑 gridBackup。
-        .confirmationDialog("备份范围", isPresented: $gridBackupScopeConfirm, titleVisibility: .visible) {
-            Button("只备份登录态") {
-                Task { await gridBackup(loginOnly: true) }
-            }
-            Button("完整备份（数据 + 登录态）") {
-                Task { await gridBackup(loginOnly: false) }
-            }
-            Button("取消", role: .cancel) { gridBackupApp = nil }
-        } message: {
-            Text("只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
-        }
-        // 手机桌面视图（3.8.380）：网格单 App 删除确认
-        //（与批量删除同款两选项）；选了才跑 gridDelete。
-        .confirmationDialog("删除 \(gridDeleteApp?.appInfo.displayName() ?? "")", isPresented: $gridDeleteConfirm, titleVisibility: .visible) {
-            Button("删除 App（保留数据）", role: .destructive) {
-                Task { await gridDelete(removeDataFolders: false) }
-            }
-            Button("删除 App 及其数据", role: .destructive) {
-                Task { await gridDelete(removeDataFolders: true) }
-            }
-            Button("取消", role: .cancel) { gridDeleteApp = nil }
         }
         // 批量恢复范围单（与批量备份同款两选项）；选了范围
         // 才跑 batchRestore，取消不跑。

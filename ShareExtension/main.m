@@ -14,6 +14,15 @@
 //（ViewModel 的 firstFreeInstalledLC 还在用它找空闲 LC）。
 // UIKitPrivate.h 只给那路声明类型，一并去掉。
 
+// 3.8.385：补 LSApplicationWorkspace 最小声明。381 删 UIKitPrivate import
+// 后 canOpenURLFromShareExtension 还在调 defaultWorkspace /
+// isApplicationAvailableToOpenURL:error:，编译器不认这两个 selector
+//（384 唯一红字）。只声明用到的两个方法，不引私有头。
+@interface LSApplicationWorkspace : NSObject
++ (instancetype)defaultWorkspace;
+- (BOOL)isApplicationAvailableToOpenURL:(NSURL *)url error:(NSError **)error;
+@end
+
 @implementation LCShareExtensionLauncher
 
 + (BOOL)canOpenURLFromShareExtension:(NSURL *)url {
