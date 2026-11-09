@@ -45,6 +45,11 @@
 		4BC2C78E5F0B4AF044A63C1D /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C005B99B4141465597AE1E9A /* Security.framework */; };
 		2F5054A546B6CC02E86866C7 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8DB7510961810EA66D691F6 /* SystemConfiguration.framework */; };
 		72F55252E5C1D7EB473276F1 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = D0DE5359A4284189A2E68E22 /* libresolv.tbd */; };
+		A5F1B1012D689AEF6645DFDE /* AssociatedDomainResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CBBE240912FE5D25C18D8D7 /* AssociatedDomainResolver.swift */; };
+		A92CD6CFEBCD29F9777C492B /* ShareExtensionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E85292A772A67A6E341D23 /* ShareExtensionViewModel.swift */; };
+		D06E0939957AD8928BCDBE79 /* ShareExtensionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C8E7C4DDE28E21D590B889 /* ShareExtensionViews.swift */; };
+		D48B616B469945587E972CBC /* ShareModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6DBE5B03912C7FEAD4E4F9 /* ShareModels.swift */; };
+		F2FE96FFE4AF1A6399F76BF3 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = A3F449D68C077DB4C80394C0 /* main.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -222,6 +227,11 @@
 		EA97903FB0578C703A57CA7A /* CZFSingBoxCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CZFSingBoxCore.swift; sourceTree = "<group>"; };
 		989F31049DE845756C8F8A85 /* CZFSingBoxProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CZFSingBoxProbe.swift; sourceTree = "<group>"; };
 		C8DB7510961810EA66D691F6 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
+		2CBBE240912FE5D25C18D8D7 /* AssociatedDomainResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareExtension/AssociatedDomainResolver.swift; sourceTree = "<group>"; };
+		64E85292A772A67A6E341D23 /* ShareExtensionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareExtension/ShareExtensionViewModel.swift; sourceTree = "<group>"; };
+		67C8E7C4DDE28E21D590B889 /* ShareExtensionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareExtension/ShareExtensionViews.swift; sourceTree = "<group>"; };
+		6F6DBE5B03912C7FEAD4E4F9 /* ShareModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareExtension/ShareModels.swift; sourceTree = "<group>"; };
+		A3F449D68C077DB4C80394C0 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ShareExtension/main.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -282,14 +292,6 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
-			);
-			target = 4884B2EED5651C09E74EDE39 /* ActionExtension */;
-		};
-		A23F5CE5EB8216F48837FD04 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-				ShareExtensionHandler.swift,
 			);
 			target = 4884B2EED5651C09E74EDE39 /* ActionExtension */;
 		};
@@ -373,7 +375,7 @@
 		17780D3B2E1C02420077E636 /* litehook */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (17780E512E1C039D0077E636 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = litehook; sourceTree = "<group>"; };
 		17B0F8452DE16FE4008110EA /* xcconfigs */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = xcconfigs; sourceTree = "<group>"; };
 		17CAE6182F230449008B1977 /* LaunchAppExtension */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (17CAE6252F230449008B1977 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = LaunchAppExtension; sourceTree = "<group>"; };
-		17E23DE02F443A9300C55733 /* ShareExtension */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (17E23DED2F443A9300C55733 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, A23F5CE5EB8216F48837FD04 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = ShareExtension; sourceTree = "<group>"; };
+		17E23DE02F443A9300C55733 /* ShareExtension */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (17E23DED2F443A9300C55733 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = ShareExtension; sourceTree = "<group>"; };
 		CA4B3BD2FAFB42F676DE157E /* ActionExtension */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (DEA178C0E21106A64E9A3252 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = ActionExtension; sourceTree = "<group>"; };
 		E1292AE72DCA3A660065E12D /* LiveProcess */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (E1292AF72DCA3A660065E12D /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = LiveProcess; sourceTree = "<group>"; };
 		E1292C1A2DCA48F00065E12D /* Tweaks */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (E1292C202DCA48F00065E12D /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = Tweaks; sourceTree = "<group>"; };
@@ -817,7 +819,6 @@
 				7640958E5C135BDDA2863480 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				17E23DE02F443A9300C55733 /* ShareExtension */,
 				CA4B3BD2FAFB42F676DE157E /* ActionExtension */,
 			);
 			name = ActionExtension;
@@ -1129,6 +1130,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A5F1B1012D689AEF6645DFDE /* AssociatedDomainResolver.swift in Sources */,
+				A92CD6CFEBCD29F9777C492B /* ShareExtensionViewModel.swift in Sources */,
+				D06E0939957AD8928BCDBE79 /* ShareExtensionViews.swift in Sources */,
+				D48B616B469945587E972CBC /* ShareModels.swift in Sources */,
+				F2FE96FFE4AF1A6399F76BF3 /* main.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
