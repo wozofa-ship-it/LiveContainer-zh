@@ -4238,7 +4238,14 @@ struct SourcesPanelView: View {
             old.isHidden = true
             Self.czfPanelScopeAlertWindow = nil
         }
-        guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene else { return }
+        // 3.8.394：取 scene 加兜底——只找 foregroundActive 时，
+        // 面板打开瞬间若 scene 不在 foregroundActive 就直接
+        // return，框悄悄不弹（用户 393 实测仍不弹）。先找前台，
+        // 没有就取第一个 scene，再没有就取 keyWindow 的 scene；
+        // 三个都没有才 return，不建僵尸窗口。
+        guard let scene = (UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene)
+            ?? (UIApplication.shared.connectedScenes.first as? UIWindowScene)
+            ?? (UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first(where: { $0.windows.contains { $0.isKeyWindow } })) else { return }
         let alertWindow = UIWindow(windowScene: scene)
         alertWindow.frame = scene.coordinateSpace.bounds
         alertWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
