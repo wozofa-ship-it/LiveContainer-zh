@@ -151,14 +151,16 @@ struct LCDataManagementView : View {
     @State private var backupSelectedIDs = Set<String>()
     @State private var showBackupScopeDialog = false
     @State private var showRestoreScopeDialog = false
-    // 3.8.397：面板直进范围框的 SwiftUI 原生开关。presentScopeAlert
-    // 的独立窗口在面板 sheet 语境下弹不出（396 用户 18:35 实证：
-    // 页开了、备份能跑，但范围框一次没出现）。改走本页成功弹窗
-    // 同款 SwiftUI .alert。只用于直进 .backupScope（initialSheet
-    // 唯一来源是面板，此时无盖子在呈现，342 的盖子冲突不适用）；
+    // 3.8.398：面板直进范围框改走页内直选（见 czfShowPanelScopeChoice）。
+    // 397 的 SwiftUI .alert 在面板 sheet 语境下同样弹不出（用户
+    // 20:09 视频实证：已装 397，面板备份仍无框；设置路同一机制的
+    // 框能弹）。面板宿主是 addSubview 的独立 hosting 控制器，不在
+    // root 呈现链里，从它弹出的 sheet 再往外 present（UIKit 窗口
+    // 与 SwiftUI .alert 两路，六版全灭）系统都丢。页内 Section 是
+    // 普通内容不走 present，必定显示。只用于直进 .backupScope；
     // 设置路仍走 presentScopeAlert 不动。不进直进收尾五路检查——
     // 选完页留着，让用户看到备份成功回执。
-    @State private var czfPanelBackupScopeAlert = false
+    @State private var czfShowPanelScopeChoice = false
     // 3.8.355：范围框独立 alert 窗口的持有位。presentScopeAlert
     // 不再走 top.present（面板宿主不在 root 链里，弹了也被盖
     // 住），改走自建 UIWindow；静态持有防 action 跑之前窗口
@@ -742,6 +744,44 @@ struct LCDataManagementView : View {
         } else {
 
         Form {
+            // 3.8.398：面板直进范围框的页内直选（见 czfShowPanelScopeChoice）。
+            // 弹窗两路（UIKit 独立窗口、SwiftUI .alert）在面板 sheet
+            // 语境下六版全灭，页内 Section 是普通内容、必定显示。
+            // 只在直进 .backupScope 且未预选时出现；选完收起，页留
+            // 着看备份成功回执。按钮顺序与 presentScopeAlert 同款：
+            // 按上次选择排第一。
+            if czfShowPanelScopeChoice {
+                Section {
+                    Text(lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if lastBackupLoginOnly == false {
+                        Button("完整备份（数据 + 登录态）") {
+                            czfShowPanelScopeChoice = false
+                            self.doBackupScope(loginOnly: false)
+                        }
+                        Button("只备份登录态") {
+                            czfShowPanelScopeChoice = false
+                            self.doBackupScope(loginOnly: true)
+                        }
+                    } else {
+                        Button("只备份登录态") {
+                            czfShowPanelScopeChoice = false
+                            self.doBackupScope(loginOnly: true)
+                        }
+                        Button("完整备份（数据 + 登录态）") {
+                            czfShowPanelScopeChoice = false
+                            self.doBackupScope(loginOnly: false)
+                        }
+                    }
+                    Button("取消", role: .cancel) {
+                        czfShowPanelScopeChoice = false
+                        self.dismiss()
+                    }
+                } header: {
+                    Text("备份范围")
+                }
+            }
             // #20：储存总览已拆成独立文件 LCStorageOverviewSection
             LCStorageOverviewSection()
 
@@ -1106,21 +1146,7 @@ struct LCDataManagementView : View {
         .onChange(of: showScheduleBackup) { _ in czfDismissIfDirectEntryDone() }
         .onChange(of: showBackupScopeDialog) { _ in czfDismissIfDirectEntryDone() }
         .onChange(of: showRestoreScopeDialog) { _ in czfDismissIfDirectEntryDone() }
-        // 3.8.397：面板直进范围框，SwiftUI 原生（见 czfPanelBackupScopeAlert）。
-        // 只在直进 .backupScope 且未预选时弹（设置路仍走 presentScopeAlert）。
-        // 按钮顺序与 presentScopeAlert 同款：按上次选择排第一。
-        .alert("备份范围", isPresented: $czfPanelBackupScopeAlert) {
-            if lastBackupLoginOnly == false {
-                Button("完整备份（数据 + 登录态）") { self.doBackupScope(loginOnly: false) }
-                Button("只备份登录态") { self.doBackupScope(loginOnly: true) }
-            } else {
-                Button("只备份登录态") { self.doBackupScope(loginOnly: true) }
-                Button("完整备份（数据 + 登录态）") { self.doBackupScope(loginOnly: false) }
-            }
-            Button("取消", role: .cancel) { }
-        } message: {
-            Text(lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
-        }
+        // 3.8.398：397 的 .alert 已删——面板 sheet 语境下弹不出，改走页内直选 Section（见 czfShowPanelScopeChoice）。
         // 3.8.342：范围框不再挂 SwiftUI .alert——340 的前提是错的。
         // .alert 和 .confirmationDialog 都是由所挂视图的 VC 用
         // UIAlertController 呈现，与 fullScreenCover 共用同一个
@@ -1411,15 +1437,13 @@ struct LCDataManagementView : View {
                             self.doBackupScope(loginOnly: loginOnly)
                         }
                     } else {
-                        // 3.8.397：面板直进改走 SwiftUI 原生范围框（见
-                        // czfPanelBackupScopeAlert）。presentScopeAlert
-                        // 的独立窗口在面板 sheet 里弹不出（396 用户
-                        // 18:35 实证：页开了、备份能跑，但范围框一次
-                        // 没出现）。本页的成功弹窗（SwiftUI .alert
-                        // 同款）已证实能弹。
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            self.czfPanelBackupScopeAlert = true
-                        }
+                        // 3.8.398：面板直进改走页内直选（见
+                        // czfShowPanelScopeChoice）。弹窗两路全灭：
+                        // UIKit 独立窗口（396）、SwiftUI .alert
+                        // （397，用户 20:09 视频实证已装 397 仍无
+                        // 框）。页内 Section 是普通内容，不走 present，
+                        // 不等 sheet 落定，直接置 true。
+                        self.czfShowPanelScopeChoice = true
                     }
                 case .scheduleBackup:
                     self.loadScheduleSettings()
