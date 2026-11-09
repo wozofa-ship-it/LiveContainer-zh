@@ -40,17 +40,14 @@ extension String {
 final class LCSharedUtils: NSObject {
 
     /// 对齐 LiveContainer/LCSharedUtils.m +teamIdentifier。
+    /// 注意：SecTaskCreateFromSelf / SecTaskCopyValueForEntitlement 不进 Swift
+    ///（389 红字证实），不用 SecTask。先读主 App 的 embedded.mobileprovision，
+    /// 再走钥匙串回退（与 ObjC 的 Palera1n 回退同法）。
     static func teamIdentifier() -> String? {
-        // 1) SecTask 取 team-identifier
-        #if !targetEnvironment(simulator)
-        if let task = SecTaskCreateFromSelf(nil),
-           let value = SecTaskCopyValueForEntitlement(task, "com.apple.developer.team-identifier" as CFString, nil),
-           CFGetTypeID(value) == CFStringGetTypeID(),
-           let team = value as? String {
+        if let team = CZFActionShims.teamIdentifierFromProvision() {
             return team
         }
-        #endif
-        // 2) 钥匙串回退：查 bundleSeedID 的 accessGroup，取 "." 前一段
+        // 钥匙串回退：查 bundleSeedID 的 accessGroup，取 "." 前一段
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: "bundleSeedID",
@@ -71,9 +68,24 @@ final class LCSharedUtils: NSObject {
         return nil
     }
 
-    /// 对齐 +appGroupID：优先含 Apps 子目录的组，其次任一有效组，
-    /// 再读缓存，最后读 entitlement 里的 application-groups 首个。
+    /// 对齐 +appGroupID：先读 mobileprovision 里的 application-groups，
+    /// 优先含 Apps 子目录的组；再按 teamID 拼两个候选组；再读缓存；都没有返回 Unknown。
+    /// 注意：SecTask 读 entitlement 不进 Swift，不用。
     static func appGroupID() -> String {
+        if let groups = CZFActionShims.applicationGroupsFromProvision() {
+            for group in groups {
+                guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else { continue }
+                let appsURL = url.appendingPathComponent("Apps")
+                if FileManager.default.fileExists(atPath: appsURL.path) {
+                    return group
+                }
+            }
+            for group in groups {
+                if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) != nil {
+                    return group
+                }
+            }
+        }
         let team = teamIdentifier() ?? ""
         let candidates = [
             "group.com.SideStore.SideStore.\(team)",
@@ -95,14 +107,6 @@ final class LCSharedUtils: NSObject {
            FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: cached) != nil {
             return cached
         }
-        #if !targetEnvironment(simulator)
-        if let task = SecTaskCreateFromSelf(nil),
-           let value = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString, nil),
-           let groups = value as? [String],
-           let first = groups.first {
-            return first
-        }
-        #endif
         return "Unknown"
     }
 
@@ -180,14 +184,15 @@ final class LCSharedUtils: NSObject {
 final class LCShareExtensionLauncher: NSObject {
 
     /// 对齐 ShareExtension/main.m 的 +canOpenURLFromShareExtension:，
-    /// 用 LSApplicationWorkspace 私有 API（经 @objc 协议动态调，不走桥接头）。
+    /// 用 LSApplicationWorkspace 私有 API，不走桥接头。
+    /// 取 workspace 走 LCSettingsView 里已证实的 NSClassFromString+perform 写法；
+    /// 实例方法走最小 @objc 协议（只含实例方法，不含 static）。
     /// 取不到 workspace 时返回 false，调用方会回落到默认 livecontainer 方案。
     static func canOpenURL(fromShareExtension url: URL) -> Bool {
-        guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? CZFLSApplicationWorkspace.Type else {
-            return false
-        }
-        let workspaceObject = workspaceClass.defaultWorkspace()
-        guard let workspace = workspaceObject as? CZFLSApplicationWorkspace else {
+        guard let workspaceObj = (NSClassFromString("LSApplicationWorkspace") as? NSObject.Type)?
+            .perform(NSSelectorFromString("defaultWorkspace"))?
+            .takeUnretainedValue(),
+              let workspace = workspaceObj as? CZFLSApplicationWorkspace else {
             return false
         }
         var error: NSError?
@@ -195,9 +200,8 @@ final class LCShareExtensionLauncher: NSObject {
     }
 }
 
-/// LSApplicationWorkspace 的最小 @objc 协议（只声明要用的两个方法）。
+/// LSApplicationWorkspace 的最小 @objc 协议（只声明要用的实例方法）。
 @objc private protocol CZFLSApplicationWorkspace: NSObjectProtocol {
-    static func defaultWorkspace() -> NSObject
     func isApplicationAvailableToOpenURL(_ url: URL, error: NSErrorPointer) -> Bool
 }
 
@@ -210,5 +214,36 @@ private enum CZFActionShims {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         return Bundle(url: url) ?? Bundle.main
+    }
+
+    /// 读主 App 的 embedded.mobileprovision（CMS 包裹的 plist），返回顶层字典。
+    /// 找不到文件、找不到 plist 段或解析失败都返回 nil，调用方走别的回退。
+    /// 写法照抄 LiveContainerSwiftUI/Utilities/CZFSignatureExpiry.swift 的 plistPayload。
+    static func readMobileProvision() -> [String: Any]? {
+        let url = mainBundle.bundleURL.appendingPathComponent("embedded.mobileprovision")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let xmlStart = Data("<?xml".utf8)
+        let xmlEnd = Data("</plist>".utf8)
+        guard let start = data.range(of: xmlStart),
+              let end = data.range(of: xmlEnd, options: [], in: start.lowerBound..<data.endIndex) else { return nil }
+        let plistData = data[start.lowerBound..<end.upperBound]
+        guard let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else { return nil }
+        return plist
+    }
+
+    /// 从 mobileprovision 的 Entitlements 取 com.apple.developer.team-identifier。
+    static func teamIdentifierFromProvision() -> String? {
+        guard let plist = readMobileProvision(),
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let team = entitlements["com.apple.developer.team-identifier"] as? String else { return nil }
+        return team
+    }
+
+    /// 从 mobileprovision 的 Entitlements 取 com.apple.security.application-groups。
+    static func applicationGroupsFromProvision() -> [String]? {
+        guard let plist = readMobileProvision(),
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let groups = entitlements["com.apple.security.application-groups"] as? [String] else { return nil }
+        return groups
     }
 }
