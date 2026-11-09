@@ -3010,8 +3010,11 @@ struct LCDataManagementView : View {
         // 底下，alert 弹在它上面被面板盖住/丢掉——设置路 sheet 在
         // 主层级里所以能弹，面板路弹不出（用户 09:07 三图实证：
         // 设置备份弹窗+回执正常，图三快捷方式点完没弹窗）。
-        // 独立窗口不依赖任何 VC 层级，windowLevel 高于 alert 必定
-        // 盖在最上，设置路与面板路同款。窗口用静态持有，action 里
+        // 独立窗口不依赖任何 VC 层级。3.8.395 修正：windowLevel
+        // 不是固定高于 alert 就必盖最上——客 App GuestHooks 用
+        // lastObject.windowLevel + 1 逐次抬升，固定 alert+1
+        // （2001）会被抬升后的客窗口盖住；改动态取当前最高+1
+        // （见下）。设置路与面板路同款。窗口用静态持有，action 里
         // 收掉（alert 只能走按钮关闭，必有 action 跑，窗口不会漏）。
         // 3.8.357：355 同步 present 弹不出。makeKeyAndVisible 刚跑
         // 完时 rootVC 的 view 还没进层级，同步 present 被悄悄丢掉，
@@ -3026,10 +3029,17 @@ struct LCDataManagementView : View {
         // 11:45 实证：357 点备份没反应）。改挂前台 windowScene
         // 建窗，窗口才是真的可见窗口，present 才能落上去。拿不到
         // 前台 scene 时直接 return，不建僵尸窗口。
+        // 3.8.395：窗口层级动态取当前最高+1（与面板路同款，见
+        // MultitaskDockView.presentPanelBackupScopeAlert）：客
+        // App 的 GuestHooks 弹框用 lastObject.windowLevel + 1
+        // 逐次抬升，固定 alert+1（2001）会被抬升后的窗口盖住；
+        // 设置页现在主窗口 0 层所以 2001 够用，但客窗口抬升后
+        // 同样会被盖，改动态最高+1 一劳永逸。
         guard let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene else { return }
         let alertWindow = UIWindow(windowScene: scene)
         alertWindow.frame = scene.coordinateSpace.bounds
-        alertWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
+        let czfTopLevel = scene.windows.map { $0.windowLevel.rawValue }.max() ?? UIWindow.Level.alert.rawValue
+        alertWindow.windowLevel = UIWindow.Level(rawValue: czfTopLevel + 1)
         alertWindow.rootViewController = UIViewController()
         alertWindow.makeKeyAndVisible()
         Self.czfScopeAlertWindow = alertWindow

@@ -3858,7 +3858,11 @@ struct SourcesPanelView: View {
     // window.addSubview，不走 present），不在 root 的 presented
     // 链里，dialog 经宿主 VC 呈现被悄悄丢掉（设置路 355/357/
     // 358 已证实并改走独立窗口，面板一直没跟进）。独立窗口不
-    // 依赖任何 VC 层级，windowLevel 高于 alert 必盖最上。
+    // 依赖任何 VC 层级。3.8.395 修正：windowLevel 不是固定
+    // alert+1 就必盖最上——客 App GuestHooks 用
+    // lastObject.windowLevel + 1 逐次抬升，面板挂客窗口上时
+    // 固定 2001 会被盖住；改动态取当前最高+1（见
+    // presentPanelBackupScopeAlert）。
     private static var czfPanelScopeAlertWindow: UIWindow?
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
@@ -4243,12 +4247,20 @@ struct SourcesPanelView: View {
         // return，框悄悄不弹（用户 393 实测仍不弹）。先找前台，
         // 没有就取第一个 scene，再没有就取 keyWindow 的 scene；
         // 三个都没有才 return，不建僵尸窗口。
+        // 3.8.395：窗口层级动态取当前最高+1——客 App 的 GuestHooks
+        // 弹框用 lastObject.windowLevel + 1 逐次抬升（见
+        // TweakLoader/UIKit+GuestHooks.m），面板挂在客 App 窗口
+        // 上时固定 alert+1（2001）会被抬升后的客窗口盖住，框
+        // 永远不出现；设置页在主窗口（0层）所以 2001 够用，面板
+        // 不行。动态取 scene 里当前最高窗口层级 +1，保证框永
+        // 远在最上（394 的 scene 兜底没治到这层，仍不弹）。
         guard let scene = (UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene)
             ?? (UIApplication.shared.connectedScenes.first as? UIWindowScene)
             ?? (UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first(where: { $0.windows.contains { $0.isKeyWindow } })) else { return }
         let alertWindow = UIWindow(windowScene: scene)
         alertWindow.frame = scene.coordinateSpace.bounds
-        alertWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
+        let czfTopLevel = scene.windows.map { $0.windowLevel.rawValue }.max() ?? UIWindow.Level.alert.rawValue
+        alertWindow.windowLevel = UIWindow.Level(rawValue: czfTopLevel + 1)
         alertWindow.rootViewController = UIViewController()
         alertWindow.makeKeyAndVisible()
         Self.czfPanelScopeAlertWindow = alertWindow
