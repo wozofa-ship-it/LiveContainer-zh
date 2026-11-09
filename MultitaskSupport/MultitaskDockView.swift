@@ -4519,8 +4519,18 @@ struct SourcesPanelView: View {
                             // 页里按预选直接备份，不再弹范围框（面板
                             // 直进的范围框 355–358 三版都没弹出来，
                             // 改由面板自己弹，最可靠）。
+                            // 3.8.396：面板独立弹窗四版（382/393/
+                            // 394/395）全灭——窗口/scene/层级三路
+                            // 都试过仍不弹，根因不在这三处，不再猜。
+                            // 改走备份页自己的范围框：不预选、直进
+                            // .backupScope，页里 0.5 秒后调
+                            // presentScopeAlert（设置页同款，已证实
+                            // 能弹），用户在页里选范围再备。面板弹窗
+                            // 函数保留，待查清再恢复。
                             Button {
-                                presentPanelBackupScopeAlert(for: app)
+                                self.czfPreselectedLoginOnly = nil
+                                self.czfDirectBackupApp = app
+                                self.czfDirectDataPage = .backupScope
                             } label: {
                                 ZStack(alignment: .bottomTrailing) {
                                     RunningAppIcon(appInfo: app.appInfo)
