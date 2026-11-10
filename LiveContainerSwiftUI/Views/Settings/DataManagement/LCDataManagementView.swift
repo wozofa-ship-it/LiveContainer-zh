@@ -825,42 +825,6 @@ struct LCDataManagementView : View {
                     Text("备份范围")
                 }
             }
-            // 3.8.401：设置页备份的页内直选（与上面面板同款，见
-            // czfShowSettingsBackupScopeChoice）。主 Form“备份全部”
-            // 按钮置位，不再走 presentScopeAlert。取消只收起选框、
-            // 不关页（面板版取消要 dismiss 是因为直进页是临时壳，
-            // 设置页是常驻页，关页就回不来了）。
-            if czfShowSettingsBackupScopeChoice {
-                Section {
-                    Text(lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if lastBackupLoginOnly == false {
-                        Button("完整备份（数据 + 登录态）") {
-                            czfShowSettingsBackupScopeChoice = false
-                            self.doBackupScope(loginOnly: false)
-                        }
-                        Button("只备份登录态") {
-                            czfShowSettingsBackupScopeChoice = false
-                            self.doBackupScope(loginOnly: true)
-                        }
-                    } else {
-                        Button("只备份登录态") {
-                            czfShowSettingsBackupScopeChoice = false
-                            self.doBackupScope(loginOnly: true)
-                        }
-                        Button("完整备份（数据 + 登录态）") {
-                            czfShowSettingsBackupScopeChoice = false
-                            self.doBackupScope(loginOnly: false)
-                        }
-                    }
-                    Button("取消", role: .cancel) {
-                        czfShowSettingsBackupScopeChoice = false
-                    }
-                } header: {
-                    Text("备份范围")
-                }
-            }
             // #20：储存总览已拆成独立文件 LCStorageOverviewSection
             LCStorageOverviewSection()
 
@@ -988,6 +952,9 @@ struct LCDataManagementView : View {
                 Button {
                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
                     // 3.8.401：改走页内直选，不再走 presentScopeAlert。
+                    // 3.8.402：选框直接跟在按钮下面（401 放在 Form 顶部，
+                    // 用户在下面点按钮、选框在上面看不见，用户 15:29
+                    // 确认没出现）。放同一组里，点完立刻在手边看到。
                     czfShowSettingsBackupScopeChoice = true
                 } label: {
                     HStack {
@@ -996,6 +963,36 @@ struct LCDataManagementView : View {
                     }
                 }
                 .disabled(backupRestoreProgress != nil)
+                // 3.8.402：备份范围选框（与上面面板同款，见
+                // czfShowSettingsBackupScopeChoice），直接长在
+                // “备份全部”按钮下面。取消只收起选框、不关页。
+                if czfShowSettingsBackupScopeChoice {
+                    Text(lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if lastBackupLoginOnly == false {
+                        Button("完整备份（数据 + 登录态）") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: false)
+                        }
+                        Button("只备份登录态") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: true)
+                        }
+                    } else {
+                        Button("只备份登录态") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: true)
+                        }
+                        Button("完整备份（数据 + 登录态）") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: false)
+                        }
+                    }
+                    Button("取消", role: .cancel) {
+                        czfShowSettingsBackupScopeChoice = false
+                    }
+                }
                 Button {
                     showBackupSelect = true
                 } label: {
