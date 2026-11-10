@@ -161,6 +161,13 @@ struct LCDataManagementView : View {
     // 设置路仍走 presentScopeAlert 不动。不进直进收尾五路检查——
     // 选完页留着，让用户看到备份成功回执。
     @State private var czfShowPanelScopeChoice = false
+    // 3.8.401：设置页备份/恢复也改走页内直选（与 398 面板同款）。
+    // 用户 2026-11-10 实证：400 设置页 presentScopeAlert 弹不出。
+    // presentScopeAlert（UIKit 独立窗口）在设置页同样不可靠，六版
+    // 弹窗全灭的教训同样适用。主 Form 备份按钮与恢复页恢复按钮
+    // 改置这两个位，页内 Section 必定显示，不走 present。
+    @State private var czfShowSettingsBackupScopeChoice = false
+    @State private var czfShowSettingsRestoreScopeChoice = false
     // 3.8.355：范围框独立 alert 窗口的持有位。presentScopeAlert
     // 不再走 top.present（面板宿主不在 root 链里，弹了也被盖
     // 住），改走自建 UIWindow；静态持有防 action 跑之前窗口
@@ -329,6 +336,41 @@ struct LCDataManagementView : View {
             // “选哪个文件夹”再进单源列表；文件夹选择与
             // 换机迁移放最顶上（3.8.282）
             List {
+                // 3.8.401：恢复页恢复范围的页内直选（与主 Form
+                // 备份同款，见 czfShowSettingsRestoreScopeChoice）。
+                // “一键恢复全部”与各行“恢复”按钮置位，不再走
+                // presentScopeAlert。取消只收起选框、不关页。
+                if czfShowSettingsRestoreScopeChoice {
+                    Section {
+                        Text(lastRestoreScopeHint() + restoreTargetText() + "恢复会用备份里的登录态覆盖当前登录态。\n" + "只恢复登录态：只写回登录，现有数据不动。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        if lastRestoreLoginOnly == false {
+                            Button("恢复全部数据（会覆盖当前数据）", role: .destructive) {
+                                czfShowSettingsRestoreScopeChoice = false
+                                self.doRestoreScope(loginOnly: false)
+                            }
+                            Button("只恢复登录态") {
+                                czfShowSettingsRestoreScopeChoice = false
+                                self.doRestoreScope(loginOnly: true)
+                            }
+                        } else {
+                            Button("只恢复登录态") {
+                                czfShowSettingsRestoreScopeChoice = false
+                                self.doRestoreScope(loginOnly: true)
+                            }
+                            Button("恢复全部数据（会覆盖当前数据）", role: .destructive) {
+                                czfShowSettingsRestoreScopeChoice = false
+                                self.doRestoreScope(loginOnly: false)
+                            }
+                        }
+                        Button("取消", role: .cancel) {
+                            czfShowSettingsRestoreScopeChoice = false
+                        }
+                    } header: {
+                        Text("恢复范围")
+                    }
+                }
                 // 3.8.307：一键恢复全部挪到列表顶部单独一行
                 //（原来藏在工具栏“全部”菜单里，翻半天才找
                 // 到）；副标题写清恢复的是全部本地备份。
@@ -336,9 +378,10 @@ struct LCDataManagementView : View {
                     Button {
                         // 3.8.339：先不关恢复页，范围框盖在上面
                         //（同备份按钮的修法，关页+弹框撞转场会吞框）。
+                        // 3.8.401：改走页内直选，不再走 presentScopeAlert。
                         pendingRestoreURL = nil
                         pendingRestoreAll = true
-                        presentScopeAlert(isBackup: false)
+                        czfShowSettingsRestoreScopeChoice = true
                     } label: {
                         HStack {
                             LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
@@ -782,6 +825,42 @@ struct LCDataManagementView : View {
                     Text("备份范围")
                 }
             }
+            // 3.8.401：设置页备份的页内直选（与上面面板同款，见
+            // czfShowSettingsBackupScopeChoice）。主 Form“备份全部”
+            // 按钮置位，不再走 presentScopeAlert。取消只收起选框、
+            // 不关页（面板版取消要 dismiss 是因为直进页是临时壳，
+            // 设置页是常驻页，关页就回不来了）。
+            if czfShowSettingsBackupScopeChoice {
+                Section {
+                    Text(lastBackupScopeHint() + existingBackupSummaryText() + existingFullBackupWarningText() + keychainSnapshotWarningText() + "只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if lastBackupLoginOnly == false {
+                        Button("完整备份（数据 + 登录态）") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: false)
+                        }
+                        Button("只备份登录态") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: true)
+                        }
+                    } else {
+                        Button("只备份登录态") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: true)
+                        }
+                        Button("完整备份（数据 + 登录态）") {
+                            czfShowSettingsBackupScopeChoice = false
+                            self.doBackupScope(loginOnly: false)
+                        }
+                    }
+                    Button("取消", role: .cancel) {
+                        czfShowSettingsBackupScopeChoice = false
+                    }
+                } header: {
+                    Text("备份范围")
+                }
+            }
             // #20：储存总览已拆成独立文件 LCStorageOverviewSection
             LCStorageOverviewSection()
 
@@ -908,7 +987,8 @@ struct LCDataManagementView : View {
                 // 在上面走着时入口全灰，跑完自动恢复。
                 Button {
                     pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
-                    presentScopeAlert(isBackup: true)
+                    // 3.8.401：改走页内直选，不再走 presentScopeAlert。
+                    czfShowSettingsBackupScopeChoice = true
                 } label: {
                     HStack {
                         LCSettingsIcon(systemName: "doc.on.doc", color: .blue)
@@ -2299,9 +2379,10 @@ struct LCDataManagementView : View {
             Button {
                 // 3.8.339：恢复页先不关，范围框盖在上面
                 //（同款转场冲突，关页+弹框会吞框）。
+                // 3.8.401：改走页内直选，不再走 presentScopeAlert。
                 pendingRestoreURL = folderURL
                 pendingRestoreAll = false
-                presentScopeAlert(isBackup: false)
+                czfShowSettingsRestoreScopeChoice = true
             } label: {
                 HStack {
                     Image(systemName: "arrow.clockwise.circle")
