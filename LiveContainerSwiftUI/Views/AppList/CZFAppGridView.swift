@@ -154,6 +154,12 @@ struct CZFAppGridView: View {
             Color.clear
                 .frame(height: LCAppBannerRootView.bannerHeight)
                 .contentShape(Rectangle())
+                // VoiceOver：透明区无标签、长按手势 VoiceOver 找不到；
+                // 加标签与动作，调已有的人脸识别闭包。
+                .accessibilityLabel("解锁隐藏 App")
+                .accessibilityAction {
+                    onAuthenticateHidden()
+                }
                 .onLongPressGesture {
                     onAuthenticateHidden()
                 }
@@ -195,7 +201,9 @@ struct CZFAppGridCell: View {
     var body: some View {
         VStack(spacing: 6) {
             GeometryReader { geo in
-                let side = max(geo.size.width * iconFactor, 44)
+                // 图标边长不小于 44，但不许超出单元格宽（小屏格子不足 44pt
+                // 时原 max 会盖住相邻格子）；iconFactor 逻辑不动。
+                let side = min(max(geo.size.width * iconFactor, 44), geo.size.width)
                 IconImageView(icon: app.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage())
                     .frame(width: side, height: side)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -223,6 +231,15 @@ struct CZFAppGridCell: View {
         // App 格子回扁平（裸图标 + 名字），与源页格子一样，
         // 两页都无阴影。417 的去液体（切换行/批量底栏实底）保留。
         .contentShape(Rectangle())
+        // VoiceOver：cell 不是 Button，启动/进设置全靠手势，
+        // VoiceOver 不可用；合并为一个按钮元素，标签用 App 名，
+        // 动作为启动（actions.onLaunch）。手势逻辑本身不动。
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(app.displayName)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            actions.onLaunch(app)
+        }
         // 单双击（3.8.419）：跟列表 banner 原来一样——单击启动、
         // 双击进设置。双击优先（exclusively），双击成功时单击
         // 不触发；单击会等双击超时（约 0.3 秒）再启动，是双击

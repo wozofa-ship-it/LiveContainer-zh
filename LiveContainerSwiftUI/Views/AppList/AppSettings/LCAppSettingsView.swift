@@ -230,7 +230,15 @@ struct LCAppSettingsView: View {
                 HStack {
                     Text("lc.appSettings.bundleId".loc)
                     Spacer()
-                    Text(appInfo.relativeBundlePath)
+                    Text(appInfo.bundleIdentifier() ?? "")
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                }
+                HStack {
+                    Text("相对路径")
+                    Spacer()
+                    Text(appInfo.relativeBundlePath ?? "")
                         .foregroundColor(.gray)
                         .multilineTextAlignment(.trailing)
                         .textSelection(.enabled)
@@ -418,9 +426,9 @@ struct LCAppSettingsView: View {
                 }
                 if model.uiIs32bit {
                     Picker(selection: $model.uiSelected32BitEmulator) {
+                        Text("lc.common.default".loc).tag("")
                         ForEach(sharedModel.arm32EmuApps, id: \.self) { app in
-                            Text("lc.common.default".loc).tag("")
-                            Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath!)
+                            Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath ?? "")
                         }
                     } label: {
                         HStack {
@@ -831,7 +839,7 @@ struct LCAppSettingsView: View {
 
     func createFolder() async {
         let newName = NSUUID().uuidString
-        guard let displayName = await renameFolderInput.open(initVal: newName), displayName != "" else {
+        guard let displayName = await renameFolderInput.open(initVal: "未命名"), displayName != "" else {
             return
         }
         let fm = FileManager()

@@ -633,12 +633,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
         // 网格设置入口（3.8.419）：切换行收进设置后，网格设置
         // 从顶栏“>”展开的工具组里进——点“>”展开就能看到。
-        // 点开即切到网格模式（跟原来切换行的“网格设置”按钮同款），
-        // 模式再到 sheet 里的显示模式 Picker 里切。
+        // 点开只弹设置 sheet，不强制切模式；模式由 sheet 里
+        // 的显示模式 Picker 决定。
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded {
                 Button {
-                    czfGridMode = true
                     czfGridSettingsShow = true
                 } label: {
                     Label("网格设置", systemImage: "slider.horizontal.3")
@@ -2235,9 +2234,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             appRelativePath = installOptionChosen.nameOfFolderToInstall
             appToReplace = installOptionChosen.appToReplace
-            if installOptionChosen.isReplace {
-                try fm.removeItem(at: outputFolder)
-            }
+            // I1：覆盖时先不在这里删旧包——新包先搬到临时名，
+            // 成功后再删旧包、把临时名改回正式名（下面 move
+            // 处做），搬失败时旧包还在。
         }
         // 覆盖已有 App 前，先把它的整套数据自动备份一份
         //（容器+组数据+钥匙串，与手动备份同一位置、新的盖
@@ -2246,7 +2245,36 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             await LCDataManagementView.autoBackupBeforeOverwrite(appToReplace)
         }
         // Move it!
-        try fm.moveItem(at: appFolderPath, to: outputFolder)
+        // I1：真回滚（先把旧包搬到备份名，再搬新包进来；任一
+        // 步抛错都把旧包搬回来，旧 App 不丢）。旧包只在新包
+        // 已落盘后才删备份；错误沿原路抛给调用方
+        //（installFromUrl / startInstallApp 的 catch 里按
+        // 原有方式报 errorInfo/errorShow）。
+        let czfOldBackup = outputFolder.deletingLastPathComponent().appendingPathComponent(outputFolder.lastPathComponent + ".czf-old")
+        if fm.fileExists(atPath: czfOldBackup.path) {
+            try? fm.removeItem(at: czfOldBackup)
+        }
+        do {
+            // ① 旧包先搬去备份名（不删）。
+            if fm.fileExists(atPath: outputFolder.path) {
+                try fm.moveItem(at: outputFolder, to: czfOldBackup)
+            }
+            do {
+                // ② 新包搬进来。
+                try fm.moveItem(at: appFolderPath, to: outputFolder)
+            } catch {
+                // 新包没进来：把旧包搬回来，再抛错。
+                if fm.fileExists(atPath: czfOldBackup.path) {
+                    try? fm.moveItem(at: czfOldBackup, to: outputFolder)
+                }
+                throw error
+            }
+            // ③ 新包落盘了，删旧包备份。
+            try? fm.removeItem(at: czfOldBackup)
+        } catch {
+            try? fm.removeItem(at: czfOldBackup)
+            throw error
+        }
         let finalNewApp = LCAppInfo(bundlePath: outputFolder.path)
         finalNewApp?.relativeBundlePath = appRelativePath
         
@@ -2873,19 +2901,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 errorShow = true
             }
 
-            do {
-                // delete ipa if it's in inbox
-                var shouldDelete = false
-                if let documentsDirectory = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
-                    let inboxURL = documentsDirectory.appendingPathComponent("Inbox")
-                    shouldDelete = installUrl.deletingLastPathComponent().standardizedFileURL == inboxURL.standardizedFileURL
+            // I2：只有安装成功才删 Inbox 源 IPA；安装失败时
+            // 留着源文件，方便用户重试 / 排查。
+            if installOK {
+                do {
+                    // delete ipa if it's in inbox
+                    var shouldDelete = false
+                    if let documentsDirectory = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+                        let inboxURL = documentsDirectory.appendingPathComponent("Inbox")
+                        shouldDelete = installUrl.deletingLastPathComponent().standardizedFileURL == inboxURL.standardizedFileURL
+                    }
+                    if shouldDelete {
+                        try fm.removeItem(at: installUrl)
+                    }
+                } catch {
+                    // 清理本身失败只记日志，不重写 errorInfo
+                    print("delete inbox ipa failed: \(error)")
                 }
-                if shouldDelete {
-                    try fm.removeItem(at: installUrl)
-                }
-            } catch {
-                errorInfo = LCUtils.czfFriendlyError(error)
-                errorShow = true
             }
             return installOK
         }

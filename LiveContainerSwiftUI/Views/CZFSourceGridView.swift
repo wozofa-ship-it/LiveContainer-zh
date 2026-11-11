@@ -25,7 +25,9 @@ struct CZFSourceGridView: View {
     var onRemove: (AltStoreSourcesViewModel.SourceItem) -> Void
     var isBatchMode: Bool
     var selectedIDs: Set<String>
-    var onToggleSelect: (AltStoreSourceApp) -> Void
+    // U10：勾选回调带源 feed URL——同一 App 在两个源里是两条
+    // 记录，回调只给 app 时父视图分不清勾的是哪一个源的。
+    var onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
     private var czfGridColumns: [GridItem] {
         let count = max(3, min(6, columns))
@@ -119,7 +121,7 @@ struct CZFSourceGridGroupHeaderView: View {
     let onRemove: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
-    let onToggleSelect: (AltStoreSourceApp) -> Void
+    let onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -191,39 +193,48 @@ struct CZFSourceGridGroupContentView: View {
     let onRemove: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
-    let onToggleSelect: (AltStoreSourceApp) -> Void
+    let onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
     var body: some View {
         // 组头瘦身（3.8.419，建议第 4 条）：副标题/host 行删掉，
         // 收到详情页里（CZFSourceDetailView 本来就显示 subtitle），
         // 组头只剩标题一行，少占地方。
         Group {
-            if let error = item.error {
-                CZFSourceGridErrorView(error: error, onRefresh: onRefresh)
-            } else if let source = item.source {
-                if apps.isEmpty {
-                    Text("lc.sources.section.noApps".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(apps, id: \.bundleIdentifier) { app in
-                            CZFSourceAppGridCell(
-                                app: app,
-                                source: source,
-                                iconFactor: iconFactor,
-                                isBatchMode: isBatchMode,
-                                isSelected: selectedIDs.contains(app.bundleIdentifier),
-                                onToggleSelect: { onToggleSelect(app) },
-                                onInstall: onInstall,
-                                onInstallAsNew: onInstallAsNew,
-                                onDownload: onDownload,
-                                onDownloadVersion: onDownloadVersion
-                            )
+            // S1：有缓存 source 时先显示 App 网格，刷新失败只在
+            // 网格上方贴一行小提示；无缓存时仍走下面的大错误块。
+            if let source = item.source {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let error = item.error {
+                        CZFSourceRefreshErrorRow(error: error, onRefresh: onRefresh)
+                    }
+                    if apps.isEmpty {
+                        Text("lc.sources.section.noApps".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(apps, id: \.bundleIdentifier) { app in
+                                CZFSourceAppGridCell(
+                                    app: app,
+                                    source: source,
+                                    iconFactor: iconFactor,
+                                    isBatchMode: isBatchMode,
+                                    // U10：勾选键 = 源 feed URL + bundleIdentifier，
+                                    // 同一 App 在两个源里不再两边同打勾。
+                                    isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: app.bundleIdentifier)),
+                                    onToggleSelect: { onToggleSelect(item.url, app) },
+                                    onInstall: onInstall,
+                                    onInstallAsNew: onInstallAsNew,
+                                    onDownload: onDownload,
+                                    onDownloadVersion: onDownloadVersion
+                                )
+                            }
                         }
                     }
                 }
+            } else if let error = item.error {
+                CZFSourceGridErrorView(error: error, onRefresh: onRefresh)
             } else if item.isLoading {
                 ProgressView("lc.sources.loading".loc)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -256,6 +267,30 @@ struct CZFSourceGridErrorView: View {
     }
 }
 
+// S1 刷新失败一行小提示（有缓存时用）：只占一行，不盖住已缓存
+// 的 App 网格/列表；无缓存时仍走上面的 CZFSourceGridErrorView
+// 大块。文案走现成 .loc key（lc.sources.section.error /
+// lc.sources.refresh），无中文写死。
+struct CZFSourceRefreshErrorRow: View {
+    let error: String
+    let onRefresh: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.secondary)
+            Text("lc.sources.section.error".loc)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+            Button("lc.sources.refresh".loc, action: onRefresh)
+                .font(.footnote)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // App 格子：大图标 + 下方单行 App 名，图标取法与 CZFAppGridCell
 // 同款（GeometryReader + aspectRatio(1)，图标宽 = 单元宽 × 系数，
 // 最小 44，圆角 14）。点格子：批量模式切勾选，非批量打开应用
@@ -278,7 +313,10 @@ struct CZFSourceAppGridCell: View {
     var body: some View {
         VStack(spacing: 6) {
             GeometryReader { geo in
-                let side = max(geo.size.width * iconFactor, 44)
+                // U11：边长不小于 44，但不许超出单元格宽——屏宽
+                // ≤375pt 时单元格不足 44pt，旧写法图标比格子宽、
+                // 盖住相邻格子。iconFactor 逻辑不动。
+                let side = min(max(geo.size.width * iconFactor, 44), geo.size.width)
                 SourceIconView(url: app.iconURL)
                     .frame(width: side, height: side)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -357,7 +395,7 @@ struct CZFSourceDetailView: View {
     let onRemove: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
-    let onToggleSelect: (AltStoreSourceApp) -> Void
+    let onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
     var body: some View {
         ScrollView {
@@ -396,7 +434,28 @@ struct CZFSourceDetailView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if let error = item.error {
+                // S1：有缓存 source 时先显示 App 列表，刷新失败只在
+                // 列表上方贴一行小提示；无缓存时仍走下面的大错误块。
+                if let source = item.source {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if let error = item.error {
+                            CZFSourceRefreshErrorRow(error: error, onRefresh: onRefresh)
+                        }
+                        CZFSourceAppListView(
+                            source: source,
+                            sourceURL: item.url,
+                            filteredApps: filteredApps,
+                            isFiltering: isFiltering,
+                            onInstall: onInstall,
+                            onInstallAsNew: onInstallAsNew,
+                            onDownload: onDownload,
+                            onDownloadVersion: onDownloadVersion,
+                            isBatchMode: isBatchMode,
+                            selectedIDs: selectedIDs,
+                            onToggleSelect: onToggleSelect
+                        )
+                    }
+                } else if let error = item.error {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("lc.sources.section.error".loc)
                             .font(.subheadline)
@@ -411,19 +470,6 @@ struct CZFSourceDetailView: View {
                     .background(
                         RoundedRectangle(cornerRadius: 18)
                             .fill(Color(uiColor: UIColor.secondarySystemBackground))
-                    )
-                } else if let source = item.source {
-                    CZFSourceAppListView(
-                        source: source,
-                        filteredApps: filteredApps,
-                        isFiltering: isFiltering,
-                        onInstall: onInstall,
-                        onInstallAsNew: onInstallAsNew,
-                        onDownload: onDownload,
-                        onDownloadVersion: onDownloadVersion,
-                        isBatchMode: isBatchMode,
-                        selectedIDs: selectedIDs,
-                        onToggleSelect: onToggleSelect
                     )
                 } else if item.isLoading {
                     ProgressView("lc.sources.loading".loc)

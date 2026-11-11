@@ -523,6 +523,16 @@ enum CZFUpdateIgnore {
     }
 }
 
+// U10 批量勾选键：源 feed URL + bundleIdentifier。同一 App 在
+// 两个源里是两条记录，只用 bundleIdentifier 会两边同打勾；
+// 源标识用 SourceItem 的 feed URL（item.url / item.id，
+// 稳定唯一），不用 AltStoreSource.identifier（可选、
+// 可能为空/重复）也不用 AltStoreSource.id（每次解码
+// 新 UUID，不稳定）。
+func czfSourceSelectionKey(sourceURL: URL, bundleIdentifier: String) -> String {
+    "\(sourceURL.absoluteString):\(bundleIdentifier)"
+}
+
 struct LCSourcesView: View {
     @StateObject private var viewModel = AltStoreSourcesViewModel()
     @State private var errorMessage: String?
@@ -607,12 +617,12 @@ struct LCSourcesView: View {
                                 onRemove: { item in sourcePendingRemoval = item },
                                 isBatchMode: isBatchMode,
                                 selectedIDs: selectedIDs,
-                                onToggleSelect: { app in
-                                    let bid = app.bundleIdentifier
-                                    if selectedIDs.contains(bid) {
-                                        selectedIDs.remove(bid)
+                                onToggleSelect: { sourceURL, app in
+                                    let key = czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)
+                                    if selectedIDs.contains(key) {
+                                        selectedIDs.remove(key)
                                     } else {
-                                        selectedIDs.insert(bid)
+                                        selectedIDs.insert(key)
                                     }
                                 }
                             )
@@ -634,12 +644,12 @@ struct LCSourcesView: View {
                                     toggleExpanded: { toggleExpansion(for: item.id) },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
-                                    onToggleSelect: { app in
-                                        let bid = app.bundleIdentifier
-                                        if selectedIDs.contains(bid) {
-                                            selectedIDs.remove(bid)
+                                    onToggleSelect: { sourceURL, app in
+                                        let key = czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)
+                                        if selectedIDs.contains(key) {
+                                            selectedIDs.remove(key)
                                         } else {
-                                            selectedIDs.insert(bid)
+                                            selectedIDs.insert(key)
                                         }
                                     }
                                 )
@@ -648,7 +658,9 @@ struct LCSourcesView: View {
                             }
                         }
                         
-                        if totalFilteredAppCount == 0 {
+                        // S2：加载中不闪空态——还有源在加载时不显示
+                        // “没有 App”，等加载完、计数仍为 0 时再显示。
+                        if totalFilteredAppCount == 0 && !viewModel.sources.contains(where: { $0.isLoading }) {
                             VStack(spacing: 8) {
                                 Text("lc.sources.section.noApps".loc)
                                     .foregroundStyle(.gray)
@@ -758,8 +770,9 @@ struct LCSourcesView: View {
                         // leading 原来三个图标（刷新/批量/网格设置）挤一个
                         // 宽 pill，太宽、中间“源”字没地方；网格设置挪到
                         // 右边“+”旁边，leading 只留刷新+批量，pill 变窄。
+                        // U12：只打开设置 sheet，不强制切网格——模式由
+                        // sheet 里的显示模式 Picker 决定。
                         Button {
-                            czfSourceGridMode = true
                             czfSourceGridSettingsShow = true
                         } label: {
                             Label("网格设置", systemImage: "slider.horizontal.3")
@@ -917,7 +930,7 @@ struct LCSourcesView: View {
     private func batchInstallSelected() {
         let appsToInstall = viewModel.sources.flatMap { item -> [AltStoreSourceApp] in
             guard let source = item.source else { return [] }
-            return source.apps.filter { selectedIDs.contains($0.bundleIdentifier) }
+            return source.apps.filter { selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: $0.bundleIdentifier)) }
         }
         isBatchMode = false
         selectedIDs.removeAll()
@@ -1258,6 +1271,9 @@ private struct ManageSourcesSheet: View {
 // LCSourceAppBanner 行（安装/下载/批量勾选原样）。
 struct CZFSourceAppListView: View {
     let source: AltStoreSource
+    // U10：勾选键要用的源 feed URL（AltStoreSource 本身没有
+    // URL 字段，从调用方 item.url 传进来）。
+    let sourceURL: URL
     let filteredApps: [AltStoreSourceApp]
     let isFiltering: Bool
     let onInstall: (AltStoreSourceApp) -> Void
@@ -1266,13 +1282,13 @@ struct CZFSourceAppListView: View {
     let onDownloadVersion: (URL) -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
-    let onToggleSelect: (AltStoreSourceApp) -> Void
+    let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     @State private var showAllApps = false
 
     var body: some View {
         VStack(spacing: 12) {
             ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))]) { app in
-                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
+                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)), onToggleSelect: { onToggleSelect(sourceURL, app) })
             }
             if filteredApps.isEmpty {
                 if source.apps.isEmpty || isFiltering {
@@ -1312,7 +1328,7 @@ private struct AltStoreSourceSectionView: View {
     let toggleExpanded: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
-    let onToggleSelect: (AltStoreSourceApp) -> Void
+    let onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1357,7 +1373,29 @@ private struct AltStoreSourceSectionView: View {
                     .foregroundStyle(.secondary)
             }
             
-            if let error = item.error {
+            // S1：有缓存 source 且展开/过滤中时先显示 App 列表，
+            // 刷新失败只在列表上方贴一行小提示；无缓存或未展开
+            // 时仍走下面的大错误块（与旧行为一致）。
+            if let source = item.source, isExpanded || isFiltering {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let error = item.error {
+                        CZFSourceRefreshErrorRow(error: error, onRefresh: onRefresh)
+                    }
+                    CZFSourceAppListView(
+                        source: source,
+                        sourceURL: item.url,
+                        filteredApps: filteredApps,
+                        isFiltering: isFiltering,
+                        onInstall: onInstall,
+                        onInstallAsNew: onInstallAsNew,
+                        onDownload: onDownload,
+                        onDownloadVersion: onDownloadVersion,
+                        isBatchMode: isBatchMode,
+                        selectedIDs: selectedIDs,
+                        onToggleSelect: onToggleSelect
+                    )
+                }
+            } else if let error = item.error {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("lc.sources.section.error".loc)
                         .font(.subheadline)
@@ -1372,19 +1410,6 @@ private struct AltStoreSourceSectionView: View {
                 .background(
                     RoundedRectangle(cornerRadius: 18)
                         .fill(Color(uiColor: UIColor.secondarySystemBackground))
-                )
-            } else if let source = item.source, isExpanded || isFiltering {
-                CZFSourceAppListView(
-                    source: source,
-                    filteredApps: filteredApps,
-                    isFiltering: isFiltering,
-                    onInstall: onInstall,
-                    onInstallAsNew: onInstallAsNew,
-                    onDownload: onDownload,
-                    onDownloadVersion: onDownloadVersion,
-                    isBatchMode: isBatchMode,
-                    selectedIDs: selectedIDs,
-                    onToggleSelect: onToggleSelect
                 )
             } else if item.isLoading {
                 ProgressView("lc.sources.loading".loc)

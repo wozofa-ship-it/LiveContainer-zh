@@ -141,8 +141,15 @@ public struct DocModifier: ViewModifier {
                 let controller = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
                 controller.allowsMultipleSelection = multiple
                 controller.delegate = delegate
+                guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
+                    // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+                    // 不把 isPresented 置 false、不占 docController，
+                    // 下次 onChange 再触发时重试，并留日志。
+                    print("[DocModifier] present skipped: rootViewController already presenting")
+                    return
+                }
                 self.docController = controller
-                sceneDelegate.window?.rootViewController?.present(controller, animated: true)
+                rootViewController.present(controller, animated: true)
             } else if !isPresented, let docController = docController {
                 docController.dismiss(animated: true)
                 self.docController = nil
@@ -195,8 +202,15 @@ public struct CZFFolderPickerModifier: ViewModifier {
                 let controller = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
                 controller.allowsMultipleSelection = false
                 controller.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
+                guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
+                    // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+                    // 不把 isPresented 置 false、不占 docController，
+                    // 下次 onChange 再触发时重试，并留日志。
+                    print("[CZFFolderPickerModifier] present skipped: rootViewController already presenting")
+                    return
+                }
                 self.docController = controller
-                sceneDelegate.window?.rootViewController?.present(controller, animated: true)
+                rootViewController.present(controller, animated: true)
             } else if !isPresented, let docController = docController {
                 docController.dismiss(animated: true)
                 self.docController = nil
@@ -239,8 +253,15 @@ public struct TextFieldAlertModifier: ViewModifier {
         content.onChange(of: isPresented) { isPresented in
             if isPresented, alertController == nil {
                 let alertController = makeAlertController()
+                guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
+                    // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+                    // 不把 isPresented 置 false、不占 alertController，
+                    // 下次 onChange 再触发时重试，并留日志。
+                    print("[TextFieldAlertModifier] present skipped: rootViewController already presenting")
+                    return
+                }
                 self.alertController = alertController
-                sceneDelegate.window?.rootViewController?.present(alertController, animated: true)
+                rootViewController.present(alertController, animated: true)
             } else if !isPresented, let alertController = alertController {
                 alertController.dismiss(animated: true)
                 self.alertController = nil

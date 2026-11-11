@@ -211,7 +211,13 @@ struct LCTabView: View {
             case "certificate":
                 sharedModel.selectedTab = .settings
             case "source":
-                sharedModel.selectedTab = .sources
+                // 副 LC（multiLCStatus == 2）没有源 Tab：不切 .sources，
+                // 改落 App 页，deepLink 照常写下去由 App 页 onChange 消费。
+                if DataManager.shared.model.multiLCStatus == 2 {
+                    sharedModel.selectedTab = .apps
+                } else {
+                    sharedModel.selectedTab = .sources
+                }
             default:
                 return
             }

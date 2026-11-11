@@ -66,6 +66,7 @@ struct LCSettingsView: View {
     @StateObject private var certificateImportAlert = YesNoHelper()
     @StateObject private var certificateImportFromBuiltInSideStoreAlert = YesNoHelper()
     @StateObject private var certificateRemoveAlert = YesNoHelper()
+    @StateObject private var nukeSideStoreAlert = YesNoHelper()
     @StateObject private var certificateImportFileAlert = AlertHelper<URL>()
     @StateObject private var certificateImportPasswordAlert = InputHelper()
     
@@ -251,6 +252,19 @@ struct LCSettingsView: View {
                 }
             } message: {
                 Text("lc.settings.removeCertificateDesc".loc)
+            }
+            .alert("lc.settings.nukeSideStore".loc, isPresented: $nukeSideStoreAlert.show) {
+                Button(role: .destructive) {
+                    nukeSideStoreAlert.close(result: true)
+                } label: {
+                    Text("lc.common.ok".loc)
+                }
+
+                Button("lc.common.cancel".loc, role: .cancel) {
+                    nukeSideStoreAlert.close(result: false)
+                }
+            } message: {
+                Text("将删除 SideStore 的 Database 与 Apps 目录，此操作不可撤销，要继续吗？")
             }
             .alert("lc.settings.importCertFromBuiltinSideStore".loc, isPresented: $certificateImportFromBuiltInSideStoreAlert.show) {
                 Button {
@@ -459,9 +473,9 @@ struct LCSettingsView: View {
     @ViewBuilder private var emulatorSection: some View {
         Section {
             Picker(selection: $selected32BitEmulator) {
+                Text("lc.common.none".loc).tag("")
                 ForEach(sharedModel.arm32EmuApps, id: \.self) { app in
-                    Text("lc.common.none".loc).tag("")
-                    Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath!)
+                    Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath ?? "")
                 }
             } label: {
                 HStack {
@@ -929,12 +943,15 @@ struct LCSettingsView: View {
         } else {
             UIApplication.shared.applicationIconBadgeNumber = 0
         }
+        successInfo = "通知已清除"
+        successShow = true
     }
 
     func export() {
         let fileManager = FileManager.default
         let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
-        
+        var failures: [String] = []
+
         // 1. Copy embedded.mobileprovision from the main bundle to Documents
         if let embeddedURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") {
             let destinationURL = documentsURL.appendingPathComponent("embedded.mobileprovision")
@@ -943,11 +960,13 @@ struct LCSettingsView: View {
                 print("Successfully copied embedded.mobileprovision to Documents.")
             } catch {
                 print("Error copying embedded.mobileprovision: \(error)")
+                failures.append("embedded.mobileprovision 复制失败：\(error.localizedDescription)")
             }
         } else {
             print("embedded.mobileprovision not found in the main bundle.")
+            failures.append("embedded.mobileprovision 未找到")
         }
-        
+
         // 2. Read "certData" from UserDefaults and save to cert.p12 in Documents
         if let certData = LCUtils.certificateData() {
             let certFileURL = documentsURL.appendingPathComponent("cert.p12")
@@ -956,11 +975,13 @@ struct LCSettingsView: View {
                 print("Successfully wrote certData to cert.p12 in Documents.")
             } catch {
                 print("Error writing certData to cert.p12: \(error)")
+                failures.append("cert.p12 写入失败：\(error.localizedDescription)")
             }
         } else {
             print("certData not found in UserDefaults.")
+            failures.append("证书数据未找到")
         }
-        
+
         // 3. Read "certPassword" from UserDefaults and save to pass.txt in Documents
         if let certPassword = LCSharedUtils.certificatePassword() {
             let passwordFileURL = documentsURL.appendingPathComponent("pass.txt")
@@ -969,9 +990,19 @@ struct LCSettingsView: View {
                 print("Successfully wrote certPassword to pass.txt in Documents.")
             } catch {
                 print("Error writing certPassword to pass.txt: \(error)")
+                failures.append("pass.txt 写入失败：\(error.localizedDescription)")
             }
         } else {
             print("certPassword not found in UserDefaults.")
+            failures.append("证书密码未找到")
+        }
+
+        if failures.isEmpty {
+            successInfo = "证书已导出到 Documents"
+            successShow = true
+        } else {
+            errorInfo = failures.joined(separator: "\n")
+            errorShow = true
         }
     }
     
@@ -983,13 +1014,19 @@ struct LCSettingsView: View {
             let destinationURL = documentsURL.appendingPathComponent(url.lastPathComponent)
             try fileManager.copyItem(at: url, to: destinationURL)
             print("Successfully copied main bundle to Documents.")
+            successInfo = "主包已导出到 Documents"
+            successShow = true
         } catch {
             print("Error copying main bundle \(error)")
+            errorInfo = error.localizedDescription
+            errorShow = true
         }
     }
-    
+
     func resetSymbolOffsets() {
         LCUtils.appGroupUserDefault.removeObject(forKey: "symbolOffsetCache")
+        successInfo = "符号偏移已重置"
+        successShow = true
     }
     
     func presentFLEXOverlay() {
@@ -1122,7 +1159,7 @@ struct LCSettingsView: View {
     }
     
     func nukeSideStore() async {
-        guard let doRemove = await certificateRemoveAlert.open(), doRemove else {
+        guard let doRemove = await nukeSideStoreAlert.open(), doRemove else {
             return
         }
         do {
@@ -1130,8 +1167,11 @@ struct LCSettingsView: View {
             let sidestoreAppGroupURL = LCPath.lcGroupDocPath.deletingLastPathComponent()
             try fm.removeItem(at: sidestoreAppGroupURL.appendingPathComponent("Database"))
             try fm.removeItem(at: sidestoreAppGroupURL.appendingPathComponent("Apps"))
+            successInfo = "SideStore 数据已清除"
+            successShow = true
         } catch {
-            print("wtf \(error)")
+            errorInfo = error.localizedDescription
+            errorShow = true
         }
     }
     
@@ -1143,8 +1183,12 @@ struct LCSettingsView: View {
             let destinationURL = documentsURL.appendingPathComponent(url.lastPathComponent)
             try fileManager.copyItem(at: url, to: destinationURL)
             print("Successfully copied dyld to Documents.")
+            successInfo = "dyld 已导出到 Documents"
+            successShow = true
         } catch {
             print("Error copying dyld \(error)")
+            errorInfo = error.localizedDescription
+            errorShow = true
         }
     }
     
