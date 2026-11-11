@@ -89,6 +89,16 @@ extension View {
         self.modifier(NavigationBarProgressModifier(show: show, progress: progress))
     }
 
+    // 3.8.431 恢复：这不是死代码！MultitaskDockView.swift 有 3 处
+    // .modifier { content in } 在用它（2757/3519/5058 行）。431 第三批
+    // 误删了它，构建 12 条红字全挂在这。删前必须全仓 grep
+    // ".modifier {"（含 MultitaskSupport/ 目录），只查
+    // LiveContainerSwiftUI/ 会漏掉。
+    func modifier<ModifiedContent: View>(@ViewBuilder body: (_ content: Self) -> ModifiedContent
+    ) -> ModifiedContent {
+        body(self)
+    }
+
     // 3.8.317 修复：.presentationDetents 是 iOS 16+ API，部署目标
     // 15.0 下直接调用编不过（构建 #364 唯一红字）。包一层
     // #available，iOS 15 走默认 sheet 高度，iOS 16+ 强制满高。
