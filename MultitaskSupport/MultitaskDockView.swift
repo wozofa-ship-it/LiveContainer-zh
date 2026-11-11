@@ -2142,6 +2142,28 @@ extension Notification.Name {
     }
 
 
+    // 3.8.412：面板宿主必须挂进视图控制器层级，.sheet 才能弹出来——
+    // 只 window.addSubview(host.view) 不 addChild，宿主是孤儿控制器，
+    // SwiftUI 的 sheet 经它 present 时 UIKit 静默丢掉，点“备份全部”
+    // 什么都不出（用户 11-08 起反复报的备份没弹窗；411 只删了
+    // closePanel，没治到根）。挂到当前窗口的 rootViewController 下；
+    // 窗口变了就先从旧父控制器摘掉再挂到新窗口的根控制器。
+    private func czfAttachPanelHost(_ host: UIViewController, backdrop: UIView, to window: UIWindow) {
+        if host.parent != nil {
+            host.willMove(toParent: nil)
+            host.view.removeFromSuperview()
+            host.removeFromParent()
+        }
+        window.addSubview(backdrop)
+        if let rootVC = window.rootViewController {
+            rootVC.addChild(host)
+            window.addSubview(host.view)
+            host.didMove(toParent: rootVC)
+        } else {
+            window.addSubview(host.view)
+        }
+    }
+
     // 建好手势面板覆盖层（只建一次，常驻窗口待命，和快捷栏同一个生命周期）。
     // #89 是每次左滑现建 SwiftUI 视图树：首帧渲染慢，滑完要等一下才动，
     // 体感像失灵；且开/关状态只认存着的引用，视图一旦被外部摘掉引用还
@@ -2154,8 +2176,7 @@ extension Notification.Name {
         if let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop {
             // 已建过：若被挪出当前窗口（窗口/场景切换），搬回当前窗口
             if host.view.superview !== window {
-                window.addSubview(backdrop)
-                window.addSubview(host.view)
+                czfAttachPanelHost(host, backdrop: backdrop, to: window)
             }
             return
         }
@@ -2191,7 +2212,9 @@ extension Notification.Name {
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
         host.view.isHidden = true
-        window.addSubview(host.view)
+        // 3.8.412：挂进视图控制器层级，面板里的 .sheet 才能弹出来
+        //（只加 view 不 addChild 是孤儿控制器，sheet 会被静默丢掉）。
+        czfAttachPanelHost(host, backdrop: backdrop, to: window)
         // 下滑关闭：面板宿主挂拖动手势（只认顶部标题区起手，不抢
         // 列表滚动，起手判定在 gestureRecognizerShouldBegin）
         let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
@@ -2351,8 +2374,7 @@ extension Notification.Name {
         czfStartKeyboardObserving()
         if let host = czfSourcesOverlayHost, let backdrop = czfSourcesOverlayBackdrop {
             if host.view.superview !== window {
-                window.addSubview(backdrop)
-                window.addSubview(host.view)
+                czfAttachPanelHost(host, backdrop: backdrop, to: window)
             }
             return
         }
@@ -2402,7 +2424,9 @@ extension Notification.Name {
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
         host.view.isHidden = true
-        window.addSubview(host.view)
+        // 3.8.412：挂进视图控制器层级，面板里的 .sheet 才能弹出来
+        //（只加 view 不 addChild 是孤儿控制器，sheet 会被静默丢掉）。
+        czfAttachPanelHost(host, backdrop: backdrop, to: window)
         // 下滑关闭：与 App 面板共用同一个拖动处理器
         let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
         drag.delegate = self

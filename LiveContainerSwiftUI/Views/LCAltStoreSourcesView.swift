@@ -387,10 +387,14 @@ enum AltStoreSourceLoader {
     }
     
     private static func buildApp(from response: AltStoreSourceAppResponse, baseURL: URL, fallbackTint: String?, isoFormatter: ISO8601DateFormatter, shortFormatter: DateFormatter) -> AltStoreSourceApp? {
-        guard let name = response.name,
-              let bundleIdentifier = response.bundleIdentifier else {
+        guard let bundleIdentifier = response.bundleIdentifier else {
             return nil
         }
+        // 3.8.412：名字为空的源条目不能直接留着——Text("") 不渲染，
+        // 图标再加载失败就剩一个全空白格（用户 11-11 截图 3 处）。
+        // 空名字用 bundleIdentifier 兜底，格子总有字可认。
+        let trimmedName = (response.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmedName.isEmpty ? bundleIdentifier : trimmedName
 
         let versions = buildVersions(from: response, baseURL: baseURL, isoFormatter: isoFormatter, shortFormatter: shortFormatter)
         let latest = versions.first ?? buildLegacyVersion(from: response, baseURL: baseURL, isoFormatter: isoFormatter, shortFormatter: shortFormatter)
@@ -1954,8 +1958,16 @@ struct SourceIconView: View {
     }
 
     private var placeholder: some View {
-        Image("DefaultIcon")
-            .resizable()
-            .scaledToFill()
+        // 3.8.412：DefaultIcon 是白底细线框，白底上几乎看不见，
+        // 图标加载失败的格子就剩一片白（用户 11-11 截图）。
+        // 改灰底 + 系统 App glyph，加载失败也有个可见的灰格子。
+        ZStack {
+            Color(uiColor: .systemGray5)
+            Image(systemName: "app.fill")
+                .resizable()
+                .scaledToFit()
+                .padding(12)
+                .foregroundStyle(.secondary)
+        }
     }
 }

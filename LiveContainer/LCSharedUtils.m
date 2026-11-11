@@ -20,11 +20,14 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 #if !TARGET_OS_SIMULATOR
         void* taskSelf = SecTaskCreateFromSelf(NULL);
         CFErrorRef error = NULL;
-        CFTypeRef cfans = SecTaskCopyValueForEntitlement(taskSelf, CFSTR("com.apple.developer.team-identifier"), &error);
-        if(CFGetTypeID(cfans) == CFStringGetTypeID()) {
+        // 3.8.412：SecTaskCreateFromSelf 可能返回 NULL（扩展进程），
+        // SecTaskCopyValueForEntitlement 也可能返回 NULL；CFGetTypeID(NULL)
+        // 与 CFRelease(NULL) 都会崩。先判空再用。
+        CFTypeRef cfans = taskSelf ? SecTaskCopyValueForEntitlement(taskSelf, CFSTR("com.apple.developer.team-identifier"), &error) : NULL;
+        if(cfans && CFGetTypeID(cfans) == CFStringGetTypeID()) {
             ans = (__bridge NSString*)cfans;
         }
-        CFRelease(taskSelf);
+        if (taskSelf) CFRelease(taskSelf);
 #endif
         if(!ans) {
             // the above seems not to work if the device is jailbroken by Palera1n, so we use the public api one as backup
@@ -57,20 +60,28 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
     static dispatch_once_t once;
     static NSString *appGroupID = @"Unknown";
     dispatch_once(&once, ^{
-        NSArray* possibleAppGroups = @[
-            [@"group.com.SideStore.SideStore." stringByAppendingString:[self teamIdentifier]],
-            [@"group.com.rileytestut.AltStore." stringByAppendingString:[self teamIdentifier]],
-            // 3.8.411：Release 的 entitlements 是不带团队后缀的
-            // （Global.xcconfig 里 DEVELOPMENT_TEAM_SUFFIX[Release]
-            // 为空，APP_GROUP_* = group.com.*.SideStore/AltStore），
-            // 只试带后缀的两组永远命中不了，全靠后面 SecTask 读
-            // entitlement 兜底；扩展进程里 SecTask 一旦拿不到，
-            // App Group 就解析成 Unknown，收件箱写不进、分享
-            // 就死在这。把不带后缀的两组也放进候选，entitlements
-            // 是哪种就命中哪种，不再只依赖 SecTask 兜底。
-            @"group.com.SideStore.SideStore",
-            @"group.com.rileytestut.AltStore"
-        ];
+        // 3.8.412：teamIdentifier 可能为 nil——扩展进程里 SecTask
+        // 拿不到 team、钥匙串兜底又没有 keychain entitlement，
+        // teamIdentifier 直接返回 nil；这时 stringByAppendingString:
+        // 传 nil 会抛 NSInvalidArgumentException，扩展启动就崩，
+        // 分享从 398 起一直死在这（411 加的不带后缀组根本走不到，
+        // 数组构造那行先崩了）。只 team 非空才加带后缀组。
+        NSMutableArray<NSString *> *possibleAppGroups = [NSMutableArray array];
+        NSString *teamID = [self teamIdentifier];
+        if (teamID.length > 0) {
+            [possibleAppGroups addObject:[@"group.com.SideStore.SideStore." stringByAppendingString:teamID]];
+            [possibleAppGroups addObject:[@"group.com.rileytestut.AltStore." stringByAppendingString:teamID]];
+        }
+        // 3.8.411：Release 的 entitlements 是不带团队后缀的
+        // （Global.xcconfig 里 DEVELOPMENT_TEAM_SUFFIX[Release]
+        // 为空，APP_GROUP_* = group.com.*.SideStore/AltStore），
+        // 只试带后缀的两组永远命中不了，全靠后面 SecTask 读
+        // entitlement 兜底；扩展进程里 SecTask 一旦拿不到，
+        // App Group 就解析成 Unknown，收件箱写不进、分享
+        // 就死在这。把不带后缀的两组也放进候选，entitlements
+        // 是哪种就命中哪种，不再只依赖 SecTask 兜底。
+        [possibleAppGroups addObject:@"group.com.SideStore.SideStore"];
+        [possibleAppGroups addObject:@"group.com.rileytestut.AltStore"];
         
         // we prefer app groups with "Apps" in it, which indicate this app group is actually used by the store.
         for (NSString *group in possibleAppGroups) {
