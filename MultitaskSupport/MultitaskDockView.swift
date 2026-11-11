@@ -2148,6 +2148,10 @@ extension Notification.Name {
     // 什么都不出（用户 11-08 起反复报的备份没弹窗；411 只删了
     // closePanel，没治到根）。挂到当前窗口的 rootViewController 下；
     // 窗口变了就先从旧父控制器摘掉再挂到新窗口的根控制器。
+    // 3.8.414：只在面板打开时挂（present/switch），预建时不挂——
+    // 412 在 setupDockView 预建时就 addChild，启动时 rootVC 还没
+    // 稳，装上打开就闪退。预建只 addSubview（411 同款，不闪退）；
+    // 打开面板时再挂成 child，sheet 照样能弹。
     private func czfAttachPanelHost(_ host: UIViewController, backdrop: UIView, to window: UIWindow) {
         if host.parent != nil {
             host.willMove(toParent: nil)
@@ -2175,8 +2179,12 @@ extension Notification.Name {
         czfStartKeyboardObserving()
         if let host = czfPanelOverlayHost, let backdrop = czfPanelOverlayBackdrop {
             // 已建过：若被挪出当前窗口（窗口/场景切换），搬回当前窗口
+            // 3.8.414：预建/搬窗只 addSubview，不 addChild——addChild
+            // 只在面板打开时做（见 presentAllAppsPanel），启动时
+            // rootVC 没稳就 addChild 会闪退。
             if host.view.superview !== window {
-                czfAttachPanelHost(host, backdrop: backdrop, to: window)
+                window.addSubview(backdrop)
+                window.addSubview(host.view)
             }
             return
         }
@@ -2212,9 +2220,11 @@ extension Notification.Name {
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
         host.view.isHidden = true
-        // 3.8.412：挂进视图控制器层级，面板里的 .sheet 才能弹出来
-        //（只加 view 不 addChild 是孤儿控制器，sheet 会被静默丢掉）。
-        czfAttachPanelHost(host, backdrop: backdrop, to: window)
+        // 3.8.414：预建只 addSubview，不 addChild——addChild 只在
+        // 面板打开时做（presentAllAppsPanel），启动时 rootVC 没稳
+        // 就 addChild 会闪退（412 启动闪退根因）；sheet 要弹时
+        // 打开面板那一步会挂成 child，不影响弹窗。
+        window.addSubview(host.view)
         // 下滑关闭：面板宿主挂拖动手势（只认顶部标题区起手，不抢
         // 列表滚动，起手判定在 gestureRecognizerShouldBegin）
         let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
@@ -2256,6 +2266,9 @@ extension Notification.Name {
             self.dismissSourcesOverlay()
             self.ensurePanelOverlay(in: window)
             guard let host = self.czfPanelOverlayHost, let backdrop = self.czfPanelOverlayBackdrop else { return }
+            // 3.8.414：打开面板时才挂成 child（启动预建不挂，412
+            // 启动闪退根因）；挂成 child 后面板里的 .sheet 才能弹出来。
+            self.czfAttachPanelHost(host, backdrop: backdrop, to: window)
             // 每次调用都强制对齐到打开状态，不看旧状态早退：旧状态可能
             // 与真实显示脱节（isHidden 为 false 但 frame 停在屏外/被盖住，
             // 表现为"滑一次没出来、再滑一次才出来"）。搬顶层、摆正、
@@ -2373,8 +2386,12 @@ extension Notification.Name {
         // 键盘监听只注册一次（3.8.296，见 ensurePanelOverlay）。
         czfStartKeyboardObserving()
         if let host = czfSourcesOverlayHost, let backdrop = czfSourcesOverlayBackdrop {
+            // 3.8.414：预建/搬窗只 addSubview，不 addChild——addChild
+            // 只在面板打开时做（见 presentSourcesPanel），启动时
+            // rootVC 没稳就 addChild 会闪退。
             if host.view.superview !== window {
-                czfAttachPanelHost(host, backdrop: backdrop, to: window)
+                window.addSubview(backdrop)
+                window.addSubview(host.view)
             }
             return
         }
@@ -2424,9 +2441,11 @@ extension Notification.Name {
         host.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         host.view.clipsToBounds = true
         host.view.isHidden = true
-        // 3.8.412：挂进视图控制器层级，面板里的 .sheet 才能弹出来
-        //（只加 view 不 addChild 是孤儿控制器，sheet 会被静默丢掉）。
-        czfAttachPanelHost(host, backdrop: backdrop, to: window)
+        // 3.8.414：预建只 addSubview，不 addChild——addChild 只在
+        // 面板打开时做（presentSourcesPanel），启动时 rootVC 没稳
+        // 就 addChild 会闪退（412 启动闪退根因）；sheet 要弹时
+        // 打开面板那一步会挂成 child，不影响弹窗。
+        window.addSubview(host.view)
         // 下滑关闭：与 App 面板共用同一个拖动处理器
         let drag = UIPanGestureRecognizer(target: self, action: #selector(self.czfPanelDragged(_:)))
         drag.delegate = self
@@ -2450,6 +2469,9 @@ extension Notification.Name {
             self.dismissPanelOverlay()
             self.ensureSourcesOverlay(in: window)
             guard let host = self.czfSourcesOverlayHost, let backdrop = self.czfSourcesOverlayBackdrop else { return }
+            // 3.8.414：打开面板时才挂成 child（启动预建不挂，412
+            // 启动闪退根因）；挂成 child 后面板里的 .sheet 才能弹出来。
+            self.czfAttachPanelHost(host, backdrop: backdrop, to: window)
             // 计数 +1：面板视图据此刷新源数据（覆盖层常驻，onAppear 不重来）
             self.czfSourcesPanelOpenCounter += 1
             window.bringSubviewToFront(backdrop)
@@ -2493,6 +2515,9 @@ extension Notification.Name {
                   let oldBackdrop = toSources ? self.czfPanelOverlayBackdrop : self.czfSourcesOverlayBackdrop,
                   let newHost = toSources ? self.czfSourcesOverlayHost : self.czfPanelOverlayHost,
                   let newBackdrop = toSources ? self.czfSourcesOverlayBackdrop : self.czfPanelOverlayBackdrop else { return }
+            // 3.8.414：切到新面板时才挂成 child（启动预建不挂，412
+            // 启动闪退根因）；挂成 child 后面板里的 .sheet 才能弹出来。
+            self.czfAttachPanelHost(newHost, backdrop: newBackdrop, to: window)
             let b = window.bounds
             let panelHeight = b.height * 0.45 + 48
             if toSources {
