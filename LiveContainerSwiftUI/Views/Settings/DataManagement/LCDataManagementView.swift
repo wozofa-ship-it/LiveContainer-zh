@@ -797,15 +797,25 @@ struct LCDataManagementView : View {
                     self.pendingBackupApps = self.czfDirectScopeApps
                     self.czfScopeChosen = true
                     self.doBackupScope(loginOnly: loginOnly)
+                    // 3.8.408：选完直接调收尾——Form 分支上的
+                    // .onChange(of: czfScopeChosen) 在直进时还不存在
+                    // （body 直返选页、Form 根本没渲染），选完翻回
+                    // Form 时值已是 true、不会再触发；不调这一句，
+                    // didApplyInitialSheet 即便为 true 也没人关 sheet。
+                    self.czfDismissIfDirectEntryDone()
                 }
             )
+            // 3.8.408：直进选页出现即置 didApplyInitialSheet——
+            // onAppearFunc 只挂在 .restore 分支与 Form 分支，直进
+            // 时根本不跑；不置这一位，收尾函数的 guard 永远提前返回。
+            .onAppear { self.didApplyInitialSheet = true }
         } else {
-        // 3.8.404：Form 需要导航容器推范围选页——设置路已有
-        // LCSettingsView 的 NavigationView 祖先，坞 sheet 路
-        // （.datamanagement）没有。CZFNavWrap 在 iOS 16+ 包
-        // NavigationStack，iOS 15 原样返回（部署目标 15.0，
-        // NavigationStack 必须包 #available，否则编译挂）。
-        CZFNavWrap {
+        // 3.8.408：删 CZFNavWrap——NavigationStack 嵌在 NavigationView
+        // 里是未定义行为，设置页“备份全部”的 NavigationLink 被它吞了
+        // （点一下什么都不出，用户 404/406 真机报）。三路入口（设置页
+        // NavigationLink、坞 sheet、App 列表 NavigationLink）与各 sheet
+        // 内页（预览/多选/备份选页/恢复页）都已有 NavigationView 祖先，
+        // Form 直接放，不再包导航容器。
         Form {
             // 3.8.404：面板直进范围框已独立成页 CZFScopeChoiceView
             //（body 直返，见 czfDirectScopeOpen），此页内选框删除。
@@ -1059,7 +1069,6 @@ struct LCDataManagementView : View {
                 }
                 }
             }
-        }
         }
         // 3.8.337：直进时本页只是空壳——标题留空、导航栏藏掉、
         // 内容透明，内层页没弹出来之前用户只看到一张白纸，不
@@ -5841,23 +5850,5 @@ struct CZFScopeChoiceView: View {
         }
         .navigationTitle(isBackup ? "备份范围" : "恢复范围")
         .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-/// 条件导航容器（3.8.404）：iOS 16+ 包 NavigationStack，iOS 15
-/// 原样返回内容。部署目标 15.0，NavigationStack 必须包
-/// #available，否则编译挂。用于数据管理 Form（坞 sheet 路没有
-/// 导航祖先，设置路已有，嵌套无害、内层栈独立管理）。
-struct CZFNavWrap<Content: View>: View {
-    let content: Content
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-    var body: some View {
-        if #available(iOS 16.0, *) {
-            NavigationStack { content }
-        } else {
-            content
-        }
     }
 }
