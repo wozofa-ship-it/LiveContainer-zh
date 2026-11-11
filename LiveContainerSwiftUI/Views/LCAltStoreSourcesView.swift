@@ -683,7 +683,10 @@ struct LCSourcesView: View {
                     // 页面多出一行 App。
                 }
             }
+            // 大标题改内联（3.8.420）：与 App 页同款，标题收进顶栏
+            // 一行，页面更紧凑，顶栏不留大片空白。
             .navigationTitle("lc.tabView.sources".loc)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if viewModel.isRefreshingAll {

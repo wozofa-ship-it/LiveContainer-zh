@@ -423,42 +423,44 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 图标、菜单、点按长按语义一字不动。
     @ToolbarContentBuilder
     private var appListToolbar: some ToolbarContent {
+        // 顶栏 leading 收紧（3.8.420）：“+”和“?”原来是两个独立
+        // ToolbarItem，iOS 把它们并进一个 pill、中间空一大截
+        // （用户 20:11 截图：pill 又宽又空）。合成一个 ToolbarItem、
+        // 里面 HStack 紧排，pill 变窄、看着利落。
         ToolbarItem(placement: .topBarLeading) {
-            if sharedModel.multiLCStatus != 2 {
-                if !installprogressVisible {
-                    Menu {
-                        
-                        Button("lc.appList.installFromIpa".loc, systemImage: "doc.badge.plus", action: {
-                            choosingIPA = true
-                        })
-                        Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
-                            Task{ await startInstallFromUrl() }
-                        })
-                    } label: {
-                        Label("add", systemImage: "plus")
+            HStack(spacing: 16) {
+                if sharedModel.multiLCStatus != 2 {
+                    if !installprogressVisible {
+                        Menu {
+
+                            Button("lc.appList.installFromIpa".loc, systemImage: "doc.badge.plus", action: {
+                                choosingIPA = true
+                            })
+                            Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
+                                Task{ await startInstallFromUrl() }
+                            })
+                        } label: {
+                            Label("add", systemImage: "plus")
+                        }
+
+                    } else {
+                        ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
                     }
-                    
+                }
+                if(UserDefaults.sideStoreExist()) {
+                    Button {
+                        LCUtils.openSideStore(delegate: self)
+                    } label: {
+                        IconImageView(icon: BuiltInSideStoreAppInfo.shared.iconIsDarkIcon(darkModeIcon))
+                            .frame(width: UIFont.preferredFont(forTextStyle: .body).lineHeight, height: UIFont.preferredFont(forTextStyle: .body).lineHeight)
+
+                    }
                 } else {
-                    ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
+                    Button("Help", systemImage: "questionmark") {
+                        helpPresent = true
+                    }
                 }
             }
-        }
-        ToolbarItem(placement: .topBarLeading) {
-            if(UserDefaults.sideStoreExist()) {
-                Button {
-                    LCUtils.openSideStore(delegate: self)
-                } label: {
-                    IconImageView(icon: BuiltInSideStoreAppInfo.shared.iconIsDarkIcon(darkModeIcon))
-                        .frame(width: UIFont.preferredFont(forTextStyle: .body).lineHeight, height: UIFont.preferredFont(forTextStyle: .body).lineHeight)
-
-                }
-            } else {
-                Button("Help", systemImage: "questionmark") {
-                    helpPresent = true
-                }
-            }
-            
-
         }
         
         // 顶栏三个工具收起/展开：默认只露一个箭头，点箭头
@@ -1413,7 +1415,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
             }
             
+            // 大标题改内联（3.8.420）：大标题区在真机上是空的
+            // （用户 20:11 截图：工具栏和搜索栏之间一大片空白，
+            // 大标题“我的 App”没露出来，白占地方），改内联后标题
+            // 收进顶栏一行，搜索栏上移，页面更紧凑。
             .navigationTitle("lc.appList.myApps".loc)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { appListToolbar }
         }
         // 新4（3.8.277）：批量操作底栏——多选模式时才出现。备份/
