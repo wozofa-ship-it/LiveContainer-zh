@@ -316,9 +316,11 @@ public struct TextFieldAlertModifier: ViewModifier {
         // 3.8.428 #35 同款：UIAlertAction 的 handler 是 escaping 闭包，
         // 不能在里面调 mutating 的 shutdown()（抓 mutating self 编不过）。
         // 先把 isPresented 这个 Binding 拷到局部量，闭包只抓它；
+        // 注意必须用 $isPresented（投影值才是 Binding 本身），
+        // 直接写 isPresented 拿到的是 Bool，.wrappedValue 编不过。
         // 置 false 后 onChange 走 handlePresentationChange(false)，
         // 在那里 dismiss 并把 alertController 置 nil。
-        let czfIsPresented = isPresented
+        let czfIsPresented = $isPresented
         controller.addTextField {
             $0.placeholder = self.placeholder
             $0.text = self.text.wrappedValue
