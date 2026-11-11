@@ -53,6 +53,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var didAppear = false
     // ipa choosing stuff
     @State var choosingIPA = false
+    // 本地 IPA 文件夹（3.8.423）：+ 号旁的文件夹按钮，选一个
+    // 文件夹，列里面的 IPA 点一下安装；文件夹用 bookmark 记住。
+    @State var czfIpaFolderPickerShow = false
+    @State var czfIpaFolderURL: URL? = nil
+    @State var czfIpaFolderSheetShow = false
     @State var errorShow = false
     @State var errorInfo = ""
     // 新装 App 后自动恢复备份的结果提示
@@ -447,6 +452,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
                     }
                 }
+                // 本地 IPA 文件夹（3.8.423，用户 21:49 令）：+ 号旁的
+                // 文件夹按钮，点开选一个本地文件夹，列里面的 IPA，
+                // 显示名字和图标，点一下安装。记过的直接打开列表。
+                Button {
+                    if let saved = czfRestoreIpaFolder() {
+                        czfIpaFolderURL = saved
+                        czfIpaFolderSheetShow = true
+                    } else {
+                        czfIpaFolderPickerShow = true
+                    }
+                } label: {
+                    Label("本地 IPA 文件夹", systemImage: "folder")
+                }
                 if(UserDefaults.sideStoreExist()) {
                     Button {
                         LCUtils.openSideStore(delegate: self)
@@ -455,11 +473,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             .frame(width: UIFont.preferredFont(forTextStyle: .body).lineHeight, height: UIFont.preferredFont(forTextStyle: .body).lineHeight)
 
                     }
-                } else {
-                    Button("Help", systemImage: "questionmark") {
-                        helpPresent = true
-                    }
                 }
+                // “?”已移进“>”展开的工具组（用户 21:48 令）：leading
+                // 只留“+”（+ 有 SideStore 时还有它图标），不再常驻
+                // 占地方；要帮助点“>”展开就能看到。
             }
         }
         
@@ -610,6 +627,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfGridSettingsShow = true
                 } label: {
                     Label("网格设置", systemImage: "slider.horizontal.3")
+                }
+            }
+        }
+
+        // “?”帮助收到“>”展开的工具组（用户 21:48 令）：原来常驻
+        // 在 leading pill 里占地方，挪到这里，点“>”展开才看到。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded {
+                Button("Help", systemImage: "questionmark") {
+                    helpPresent = true
                 }
             }
         }
@@ -1364,56 +1391,65 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
-    var body: some View {
-        NavigationView {
-            ScrollView {
-                if czfGridMode {
-                    czfGridContent
-                } else {
-                    czfListContent
-                }
+    // body 拆分（3.8.423，422 构建红字）：body 太大编译器
+    // 算不过来（unable to type-check in reasonable time）。
+    // 把最大的块——ScrollView（含背景/onAppear/onChange）
+    // 抽出来，body 只剩 NavigationView + 修饰符。只拆不改逻辑。
+    @ViewBuilder
+    private var czfAppScrollContent: some View {
+        ScrollView {
+            if czfGridMode {
+                czfGridContent
+            } else {
+                czfListContent
+            }
 
+        }
+        // 自定义背景（3.8.415）：图挂在 ScrollView 的 .background
+        // 里，不包 ZStack——413 把 ScrollView 包进 ZStack 后，
+        // NavigationView 的大标题/搜索栏/切换行全叠到一块
+        // （用户 414 截图：App 标题压住图标、搜索栏压住名字，
+        // 太丑）。background 不动视图层级，标题/搜索/切换行
+        // 原样排布，图只从透明处透出来。
+        .background {
+            if let bg = czfBackgroundImage {
+                Image(uiImage: bg)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+                    .overlay(Color.black.opacity(0.12))
             }
-            // 自定义背景（3.8.415）：图挂在 ScrollView 的 .background
-            // 里，不包 ZStack——413 把 ScrollView 包进 ZStack 后，
-            // NavigationView 的大标题/搜索栏/切换行全叠到一块
-            // （用户 414 截图：App 标题压住图标、搜索栏压住名字，
-            // 太丑）。background 不动视图层级，标题/搜索/切换行
-            // 原样排布，图只从透明处透出来。
-            .background {
-                if let bg = czfBackgroundImage {
-                    Image(uiImage: bg)
-                        .resizable()
-                        .scaledToFill()
-                        .ignoresSafeArea()
-                        .overlay(Color.black.opacity(0.12))
-                }
+        }
+        // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在顶部的
+        // “恢复原生 / 网格设置”行删掉，模式开关收到网格设置
+        // sheet 里（CZFAppGridSettingsView 的显示模式），网格设置
+        // 入口收到顶栏“>”展开的工具组里；页面多出一行 App。
+        .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
+        .coordinateSpace(name: "scroll")
+        .onAppear {
+            czfBackgroundImage = CZFAppBackground.loadImage()
+            if !didAppear {
+                onAppear()
             }
-            // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在顶部的
-            // “恢复原生 / 网格设置”行删掉，模式开关收到网格设置
-            // sheet 里（CZFAppGridSettingsView 的显示模式），网格设置
-            // 入口收到顶栏“>”展开的工具组里；页面多出一行 App。
-            .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
-            .coordinateSpace(name: "scroll")
-            .onAppear {
-                czfBackgroundImage = CZFAppBackground.loadImage()
-                if !didAppear {
-                    onAppear()
-                }
-                // 3.8.404：每次回到本页都扫分享收件箱（切回 App
-                // 页时 onAppear 也触发，didAppear 守卫只拦 onAppear()）。
+            // 3.8.404：每次回到本页都扫分享收件箱（切回 App
+            // 页时 onAppear 也触发，didAppear 守卫只拦 onAppear()）。
+            czfClaimShareInbox()
+        }
+        .onChange(of: czfBackgroundVersion) { _ in
+            czfBackgroundImage = CZFAppBackground.loadImage()
+        }
+        .onChange(of: scenePhase) { newPhase in
+            // 3.8.404：从后台切回前台时扫分享收件箱（本页已在
+            // 前台时分享的场景，onAppear 不触发）。
+            if newPhase == .active {
                 czfClaimShareInbox()
             }
-            .onChange(of: czfBackgroundVersion) { _ in
-                czfBackgroundImage = CZFAppBackground.loadImage()
-            }
-            .onChange(of: scenePhase) { newPhase in
-                // 3.8.404：从后台切回前台时扫分享收件箱（本页已在
-                // 前台时分享的场景，onAppear 不触发）。
-                if newPhase == .active {
-                    czfClaimShareInbox()
-                }
-            }
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            czfAppScrollContent
             
             // 大标题改内联（3.8.420）：大标题区在真机上是空的
             // （用户 20:11 截图：工具栏和搜索栏之间一大片空白，
@@ -1639,6 +1675,34 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }, onDismiss: {
             choosingIPA = false
         })
+        // 本地 IPA 文件夹（3.8.423）：选文件夹（asCopy false，
+        // 原位读），存 bookmark、打开 IPA 列表；列表里点一个
+        // 就进安装队列（enqueueInstall，不删用户文件夹里的原文件）。
+        .betterFolderImporter(isPresented: $czfIpaFolderPickerShow, callback: { folderURL in
+            czfSaveIpaFolder(folderURL)
+            czfIpaFolderURL = folderURL
+            czfIpaFolderSheetShow = true
+        }, onDismiss: {
+            czfIpaFolderPickerShow = false
+        })
+        .sheet(isPresented: $czfIpaFolderSheetShow) {
+            if let folderURL = czfIpaFolderURL {
+                CZFLocalIpaFolderView(
+                    folderURL: folderURL,
+                    onInstall: { ipaURL in
+                        czfIpaFolderSheetShow = false
+                        enqueueInstall(url: ipaURL, autoReplace: false)
+                    },
+                    onChangeFolder: {
+                        czfIpaFolderSheetShow = false
+                        czfIpaFolderPickerShow = true
+                    },
+                    onClose: {
+                        czfIpaFolderSheetShow = false
+                    }
+                )
+            }
+        }
         .alert("lc.appList.installation".loc, isPresented: $installReplaceAlert.show) {
             ForEach(installOptions, id: \.self) { installOption in
                 Button(role: installOption.isReplace ? .destructive : nil, action: {
@@ -1941,6 +2005,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
 
     
+    // 本地 IPA 文件夹（3.8.423）：文件夹 bookmark 存取。
+    // bookmark 带 security scope，存进 UserDefaults，下次点
+    // 文件夹按钮直接恢复，不用重新选；失效了返回 nil、重选。
+    private func czfSaveIpaFolder(_ url: URL) {
+        if let data = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+            UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
+        }
+    }
+
+    private func czfRestoreIpaFolder() -> URL? {
+        guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else { return nil }
+        var isStale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale),
+              !isStale else { return nil }
+        return url
+    }
+
     func startInstallApp(_ fileUrl:URL) async {
         do {
             self.installprogressVisible = true

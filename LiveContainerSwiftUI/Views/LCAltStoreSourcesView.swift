@@ -571,36 +571,67 @@ struct LCSourcesView: View {
     @AppStorage(CZFAppBackground.versionKey) private var czfBackgroundVersion = 0
     @State private var czfBackgroundImage: UIImage? = nil
     
-    var body: some View {
-        NavigationView {
-            Group {
-                if viewModel.sources.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "link.badge.plus")
-                            .font(.system(size: 48))
-                            .foregroundColor(.secondary)
-                        Text("lc.sources.empty".loc)
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 16) {
-                            if czfSourceGridMode {
-                                CZFSourceGridView(
-                                    items: viewModel.sources,
-                                    columns: czfSourceGridColumns,
-                                    iconSize: czfSourceGridIconSize,
-                                    filteredApps: { item in filteredApps(for: item) },
+    // body 拆分（3.8.423，422 构建红字）：body 太大编译器
+    // 算不过来（unable to type-check in reasonable time）。
+    // 把最大的块——整个 Group（空态 + 列表）抽出来，body
+    // 只剩 NavigationView + 修饰符。只拆不改逻辑。
+    @ViewBuilder
+    private var czfSourcesContent: some View {
+        Group {
+            if viewModel.sources.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "link.badge.plus")
+                        .font(.system(size: 48))
+                        .foregroundColor(.secondary)
+                    Text("lc.sources.empty".loc)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 16) {
+                        if czfSourceGridMode {
+                            CZFSourceGridView(
+                                items: viewModel.sources,
+                                columns: czfSourceGridColumns,
+                                iconSize: czfSourceGridIconSize,
+                                filteredApps: { item in filteredApps(for: item) },
+                                isFiltering: isFiltering,
+                                onRefresh: { item in Task { await viewModel.refreshSource(item) } },
+                                onInstall: install(app:),
+                                onInstallAsNew: installAsNew(app:),
+                                onDownload: download(app:),
+                                onDownloadVersion: downloadVersion(url:),
+                                onRemove: { item in sourcePendingRemoval = item },
+                                isBatchMode: isBatchMode,
+                                selectedIDs: selectedIDs,
+                                onToggleSelect: { app in
+                                    let bid = app.bundleIdentifier
+                                    if selectedIDs.contains(bid) {
+                                        selectedIDs.remove(bid)
+                                    } else {
+                                        selectedIDs.insert(bid)
+                                    }
+                                }
+                            )
+                            .padding(.horizontal)
+                        } else {
+                            ForEach(viewModel.sources, id: \.id) { item in
+                                let apps = filteredApps(for: item)
+                                AltStoreSourceSectionView(
+                                    item: item,
+                                    filteredApps: apps,
                                     isFiltering: isFiltering,
-                                    onRefresh: { item in Task { await viewModel.refreshSource(item) } },
+                                    isExpanded: expandedSources.contains(item.id),
+                                    onRefresh: { Task { await viewModel.refreshSource(item) } },
                                     onInstall: install(app:),
                                     onInstallAsNew: installAsNew(app:),
                                     onDownload: download(app:),
                                     onDownloadVersion: downloadVersion(url:),
-                                    onRemove: { item in sourcePendingRemoval = item },
+                                    onRemove: { sourcePendingRemoval = item },
+                                    toggleExpanded: { toggleExpansion(for: item.id) },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
                                     onToggleSelect: { app in
@@ -613,81 +644,59 @@ struct LCSourcesView: View {
                                     }
                                 )
                                 .padding(.horizontal)
-                            } else {
-                                ForEach(viewModel.sources, id: \.id) { item in
-                                    let apps = filteredApps(for: item)
-                                    AltStoreSourceSectionView(
-                                        item: item,
-                                        filteredApps: apps,
-                                        isFiltering: isFiltering,
-                                        isExpanded: expandedSources.contains(item.id),
-                                        onRefresh: { Task { await viewModel.refreshSource(item) } },
-                                        onInstall: install(app:),
-                                        onInstallAsNew: installAsNew(app:),
-                                        onDownload: download(app:),
-                                        onDownloadVersion: downloadVersion(url:),
-                                        onRemove: { sourcePendingRemoval = item },
-                                        toggleExpanded: { toggleExpansion(for: item.id) },
-                                        isBatchMode: isBatchMode,
-                                        selectedIDs: selectedIDs,
-                                        onToggleSelect: { app in
-                                            let bid = app.bundleIdentifier
-                                            if selectedIDs.contains(bid) {
-                                                selectedIDs.remove(bid)
-                                            } else {
-                                                selectedIDs.insert(bid)
-                                            }
-                                        }
-                                    )
-                                    .padding(.horizontal)
-                                    .animation(.easeInOut, value: apps.count)
-                                }
-                            }
-                            
-                            if totalFilteredAppCount == 0 {
-                                VStack(spacing: 8) {
-                                    Text("lc.sources.section.noApps".loc)
-                                        .foregroundStyle(.gray)
-                                        .multilineTextAlignment(.center)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .frame(minHeight: 160, alignment: .center)
-                                .padding(.horizontal)
+                                .animation(.easeInOut, value: apps.count)
                             }
                         }
-                        // 顶部留白 + 底部留白（3.8.421，建议第 1、6 条）：
-                        // 顶部 8pt，第一组完整露出来，不顶到搜索栏下；
-                        // 底部 100pt，滑到底最后一行名字完整露出来，
-                        // 不被底部 tab 栏盖住一半。
-                        .padding(.top, 8)
-                        .padding(.bottom, 100)
-                    }
-                    // 自定义背景（3.8.416）：与 App 页同款——图挂
-                    // ScrollView 的 .background，不包 ZStack，
-                    // 不动 NavigationView 排布（415 血泪：ZStack
-                    // 会把大标题/搜索栏/切换行叠到一块）。
-                    .background {
-                        if let bg = czfBackgroundImage {
-                            Image(uiImage: bg)
-                                .resizable()
-                                .scaledToFill()
-                                .ignoresSafeArea()
-                                .overlay(Color.black.opacity(0.12))
+                        
+                        if totalFilteredAppCount == 0 {
+                            VStack(spacing: 8) {
+                                Text("lc.sources.section.noApps".loc)
+                                    .foregroundStyle(.gray)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: 160, alignment: .center)
+                            .padding(.horizontal)
                         }
                     }
-                    .onAppear {
-                        czfBackgroundImage = CZFAppBackground.loadImage()
-                    }
-                    .onChange(of: czfBackgroundVersion) { _ in
-                        czfBackgroundImage = CZFAppBackground.loadImage()
-                    }
-                    // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在
-                    // 顶部的“恢复原生 / 网格设置”行删掉，模式开关收到
-                    // 网格设置 sheet 里（CZFAppGridSettingsView 的显示
-                    // 模式，两页共用），网格设置入口收到顶栏 leading；
-                    // 页面多出一行 App。
+                    // 顶部留白 + 底部留白（3.8.421，建议第 1、6 条）：
+                    // 顶部 8pt，第一组完整露出来，不顶到搜索栏下；
+                    // 底部 100pt，滑到底最后一行名字完整露出来，
+                    // 不被底部 tab 栏盖住一半。
+                    .padding(.top, 8)
+                    .padding(.bottom, 100)
                 }
+                // 自定义背景（3.8.416）：与 App 页同款——图挂
+                // ScrollView 的 .background，不包 ZStack，
+                // 不动 NavigationView 排布（415 血泪：ZStack
+                // 会把大标题/搜索栏/切换行叠到一块）。
+                .background {
+                    if let bg = czfBackgroundImage {
+                        Image(uiImage: bg)
+                            .resizable()
+                            .scaledToFill()
+                            .ignoresSafeArea()
+                            .overlay(Color.black.opacity(0.12))
+                    }
+                }
+                .onAppear {
+                    czfBackgroundImage = CZFAppBackground.loadImage()
+                }
+                .onChange(of: czfBackgroundVersion) { _ in
+                    czfBackgroundImage = CZFAppBackground.loadImage()
+                }
+                // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在
+                // 顶部的“恢复原生 / 网格设置”行删掉，模式开关收到
+                // 网格设置 sheet 里（CZFAppGridSettingsView 的显示
+                // 模式，两页共用），网格设置入口收到顶栏 leading；
+                // 页面多出一行 App。
             }
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            czfSourcesContent
             // 大标题改内联（3.8.420）：与 App 页同款，标题收进顶栏
             // 一行，页面更紧凑，顶栏不留大片空白。
             // 顶栏改实底（3.8.422，建议第 1 条）：与 App 页同款，
