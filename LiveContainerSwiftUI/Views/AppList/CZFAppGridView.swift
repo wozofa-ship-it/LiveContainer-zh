@@ -165,6 +165,18 @@ struct CZFAppGridView: View {
         }
         // 未解锁时保留原来的透明长按区（人脸识别唤起），不要删。
         if hiddenCount > 0 && !hiddenUnlocked {
+            // 可见入口（低 #11）：原来只有一块透明长按区，用户看不见、
+            // App 多时还要滑到底才能按到；加一个可见的小按钮，点它
+            // 同样调人脸识别。网格设置里加行要 LCAppListView 接线，
+            // 不在这次手里，改放网格底部。
+            Button {
+                onAuthenticateHidden()
+            } label: {
+                Label("解锁隐藏 App", systemImage: "lock")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
             Color.clear
                 .frame(height: LCAppBannerRootView.bannerHeight)
                 .contentShape(Rectangle())
@@ -328,10 +340,16 @@ struct CZFAppGridCell: View {
                     .font(.title3)
                     .foregroundColor(actions.isBatchSelected(app) ? .accentColor : .secondary)
                     .background(Color(.systemBackground).opacity(0.85), in: Circle())
+                    // 低 #55：勾选圈向外偏移，别压在图标一角。
+                    .offset(x: 6, y: -6)
             }
         }
         .contextMenu {
-            czfContextMenu
+            // 低 #9：批量模式下不挂 contextMenu——原来长按仍能调出
+            // 删除/隐藏/锁定等破坏性菜单；空内容时不弹菜单。
+            if !batchMode {
+                czfContextMenu
+            }
         }
         .alert("提示", isPresented: Binding(get: { czfCellError != nil }, set: { if !$0 { czfCellError = nil } })) {
             Button("lc.common.ok".loc, role: .cancel) {
@@ -517,6 +535,11 @@ struct CZFAppGridSettingsView: View {
     @Binding var columns: Int
     @Binding var iconSize: Int
     @Binding var gridMode: Bool
+    // 排序入口只属于 App 页（3.8.431）：LCCustomSortView 排的是
+    // 已安装 App。源页也共用这个设置页，之前没区分，源页点
+    // “编辑排序”会打开 App 面板的排序页（用户 01:59 报
+    // “编辑排序怎么编辑 APP 面板的了”）。源页传 false 藏掉。
+    var showSort: Bool = true
     @Environment(\.dismiss) private var dismiss
     // 自定义背景：版本号与列表页共用，选图/清除时 +1 触发列表页重读。
     @AppStorage(CZFAppBackground.versionKey) private var backgroundVersion = 0
@@ -545,11 +568,15 @@ struct CZFAppGridSettingsView: View {
                 // App 页排序菜单里的“编辑排序”项
                 //（LCAppListView.swift:606）。LCCustomSortView 保存时
                 // 自己置排序类型为自定义，与菜单入口同款。
-                Section("排序") {
-                    Button {
-                        showCustomSort = true
-                    } label: {
-                        Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
+                // 3.8.431：源页不显示（showSort=false 时藏掉），
+                // 否则源页点它会打开 App 面板的排序页。
+                if showSort {
+                    Section("排序") {
+                        Button {
+                            showCustomSort = true
+                        } label: {
+                            Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
+                        }
                     }
                 }
                 Section("列数") {

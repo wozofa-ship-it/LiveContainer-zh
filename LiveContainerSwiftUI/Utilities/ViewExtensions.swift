@@ -74,13 +74,6 @@ extension View {
         self.modifier(CZFFolderPickerModifier(isPresented: isPresented, callback: callback, onDismiss: onDismiss))
     }
     
-    func onBackground(_ f: @escaping () -> Void) -> some View {
-        self.onReceive(
-            NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification),
-            perform: { _ in f() }
-        )
-    }
-    
     func onForeground(_ f: @escaping () -> Void) -> some View {
         self.onReceive(
             NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification),
@@ -94,11 +87,6 @@ extension View {
     
     func navigationBarProgressBar(show: Binding<Bool>, progress: Binding<Float>) -> some View {
         self.modifier(NavigationBarProgressModifier(show: show, progress: progress))
-    }
-    
-    func modifier<ModifiedContent: View>(@ViewBuilder body: (_ content: Self) -> ModifiedContent
-    ) -> ModifiedContent {
-        body(self)
     }
 
     // 3.8.317 修复：.presentationDetents 是 iOS 16+ API，部署目标
@@ -417,6 +405,9 @@ private struct NavigationBarProgressView: UIViewControllerRepresentable {
 struct RainbowAnimation: ViewModifier {
     // 1
     @State var isOn: Bool = false
+    // 第三批低 #59：响应减弱动态偏好——开启时不启动无限
+    // 彩虹动画，直接显示静态内容。
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let hueColors = stride(from: 0, to: 1, by: 0.01).map {
         Color(hue: $0, saturation: 1, brightness: 1)
     }
@@ -442,6 +433,9 @@ struct RainbowAnimation: ViewModifier {
         })
     // 6
         .onAppear {
+            // 第三批低 #59：减弱动态开启时不启动动画，isOn 保持
+            // false，渐变停在初始位置、静态显示。
+            guard !reduceMotion else { return }
             withAnimation(self.animation) {
                 self.isOn = true
             }
@@ -467,17 +461,6 @@ struct ActivityViewController: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: UIViewControllerRepresentableContext<ActivityViewController>) {}
-}
-
-private class SizedHostingController<Content: View>: UIHostingController<Content> {
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-
-        let size = sizeThatFits(in: UIView.layoutFittingCompressedSize)
-        if preferredContentSize != size {
-            preferredContentSize = size
-        }
-    }
 }
 
 struct IconImageView: View {

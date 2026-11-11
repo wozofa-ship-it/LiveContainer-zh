@@ -351,33 +351,42 @@ struct LCAppSettingsView: View {
                         }
                     }
                 }
-                if(model.uiContainers.count < SharedModel.keychainAccessGroupCount) {
+                // 第三批低 #46：满 128 个时按钮不再凭空消失，保留
+                // 并置灰，注明上限（实际很难触达，仅作边界记录）。
+                let containerLimitReached = model.uiContainers.count >= SharedModel.keychainAccessGroupCount
+                Button {
+                    Task{ await createFolder() }
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "folder.badge.plus", color: .blue)
+                        Text("lc.appSettings.newDataFolder".loc)
+                    }
+                }
+                .disabled(containerLimitReached)
+                Button {
+                    choosingStorage = true
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "externaldrive.fill", color: .gray)
+                        Text("lc.appSettings.selectExternalStorage".loc)
+                    }
+                }
+                .disabled(containerLimitReached)
+                if(!model.uiIsShared) {
                     Button {
-                        Task{ await createFolder() }
+                        selectUnusedContainerSheetShow = true
                     } label: {
                         HStack {
-                            LCSettingsIcon(systemName: "folder.badge.plus", color: .blue)
-                            Text("lc.appSettings.newDataFolder".loc)
+                            LCSettingsIcon(systemName: "archivebox.fill", color: .gray)
+                            Text("lc.container.selectUnused".loc)
                         }
                     }
-                    Button {
-                        choosingStorage = true
-                    } label: {
-                        HStack {
-                            LCSettingsIcon(systemName: "externaldrive.fill", color: .gray)
-                            Text("lc.appSettings.selectExternalStorage".loc)
-                        }
-                    }
-                    if(!model.uiIsShared) {
-                        Button {
-                            selectUnusedContainerSheetShow = true
-                        } label: {
-                            HStack {
-                                LCSettingsIcon(systemName: "archivebox.fill", color: .gray)
-                                Text("lc.container.selectUnused".loc)
-                            }
-                        }
-                    }
+                    .disabled(containerLimitReached)
+                }
+                if containerLimitReached {
+                    Text("数据文件夹已达上限（\(SharedModel.keychainAccessGroupCount) 个）。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 
             } header: {
@@ -397,6 +406,12 @@ struct LCAppSettingsView: View {
                     }
                 }
                 .disabled(model.uiIs32bit)
+                // 第三批低 #42：32 位 App 时上面两开关置灰，加一句原因。
+                if model.uiIs32bit {
+                    Text("32 位 App 不支持助手进程与 JIT 启动。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 if #available(iOS 26.0, *), model.uiIsJITNeeded, !model.uiIs32bit {
                     HStack {
                         Text("lc.appSettings.jit26.script".loc)
@@ -721,6 +736,12 @@ struct LCAppSettingsView: View {
                         Text("lc.appSettings.dontInjectTweakLoader".loc)
                     }
                 }.disabled(model.uiTweakLoaderInjectFailed)
+                // 第三批低 #42：注入失败时该开关置灰，加一句原因。
+                if model.uiTweakLoaderInjectFailed {
+                    Text("注入失败，该开关已不可用。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 
                 if model.uiDontInjectTweakLoader {
                     Toggle(isOn: $model.uiDontLoadTweakLoader) {
@@ -781,6 +802,12 @@ struct LCAppSettingsView: View {
                     }
                 }
                 .disabled(model.isAppRunning)
+                // 第三批低 #42：App 运行时该按钮置灰，加一句原因。
+                if model.isAppRunning {
+                    Text("App 正在运行，退出后再强制重新签名。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             } footer: {
                 Text("lc.appSettings.forceSignDesc".loc)
             }
@@ -953,6 +980,9 @@ struct LCAppSettingsView: View {
                 errorShow = true
                 return
             }
+            // 第三批低 #40：用完释放安全域访问，否则一直不释放。
+            // 书签已在下面生成（LCUtils.bookmark），后续访问走书签。
+            defer { url.stopAccessingSecurityScopedResource() }
             let path = url.path
             let fm = FileManager.default
             let _ = try fm.contentsOfDirectory(atPath: path)

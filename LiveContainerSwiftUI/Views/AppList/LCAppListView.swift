@@ -132,7 +132,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var installInfoShow = false
     @State var installInfo = ""
     // 安装请求队列（源页批量安装用）：串行下+装，已装的直接覆盖
-    @State var installQueue: [(url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool)] = []
+    // App #8：队列项带稳定 id——原来是无 id 元组，删行按
+    // url + autoReplace 找第一个匹配，有重复项时删的是另一行。
+    @State var installQueue: [(id: UUID, url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool)] = []
     // 安装前预览（源里单个安装时，下完先弹信息卡确认再装）
     @State var installPreviewShow = false
     @State var installPreviewText = ""
@@ -274,7 +276,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
 
     // 全选用的当前列表：可见 App + 已解锁的隐藏 App（搜
-    // 索时只含搜到的）；全选只动这些，不动列表外的。
+    // 索时只含搜到的）；“全选”只勾这些。“取消全选”清掉
+    // 全部已选项（App #12：原来只清当前列表的，搜索时
+    // 看不见的已选项还留在批量里，接着点删除会删掉屏幕
+    // 上看不见的 App）。
     private var batchCurrentList: [LCAppModel] {
         filteredApps + (sharedModel.isHiddenAppUnlocked ? filteredHiddenApps : [])
     }
@@ -285,9 +290,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
     private func toggleBatchSelectAll() {
         if batchAllSelected {
-            for app in batchCurrentList {
-                batchSelectedIDs.remove(czfBatchKey(for: app))
-            }
+            batchSelectedIDs.removeAll()
         } else {
             for app in batchCurrentList {
                 batchSelectedIDs.insert(czfBatchKey(for: app))
@@ -506,8 +509,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         } label: {
             Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
-        } primaryAction: {
-            toggleVPNCore()
         }
         .foregroundStyle(vpnCoreRunning ? .green : .secondary)
     }
@@ -537,7 +538,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             Task{ await startInstallFromUrl() }
                         })
                     } label: {
-                        Label("add", systemImage: "plus")
+                        // App #21：文案走 .loc（没配翻译时回落原文）。
+                        Label("add".loc, systemImage: "plus")
                     }
 
                     if installprogressVisible {
@@ -591,7 +593,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Button {
                 withAnimation { topToolsExpanded.toggle() }
             } label: {
-                Label("更多工具", systemImage: topToolsExpanded ? "chevron.left" : "chevron.right")
+                Label("更多工具".loc, systemImage: topToolsExpanded ? "chevron.left" : "chevron.right")
             }
         }
         // 3.8.334：333 的 #available 修法是错的——ToolbarContentBuilder
@@ -737,7 +739,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 在 leading pill 里占地方，挪到这里，点“>”展开才看到。
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded {
-                Button("Help", systemImage: "questionmark") {
+                Button("Help".loc, systemImage: "questionmark") {
                     helpPresent = true
                 }
             }
@@ -757,7 +759,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     // 网格模式（3.8.406）：标准 UserDefaults。默认网格，
-    // 列数默认 4，图标大小默认 0=大（1=中，2=小）。
+    // 列数默认 5，图标大小默认 0=大（1=中，2=小）。
     @AppStorage("CZFAppListGridMode") private var czfGridMode = true
     @AppStorage("CZFAppGridColumns") private var czfGridColumns = 5
     @AppStorage("CZFAppGridIconSize") private var czfGridIconSize = 0
@@ -1327,6 +1329,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 installMdm: { data in self.installMdm(data: data) }
             )
             // 计数行已删（3.8.419，建议第 6 条）：“共 n 个 App”没信息量。
+            // 3.8.431 设置低 #19：网格模式看不到 App 总数；页面
+            // 底部放一行小字总数（不占行、只作信息显示）。
+            Text("共 \(sharedModel.apps.count + sharedModel.hiddenApps.count) 个 App")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
             if sharedModel.multiLCStatus == 2 {
                 Text("lc.appList.manageInPrimaryTip".loc)
                     .foregroundStyle(.secondary)
@@ -1665,6 +1673,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Text("只恢复登录态：只恢复登录会话，不动 App 数据；完整恢复会把备份里的数据整个恢复回来。没有备份的 App 会跳过。")
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        // 设置低 #49：系统返回只改 isNavigationActive、不清
+        // navigateTo，旧 destination 常驻内存；返回后清掉。
+        // closeNavigationView 经 LCAppModel delegate 还在调，不删；
+        // 两条隐藏 NavigationLink 分属列表/网格各自层级，不合并。
+        .onChange(of: isNavigationActive) { active in
+            if !active { navigateTo = nil }
+        }
         .alert("lc.common.error".loc, isPresented: $errorShow){
             Button("lc.common.ok".loc, action: {
             })
@@ -1767,15 +1782,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             .lineLimit(1)
                     }
                     Section("排队中（\(installQueue.count)）") {
-                        ForEach(Array(installQueue.enumerated()), id: \.offset) { _, item in
+                        ForEach(installQueue, id: \.id) { item in
                             HStack {
                                 Text(item.url.lastPathComponent)
                                     .lineLimit(1)
                                 Spacer()
                                 Button(role: .destructive) {
-                                    if let idx = installQueue.firstIndex(where: { $0.url == item.url && $0.autoReplace == item.autoReplace }) {
-                                        installQueue.remove(at: idx)
-                                    }
+                                    installQueue.removeAll { $0.id == item.id }
                                 } label: {
                                     Image(systemName: "xmark.circle")
                                 }
@@ -1933,7 +1946,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         )
         .textFieldAlert(
             isPresented: $installAsNewNameInput.show,
-            title: "给新 App 起个名字",
+            title: "给新 App 起个名字".loc,
             text: $installAsNewNameInput.initVal,
             placeholder: "",
             action: { newText in
@@ -2007,11 +2020,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     Task { await openWebView(urlString: webpageUrlStr) }
                     UserDefaults.standard.set(nil, forKey: "webPageToOpen")
                 }
-                
+                // App #25：标志位在 webPageToOpen 处理完就置真——
+                // 原来只在深链分支走完后才置，没有深链时 guard
+                // 提前 return，标志位永远是 false，首现逻辑
+                // 每次进页都重跑一遍。
+                isViewAppeared = true
+
                 guard sharedModel.selectedTab == .apps, let link = sharedModel.deepLink else { return }
                 sharedModel.deepLink = nil
                 handleURL(url: link)
-                isViewAppeared = true
             }
         }
         .onChange(of: sharedModel.deepLink) { link in
@@ -2245,9 +2262,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
         // 装之前先看空间：解包 + 落盘 + 签名大约要 IPA 体积
         // 的 3 倍，空间不够时原来是装到一半才失败、报错还看
-        // 不懂；现在提前明确告诉差多少。小包不查（误差大）
+        // 不懂；现在提前明确告诉差多少。安装低 #14：去掉
+        // 50MB 门槛，小包也按 3 倍预检。
         if let attrs = try? fm.attributesOfItem(atPath: url.path),
-           let ipaSize = (attrs[.size] as? NSNumber)?.int64Value, ipaSize > 50 * 1024 * 1024,
+           let ipaSize = (attrs[.size] as? NSNumber)?.int64Value,
            let fsAttrs = try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let freeSize = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value {
             let need = ipaSize * 3
@@ -2267,16 +2285,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         let decompressProgress = Progress.discreteProgress(totalUnitCount: 100)
         installProgress.addChild(decompressProgress, withPendingUnitCount: 80)
-        let payloadPath = fm.temporaryDirectory.appendingPathComponent("Payload")
-        if fm.fileExists(atPath: payloadPath.path) {
-            try fm.removeItem(at: payloadPath)
-        }
-        
+        // 安装低 #23：每次安装用独立解包目录，不再共用固定
+        // tmp/Payload——两个入口同时装会互相覆盖装坏。
+        // 安装低 #12：defer 退出时一律清掉本次解包目录，
+        // 抛错路径也不留残留（原来只在几个取消点手动删）。
+        let czfExtractDir = fm.temporaryDirectory.appendingPathComponent("LCInstall-\(UUID().uuidString)")
+        try? fm.createDirectory(at: czfExtractDir, withIntermediateDirectories: true)
+        let payloadPath = czfExtractDir.appendingPathComponent("Payload")
+        defer { try? fm.removeItem(at: czfExtractDir) }
+
         // decompress
         // 3.8.428 安装#8：解包失败单独报“已损坏或下载不完整”，
         // 不再复用 urlFileIsNotIpaError（那是“不是 IPA”的判断，
         // 扩展名那路还用它，别动）。
-        guard await decompress(url.path, fm.temporaryDirectory.path, decompressProgress) == 0 else {
+        guard await decompress(url.path, czfExtractDir.path, decompressProgress) == 0 else {
             throw "这个 IPA 已损坏或下载不完整，请重新下载"
         }
 
@@ -2346,7 +2368,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 块内 var 会出不了作用域（构建 #209 唯一红字就是这个）。
         var czfCustomDisplayName: String? = nil
         if fm.fileExists(atPath: outputFolder.path) || sameBundleIdApp.count > 0 {
-            appRelativePath = "\(newBundleId)_\(Int(CFAbsoluteTimeGetCurrent())).app"
+            // 安装低 #24：秒级时间戳同秒装两次会撞名，改毫秒。
+            appRelativePath = "\(newBundleId)_\(Int(CFAbsoluteTimeGetCurrent() * 1000)).app"
             
             self.installOptions = [AppReplaceOption(isReplace: false, nameOfFolderToInstall: appRelativePath)]
             
@@ -2757,7 +2780,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 安装请求也走这里（队列空闲时立即执行，和以前一样）；
     /// autoReplace 的请求遇到已装同款直接覆盖、不弹选择框
     func enqueueInstall(url: URL, autoReplace: Bool, preview: Bool = false, forceAsNew: Bool = false) {
-        installQueue.append((url: url, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew))
+        // App #8：同一 IPA 点两次会进队两次（文件夹网格双击 /
+        // 源页批量重复勾选）；入队前判重，同一请求已在队里
+        // 就不再加。
+        guard !installQueue.contains(where: { $0.url == url && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew }) else {
+            return
+        }
+        installQueue.append((id: UUID(), url: url, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew))
         guard !installQueueRunning else {
             return
         }
@@ -3141,13 +3170,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if !fm.isReadableFile(atPath: installUrl.path),
                let bookmarkData = LCUtils.appGroupUserDefault.data(forKey: "LCLaunchExtensionFileBookmark") {
                 do {
+                    // 安装低 #20：1 << 10 就是 .withSecurityScope——
+                    // iOS 上该具名常量标了 unavailable（429 实证
+                    // 编不过），只能用 rawValue；抽成具名量，
+                    // 不再裸写魔数。书签旧了也别直接丢：解析出的
+                    // URL 多半还能用，先返回再重存一份新书签
+                    // （与 czfRestoreIpaFolder 同款处理）。
+                    let czfWithSecurityScope: UInt = 1 << 10
                     var isStale = false
                     let resolvedURL = try URL(
                         resolvingBookmarkData: bookmarkData,
-                        options: URL.BookmarkResolutionOptions(rawValue: 1 << 10),
+                        options: URL.BookmarkResolutionOptions(rawValue: czfWithSecurityScope),
                         relativeTo: nil,
                         bookmarkDataIsStale: &isStale
                     )
+                    if isStale, let newData = try? resolvedURL.bookmarkData(
+                        options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope),
+                        includingResourceValuesForKeys: nil, relativeTo: nil) {
+                        LCUtils.appGroupUserDefault.set(newData, forKey: "LCLaunchExtensionFileBookmark")
+                    }
                     installUrl = resolvedURL
                     didStartAccessing = resolvedURL.startAccessingSecurityScopedResource()
                 } catch {
@@ -3241,6 +3282,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if fileManager.fileExists(atPath: destinationURL.path) {
                 try fileManager.removeItem(at: destinationURL)
             }
+
+            // 安装低 #16：下载阶段导航栏进度条原来停在 0——
+            // installProgressPercentage 只在 installIpaFile 内
+            // 更新。下载时把下载进度同步过来（占前 20%，与
+            // installIpaFile 里解包 80 + 签名 20 的配比一致）；
+            // 下载完停掉，解包开始时 installIpaFile 从 0 重走。
+            // 只在变化时写，避免 0.1 秒一次的无效重绘。
+            let czfDownloadProgressTask = Task {
+                var czfLastShown: Float = -1
+                while !Task.isCancelled {
+                    let czfShown = self.downloadHelper.downloadProgress * 0.2
+                    if czfShown != czfLastShown {
+                        czfLastShown = czfShown
+                        self.installProgressPercentage = czfShown
+                    }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+            defer { czfDownloadProgressTask.cancel() }
 
             try await downloadHelper.download(url: installUrl, to: destinationURL)
             if downloadHelper.cancelled {
@@ -3561,18 +3621,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             LCUtils.openSideStore(delegate: self)
             return
         }
-        
+        // 设置低 #48：sidestore 链接但没装 SideStore，原来静默
+        // return、deepLink 还被先清掉，链接丢了也没提示；弹一次错。
+        if url.scheme == "sidestore" {
+            errorInfo = "未安装 SideStore，无法打开此链接"
+            errorShow = true
+            return
+        }
+
         if url.host == "open-web-page" || url.host == "open-url" {
-            if let urlComponent = URLComponents(url: url, resolvingAgainstBaseURL: false), let queryItem = urlComponent.queryItems?.first {
-                if queryItem.value?.isEmpty ?? true {
-                    return
-                }
-                
-                if let decodedData = Data(base64Encoded: queryItem.value ?? ""),
-                   let decodedUrl = String(data: decodedData, encoding: .utf8) {
-                    Task { await openWebView(urlString: decodedUrl) }
-                }
+            // App #26：解码失败原来静默 return，调方以为链接已
+            // 打开；解不开就弹一次错误提示。
+            // 设置低 #51：只取 queryItems?.first 会解错——链接带
+            // 多余参数时 first 未必是 url；按名取 url/open-url。
+            guard let urlComponent = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let queryItem = urlComponent.queryItems?.first(where: { $0.name == "url" || $0.name == "open-url" }),
+                  !(queryItem.value?.isEmpty ?? true),
+                  let decodedData = Data(base64Encoded: queryItem.value ?? ""),
+                  let decodedUrl = String(data: decodedData, encoding: .utf8) else {
+                errorInfo = "打开网页链接失败：链接无效或已损坏"
+                errorShow = true
+                return
             }
+            Task { await openWebView(urlString: decodedUrl) }
         } else if url.host == "livecontainer-launch" {
             if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
                 var bundleId : String? = nil

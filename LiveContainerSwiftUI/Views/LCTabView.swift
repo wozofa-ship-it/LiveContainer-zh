@@ -119,7 +119,7 @@ struct LCTabView: View {
             NavigationView {
                 ScrollView {
                     Text(errorInfo)
-                        .font(.system(size: 12).monospaced())
+                        .font(.footnote.monospaced())
                         .fixedSize(horizontal: false, vertical: false)
                         .textSelection(.enabled)
                 }
@@ -209,6 +209,9 @@ struct LCTabView: View {
             }
             
             guard let host = url.host?.lowercased() else {
+                // 第三批低 #47：无 host 的链接原来静默丢弃，弹一次提示。
+                errorInfo = "无法识别的链接"
+                errorShow = true
                 return
             }
             
@@ -226,12 +229,22 @@ struct LCTabView: View {
                     sharedModel.selectedTab = .sources
                 }
             default:
+                // 第三批低 #47：未知 host 原来静默丢弃，弹一次提示。
+                errorInfo = "无法识别的链接：\(url.absoluteString)"
+                errorShow = true
                 return
             }
             
         } while(false)
 
-        sharedModel.deepLink = url
+        // 第三批低 #53：deepLink 原是单值槽，第二条链接会覆盖
+        // 第一条。槽空着直接写，有链接在等就排队；消费方置 nil
+        // 时 SharedModel.didSet 递补下一条。
+        if sharedModel.deepLink == nil {
+            sharedModel.deepLink = url
+        } else {
+            sharedModel.deepLinkQueue.append(url)
+        }
     }
     
     func closeDuplicatedWindow() {

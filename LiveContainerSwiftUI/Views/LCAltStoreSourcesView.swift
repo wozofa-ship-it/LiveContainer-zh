@@ -605,7 +605,20 @@ struct LCSourcesView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 16) {
+                    // 3.8.431 源分组仍没好（用户 01:58 报 429“原来
+                    // 一模一样”：整页只有一个“解剖自我”组头）：
+                    // 429 只把 CZFSourceGridView 里层改成 VStack，
+                    // 外层父级这里仍是 LazyVStack——ScrollView >
+                    // LazyVStack（父）> CZFSourceGridView（VStack）
+                    // > 每源 VStack > 组头 + LazyVGrid。父级懒栈
+                    // 给里层算高度算不准，只露出第一组、其余组
+                    // 被裁掉，看着像所有 App 混在一个组里。426
+                    // 的 Section 版组头横排一行、428 的组头沉底，
+                    // 都是同一处父级懒栈算高度的毛病。修法：父级
+                    // 也改普通 VStack（非懒），整页确定性布局；
+                    // 列表路（AltStoreSourceSectionView）同样走
+                    // VStack，不受影响。
+                    VStack(spacing: 16) {
                         if czfSourceGridMode {
                             CZFSourceGridView(
                                 items: viewModel.sources,
@@ -818,7 +831,7 @@ struct LCSourcesView: View {
             }
         }
         .sheet(isPresented: $czfSourceGridSettingsShow) {
-            CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode)
+            CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode, showSort: false)
         }
         .sheet(isPresented: $isManagingSources) {
             if #available(iOS 16.0, *) {
@@ -975,7 +988,7 @@ struct LCSourcesView: View {
             }
             if downloadURL.pathExtension.lowercased() == "dylib" {
                 // 插件（dylib）走插件安装通道，和以前一样
-                Task { await installTweak(from: downloadURL, name: app.name) }
+                Task { await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) }
                 continue
             }
             if !switchedTab {
@@ -1003,7 +1016,7 @@ struct LCSourcesView: View {
             for app in source.apps {
                 guard let latest = app.latestVersion,
                       let installedVersion = installed[app.bundleIdentifier],
-                      latest.version.compare(installedVersion, options: .numeric) == .orderedDescending,
+                      czfIsVersion(latest.version, newerThan: installedVersion),
                       CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) != latest.version,
                       seen.insert(app.bundleIdentifier).inserted else {
                     continue
@@ -1029,7 +1042,7 @@ struct LCSourcesView: View {
             return
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
-            Task { await installTweak(from: downloadURL, name: app.name) }
+            Task { await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) }
             return
         }
         withAnimation {
@@ -1051,7 +1064,7 @@ struct LCSourcesView: View {
             return
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
-            Task { await installTweak(from: downloadURL, name: app.name) }
+            Task { await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) }
             return
         }
         withAnimation {
@@ -1061,13 +1074,16 @@ struct LCSourcesView: View {
         CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: true))
     }
 
+    // 低 #10：插件安装文件夹名加上 bundleIdentifier，防同名
+    // 插件互相覆盖——原来只用 app.name，两个源里同名不同款的
+    // 插件会写进同一个文件夹、互相覆盖。
     @MainActor
-    private func installTweak(from url: URL, name: String) async {
+    private func installTweak(from url: URL, name: String, bundleIdentifier: String) async {
         do {
             let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: url)
             let fm = FileManager.default
-            // 按插件名字建文件夹，不全塞一个
-            let folderURL = LCPath.tweakPath.appendingPathComponent(name)
+            // 按“插件名-包名”建文件夹，不全塞一个。
+            let folderURL = LCPath.tweakPath.appendingPathComponent("\(name)-\(bundleIdentifier)")
             if !fm.fileExists(atPath: folderURL.path) {
                 try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
             }
@@ -1151,8 +1167,13 @@ struct LCSourcesView: View {
                     }
                 }
                 if let sourceUrl {
-                    DataManager.shared.model.selectedTab = .sources
+                    // 低 #52：切 Tab 由 dispatchURL 做（LCTabView:220，
+                    // host == "source" 时已写 selectedTab = .sources），
+                    // 这里重复写已删。
                     Task { await handleAddSource(sourceUrl) }
+                } else {
+                    // 低 #52：无 url 参数时弹提示，别静默无事。
+                    errorMessage = "lc.sources.error.invalidUrl".loc
                 }
             }
         }
@@ -1263,16 +1284,12 @@ private struct ManageSourcesSheet: View {
         .navigationViewStyle(StackNavigationViewStyle())
     }
     
+    // 低 #7：删第二段冗余查找——ManageSourcesSheet 的 ForEach
+    // 本来就是 over viewModel.sources，item 就是列表里的那一项，
+    // 再 first(where:) 找回来的是同一个 item，primaryIconURL
+    // 与上面那行完全相同（上面已是 nil 才走到这里）；直接返回。
     private func resolvedIconURL(for item: AltStoreSourcesViewModel.SourceItem) -> URL? {
-        if let icon = item.primaryIconURL {
-            return icon
-        }
-        if let existing = viewModel.sources.first(where: { $0.url == item.url }) {
-            if let icon = existing.primaryIconURL {
-                return icon
-            }
-        }
-        return nil
+        item.primaryIconURL
     }
     
     private func attemptManualAdd() {
@@ -1443,6 +1460,22 @@ private struct AltStoreSourceSectionView: View {
     }
 }
 
+// 低 #8：两处版本比较统一为这一个——原来 computeUpdatableApps
+//（红点名单）用 .numeric compare，LCSourceAppBanner.hasUpdate
+// 用手动分段比（isVersion），两处可能打架；抽共用函数，
+// 手动分段比（1.10 > 1.9，非数字段按 0 算），两处都调它。
+private func czfIsVersion(_ a: String, newerThan b: String) -> Bool {
+    let aParts = a.split(separator: ".").map { Int($0) ?? 0 }
+    let bParts = b.split(separator: ".").map { Int($0) ?? 0 }
+    let count = max(aParts.count, bParts.count)
+    for i in 0..<count {
+        let av = i < aParts.count ? aParts[i] : 0
+        let bv = i < bParts.count ? bParts[i] : 0
+        if av != bv { return av > bv }
+    }
+    return false
+}
+
 // LCSourceAppBanner 不再 private：网格详情页（CZFSourceGridView.swift）
 // 复用同一份行（见 CZFSourceAppListView）。
 struct LCSourceAppBanner: View {
@@ -1487,26 +1520,18 @@ struct LCSourceAppBanner: View {
         guard let sourceVersion = app.latestVersion?.version,
               let installed = installedAppModel else { return false }
         if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
-        return Self.isVersion(sourceVersion, newerThan: installed.appInfo.version())
-    }
-    
-    private static func isVersion(_ a: String, newerThan b: String) -> Bool {
-        let aParts = a.split(separator: ".").map { Int($0) ?? 0 }
-        let bParts = b.split(separator: ".").map { Int($0) ?? 0 }
-        let count = max(aParts.count, bParts.count)
-        for i in 0..<count {
-            let av = i < aParts.count ? aParts[i] : 0
-            let bv = i < bParts.count ? bParts[i] : 0
-            if av != bv { return av > bv }
-        }
-        return false
+        return czfIsVersion(sourceVersion, newerThan: installed.appInfo.version())
     }
     
     private var isPluginInstalled: Bool {
         guard let downloadURL = app.latestVersion?.downloadURL,
               downloadURL.pathExtension.lowercased() == "dylib" else { return false }
-        let pluginURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
-        return FileManager.default.fileExists(atPath: pluginURL.path)
+        // 低 #10：文件夹名与 installTweak 同款“名-包名”；老版只
+        // 有 app.name 的文件夹也认（已装的插件不用重装）。
+        let newURL = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(downloadURL.lastPathComponent)
+        if FileManager.default.fileExists(atPath: newURL.path) { return true }
+        let oldURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
+        return FileManager.default.fileExists(atPath: oldURL.path)
     }
     
     private var primaryColor: Color {
@@ -1740,7 +1765,9 @@ struct LCSourceAppBanner: View {
             }
         }
         .padding()
-        .frame(height: 88)
+        // 低 #9：固定 88pt 改 minHeight——长版本加副标题满载约
+        // 107pt，固定高会压内容；内容少时仍是 88，不变矮。
+        .frame(minHeight: 88)
         .background {
             RoundedRectangle(cornerSize: CGSize(width: 22, height: 22))
                 .fill(backgroundColor)
@@ -2072,11 +2099,17 @@ struct SourceIconView: View {
         // 改灰底 + 系统 App glyph，加载失败也有个可见的灰格子。
         ZStack {
             Color(uiColor: .systemGray5)
-            Image(systemName: "app.fill")
-                .resizable()
-                .scaledToFit()
-                .padding(12)
-                .foregroundStyle(.secondary)
+            GeometryReader { geo in
+                Image(systemName: "app.fill")
+                    .resizable()
+                    .scaledToFit()
+                    // 低 #12：留白按图标尺寸比例算——原来固定
+                    // .padding(12)，28pt 组头里 glyph 只剩约 4pt，
+                    // 几乎看不见；按边长 30% 留白（28pt → 垫约
+                    // 8pt、glyph 约 12pt；60pt → glyph 约 24pt）。
+                    .padding(max(geo.size.width * 0.3, 2))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

@@ -43,11 +43,13 @@ struct CZFSourceGridView: View {
         }
     }
 
-    // 源中 #6：搜索中过滤掉 filteredApps 为空的源组，不渲染
-    // 空组头；非搜索时不过滤（空源仍显示“没有 App”）。
-    private var czfVisibleItems: [AltStoreSourcesViewModel.SourceItem] {
-        guard isFiltering else { return items }
-        return items.filter { !filteredApps($0).isEmpty }
+    // 低 #11：filteredApps 每源每轮算一次存起来——原来组头调一次、
+    // 组内容调一次，搜索时 czfVisibleItems 的过滤又调一次（每源
+    // 3 遍）；改成一次 map 出 (item, apps)，三处共用。
+    private var czfVisibleItems: [(item: AltStoreSourcesViewModel.SourceItem, apps: [AltStoreSourceApp])] {
+        let computed = items.map { (item: $0, apps: filteredApps($0)) }
+        guard isFiltering else { return computed }
+        return computed.filter { !$0.apps.isEmpty }
     }
 
     var body: some View {
@@ -64,11 +66,13 @@ struct CZFSourceGridView: View {
         // （格子懒加载还在，性能不丢）。组头跟着内容一起滑走，
         // 不钉住。
         VStack(alignment: .leading, spacing: 16) {
-            ForEach(czfVisibleItems, id: \.id) { item in
+            ForEach(czfVisibleItems, id: \.item.id) { entry in
+                let item = entry.item
+                let apps = entry.apps
                 VStack(alignment: .leading, spacing: 8) {
                     CZFSourceGridGroupHeaderView(
                         item: item,
-                        apps: filteredApps(item),
+                        apps: apps,
                         isFiltering: isFiltering,
                         onRefresh: { onRefresh(item) },
                         onInstall: onInstall,
@@ -84,7 +88,7 @@ struct CZFSourceGridView: View {
                     .padding(.vertical, 4)
                     CZFSourceGridGroupContentView(
                         item: item,
-                        apps: filteredApps(item),
+                        apps: apps,
                         isFiltering: isFiltering,
                         columns: czfGridColumns,
                         iconFactor: czfIconFactor,
@@ -148,6 +152,9 @@ struct CZFSourceGridGroupHeaderView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     Text(item.source?.name ?? item.displayName)
                         .font(.system(.title3).bold())
+                        // 低 #64：源名加 lineLimit(1)，超长源名截断、
+                        // 不挤占右侧 Menu（超大字体下也不挤）。
+                        .lineLimit(1)
                 }
             }
             .buttonStyle(.plain)
@@ -165,6 +172,9 @@ struct CZFSourceGridGroupHeaderView: View {
                     Image(systemName: "ellipsis.circle")
                         .imageScale(.large)
                         .foregroundColor(.secondary)
+                        // 低 #63：Menu label 补无障碍标签，VoiceOver
+                        // 能读出“更多操作”。
+                        .accessibilityLabel("更多操作")
                 }
             }
         }
@@ -363,12 +373,27 @@ struct CZFSourceAppGridCell: View {
                 showDetail = true
             }
         }
+        // 低 #54：补双击进详情，与 App 格子“单击启动、双击进设置”
+        // 的手势结构一致。双击与单击同动作（都开详情），不用
+        // exclusively——单点不用等双击超时、立即开详情；双击时
+        // 单点先触发一次、再触发双击，showDetail 置 true 幂等，
+        // sheet 只开一次。批量模式下双击不做事（单点已勾选）。
+        .onTapGesture(count: 2) {
+            if !isBatchMode {
+                showDetail = true
+            }
+        }
+        // 低 #63：格子是 onTapGesture 触发，VoiceOver 能触发但无
+        // 按钮 traits；补 .isButton（名字 Text 由 VoiceOver 读出）。
+        .accessibilityAddTraits(.isButton)
         .overlay(alignment: .topTrailing) {
             if isBatchMode {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
                     .foregroundColor(isSelected ? .accentColor : .secondary)
                     .background(Color(.systemBackground).opacity(0.85), in: Circle())
+                    // 低 #55：勾选圈向外偏移，别压在图标一角。
+                    .offset(x: 6, y: -6)
             }
         }
         .contextMenu {
@@ -431,6 +456,8 @@ struct CZFSourceDetailView: View {
                             Image(systemName: "ellipsis.circle")
                                 .imageScale(.large)
                                 .foregroundColor(.secondary)
+                                // 低 #63：同组头，Menu label 补无障碍标签。
+                                .accessibilityLabel("更多操作")
                         }
                     }
                 }

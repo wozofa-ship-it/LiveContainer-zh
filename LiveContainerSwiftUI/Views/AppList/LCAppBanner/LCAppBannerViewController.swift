@@ -597,6 +597,21 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             self?.openSettings()
         })
 
+        // 3.8.431 设置低 #10：网格菜单有隐藏/锁定，列表菜单没有，
+        // 两边补齐（调的都是 LCAppModel 已有方法，与网格同款）。
+        sectionChildren.append(UIAction(
+            title: appInfo.isHidden ? "恢复显示" : "隐藏",
+            image: UIImage(systemName: appInfo.isHidden ? "eye" : "eye.slash")
+        ) { _ in
+            Task { await model.toggleHidden() }
+        })
+        sectionChildren.append(UIAction(
+            title: appInfo.isLocked ? "解锁" : "锁定",
+            image: UIImage(systemName: appInfo.isLocked ? "lock.open" : "lock")
+        ) { _ in
+            Task { await model.setLocked(newLockState: !appInfo.isLocked) }
+        })
+
         // 单 App VPN（用户定）：长按直接调用，不用进设置页翻。
         // 没开过 → 打标记并立刻打开这个 App（插件在启动签名时
         // 自动部署、核心自动起）；已开 → 摘标记（残留插件下次

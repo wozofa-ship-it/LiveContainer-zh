@@ -41,7 +41,9 @@ struct LCSettingsIcon: View {
     let color: Color
     var body: some View {
         Image(systemName: systemName)
-            .font(.system(size: 15, weight: .semibold))
+            // 第三批低 #62：字号改相对字号（subheadline 约 15pt，
+            // 与原来一致），跟随动态类型；框仍 30×30。
+            .font(.subheadline.weight(.semibold))
             .foregroundColor(.white)
             .frame(width: 30, height: 30)
             .background(color)
@@ -619,16 +621,20 @@ struct LCSettingsView: View {
                 Text(notificationAuthText)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                if notificationAuthStatus != .authorized {
-                    Button(notificationAuthStatus == .denied ? "去设置" : "开启") {
-                        if notificationAuthStatus == .denied {
-                            if let url = URL(string: UIApplication.openSettingsURLString) {
-                                UIApplication.shared.open(url)
-                            }
-                        } else {
-                            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
-                                refreshNotificationAuth()
-                            }
+                // 第三批低 #44：临时授权时再点“开启”无变化（已是
+                // 临时授权，再申请也不会变），改成“去设置”，让
+                // 用户去系统设置改；只有未申请时才显示“开启”。
+                if notificationAuthStatus == .notDetermined {
+                    Button("开启") {
+                        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+                            refreshNotificationAuth()
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                } else if notificationAuthStatus == .denied || notificationAuthStatus == .provisional || notificationAuthStatus == .ephemeral {
+                    Button("去设置") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
                         }
                     }
                     .buttonStyle(.borderless)
@@ -667,7 +673,7 @@ struct LCSettingsView: View {
     }
 
     @ViewBuilder private var keepAliveSection: some View {
-        Section(header: Text("后台保活")) {
+        Section(header: Text("后台保活"), footer: Text("总开关：关掉后所有 App 都不保活。单 App 页可单独设置保活白名单（只有名单里的 App 保活）；改完需重开 App 生效。")) {
             Toggle(isOn: $keepAliveEnabled) {
                 HStack {
                     LCSettingsIcon(systemName: "heart.fill", color: .red)
@@ -691,31 +697,39 @@ struct LCSettingsView: View {
         Section {
             // 3.8.322 液体化繁为简：品牌图统一 30 圆角框，与
             // LCSettingsIcon 同尺寸同圆角，行高不再随图大小抖。
-            HStack {
-                Image("GitHub")
-                    .resizable()
-                    .frame(width: 30, height: 30)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                Button("LiveContainer/LiveContainer") {
-                    openGitHub()
+            // 第三批低 #45：整行包成一个 Button，图标也能点
+            //（之前只有文字是 Button，图标点不到）。
+            Button {
+                openGitHub()
+            } label: {
+                HStack {
+                    Image("GitHub")
+                        .resizable()
+                        .frame(width: 30, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    Text("LiveContainer/LiveContainer")
                 }
             }
-            HStack {
-                Image("Twitter")
-                    .resizable()
-                    .frame(width: 30, height: 30)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                Button("khanhduytran0") {
-                    openTwitter()
+            Button {
+                openTwitter()
+            } label: {
+                HStack {
+                    Image("Twitter")
+                        .resizable()
+                        .frame(width: 30, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    Text("khanhduytran0")
                 }
             }
-            HStack {
-                Image("GitHub")
-                    .resizable()
-                    .frame(width: 30, height: 30)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                Button("Huge_Black") {
-                    openGitHub2()
+            Button {
+                openGitHub2()
+            } label: {
+                HStack {
+                    Image("GitHub")
+                        .resizable()
+                        .frame(width: 30, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    Text("Huge_Black")
                 }
             }
         } header: {
@@ -780,12 +794,25 @@ struct LCSettingsView: View {
             .onTapGesture(count: 5) {
                 sharedModel.developerMode = true
             }
+            // 第三批低 #57：点 5 下进开发者模式没有无障碍入口，
+            // VoiceOver 用户无法触发，补一个 accessibilityAction。
+            .accessibilityAction {
+                sharedModel.developerMode = true
+            }
             .listRowInsets(EdgeInsets())
     }
 
     @ViewBuilder private var developerSection: some View {
         if sharedModel.developerMode {
             Section {
+                // 第三批低 #43：退出开发者模式的开关。开着表示
+                // 正在开发者模式，关掉即退出（本区随之收起）。
+                Toggle(isOn: $sharedModel.developerMode) {
+                    HStack {
+                        LCSettingsIcon(systemName: "wrench.fill", color: .gray)
+                        Text("开发者模式")
+                    }
+                }
                 Toggle(isOn: $injectToLCItelf) {
                     HStack {
                         LCSettingsIcon(systemName: "wrench.and.screwdriver", color: .gray)

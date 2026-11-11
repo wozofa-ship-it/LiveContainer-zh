@@ -205,7 +205,9 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         }
         candidates.append(contentsOf: ["AppIcon60x60", "AppIcon76x76", "AppIcon40x40"])
         outer: for base in candidates {
-            for suffix in ["@3x.png", "@2x.png", ".png"] {
+            // 安装低 #19：先直接试 base 本身（CFBundleIconFiles
+            // 里的名字有的自带后缀），再试拼接后缀。
+            for suffix in ["", "@3x.png", "@2x.png", ".png"] {
                 let path = appDir.appendingPathComponent(base + suffix).path
                 if let img = UIImage(contentsOfFile: path) {
                     icon = img
@@ -213,7 +215,38 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                 }
             }
         }
+        // 安装中 #7：现代 App 图标都在 Assets.car 里，散装 PNG
+        // 找不到时用公开 API 读：UIImage(named:in:) 会查该
+        // Bundle 的 Assets.car，不用自己解析 car 格式；名字取
+        // CFBundleIconName，没有就试 "AppIcon"，取不到再回落占位。
+        if icon == nil, let bundle = Bundle(url: appDir) {
+            var iconSetName = "AppIcon"
+            if let icons = plist["CFBundleIcons"] as? [String: Any],
+               let primary = icons["CFBundlePrimaryIcon"] as? [String: Any],
+               let name = primary["CFBundleIconName"] as? String {
+                iconSetName = name
+            }
+            icon = UIImage(named: iconSetName, in: bundle, compatibleWith: nil)
+        }
+        // 安装低 #19：存入前按显示尺寸缩成缩略图，原图全尺寸
+        // 常驻内存（格子只显示约 85pt）。
+        if let img = icon {
+            icon = Self.czfMakeThumbnail(img)
+        }
         return (name, version, icon)
+    }
+
+    // 安装低 #19：按显示尺寸缩成缩略图——格子只显示约 85pt，
+    // 原图（常上千 px）全尺寸常驻内存。最长边 ≤256px 就够
+    // @3x 的 85pt 格子；已经够小的原样返回。
+    nonisolated private static func czfMakeThumbnail(_ image: UIImage) -> UIImage {
+        let maxDimension: CGFloat = 256
+        let size = image.size
+        guard max(size.width, size.height) > maxDimension else { return image }
+        let scale = maxDimension / max(size.width, size.height)
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: newSize)) }
     }
 }
 
@@ -234,6 +267,18 @@ struct CZFLocalIpaFolderView: View {
     // 松一点，图标大、名字看得清。
     private var czfGridColumns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 16), count: 4)
+    }
+
+    @State private var czfSearchText = ""
+
+    // App #18：搜索过滤——显示名或文件名含关键字即命中。
+    private var czfFilteredItems: [CZFLocalIpaItem] {
+        let q = czfSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return model.items }
+        return model.items.filter {
+            $0.displayName.localizedCaseInsensitiveContains(q)
+            || $0.fileName.localizedCaseInsensitiveContains(q)
+        }
     }
 
     var body: some View {
@@ -263,17 +308,50 @@ struct CZFLocalIpaFolderView: View {
                     // 名字 + 版本，4 列，点格子直接安装。不再
                     // 用 List 行（行里名字版本号挤、图标小，
                     // 看着不像源页）。
-                    ScrollView {
-                        LazyVGrid(columns: czfGridColumns, spacing: 16) {
-                            ForEach(model.items) { item in
-                                CZFLocalIpaGridCell(item: item) {
-                                    onInstall(item.url)
+                    // App #18：文件夹网格加搜索框（刷新按钮 428
+                    // 已有，只补搜索）；按显示名或文件名匹配。
+                    VStack(spacing: 0) {
+                        HStack {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundStyle(.secondary)
+                            TextField("搜索".loc, text: $czfSearchText)
+                                .textInputAutocapitalization(.never)
+                                .disableAutocorrection(true)
+                            if !czfSearchText.isEmpty {
+                                Button { czfSearchText = "" } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                         }
+                        .padding(8)
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
                         .padding(.horizontal)
-                        .padding(.top, 12)
-                        .padding(.bottom, 32)
+                        .padding(.top, 8)
+                        if czfFilteredItems.isEmpty {
+                            VStack(spacing: 12) {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.largeTitle)
+                                    .foregroundStyle(.secondary)
+                                Text("没有匹配的 IPA".loc)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            ScrollView {
+                                LazyVGrid(columns: czfGridColumns, spacing: 16) {
+                                    ForEach(czfFilteredItems) { item in
+                                        CZFLocalIpaGridCell(item: item) {
+                                            onInstall(item.url)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal)
+                                .padding(.top, 12)
+                                .padding(.bottom, 32)
+                            }
+                        }
                     }
                 }
             }
@@ -309,6 +387,13 @@ struct CZFLocalIpaGridCell: View {
     let item: CZFLocalIpaItem
     var onTap: () -> Void
 
+    // App #16：detailLoaded 是“已尝试读详情”标记——读完
+    // 仍没图标也没版本号 = 解包失败，挂一句“无法读取”，
+    // 和“还在读”（占位图标）区分开。
+    private var czfDetailFailed: Bool {
+        item.detailLoaded && item.icon == nil && item.version == nil
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             GeometryReader { geo in
@@ -338,7 +423,7 @@ struct CZFLocalIpaGridCell: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
                 .shadow(color: .white.opacity(0.95), radius: 4, x: 0, y: 0)
-            Text([item.version.map { "版本 \($0)" }, item.sizeText.isEmpty ? nil : item.sizeText].compactMap { $0 }.joined(separator: " · "))
+            Text(czfDetailFailed ? "无法读取".loc : [item.version.map { "版本 \($0)" }, item.sizeText.isEmpty ? nil : item.sizeText].compactMap { $0 }.joined(separator: " · "))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

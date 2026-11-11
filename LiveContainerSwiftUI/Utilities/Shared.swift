@@ -54,7 +54,40 @@ struct LCPath {
 
 class SharedModel: ObservableObject {
     @Published var selectedTab: LCTabIdentifier = .apps
-    @Published var deepLink: URL?
+    // 第三批低 #53：deepLink 原是单值槽，连续两条链接到达时
+    // 第二条直接覆盖第一条，第一条丢失。改成队列：当前槽空
+    // 着就直接写，有链接在等就排队；消费方置 nil 时递补一条
+    // 并切到该链接对应的 Tab（切 Tab 逻辑与 LCTabView
+    // .dispatchURL 一致），逐条消费。消费方（App/源/设置页）
+    // 仍按原来方式读 deepLink、置 nil，不用改。
+    @Published var deepLink: URL? {
+        didSet {
+            if deepLink == nil, !deepLinkQueue.isEmpty {
+                let next = deepLinkQueue.removeFirst()
+                selectedTab = tab(for: next)
+                deepLink = next
+            }
+        }
+    }
+    /// 待消费的 deepLink 队列（deepLink 槽被占时排队等候）。
+    var deepLinkQueue: [URL] = []
+
+    /// 链接对应的 Tab（与 LCTabView.dispatchURL 的切 Tab 逻辑一致）。
+    func tab(for url: URL) -> LCTabIdentifier {
+        if url.isFileURL { return .apps }
+        if url.scheme?.lowercased() == "sidestore" { return .apps }
+        guard let host = url.host?.lowercased() else { return .apps }
+        switch host {
+        case "livecontainer-launch", "install", "open-web-page", "open-url":
+            return .apps
+        case "certificate":
+            return .settings
+        case "source":
+            return multiLCStatus == 2 ? .apps : .sources
+        default:
+            return .apps
+        }
+    }
     
     @Published var isHiddenAppUnlocked = false
     @Published var developerMode = false
