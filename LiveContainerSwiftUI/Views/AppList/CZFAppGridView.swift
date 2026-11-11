@@ -206,11 +206,10 @@ struct CZFAppGridCell: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
         }
-        // 板色（3.8.417）：格子加 AppBannerBG 浅蓝卡片底，与源页
-        // 网格（3.8.416）同款——之前 App 格子没卡片、源页有卡片，
-        // 两页界面不统一（用户 19:05 报）。圆角 16。
-        .background(Color("AppBannerBG"))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        // 去阴影（3.8.418）：417 刚加的 AppBannerBG 卡片底撤掉——
+        // 卡片在白底上看着像一层阴影，用户 19:09 报“源有阴影”。
+        // App 格子回扁平（裸图标 + 名字），与源页格子一样，
+        // 两页都无阴影。417 的去液体（切换行/批量底栏实底）保留。
         .contentShape(Rectangle())
         .onTapGesture {
             if batchMode {
