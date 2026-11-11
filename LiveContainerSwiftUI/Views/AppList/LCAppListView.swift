@@ -616,6 +616,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @AppStorage("CZFAppGridColumns") private var czfGridColumns = 4
     @AppStorage("CZFAppGridIconSize") private var czfGridIconSize = 0
     @State private var czfGridSettingsShow = false
+    // 自定义背景（3.8.413）：版本号与网格设置页共用，选图/清除时 +1；
+    // 图片存 Documents，onAppear/onChange 重读。
+    @AppStorage(CZFAppBackground.versionKey) private var czfBackgroundVersion = 0
+    @State private var czfBackgroundImage: UIImage?
     
     @State private var isViewAppeared = false
     
@@ -1344,46 +1348,70 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     var body: some View {
         NavigationView {
-            ScrollView {
-                if czfGridMode {
-                    czfGridContent
-                } else {
-                    czfListContent
+            ZStack {
+                // 自定义背景（3.8.413）：图片铺满整页 + 轻压暗；
+                // 列表/网格都是 ScrollView（背景透明），图从空隙透出来。
+                if let bg = czfBackgroundImage {
+                    Image(uiImage: bg)
+                        .resizable()
+                        .scaledToFill()
+                        .ignoresSafeArea()
+                        .overlay(Color.black.opacity(0.12))
                 }
+                ScrollView {
+                    if czfGridMode {
+                        czfGridContent
+                    } else {
+                        czfListContent
+                    }
 
-            }
-            // 模式切换行固定在顶部（3.8.410）：原来在 ScrollView
-            // 内容里（网格/列表各一份），往下一滑就被卷走；
-            // 改成 safeAreaInset 钉在滚动区顶部，滑多远都在。
-            .safeAreaInset(edge: .top) {
-                HStack {
-                    Button {
-                        czfGridMode.toggle()
-                    } label: {
-                        Label(czfGridMode ? "恢复原生" : "网格模式", systemImage: czfGridMode ? "arrow.uturn.left" : "square.grid.2x2")
+                }
+                // 模式切换行固定在顶部（3.8.410）：原来在 ScrollView
+                // 内容里（网格/列表各一份），往下一滑就被卷走；
+                // 改成 safeAreaInset 钉在滚动区顶部，滑多远都在。
+                .safeAreaInset(edge: .top) {
+                    HStack {
+                        Button {
+                            czfGridMode.toggle()
+                        } label: {
+                            Label(czfGridMode ? "恢复原生" : "网格模式", systemImage: czfGridMode ? "arrow.uturn.left" : "square.grid.2x2")
+                        }
+                        Spacer()
+                        Button {
+                            czfGridMode = true
+                            czfGridSettingsShow = true
+                        } label: {
+                            Label("网格设置", systemImage: "slider.horizontal.3")
+                        }
                     }
-                    Spacer()
-                    Button {
-                        czfGridMode = true
-                        czfGridSettingsShow = true
-                    } label: {
-                        Label("网格设置", systemImage: "slider.horizontal.3")
+                    .foregroundColor(.blue)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .modifier { content in
+                        // 液态化（3.8.413）：切换行是固定不动的铬，
+                        // iOS 26 走玻璃；非玻璃系统走原来实底。
+                        // 行在滚动列表里，绝不挂玻璃（同底栏）。
+                        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                            content.glassEffect(.regular, in: .rect(cornerRadius: 20))
+                        } else {
+                            content.background(Color(.systemBackground))
+                        }
                     }
                 }
-                .foregroundColor(.blue)
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(Color(.systemBackground))
+                .coordinateSpace(name: "scroll")
             }
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
-            .coordinateSpace(name: "scroll")
             .onAppear {
+                czfBackgroundImage = CZFAppBackground.loadImage()
                 if !didAppear {
                     onAppear()
                 }
                 // 3.8.404：每次回到本页都扫分享收件箱（切回 App
                 // 页时 onAppear 也触发，didAppear 守卫只拦 onAppear()）。
                 czfClaimShareInbox()
+            }
+            .onChange(of: czfBackgroundVersion) { _ in
+                czfBackgroundImage = CZFAppBackground.loadImage()
             }
             .onChange(of: scenePhase) { newPhase in
                 // 3.8.404：从后台切回前台时扫分享收件箱（本页已在

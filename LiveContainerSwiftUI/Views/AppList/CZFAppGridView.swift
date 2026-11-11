@@ -350,11 +350,70 @@ struct CZFAppGridCell: View {
 
 // 网格设置 sheet：列数/图标大小改完立即生效（@AppStorage 双向
 // 绑定）；底部“恢复原来模式”切回列表并 dismiss。
+// MARK: - App 页自定义背景（3.8.413）
+// 图片存 Documents/CZFAppBackground.jpg（等比缩到最长边 1600 再存，
+// 原图几 MB 不直接落盘）；版本号放 @AppStorage，选图/清除时 +1，
+// LCAppListView 监听版本号重读图片。部署目标 iOS 15 没有 PhotosPicker，
+// 用 UIImagePickerController（iOS 15 可用）包一层。
+enum CZFAppBackground {
+    static let versionKey = "CZFAppBackgroundVersion"
+    static let fileName = "CZFAppBackground.jpg"
+    static var fileURL: URL { LCPath.docPath.appendingPathComponent(fileName) }
+    static func loadImage() -> UIImage? {
+        UIImage(contentsOfFile: fileURL.path)
+    }
+    static func save(_ image: UIImage) {
+        let maxSide: CGFloat = 1600
+        let size = image.size
+        let scale = min(1, maxSide / max(size.width, size.height))
+        let target = CGSize(width: size.width * scale, height: size.height * scale)
+        UIGraphicsBeginImageContextWithOptions(target, true, 1)
+        image.draw(in: CGRect(origin: .zero, size: target))
+        let scaled = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        guard let data = (scaled ?? image).jpegData(compressionQuality: 0.85) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+    }
+    static func clear() {
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+    static var hasImage: Bool {
+        FileManager.default.fileExists(atPath: fileURL.path)
+    }
+}
+
+struct CZFAppBackgroundPicker: UIViewControllerRepresentable {
+    var onPick: (UIImage) -> Void
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .photoLibrary
+        picker.delegate = context.coordinator
+        return picker
+    }
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        var onPick: (UIImage) -> Void
+        init(onPick: @escaping (UIImage) -> Void) { self.onPick = onPick }
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage { onPick(image) }
+            picker.dismiss(animated: true)
+        }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            picker.dismiss(animated: true)
+        }
+    }
+}
+
 struct CZFAppGridSettingsView: View {
     @Binding var columns: Int
     @Binding var iconSize: Int
     @Binding var gridMode: Bool
     @Environment(\.dismiss) private var dismiss
+    // 自定义背景：版本号与列表页共用，选图/清除时 +1 触发列表页重读。
+    @AppStorage(CZFAppBackground.versionKey) private var backgroundVersion = 0
+    @State private var showBackgroundPicker = false
+    @State private var backgroundThumb: UIImage?
 
     var body: some View {
         NavigationView {
@@ -375,6 +434,25 @@ struct CZFAppGridSettingsView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+                Section("背景") {
+                    if let thumb = backgroundThumb {
+                        Image(uiImage: thumb)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(height: 120)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    Button("选择背景图片") {
+                        showBackgroundPicker = true
+                    }
+                    if CZFAppBackground.hasImage {
+                        Button("清除背景", role: .destructive) {
+                            CZFAppBackground.clear()
+                            backgroundThumb = nil
+                            backgroundVersion += 1
+                        }
+                    }
+                }
                 Section {
                     Button("恢复原来模式") {
                         gridMode = false
@@ -389,6 +467,16 @@ struct CZFAppGridSettingsView: View {
                     Button("完成") {
                         dismiss()
                     }
+                }
+            }
+            .onAppear {
+                backgroundThumb = CZFAppBackground.loadImage()
+            }
+            .sheet(isPresented: $showBackgroundPicker) {
+                CZFAppBackgroundPicker { image in
+                    CZFAppBackground.save(image)
+                    backgroundThumb = CZFAppBackground.loadImage()
+                    backgroundVersion += 1
                 }
             }
         }

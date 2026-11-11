@@ -535,6 +535,12 @@ struct LCTweaksView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
+                // 3.8.413：标题放这层，三个分段都有——原来只在
+                // LCTweakFolderView 里设，切到 VPN 分段时
+                // CZFVPNSettingsView 没设标题，导航栏空了、
+                // 分段顶到屏顶、Form 满屏敞开（用户 11-11 截图）。
+                // 文件夹页自己的标题（子文件夹名）更深，会盖掉这层，
+                // 根目录与 VPN 都显示“模块”。
                 Picker("", selection: $selectedTab) {
                     Text("本机").tag(TweakTab.local)
                     Text("共享").tag(TweakTab.shared)
@@ -550,6 +556,7 @@ struct LCTweaksView: View {
                         .id(selectedTab)
                 }
             }
+            .navigationTitle("lc.tabView.tweaks".loc)
         }
         .navigationViewStyle(StackNavigationViewStyle())
 
