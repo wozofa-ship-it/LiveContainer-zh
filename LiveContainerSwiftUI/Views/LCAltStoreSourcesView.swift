@@ -676,29 +676,11 @@ struct LCSourcesView: View {
                     .onChange(of: czfBackgroundVersion) { _ in
                         czfBackgroundImage = CZFAppBackground.loadImage()
                     }
-                    // 切换行固定在顶部（3.8.410）：原来放在 ScrollView
-                    // 内容里，往下一滑就被卷走、回顶才再出现；改成
-                    // safeAreaInset 钉在滚动区顶部，滑多远都在。
-                    .safeAreaInset(edge: .top) {
-                        HStack {
-                            Button {
-                                czfSourceGridMode.toggle()
-                            } label: {
-                                Label(czfSourceGridMode ? "恢复原生" : "网格模式", systemImage: czfSourceGridMode ? "arrow.uturn.left" : "square.grid.2x2")
-                            }
-                            Spacer()
-                            Button {
-                                czfSourceGridMode = true
-                                czfSourceGridSettingsShow = true
-                            } label: {
-                                Label("网格设置", systemImage: "slider.horizontal.3")
-                            }
-                        }
-                        .foregroundColor(.blue)
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-                        .background(Color(.systemBackground))
-                    }
+                    // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在
+                    // 顶部的“恢复原生 / 网格设置”行删掉，模式开关收到
+                    // 网格设置 sheet 里（CZFAppGridSettingsView 的显示
+                    // 模式，两页共用），网格设置入口收到顶栏 leading；
+                    // 页面多出一行 App。
                 }
             }
             .navigationTitle("lc.tabView.sources".loc)
@@ -721,6 +703,26 @@ struct LCSourcesView: View {
                         }
                     }
                 }
+                // 顶栏统一（3.8.419，建议第 2 条）：批量按钮从 trailing
+                // 收到 leading，跟刷新并排——两页都变成 leading  pill
+                //（两个图标）+ trailing 圆圈（一个图标），跟 App 页
+                // “+ ?” / “>” 同款式。网格设置入口也放 leading。
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(isBatchMode ? "lc.common.cancel".loc : "lc.sources.batchSelect".loc, systemImage: isBatchMode ? "xmark" : "checkmark.circle") {
+                        isBatchMode.toggle()
+                        if !isBatchMode {
+                            selectedIDs.removeAll()
+                        }
+                    }
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        czfSourceGridMode = true
+                        czfSourceGridSettingsShow = true
+                    } label: {
+                        Label("网格设置", systemImage: "slider.horizontal.3")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack {
                         if isBatchMode {
@@ -728,12 +730,6 @@ struct LCSourcesView: View {
                                 batchInstallSelected()
                             }
                             .disabled(selectedIDs.isEmpty)
-                        }
-                        Button(isBatchMode ? "lc.common.cancel".loc : "lc.sources.batchSelect".loc, systemImage: isBatchMode ? "xmark" : "checkmark.circle") {
-                            isBatchMode.toggle()
-                            if !isBatchMode {
-                                selectedIDs.removeAll()
-                            }
                         }
                         Button("lc.sources.addSource".loc, systemImage: "plus") {
                             isManagingSources = true

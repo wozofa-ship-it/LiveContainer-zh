@@ -202,22 +202,43 @@ struct CZFAppGridCell: View {
             }
             .aspectRatio(1, contentMode: .fit)
             Text(app.displayName)
-                .font(.subheadline)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
+                // 名字（3.8.419）：字号小一号 + 允许两行，治 5 列
+                // 名字截断（用户 20:08 报“源 APP 还是显示不全”、
+                // 20:07 建议第 1 条）；两行定高，格子等高；名字
+                // 加白晕影，深色背景图上也能看清（建议第 5 条）。
+                .font(.footnote)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
+                .shadow(color: .white.opacity(0.85), radius: 3, x: 0, y: 0)
         }
         // 去阴影（3.8.418）：417 刚加的 AppBannerBG 卡片底撤掉——
         // 卡片在白底上看着像一层阴影，用户 19:09 报“源有阴影”。
         // App 格子回扁平（裸图标 + 名字），与源页格子一样，
         // 两页都无阴影。417 的去液体（切换行/批量底栏实底）保留。
         .contentShape(Rectangle())
-        .onTapGesture {
-            if batchMode {
-                actions.onToggleBatchSelection(app)
-            } else {
-                actions.onLaunch(app)
-            }
-        }
+        // 单双击（3.8.419）：跟列表 banner 原来一样——单击启动、
+        // 双击进设置。双击优先（exclusively），双击成功时单击
+        // 不触发；单击会等双击超时（约 0.3 秒）再启动，是双击
+        // 必然的代价。批量模式下双击也只算一次勾选。
+        .gesture(
+            TapGesture(count: 2)
+                .onEnded {
+                    if batchMode {
+                        actions.onToggleBatchSelection(app)
+                    } else {
+                        actions.onOpenSettings(app)
+                    }
+                }
+                .exclusively(before: TapGesture(count: 1)
+                    .onEnded {
+                        if batchMode {
+                            actions.onToggleBatchSelection(app)
+                        } else {
+                            actions.onLaunch(app)
+                        }
+                    })
+        )
         .overlay(alignment: .topTrailing) {
             if batchMode {
                 Image(systemName: actions.isBatchSelected(app) ? "checkmark.circle.fill" : "circle")
@@ -422,6 +443,16 @@ struct CZFAppGridSettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                // 显示模式（3.8.419）：切换行收进设置（建议第 3 条）——
+                // 列表/网格切换不再常驻占一行，改在这里切；改完
+                // 立即生效（gridMode 是 Binding），点“完成”收起。
+                Section("显示模式") {
+                    Picker("显示模式", selection: $gridMode) {
+                        Text("网格模式").tag(true)
+                        Text("列表模式").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                }
                 Section("列数") {
                     Picker("列数", selection: $columns) {
                         ForEach([3, 4, 5, 6], id: \.self) { count in
@@ -457,12 +488,8 @@ struct CZFAppGridSettingsView: View {
                         }
                     }
                 }
-                Section {
-                    Button("恢复原来模式") {
-                        gridMode = false
-                        dismiss()
-                    }
-                }
+                // “恢复原来模式”已并入上面的显示模式 Picker（选列表
+                // 模式即恢复原来），不再单设一行。
             }
             .navigationTitle("网格设置")
             .navigationBarTitleDisplayMode(.inline)

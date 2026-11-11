@@ -109,10 +109,12 @@ struct CZFSourceGridGroupHeaderView: View {
             } label: {
                 HStack(spacing: 10) {
                     SourceIconView(url: item.primaryIconURL)
-                        .frame(width: 36, height: 36)
+                        // 组头瘦身（3.8.419，建议第 4 条）：图标 36→28、
+                        // 标题 title2→title3（小一号），组头少占地方。
+                        .frame(width: 28, height: 28)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     Text(item.source?.name ?? item.displayName)
-                        .font(.system(.title2).bold())
+                        .font(.system(.title3).bold())
                 }
             }
             .buttonStyle(.plain)
@@ -158,15 +160,9 @@ struct CZFSourceGridGroupView: View {
         VStack(alignment: .leading, spacing: 12) {
             czfGroupHeader
 
-            if let subtitle = item.source?.subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else if item.source == nil, let host = item.url.host {
-                Text(host)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+            // 组头瘦身（3.8.419，建议第 4 条）：副标题/host 行删掉，
+            // 收到详情页里（CZFSourceDetailView 本来就显示 subtitle），
+            // 组头只剩标题一行，少占地方。
 
             if let error = item.error {
                 CZFSourceGridErrorView(error: error, onRefresh: onRefresh)
@@ -273,9 +269,16 @@ struct CZFSourceAppGridCell: View {
             }
             .aspectRatio(1, contentMode: .fit)
             Text(app.name)
-                .font(.subheadline)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
+                // 名字（3.8.419）：字号小一号 + 允许两行，治 5 列
+                // 名字截断（用户 20:08 报“源 APP 还是显示不全”、
+                // 20:07 建议第 1 条）；两行定高，格子等高；名字
+                // 加白晕影，深色背景图上也能看清（建议第 5 条）。
+                // 与 App 格子同款。
+                .font(.footnote)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
+                .shadow(color: .white.opacity(0.85), radius: 3, x: 0, y: 0)
         }
         // 去阴影（3.8.418）：格子上的 AppBannerBG 卡片底撤掉——
         // 416 加的卡片在白底上看着像一层阴影，用户 19:09 报

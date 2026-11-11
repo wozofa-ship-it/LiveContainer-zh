@@ -596,6 +596,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             }
         }
+
+        // 网格设置入口（3.8.419）：切换行收进设置后，网格设置
+        // 从顶栏“>”展开的工具组里进——点“>”展开就能看到。
+        // 点开即切到网格模式（跟原来切换行的“网格设置”按钮同款），
+        // 模式再到 sheet 里的显示模式 Picker 里切。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded {
+                Button {
+                    czfGridMode = true
+                    czfGridSettingsShow = true
+                } label: {
+                    Label("网格设置", systemImage: "slider.horizontal.3")
+                }
+            }
+        }
     }
 
 
@@ -1135,22 +1150,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
     }
 
-    // 网格模式计数行文案：与列表计数行同一条表达式、同一文案。
-    private var czfGridCounterText: String {
-        let appCount = sharedModel.isHiddenAppUnlocked ? filteredApps.count + filteredHiddenApps.count : filteredApps.count
-        if appCount > 0 || searchContext.debouncedQuery != "" {
-            return "lc.appList.appCounter %lld".localizeWithFormat(appCount)
-        }
-        return sharedModel.multiLCStatus == 2 ? "lc.appList.convertToSharedToShowInLC2".loc : "lc.appList.installTip".loc
-    }
+    // 网格模式计数行文案已删（3.8.419，建议第 6 条）：“共 n 个 App”
+    // 没信息量，计数行连同这条文案一起去掉。
 
-    // 网格模式内容（自上而下）：搜索快捷行 / LazyVGrid（CZFAppGridView）/
-    // 底部居中计数行。切换行已固定在顶部（3.8.410，见 body 的
-    // safeAreaInset），不在这里。搜索栏沿用系统 .searchable，不另画
-    // 才有意义）；滚动位置与列表不共享。
+    // 网格模式内容（自上而下）：搜索快捷行 / LazyVGrid（CZFAppGridView）。
+    // 切换行已收进设置（3.8.419），不在这里。搜索栏沿用系统 .searchable，
+    // 不另画才有意义；滚动位置与列表不共享。
     @ViewBuilder
     private var czfGridContent: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // 编程式导航（3.8.419）：这条隐藏 NavigationLink 原来只在
+            // 列表内容里，网格模式下不存在，点长按菜单/双击“设置”
+            // 只改 isNavigationActive、没人响应，什么都不发生
+            // （用户 20:11 报“网格点设置不管用”）。网格内容里也放
+            // 一条，列表/网格都能进设置。
+            NavigationLink(
+                destination: navigateTo,
+                isActive: $isNavigationActive,
+                label: { EmptyView() })
+            .hidden()
+
             czfSearchShortcutRows
             CZFAppGridView(
                 apps: filteredApps,
@@ -1175,10 +1194,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 promptForGeneratedIconStyle: { await self.promptForGeneratedIconStyle() },
                 installMdm: { data in self.installMdm(data: data) }
             )
-            Text(czfGridCounterText)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .foregroundStyle(.secondary)
-                .animation(searchContext.isTyping ? nil : .easeInOut, value: czfGridCounterText)
+            // 计数行已删（3.8.419，建议第 6 条）：“共 n 个 App”没信息量。
             if sharedModel.multiLCStatus == 2 {
                 Text("lc.appList.manageInPrimaryTip".loc)
                     .foregroundStyle(.secondary)
@@ -1371,33 +1387,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         .overlay(Color.black.opacity(0.12))
                 }
             }
-            // 模式切换行固定在顶部（3.8.410）：原来在 ScrollView
-            // 内容里（网格/列表各一份），往下一滑就被卷走；
-            // 改成 safeAreaInset 钉在滚动区顶部，滑多远都在。
-            .safeAreaInset(edge: .top) {
-                HStack {
-                    Button {
-                        czfGridMode.toggle()
-                    } label: {
-                        Label(czfGridMode ? "恢复原生" : "网格模式", systemImage: czfGridMode ? "arrow.uturn.left" : "square.grid.2x2")
-                    }
-                    Spacer()
-                    Button {
-                        czfGridMode = true
-                        czfGridSettingsShow = true
-                    } label: {
-                        Label("网格设置", systemImage: "slider.horizontal.3")
-                    }
-                }
-                .foregroundColor(.blue)
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                // 去液体（3.8.417）：切换行不再走玻璃——用户 19:06
-                // “APP界面按钮别做成液体了”。改回实底，与源页切换行
-                // 同款（源页一直是 Color(.systemBackground) 实底），
-                // 两页按钮样式统一。
-                .background(Color(.systemBackground))
-            }
+            // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在顶部的
+            // “恢复原生 / 网格设置”行删掉，模式开关收到网格设置
+            // sheet 里（CZFAppGridSettingsView 的显示模式），网格设置
+            // 入口收到顶栏“>”展开的工具组里；页面多出一行 App。
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
             .coordinateSpace(name: "scroll")
             .onAppear {
