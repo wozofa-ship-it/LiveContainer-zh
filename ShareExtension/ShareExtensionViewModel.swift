@@ -23,14 +23,17 @@ final class ShareExtensionViewModel: ObservableObject {
     var privateDocAccessing = false
     var appGroupRootURL: URL?
     weak var currentContext: NSExtensionContext?
-    // 3.8.367：响应链打开的起点，由 ShareExtensionHandler 设为
-    // 它自己（UIViewController）。链往上走 view → window →
-    // UIApplication，拿到真 UIApplication 才能调 open。
+    // 3.8.404：Share 不再打开主 App（响应链 / context.open /
+    // LSApplicationWorkspace 三路全灭），改走 App Group 收件箱。
+    // launchResponder / responderChainOnly 只留给 ActionExtensionHandler
+    // 设——Action 与 Share 共用本文件（Action 的 Sources 显式编了
+    // 本文件），删了属性会断 Action 编译；Share 侧不再使用。
     weak var launchResponder: UIResponder?
-    // 3.8.381：Action 扩展只走响应链（Apollo PR #307 实证）。
-    // Share 上 context.open 已证实走不通，Action 侧直接跳过
-    // 第二路；Share 保持默认 false，行为一字不动。
     var responderChainOnly = false
+    // 3.8.404：收件箱提示。写进收件箱成功后置文案，面板顶部横幅显示，
+    // 2 秒后自动 completeRequest 关面板。
+    @Published var inboxNotice: String?
+    private var inboxCompletionSent = false
     // 3.8.376 分路日志：本次打开尝试的诊断行（每路一到两行）。
     // 失败时拼进 errorMessage 让用户截图；同时写 NSLog 和
     // App Group 里的 CZFShareExtensionLog.txt（带时间戳）。
@@ -433,7 +436,7 @@ final class ShareExtensionViewModel: ObservableObject {
     }
 
     func launch(app: ShareApp, container: ShareContainer, context: NSExtensionContext?) async {
-        if isLaunching {
+        if isLaunching || inboxNotice != nil {
             return
         }
         isLaunching = true
@@ -447,129 +450,18 @@ final class ShareExtensionViewModel: ObservableObject {
             }
 
             if app.isBuiltInSideStore {
-                try await launchBuiltInSideStore(context: context)
+                try enqueueBuiltInSideStore(context: context)
                 return
             }
 
-            let item = ShareLaunchItem(app: app, container: container)
-            let launchURLString = try preparePayloadForLaunch()
-            guard let launchURL = buildLaunchURL(for: item, launchURLString: launchURLString) else {
-                throw ShareExtensionError("Unable to build launch URL.")
-            }
-
-            // 3.8.363：iOS 26 下 LSApplicationWorkspace 从扩展里调
-            // 会被拦，旧代码还永远返回 true、失败也静默关面板。
-            // 先走系统 sanctioned 的 NSExtensionContext.openURL，
-            // 失败再回落旧 Launcher；两路都失败就留面板报错。
-            let ctx = context ?? currentContext
-            if await openLaunchURL(launchURL, context: ctx) {
-                ctx?.completeRequest(returningItems: nil, completionHandler: nil)
-            } else {
-                // 3.8.376：失败时把分路诊断拼进报错，用户截图就能定位。
-                errorMessage = "lc.shareExtension.error.openFailed".loc + "\n" + shareDiagLines.joined(separator: "\n")
-            }
+            // 3.8.404：不再尝试打开主 App，只把启动请求写进 App Group
+            // 收件箱，面板提示后关面板；主 App 前台认领后启动客 App。
+            let entry = try inboxEntryForLaunch(app: app, container: container)
+            try writeInboxEntry(entry)
+            finishWithInboxNotice("已收进 LiveContainer，打开 App 启动", context: context)
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    /// 打开 LiveContainer（3.8.367）：按序试，返回是否真正打开。
-    /// 第一路响应链：Apollo-Reborn PR #307 实证，走响应链拿到的
-    /// UIApplication.openURL:options:completionHandler: 在 iOS 26.5
-    /// 真机上能打开。链从 launchResponder（宿主视图控制器）往上走
-    /// view → window → UIApplication，5 秒超时。
-    /// 第二路 context.open（Share 扩展不在 Apple 的支持列表里，
-    /// 只列 Today/iMessage；Action 扩展直接跳过这路）。
-    /// 第三路旧 Launcher（LSApplicationWorkspace）377 已删：iOS 26
-    /// 下它谎报成功。都失败返回 false，调用方留面板报错。
-    private func openLaunchURL(_ url: URL, context: NSExtensionContext?) async -> Bool {
-        // 3.8.376：每路的真假都记下来，失败时 errorMessage 带诊断。
-        shareDiagLines = []
-        let r1 = await openViaResponderChain(url)
-        czfShareLog("resp=\(r1)")
-        if r1 { return true }
-        // 3.8.381：Action 扩展只走响应链，第二路直接跳过。
-        if responderChainOnly {
-            czfShareLog("ctx=skipped(action)")
-            czfShareLog("ws=skipped")
-            return false
-        }
-        if let context {
-            // 3.8.366：第二路加 3 秒超时竞速。context.open 的回调
-            // 在 Share 扩展上可能永远不回（系统不支持的扩展点），
-            // 原先 withCheckedContinuation 会无限挂起、面板卡死；
-            // 3 秒未回调按 false 走回落（第三路已有 5 秒信号量超时）。
-            // 回调与超时谁先到谁 resume，锁保证只 resume 一次
-            //（重复 resume 会 trap）。
-            let opened: Bool = await withCheckedContinuation { cont in
-                // 3.8.363 修正：Swift 里叫 open，不是 openURL
-                //（openURL 是 ObjC 名，Swift 下没这个成员，363
-                // 构建就是挂在这里）。Share 扩展不在 Apple 的
-                // open 支持列表里（只列 Today/iMessage），可能
-                // 直接返回 false，失败就走下面的回落。
-                let lock = NSLock()
-                var done = false
-                func resumeOnce(_ value: Bool) {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    guard !done else { return }
-                    done = true
-                    cont.resume(returning: value)
-                }
-                context.open(url) { success in resumeOnce(success) }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { resumeOnce(false) }
-            }
-            czfShareLog("ctx=\(opened)")
-            if opened { return true }
-        } else {
-            czfShareLog("ctx=nil")
-        }
-        // 3.8.377：删第三路 LSApplicationWorkspace——iOS 26 下它和
-        // 旧 openURL: 一样谎报成功（拦了仍返 YES），面板关了 App
-        // 却没拉起来（用户 22:31 视频：点闲鱼只震一下）。前两路
-        // 失败就老实报 false、留面板显示分路诊断，不再让第三路
-        // 假成功把面板关掉。真能打开只靠前两路（Apollo 实证
-        // 响应链在 iOS 26.5 能开）。
-        czfShareLog("ws=skipped")
-        return false
-    }
-
-    /// 响应链打开：从 launchResponder 往上走 nextResponder，碰到
-    /// UIApplication 就调它的 open（带 5 秒超时竞速）。链断了或
-    /// open 回 false 就返回 false，让调用方走下一路。
-    private func openViaResponderChain(_ url: URL) async -> Bool {
-        var current: UIResponder? = launchResponder
-        // 3.8.376：记 launchResponder 是否 nil、链上每个类名、
-        // UIApplication 找到没有、app.open 回什么。
-        if current == nil {
-            czfShareLog("chain: launchResponder=nil")
-            return false
-        }
-        var chain: [String] = []
-        while let responder = current {
-            chain.append(String(describing: type(of: responder)))
-            if let app = responder as? UIApplication {
-                czfShareLog("chain: \(chain.joined(separator: "->"))")
-                let opened: Bool = await withCheckedContinuation { cont in
-                    let lock = NSLock()
-                    var done = false
-                    func resumeOnce(_ value: Bool) {
-                        lock.lock()
-                        defer { lock.unlock() }
-                        guard !done else { return }
-                        done = true
-                        cont.resume(returning: value)
-                    }
-                    app.open(url, options: [:]) { success in resumeOnce(success) }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { resumeOnce(false) }
-                }
-                czfShareLog("app.open=\(opened)")
-                return opened
-            }
-            current = responder.next
-        }
-        czfShareLog("chain: \(chain.joined(separator: "->")) no UIApplication")
-        return false
     }
 
     func shouldShowInstallAction() -> Bool {
@@ -581,7 +473,7 @@ final class ShareExtensionViewModel: ObservableObject {
     }
 
     func installSharedFileInLiveContainer(context: NSExtensionContext?) async {
-        if isLaunching {
+        if isLaunching || inboxNotice != nil {
             return
         }
         guard case .file(let fileURL) = payload.kind else {
@@ -591,38 +483,34 @@ final class ShareExtensionViewModel: ObservableObject {
         defer { isLaunching = false }
 
         do {
-            try storeBookmark(for: fileURL)
-            guard var components = URLComponents(string: "livecontainer://install") else {
-                throw ShareExtensionError("Unable to build install URL.")
-            }
-            components.queryItems = [
-                URLQueryItem(name: "url", value: fileURL.absoluteString)
-            ]
-            guard let installURL = components.url else {
-                throw ShareExtensionError("Unable to build install URL.")
-            }
-
-            let ctx = context ?? currentContext
-            if await openLaunchURL(installURL, context: ctx) {
-                ctx?.completeRequest(returningItems: nil, completionHandler: nil)
-            } else {
-                // 3.8.376：失败时把分路诊断拼进报错，用户截图就能定位。
-                errorMessage = "lc.shareExtension.error.openFailed".loc + "\n" + shareDiagLines.joined(separator: "\n")
-            }
+            // 3.8.404：只把文件 bookmark 写进 App Group 收件箱，
+            // 不再拼 livecontainer://install 链接、不再尝试打开主 App。
+            let bookmark = try storeBookmark(for: fileURL)
+            let entry = CZFShareInboxEntry(
+                kind: .file,
+                date: Self.czfInboxDateString(),
+                fileName: fileURL.lastPathComponent,
+                fileExtension: fileURL.pathExtension.lowercased(),
+                fileURLString: fileURL.absoluteString,
+                bookmarkBase64: bookmark.base64EncodedString()
+            )
+            try writeInboxEntry(entry)
+            finishWithInboxNotice("已收进 LiveContainer，打开 App 安装", context: context)
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    private func preparePayloadForLaunch() throws -> String? {
+    /// 收件箱载荷（3.8.404）：URL 分享只取链接字符串写进收件箱；
+    /// 文件分享沿用 storeBookmark 取 security-scoped bookmark。
+    private func payloadPartsForInbox() throws -> (launchURLString: String?, bookmark: Data?, fileURL: URL?) {
         switch payload.kind {
         case .url(let url):
-            return url.absoluteString
+            return (url.absoluteString, nil, nil)
         case .file(let fileURL):
-            try storeBookmark(for: fileURL)
-            return fileURL.absoluteString
+            return (fileURL.absoluteString, try storeBookmark(for: fileURL), fileURL)
         case .empty:
-            return nil
+            return (nil, nil, nil)
         case .loading:
             throw ShareExtensionError("The shared item is still loading.")
         case .failed(let message):
@@ -630,40 +518,86 @@ final class ShareExtensionViewModel: ObservableObject {
         }
     }
 
-    private func launchBuiltInSideStore(context: NSExtensionContext?) async throws {
-        let launchURLString = try preparePayloadForLaunch()
+    private func inboxEntryForLaunch(app: ShareApp, container: ShareContainer) throws -> CZFShareInboxEntry {
+        let parts = try payloadPartsForInbox()
+        return CZFShareInboxEntry(
+            kind: .launch,
+            date: Self.czfInboxDateString(),
+            fileName: parts.fileURL?.lastPathComponent,
+            fileExtension: parts.fileURL?.pathExtension.lowercased(),
+            fileURLString: parts.fileURL?.absoluteString,
+            bookmarkBase64: parts.bookmark?.base64EncodedString(),
+            bundleName: app.relativeBundlePath,
+            containerFolderName: container.folderName,
+            launchURL: parts.launchURLString
+        )
+    }
 
-        sharedDefaults?.set("livecontainer", forKey: "LCLaunchExtensionScheme")
-        sharedDefaults?.set("builtinSideStore", forKey: "LCLaunchExtensionBundleID")
-        if let launchURLString {
-            sharedDefaults?.set(launchURLString, forKey: "LCLaunchExtensionLaunchURL")
-        }
-        sharedDefaults?.set(Date(), forKey: "LCLaunchExtensionLaunchDate")
+    /// 内置 SideStore 收件箱（3.8.404）：只写收件箱，不再写
+    /// LCLaunchExtension* 键、不再拼 livecontainer://livecontainer-launch
+    /// 链接、不再尝试打开主 App。
+    private func enqueueBuiltInSideStore(context: NSExtensionContext?) throws {
+        let parts = try payloadPartsForInbox()
+        let entry = CZFShareInboxEntry(
+            kind: .sidestore,
+            date: Self.czfInboxDateString(),
+            fileName: parts.fileURL?.lastPathComponent,
+            fileExtension: parts.fileURL?.pathExtension.lowercased(),
+            fileURLString: parts.fileURL?.absoluteString,
+            bookmarkBase64: parts.bookmark?.base64EncodedString(),
+            launchURL: parts.launchURLString
+        )
+        try writeInboxEntry(entry)
+        finishWithInboxNotice("已收进 LiveContainer，打开 App 安装", context: context)
+    }
 
-        guard var components = URLComponents(string: "livecontainer://livecontainer-launch") else {
-            throw ShareExtensionError("Unable to build SideStore launch URL.")
+    /// 写收件箱（3.8.404）：一文件一条，`<AppGroup>/LiveContainer/ShareInbox/<UUID>.json`，
+    /// 主 App 前台认领后删除。沿用 LCSharedUtils.appGroupPath()，
+    /// 与 czfShareLog 的 CZFShareExtensionLog.txt 同一个 group。
+    private func writeInboxEntry(_ entry: CZFShareInboxEntry) throws {
+        guard let inboxURL = inboxDirectoryURL else {
+            throw ShareExtensionError("Unable to locate App Group.")
         }
-        var queryItems = [
-            URLQueryItem(name: "bundle-name", value: "builtinSideStore")
-        ]
-        if let launchURLString {
-            queryItems.append(URLQueryItem(name: "open-url", value: Data(launchURLString.utf8).base64EncodedString()))
-        }
-        components.queryItems = queryItems
-        guard let launchURL = components.url else {
-            throw ShareExtensionError("Unable to build SideStore launch URL.")
-        }
+        try FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: true)
+        let fileURL = inboxURL.appendingPathComponent(UUID().uuidString + ".json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(entry)
+        try data.write(to: fileURL, options: .atomic)
+        czfShareLog("inbox: wrote \(entry.kind.rawValue) -> \(fileURL.lastPathComponent)")
+    }
 
+    private var inboxDirectoryURL: URL? {
+        appGroupRootURL?.appendingPathComponent("ShareInbox", isDirectory: true)
+    }
+
+    private static func czfInboxDateString() -> String {
+        ISO8601DateFormatter().string(from: Date())
+    }
+
+    /// 面板提示后关面板（3.8.404）：先置 inboxNotice 让面板顶部横幅
+    /// 显示文案，2 秒后 completeRequest。inboxCompletionSent 防重复关。
+    private func finishWithInboxNotice(_ notice: String, context: NSExtensionContext?) {
+        inboxNotice = notice
+        czfShareLog("inbox notice: \(notice)")
         let ctx = context ?? currentContext
-        if await openLaunchURL(launchURL, context: ctx) {
-            ctx?.completeRequest(returningItems: nil, completionHandler: nil)
-        } else {
-            // 3.8.376：失败时把分路诊断拼进报错，用户截图就能定位。
-            errorMessage = "lc.shareExtension.error.openFailed".loc + "\n" + shareDiagLines.joined(separator: "\n")
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            self.completeInboxRequest(context: ctx)
         }
     }
 
-    private func storeBookmark(for fileURL: URL) throws {
+    private func completeInboxRequest(context: NSExtensionContext?) {
+        guard !inboxCompletionSent else { return }
+        inboxCompletionSent = true
+        (context ?? currentContext)?.completeRequest(returningItems: nil, completionHandler: nil)
+    }
+
+    /// 沿用旧 storeBookmark：取 security-scoped bookmark（1 << 11，
+    /// SecurityScopeAllowOnlyReadAccess）。3.8.404 起不再写
+    /// LCLaunchExtensionFileBookmark 键，bookmark 只进收件箱文件；
+    /// 主 App 用旧解析法（1 << 10，见 LCAppListView installFromUrl）认领。
+    private func storeBookmark(for fileURL: URL) throws -> Data {
         let accessed = fileURL.startAccessingSecurityScopedResource()
         defer {
             if accessed {
@@ -671,66 +605,11 @@ final class ShareExtensionViewModel: ObservableObject {
             }
         }
 
-        let bookmark = try fileURL.bookmarkData(
+        return try fileURL.bookmarkData(
             options: URL.BookmarkCreationOptions(rawValue: 1 << 11),
             includingResourceValuesForKeys: nil,
             relativeTo: nil
         )
-        sharedDefaults?.set(bookmark, forKey: "LCLaunchExtensionFileBookmark")
-    }
-
-    private func buildLaunchURL(for item: ShareLaunchItem, launchURLString: String?) -> URL? {
-        var schemeToLaunch = "livecontainer"
-        var newLaunch = false
-
-        if var runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: item.container.folderName) {
-            if runningLC.hasSuffix("liveprocess") {
-                runningLC = (runningLC as NSString).deletingPathExtension
-            }
-            schemeToLaunch = runningLC
-        } else {
-            newLaunch = true
-            schemeToLaunch = item.app.isShared ? (firstFreeInstalledLC() ?? "livecontainer") : "livecontainer"
-        }
-
-        if newLaunch && !item.app.isHidden && !item.app.isLocked && !item.app.isJITNeeded {
-            sharedDefaults?.set(schemeToLaunch, forKey: "LCLaunchExtensionScheme")
-            sharedDefaults?.set(item.app.relativeBundlePath, forKey: "LCLaunchExtensionBundleID")
-            sharedDefaults?.set(item.container.folderName, forKey: "LCLaunchExtensionContainerName")
-            if let launchURLString {
-                sharedDefaults?.set(launchURLString, forKey: "LCLaunchExtensionLaunchURL")
-            }
-            sharedDefaults?.set(Date(), forKey: "LCLaunchExtensionLaunchDate")
-        }
-
-        var components = URLComponents()
-        components.scheme = schemeToLaunch
-        components.host = "livecontainer-launch"
-        var queryItems = [
-            URLQueryItem(name: "bundle-name", value: item.app.relativeBundlePath),
-            URLQueryItem(name: "container-folder-name", value: item.container.folderName)
-        ]
-        if let launchURLString {
-            queryItems.append(URLQueryItem(name: "open-url", value: Data(launchURLString.utf8).base64EncodedString()))
-        }
-        components.queryItems = queryItems
-        return components.url
-    }
-
-    private func firstFreeInstalledLC() -> String? {
-        for scheme in LCSharedUtils.lcUrlSchemes() {
-            guard
-                let url = URL(string: "\(scheme)://"),
-                LCShareExtensionLauncher.canOpenURL(fromShareExtension: url)
-            else {
-                continue
-            }
-            if LCSharedUtils.isLCScheme(inUse: scheme) {
-                continue
-            }
-            return scheme
-        }
-        return nil
     }
     
     static func resolvePrivateDocURL(sharedDefaults: UserDefaults?) -> URL? {

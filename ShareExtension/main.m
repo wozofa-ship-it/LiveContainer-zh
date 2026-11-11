@@ -10,8 +10,9 @@
 // 3.8.381：删 LSApplicationWorkspace 打开路。openURLFromShareExtension /
 // openURLFromShareExtensionWithOptions（连同 hook 里的唯一调用方
 // EXExtensionContextImplementationHook.m）已随 hook 文件一起删；
-// iOS 26 下那路被拦仍返 YES、谎报成功。只留 canOpenURL 查询
-//（ViewModel 的 firstFreeInstalledLC 还在用它找空闲 LC）。
+// iOS 26 下那路被拦仍返 YES、谎报成功。只留 canOpenURL 查询。
+// 3.8.404：收件箱改造删了 firstFreeInstalledLC，Swift 侧已无人调
+// canOpenURL；方法先留着（删 ObjC 符号另议），别再当它在用。
 // UIKitPrivate.h 只给那路声明类型，一并去掉。
 
 // 3.8.385：补 LSApplicationWorkspace 最小声明。381 删 UIKitPrivate import

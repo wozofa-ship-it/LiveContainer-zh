@@ -96,7 +96,7 @@ class SceneDelegate: NSObject, UIWindowSceneDelegate, ObservableObject { // Make
     // 3.8.346：window 只在 willConnectTo 取一次 keyWindow、永不
     // 刷新——连接时 keyWindow 可为 nil（下方
     // hook_requestSceneSessionActivation 里注释自己承认），
-    // 之后 presentScopeAlert 锚它就静默退全局查找、框可能弹错
+    // 之后弹框锚它就静默退全局查找、框可能弹错
     // 窗。场景激活时刷新：sceneDidBecomeActive 时本场景已是
     // 前台、keyWindow 已落定；nil 时退回 scene.windows 里的
     // keyWindow/首个可见窗。SwiftUI 自动把 SceneDelegate 作

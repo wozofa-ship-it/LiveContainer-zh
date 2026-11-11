@@ -91,3 +91,30 @@ struct ShareExtensionError: LocalizedError {
         message
     }
 }
+
+// MARK: - App Group 收件箱（3.8.404）
+
+/// 收件箱条目种类：一文件一条分享，文件名 `<UUID>.json`，
+/// 扩展只写、主 App 前台认领后删除。URL 分享不另设 kind，
+/// 链接字符串进 launch 条目的 launchURL（见 payloadPartsForInbox）。
+enum CZFShareInboxKind: String, Codable {
+    case file // 安装 IPA/tIPA：bookmarkBase64 + fileURLString
+    case launch // 在客 App 里打开：bundleName + containerFolderName + launchURL
+    case sidestore // 经内置 SideStore 打开：launchURL（文件时附 bookmarkBase64）
+}
+
+/// 收件箱条目。路径：`<AppGroup>/LiveContainer/ShareInbox/<UUID>.json`
+///（AppGroup 由 LCSharedUtils.appGroupPath() 定，与主 App 的
+/// LCPath.lcGroupDocPath 同一目录）。date 为 ISO8601 字符串。
+struct CZFShareInboxEntry: Codable {
+    var version: Int = 1
+    var kind: CZFShareInboxKind
+    var date: String
+    var fileName: String?
+    var fileExtension: String?
+    var fileURLString: String?
+    var bookmarkBase64: String?
+    var bundleName: String?
+    var containerFolderName: String?
+    var launchURL: String?
+}

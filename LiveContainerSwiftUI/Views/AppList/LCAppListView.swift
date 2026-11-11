@@ -604,6 +604,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     @EnvironmentObject private var sharedModel : SharedModel
     @EnvironmentObject private var sharedAppSortManager : LCAppSortManager
+    // 3.8.404：分享收件箱认领——从后台切回前台时也要扫一遍
+    //（App 已在前台时分享的场景，onAppear 不再触发）。
+    @Environment(\.scenePhase) private var scenePhase
     
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
@@ -1118,6 +1121,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .onAppear {
                 if !didAppear {
                     onAppear()
+                }
+                // 3.8.404：每次回到本页都扫分享收件箱（切回 App
+                // 页时 onAppear 也触发，didAppear 守卫只拦 onAppear()）。
+                czfClaimShareInbox()
+            }
+            .onChange(of: scenePhase) { newPhase in
+                // 3.8.404：从后台切回前台时扫分享收件箱（本页已在
+                // 前台时分享的场景，onAppear 不触发）。
+                if newPhase == .active {
+                    czfClaimShareInbox()
                 }
             }
             
@@ -2257,6 +2270,112 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f)
             case .plist(let s):
                 await installFromPlist(urlStr: s)
+            }
+        }
+    }
+
+    // MARK: - 分享收件箱认领（3.8.404）
+    // 收件箱条目种类（与 ShareExtension 的 ShareModels.swift
+    // 同款结构，字段名/类型必须一致，JSON 解码靠它；ShareModels
+    // 只在扩展靶编译，主 App 侧需自带一份）。
+    private enum CZFShareInboxKind: String, Codable {
+        case file // 安装 IPA/tIPA：bookmarkBase64 + fileURLString
+        case launch // 在客 App 里打开：bundleName + containerFolderName + launchURL
+        case sidestore // 经内置 SideStore 打开：launchURL（文件时附 bookmarkBase64）
+    }
+    /// 收件箱条目。路径：`<AppGroup>/LiveContainer/ShareInbox/<UUID>.json`，
+    /// 扩展只写、主 App 前台认领后删除。date 为 ISO8601 字符串。
+    private struct CZFShareInboxEntry: Codable {
+        var version: Int = 1
+        var kind: CZFShareInboxKind
+        var date: String
+        var fileName: String?
+        var fileExtension: String?
+        var fileURLString: String?
+        var bookmarkBase64: String?
+        var bundleName: String?
+        var containerFolderName: String?
+        var launchURL: String?
+    }
+    // 3.8.404：正在认领的收件箱文件（JSON 文件名集合）——冷打开时
+    // onAppear 与 scenePhase .active 会连着触发两次扫，同一文件
+    // 不能起两个安装任务（第二个会排进 pendingInstalls、装完又
+    // 重装一遍）。认领中的文件跳过，任务结束（无论成败）再清掉，
+    // 失败的文件留在收件箱里、下次前台重试。
+    private static var czfClaimedInboxFiles = Set<String>()
+
+    // 3.8.404：分享收件箱认领（主 App 侧）。ShareExtension 只写
+    // 收件箱、不再拉起主 App；主 App 每次进前台（onAppear +
+    // scenePhase .active）扫一遍 ShareInbox/*.json，按 date 从早
+    // 到晚逐条处理：file 走 installFromUrl（先把扩展写的 bookmark
+    // 写回 LCLaunchExtensionFileBookmark 键，installFromUrl 认这
+    // 个键解析安全域外文件）；launch 按 bundleName 找已装客 App
+    // 走 launchAppWithBundleId；sidestore 走内置 SideStore。
+    // 成功删 JSON，失败留着下次重试；解不出的坏文件直接删，防
+    // 每次前台都卡在它上面。注意：冷启动 3 秒认领窗口
+    // （LCBootstrap.m）只认 LCLaunchExtension* 键，收件箱是
+    // deferred 打开，不走那个窗口。
+    private func czfClaimShareInbox() {
+        let inboxDir = LCPath.lcGroupDocPath.appendingPathComponent("ShareInbox")
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: inboxDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
+        var entries: [(url: URL, entry: CZFShareInboxEntry)] = []
+        for url in files where url.pathExtension.lowercased() == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let entry = try? JSONDecoder().decode(CZFShareInboxEntry.self, from: data) else {
+                try? fm.removeItem(at: url)
+                continue
+            }
+            entries.append((url, entry))
+        }
+        entries.sort { $0.entry.date < $1.entry.date }
+        for (url, entry) in entries {
+            let fileKey = url.lastPathComponent
+            guard !Self.czfClaimedInboxFiles.contains(fileKey) else { continue }
+            switch entry.kind {
+            case .file:
+                guard let fileURLString = entry.fileURLString else {
+                    try? fm.removeItem(at: url)
+                    continue
+                }
+                // 有安装在跑时跳过本次认领（文件留着下次前台再认）——
+                // 否则 installFromUrl 会把这次排进 pendingInstalls，
+                // 队里的那份装完 JSON 还在，下次前台又装一遍。
+                guard !self.installprogressVisible else { continue }
+                if let b64 = entry.bookmarkBase64,
+                   let bookmarkData = Data(base64Encoded: b64) {
+                    LCUtils.appGroupUserDefault.set(bookmarkData, forKey: "LCLaunchExtensionFileBookmark")
+                }
+                Self.czfClaimedInboxFiles.insert(fileKey)
+                Task {
+                    let ok = await self.installFromUrl(urlStr: fileURLString)
+                    if ok { try? fm.removeItem(at: url) }
+                    Self.czfClaimedInboxFiles.remove(fileKey)
+                }
+            case .launch:
+                guard let bundleName = entry.bundleName else {
+                    try? fm.removeItem(at: url)
+                    continue
+                }
+                // 只认已装的 App；没装就留着（以后装了再认领），
+                // 不弹“找不到 App”。
+                let found = sharedModel.apps.contains { $0.appInfo.relativeBundlePath == bundleName }
+                    || (!LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding")
+                        && sharedModel.hiddenApps.contains { $0.appInfo.relativeBundlePath == bundleName })
+                guard found else { continue }
+                Self.czfClaimedInboxFiles.insert(fileKey)
+                Task {
+                    await self.launchAppWithBundleId(bundleId: bundleName, container: entry.containerFolderName, urlStr: entry.launchURL)
+                    try? fm.removeItem(at: url)
+                    Self.czfClaimedInboxFiles.remove(fileKey)
+                }
+            case .sidestore:
+                Self.czfClaimedInboxFiles.insert(fileKey)
+                Task {
+                    await self.launchAppWithBundleId(bundleId: "builtinSideStore", container: nil, urlStr: entry.launchURL)
+                    try? fm.removeItem(at: url)
+                    Self.czfClaimedInboxFiles.remove(fileKey)
+                }
             }
         }
     }

@@ -13,6 +13,22 @@ struct ShareExtensionRootView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    // 3.8.404：收件箱提示横幅。写进收件箱成功后显示
+                    // “已收进 LiveContainer，打开 App 安装/启动”，
+                    // 2 秒后 ViewModel 自动 completeRequest 关面板。
+                    if let inboxNotice = viewModel.inboxNotice {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                            Text(inboxNotice)
+                                .font(.subheadline)
+                        }
+                        .foregroundStyle(.green)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+
                     let suggested = viewModel.suggestedApps()
                     suggestedSection(apps: suggested, showsInstallAction: viewModel.shouldShowInstallAction())
 

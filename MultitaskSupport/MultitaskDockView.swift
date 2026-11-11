@@ -2364,7 +2364,8 @@ extension Notification.Name {
             .environment(\.czfPanelClose) { [weak self] in self?.dismissSourcesOverlay() }
         // 3.8.347：346 的直接 cover 让 LCDataManagementView 落到
         // 独立 hosting 里——它要 sceneDelegate 作 @EnvironmentObject
-        // （238 行，presentScopeAlert 里读 sceneDelegate.window），
+        // （旧 presentScopeAlert 里读 sceneDelegate.window，348 已删；
+        // 注入留着给 LCAppSettingsView 的 textFieldAlert），
         // 根视图只注了 dockManager 与 SharedModel，没注就闪退
         // （与 311 注 SharedModel 同款：独立 hosting 不注会崩）。
         // window.windowScene?.delegate 就是本场景的 SceneDelegate，
@@ -3840,19 +3841,6 @@ struct SourcesPanelView: View {
     // 快捷方式时先弹确认框让用户选，选完再开页，页里直接按
     // 预选备份、不再弹范围框）。随 sheet 关闭一起清掉。
     @State private var czfPreselectedLoginOnly: Bool? = nil
-    // 3.8.382：面板备份范围框的独立 alert 窗口（静态持有）。
-    // 368 的 SwiftUI .confirmationDialog 仍弹不出——根因不是
-    // 挂载点（按钮上已无其他 presentation），是面板宿主本身：
-    // 面板是独立 hosting 控制器（ensureSourcesOverlay 里
-    // window.addSubview，不走 present），不在 root 的 presented
-    // 链里，dialog 经宿主 VC 呈现被悄悄丢掉（设置路 355/357/
-    // 358 已证实并改走独立窗口，面板一直没跟进）。独立窗口不
-    // 依赖任何 VC 层级。3.8.395 修正：windowLevel 不是固定
-    // alert+1 就必盖最上——客 App GuestHooks 用
-    // lastObject.windowLevel + 1 逐次抬升，面板挂客窗口上时
-    // 固定 2001 会被盖住；改动态取当前最高+1（见
-    // presentPanelBackupScopeAlert）。
-    private static var czfPanelScopeAlertWindow: UIWindow?
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -4213,102 +4201,6 @@ struct SourcesPanelView: View {
         }
     }
 
-    // 3.8.366：面板备份范围框里补钥匙串快照警告。设置路
-    // presentScopeAlert 的文案里有 keychainSnapshotWarningText()，
-    // 但面板路预选后直接 doBackupScope、跳过 presentScopeAlert，
-    // 警告看不到；快照过期时备份里没有最新登录态，用户还以为备上了。
-    // 单 App 版同款检查（无快照 / 快照为空 / 超过 1 天），只读文件、
-    // 不改备份流程；没警告时返回空串，dialog 不显示 message。
-    // 3.8.382：面板备份范围框改走独立 alert 窗口（同设置路
-    // presentScopeAlert 的窗口做法）。点备份快捷方式时弹框选
-    // 范围，选完填 czfPreselectedLoginOnly/czfDirectBackupApp
-    // 再开 .backupScope 页（页里按预选直接备份，不再弹框）。
-    // 框的标题/选项/文案与原来 dialog 一字不动（只留快照警告）。
-    // 重入只拦已弹出的框，僵尸窗口先清，永不毒化（同 357）。
-    private func presentPanelBackupScopeAlert(for app: LCAppModel) {
-        if let old = Self.czfPanelScopeAlertWindow {
-            if old.rootViewController?.presentedViewController != nil { return }
-            old.isHidden = true
-            Self.czfPanelScopeAlertWindow = nil
-        }
-        // 3.8.394：取 scene 加兜底——只找 foregroundActive 时，
-        // 面板打开瞬间若 scene 不在 foregroundActive 就直接
-        // return，框悄悄不弹（用户 393 实测仍不弹）。先找前台，
-        // 没有就取第一个 scene，再没有就取 keyWindow 的 scene；
-        // 三个都没有才 return，不建僵尸窗口。
-        // 3.8.395：窗口层级动态取当前最高+1——客 App 的 GuestHooks
-        // 弹框用 lastObject.windowLevel + 1 逐次抬升（见
-        // TweakLoader/UIKit+GuestHooks.m），面板挂在客 App 窗口
-        // 上时固定 alert+1（2001）会被抬升后的客窗口盖住，框
-        // 永远不出现；设置页在主窗口（0层）所以 2001 够用，面板
-        // 不行。动态取 scene 里当前最高窗口层级 +1，保证框永
-        // 远在最上（394 的 scene 兜底没治到这层，仍不弹）。
-        guard let scene = (UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene)
-            ?? (UIApplication.shared.connectedScenes.first as? UIWindowScene)
-            ?? (UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first(where: { $0.windows.contains { $0.isKeyWindow } })) else { return }
-        let alertWindow = UIWindow(windowScene: scene)
-        alertWindow.frame = scene.coordinateSpace.bounds
-        let czfTopLevel = scene.windows.map { $0.windowLevel.rawValue }.max() ?? UIWindow.Level.alert.rawValue
-        alertWindow.windowLevel = UIWindow.Level(rawValue: czfTopLevel + 1)
-        alertWindow.rootViewController = UIViewController()
-        alertWindow.makeKeyAndVisible()
-        Self.czfPanelScopeAlertWindow = alertWindow
-        let dismissWindow: () -> Void = {
-            Self.czfPanelScopeAlertWindow?.isHidden = true
-            Self.czfPanelScopeAlertWindow = nil
-        }
-        let warning = czfBackupSnapshotWarning(for: app)
-        let alert = UIAlertController(title: "备份范围", message: warning.isEmpty ? nil : warning, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "完整备份（数据 + 登录态）", style: .default) { _ in
-            dismissWindow()
-            self.czfPreselectedLoginOnly = false
-            self.czfDirectBackupApp = app
-            self.czfDirectDataPage = .backupScope
-        })
-        alert.addAction(UIAlertAction(title: "只备份登录态", style: .default) { _ in
-            dismissWindow()
-            self.czfPreselectedLoginOnly = true
-            self.czfDirectBackupApp = app
-            self.czfDirectDataPage = .backupScope
-        })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in dismissWindow() })
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            alertWindow.rootViewController?.present(alert, animated: true)
-        }
-    }
-
-    private func czfBackupSnapshotWarning(for app: LCAppModel) -> String {
-        let fm = FileManager.default
-        var hasDump = false
-        var hasItems = false
-        var newestDate: Date? = nil
-        for container in app.uiContainers {
-            let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
-            guard let data = try? Data(contentsOf: dumpURL),
-                  let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
-            hasDump = true
-            if !items.isEmpty { hasItems = true }
-            if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
-               let mdate = attrs[.modificationDate] as? Date,
-               (newestDate == nil || mdate > newestDate!) {
-                newestDate = mdate
-            }
-        }
-        let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-        if !hasDump {
-            return "⚠️ 钥匙串快照提醒：\(name) 无快照（装桥后没打开过 App，备份里没有令牌）"
-        }
-        if !hasItems {
-            return "⚠️ 钥匙串快照提醒：\(name) 快照为空"
-        }
-        if let d = newestDate, Date().timeIntervalSince(d) > 24 * 3600 {
-            let fmt = DateFormatter()
-            fmt.dateFormat = "MM月d日 HH:mm"
-            return "⚠️ 钥匙串快照提醒：\(name) 快照是 \(fmt.string(from: d)) 的（超过 1 天没刷新，登录后先打开 App 切一次后台再备份）"
-        }
-        return ""
-    }
-
     var body: some View {
         // 3.8.304：滚动列表移出 GlassEffectContainer（与 App 面板同款
         // 原因：301 去行上玻璃治好滑动盖头，但容器里没玻璃的子视图会被
@@ -4511,11 +4403,10 @@ struct SourcesPanelView: View {
                             // 3.8.396：面板独立弹窗四版（382/393/
                             // 394/395）全灭——窗口/scene/层级三路
                             // 都试过仍不弹，根因不在这三处，不再猜。
-                            // 改走备份页自己的范围框：不预选、直进
-                            // .backupScope，页里 0.5 秒后调
-                            // presentScopeAlert（设置页同款，已证实
-                            // 能弹），用户在页里选范围再备。面板弹窗
-                            // 函数保留，待查清再恢复。
+                            // 3.8.404：改走备份页自己的范围选页：不
+                            // 预选、直进 .backupScope，body 直返范围
+                            // 选页（见 czfDirectScopeOpen），用户在页
+                            // 里选范围再备。面板弹窗函数已删。
                             Button {
                                 self.czfPreselectedLoginOnly = nil
                                 self.czfDirectBackupApp = app
@@ -4536,10 +4427,11 @@ struct SourcesPanelView: View {
                                         .offset(x: -4, y: -4)
                                 }
                             }
-                            // 3.8.382：范围框改走独立 alert 窗口
-                            //（presentPanelBackupScopeAlert，见上
-                            // 方）。368 的 SwiftUI dialog 挂按钮上仍
-                            // 弹不出（面板宿主不在 root 链里），已删。
+                            // 3.8.404：范围选择独立成页——面板单 App
+                            // 备份按钮开 .backupScope，body 直返范围
+                            // 选页（见 LCDataManagementView 的
+                            // czfDirectScopeOpen）。368 的 SwiftUI
+                            // dialog 与 382 的独立 alert 窗口都已删。
                             .contextMenu {
                                 Button("移除此快捷方式", role: .destructive) {
                                     CZFPanelCustomShortcuts.remove(item)
