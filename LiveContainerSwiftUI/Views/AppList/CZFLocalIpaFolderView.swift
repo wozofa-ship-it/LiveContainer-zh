@@ -141,6 +141,12 @@ struct CZFLocalIpaFolderView: View {
         self.onClose = onClose
     }
 
+    // 4 列网格（3.8.426）：弹窗比整页窄，4 列比源页默认 5 列
+    // 松一点，图标大、名字看得清。
+    private var czfGridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 16), count: 4)
+    }
+
     var body: some View {
         NavigationView {
             Group {
@@ -163,33 +169,22 @@ struct CZFLocalIpaFolderView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    List(model.items) { item in
-                        Button {
-                            onInstall(item.url)
-                        } label: {
-                            HStack(spacing: 12) {
-                                if let icon = item.icon {
-                                    IconImageView(icon: icon)
-                                        .frame(width: 48, height: 48)
-                                } else {
-                                    Image(systemName: "app.badge")
-                                        .font(.system(size: 28))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 48, height: 48)
-                                        .background(Color(.secondarySystemBackground))
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                }
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.displayName)
-                                        .lineLimit(1)
-                                    Text([item.version.map { "版本 \($0)" }, item.sizeText.isEmpty ? nil : item.sizeText].compactMap { $0 }.joined(separator: " · "))
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                    // 网格（3.8.426，用户 23:00 令“弹出页面跟源
+                    // 一样”）：列表改成源页同款网格——大图标 +
+                    // 名字 + 版本，4 列，点格子直接安装。不再
+                    // 用 List 行（行里名字版本号挤、图标小，
+                    // 看着不像源页）。
+                    ScrollView {
+                        LazyVGrid(columns: czfGridColumns, spacing: 16) {
+                            ForEach(model.items) { item in
+                                CZFLocalIpaGridCell(item: item) {
+                                    onInstall(item.url)
                                 }
                             }
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal)
+                        .padding(.top, 12)
+                        .padding(.bottom, 32)
                     }
                 }
             }
@@ -205,5 +200,49 @@ struct CZFLocalIpaFolderView: View {
             }
             .onAppear { model.scan() }
         }
+    }
+}
+
+// 一个 IPA 的格子（3.8.426）：源页同款——大图标 + 下方名字
+// （两行）+ 版本/大小，点格子直接安装。图标没解出来之前
+// 先显示占位，解出来那一行自己刷出来。
+struct CZFLocalIpaGridCell: View {
+    let item: CZFLocalIpaItem
+    var onTap: () -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                let side = max(geo.size.width, 44)
+                Group {
+                    if let icon = item.icon {
+                        IconImageView(icon: icon)
+                    } else {
+                        Image(systemName: "app.badge")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+                            .background(Color(.secondarySystemBackground))
+                    }
+                }
+                .frame(width: side, height: side)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+            }
+            .aspectRatio(1, contentMode: .fit)
+            Text(item.displayName)
+                .font(.footnote)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
+                .shadow(color: .white.opacity(0.95), radius: 4, x: 0, y: 0)
+            Text([item.version.map { "版本 \($0)" }, item.sizeText.isEmpty ? nil : item.sizeText].compactMap { $0 }.joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
     }
 }

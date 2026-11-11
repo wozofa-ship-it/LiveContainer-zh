@@ -92,7 +92,12 @@ struct CZFSourceGridView: View {
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
-                    .background(.ultraThinMaterial)
+                    // 组头 material 底已撤（3.8.426，用户 23:00 报
+                    // “源还是显示不全”）：421 加的 ultraThinMaterial
+                    // 是给钉住组头准备的（图标从它下面滑过时糊一
+                    // 层、不至于生盖）。424 撤了钉住，组头跟着内
+                    // 容滑走，material 底没用了，还可能让组头看
+                    // 着像一层盖在图标上的膜。撤掉，组头回透明底。
                 }
             }
         }

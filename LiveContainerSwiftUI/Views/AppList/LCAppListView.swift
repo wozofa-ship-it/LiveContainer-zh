@@ -58,6 +58,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var czfIpaFolderPickerShow = false
     @State var czfIpaFolderURL: URL? = nil
     @State var czfIpaFolderSheetShow = false
+    // 长按标记（3.8.426）：文件夹按钮长按=选文件夹、点按=
+    // 显示 IPA 网格。长按松手时 Button 的 action 也会触发，
+    // 用这个标记拦住，不让长按后又弹一次网格。
+    @State var czfIpaFolderLongPressed = false
     @State var errorShow = false
     @State var errorInfo = ""
     // 新装 App 后自动恢复备份的结果提示
@@ -452,10 +456,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
                     }
                 }
-                // 本地 IPA 文件夹（3.8.423，用户 21:49 令）：+ 号旁的
-                // 文件夹按钮，点开选一个本地文件夹，列里面的 IPA，
-                // 显示名字和图标，点一下安装。记过的直接打开列表。
+                // 本地 IPA 文件夹（3.8.423，用户 21:49 令；3.8.426
+                // 改成长按选文件夹、点按显示 IPA 网格，用户 23:00
+                // 令）：点按=记过的文件夹直接打开 IPA 网格，没记
+                // 过弹选择器；长按=重新选文件夹（换文件夹）。长
+                // 按松手时 Button 的 action 也会触发，靠
+                // czfIpaFolderLongPressed 拦住，不弹两次。
                 Button {
+                    if czfIpaFolderLongPressed {
+                        czfIpaFolderLongPressed = false
+                        return
+                    }
                     if let saved = czfRestoreIpaFolder() {
                         czfIpaFolderURL = saved
                         czfIpaFolderSheetShow = true
@@ -464,6 +475,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     }
                 } label: {
                     Label("本地 IPA 文件夹", systemImage: "folder")
+                }
+                .onLongPressGesture(minimumDuration: 0.5) {
+                    czfIpaFolderLongPressed = true
+                    czfIpaFolderPickerShow = true
                 }
                 if(UserDefaults.sideStoreExist()) {
                     Button {
@@ -2035,8 +2050,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func czfRestoreIpaFolder() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else { return nil }
         var isStale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale),
-              !isStale else { return nil }
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale) else { return nil }
+        // 书签旧了也别直接丢（3.8.426，用户 23:00 报“选了
+        // 文件夹、再点没有 IPA”）：isStale 只说明书签数据
+        // 过期，解析出的 URL 多半还能用。先把 URL 返回、
+        // 再重存一份新书签，下次就不走这条。直接返回 nil
+        // 的话，点按钮又弹选择器，看着像“没记住文件夹”。
+        if isStale {
+            czfSaveIpaFolder(url)
+        }
         return url
     }
 
