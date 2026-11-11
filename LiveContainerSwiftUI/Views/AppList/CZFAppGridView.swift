@@ -206,6 +206,11 @@ struct CZFAppGridCell: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
         }
+        // 板色（3.8.417）：格子加 AppBannerBG 浅蓝卡片底，与源页
+        // 网格（3.8.416）同款——之前 App 格子没卡片、源页有卡片，
+        // 两页界面不统一（用户 19:05 报）。圆角 16。
+        .background(Color("AppBannerBG"))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
             if batchMode {

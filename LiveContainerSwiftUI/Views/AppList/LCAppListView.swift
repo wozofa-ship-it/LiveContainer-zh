@@ -1392,16 +1392,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 .foregroundColor(.blue)
                 .padding(.horizontal)
                 .padding(.vertical, 8)
-                .modifier { content in
-                    // 液态化（3.8.413）：切换行是固定不动的铬，
-                    // iOS 26 走玻璃；非玻璃系统走原来实底。
-                    // 行在滚动列表里，绝不挂玻璃（同底栏）。
-                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                        content.glassEffect(.regular, in: .rect(cornerRadius: 20))
-                    } else {
-                        content.background(Color(.systemBackground))
-                    }
-                }
+                // 去液体（3.8.417）：切换行不再走玻璃——用户 19:06
+                // “APP界面按钮别做成液体了”。改回实底，与源页切换行
+                // 同款（源页一直是 Color(.systemBackground) 实底），
+                // 两页按钮样式统一。
+                .background(Color(.systemBackground))
             }
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
             .coordinateSpace(name: "scroll")
@@ -1476,16 +1471,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     .disabled(batchBusy)
                 }
                 .padding()
-                .modifier { content in
-                    // 液体化：底栏是固定不动的铬（safeAreaInset 底栏，
-                    // 不随列表滚动），iOS 26 走玻璃；非玻璃系统走
-                    // 原来浅灰底。行在滚动列表里，绝不挂玻璃。
-                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                        content.glassEffect(.regular, in: .rect(cornerRadius: 20))
-                    } else {
-                        content.background(Color(.secondarySystemBackground))
-                    }
-                }
+                // 去液体（3.8.417）：批量底栏不再走玻璃——用户 19:06
+                // “APP界面按钮别做成液体了”。改回原来浅灰实底
+                // （Color(.secondarySystemBackground)），与源页同款
+                // 实底做法统一。
+                .background(Color(.secondarySystemBackground))
             }
         }
         .confirmationDialog("删除 \(batchSelectedIDs.count) 个 App", isPresented: $batchDeleteConfirm, titleVisibility: .visible) {
