@@ -1075,25 +1075,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .hidden()
 
             LazyVStack {
-                // 3.8.407：列表模式回网格的入口——切到列表后网格
-                // 按钮就没了，用户回不去；顶部加一行与网格模式
-                // 同款式样：左“网格模式”切回网格，右“网格设置”
-                // 先切回网格再开设置 sheet，让用户落在网格上改。
-                HStack {
-                    Button {
-                        czfGridMode = true
-                    } label: {
-                        Label("网格模式", systemImage: "square.grid.2x2")
-                    }
-                    Spacer()
-                    Button {
-                        czfGridMode = true
-                        czfGridSettingsShow = true
-                    } label: {
-                        Label("网格设置", systemImage: "slider.horizontal.3")
-                    }
-                }
-                .foregroundColor(.blue)
+                // 切换行已固定在顶部（3.8.410，见 body 的 safeAreaInset），这里不再重复。
                 czfSearchShortcutRows
                 ForEach(filteredApps, id: \.self) { app in
                     appRow(for: app)
@@ -1158,28 +1140,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         return sharedModel.multiLCStatus == 2 ? "lc.appList.convertToSharedToShowInLC2".loc : "lc.appList.installTip".loc
     }
 
-    // 网格模式内容（自上而下）：搜索快捷行 / 恢复原生 + 网格设置 /
-    // LazyVGrid（CZFAppGridView）/ 底部居中计数行。搜索栏沿用系统
-    // .searchable，不另画搜索框；拖拽重排不挂（只在列表无搜索时
+    // 网格模式内容（自上而下）：搜索快捷行 / LazyVGrid（CZFAppGridView）/
+    // 底部居中计数行。切换行已固定在顶部（3.8.410，见 body 的
+    // safeAreaInset），不在这里。搜索栏沿用系统 .searchable，不另画
     // 才有意义）；滚动位置与列表不共享。
     @ViewBuilder
     private var czfGridContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             czfSearchShortcutRows
-            HStack {
-                Button {
-                    czfGridMode = false
-                } label: {
-                    Label("恢复原生", systemImage: "arrow.uturn.left")
-                }
-                Spacer()
-                Button {
-                    czfGridSettingsShow = true
-                } label: {
-                    Label("网格设置", systemImage: "slider.horizontal.3")
-                }
-            }
-            .foregroundColor(.blue)
             CZFAppGridView(
                 apps: filteredApps,
                 hiddenApps: filteredHiddenApps,
@@ -1383,6 +1351,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfListContent
                 }
 
+            }
+            // 模式切换行固定在顶部（3.8.410）：原来在 ScrollView
+            // 内容里（网格/列表各一份），往下一滑就被卷走；
+            // 改成 safeAreaInset 钉在滚动区顶部，滑多远都在。
+            .safeAreaInset(edge: .top) {
+                HStack {
+                    Button {
+                        czfGridMode.toggle()
+                    } label: {
+                        Label(czfGridMode ? "恢复原生" : "网格模式", systemImage: czfGridMode ? "arrow.uturn.left" : "square.grid.2x2")
+                    }
+                    Spacer()
+                    Button {
+                        czfGridMode = true
+                        czfGridSettingsShow = true
+                    } label: {
+                        Label("网格设置", systemImage: "slider.horizontal.3")
+                    }
+                }
+                .foregroundColor(.blue)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color(.systemBackground))
             }
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
             .coordinateSpace(name: "scroll")

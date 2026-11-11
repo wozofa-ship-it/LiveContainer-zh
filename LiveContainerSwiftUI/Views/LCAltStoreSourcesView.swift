@@ -576,24 +576,6 @@ struct LCSourcesView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 16) {
-                            // 切换行（App 页同款式样）：左切模式，
-                            // 右开网格设置（先落到网格上再改）。
-                            HStack {
-                                Button {
-                                    czfSourceGridMode.toggle()
-                                } label: {
-                                    Label(czfSourceGridMode ? "恢复原生" : "网格模式", systemImage: czfSourceGridMode ? "arrow.uturn.left" : "square.grid.2x2")
-                                }
-                                Spacer()
-                                Button {
-                                    czfSourceGridMode = true
-                                    czfSourceGridSettingsShow = true
-                                } label: {
-                                    Label("网格设置", systemImage: "slider.horizontal.3")
-                                }
-                            }
-                            .foregroundColor(.blue)
-                            .padding(.horizontal)
                             if czfSourceGridMode {
                                 CZFSourceGridView(
                                     items: viewModel.sources,
@@ -662,6 +644,29 @@ struct LCSourcesView: View {
                             }
                         }
                         .padding(.vertical)
+                    }
+                    // 切换行固定在顶部（3.8.410）：原来放在 ScrollView
+                    // 内容里，往下一滑就被卷走、回顶才再出现；改成
+                    // safeAreaInset 钉在滚动区顶部，滑多远都在。
+                    .safeAreaInset(edge: .top) {
+                        HStack {
+                            Button {
+                                czfSourceGridMode.toggle()
+                            } label: {
+                                Label(czfSourceGridMode ? "恢复原生" : "网格模式", systemImage: czfSourceGridMode ? "arrow.uturn.left" : "square.grid.2x2")
+                            }
+                            Spacer()
+                            Button {
+                                czfSourceGridMode = true
+                                czfSourceGridSettingsShow = true
+                            } label: {
+                                Label("网格设置", systemImage: "slider.horizontal.3")
+                            }
+                        }
+                        .foregroundColor(.blue)
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                        .background(Color(.systemBackground))
                     }
                 }
             }
