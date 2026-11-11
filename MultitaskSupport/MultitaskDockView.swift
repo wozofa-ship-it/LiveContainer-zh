@@ -1420,24 +1420,35 @@ extension Notification.Name {
     // 用户 2026-11-04 令，2 号机制修）
     private var globalSwipeStartX: CGFloat = 0
     // 边缘手势启用带：边缘起手的触摸只有落在屏幕高度的一段
-    // 内才算数，上下不调（防误触）。2026-11-11 用户红线定：
-    // 统一收到屏幕底部 85%–99% 一段（红线位置）；往里拖、
-    // 往外弹两带同值，三档同值，不再分档。
+    // 内才算数，上下不调（防误触）。2026-10-24 用户红圈定：
+    // 调用带移到屏幕底部 10%–30% 一段（从顶算 70%–90%，
+    // 别再放中间）；三档同中心 80%，低=带更窄、高=带更宽。
     // TweakLoader 内手势用中档值，宿主这边按档位做
     // 最终判定，两边中档必须同值。
     private static var czfEdgeBandTop: CGFloat { czfEdgeBandValues.top }
     private static var czfEdgeBandBottom: CGFloat { czfEdgeBandValues.bottom }
     private static var czfEdgeBandValues: (top: CGFloat, bottom: CGFloat) {
-        return (0.85, 0.99)
+        switch czfEdgeSensitivity {
+        case 0: return (0.75, 0.85)
+        case 2: return (0.65, 0.95)
+        default: return (0.70, 0.90)
+        }
     }
     // 灵敏度档位：0 低 1 中（默认）2 高（设置页可调）
     private static var czfEdgeSensitivity: Int {
         UserDefaults.standard.object(forKey: "CZFEdgeSensitivity") as? Int ?? 1
     }
-    // 往外弹启用带：2026-11-11 用户红线定，与普通带统一
-    // 到屏幕底部 85%–99% 一段，三档同值，不再分档。
+    // 往外弹启用带：用户 2026-11-04 令左往左滑根本不好用、检查
+    // 好修复——11-03 把往外弹带收窄到跟 App 面板一致（0.70–0.90）
+    // 后，左滑大半高度都认不出；恢复收窄前的好用值（中档
+    // 0.55–0.93，低 0.65–0.90、高 0.50–0.95），左滑带宽回
+    // 来才灵敏。App 面板往里拖仍用普通带，不动。
     private static var czfEdgeOutwardBandValues: (top: CGFloat, bottom: CGFloat) {
-        return (0.85, 0.99)
+        switch czfEdgeSensitivity {
+        case 0: return (0.65, 0.90)
+        case 2: return (0.50, 0.95)
+        default: return (0.55, 0.93)
+        }
     }
     private static var czfEdgeOutwardBandTop: CGFloat { czfEdgeOutwardBandValues.top }
     private static var czfEdgeOutwardBandBottom: CGFloat { czfEdgeOutwardBandValues.bottom }
@@ -1682,7 +1693,7 @@ extension Notification.Name {
             // = App 面板，往外弹（手指左移）= 源面板。门槛跟着动作
             // 的物理方向走，不跟面板走（往里拖与 App 内横滑同轨，
             // 门槛保持严；往外弹空间小，门槛保持松）
-            // 往外弹带与普通带统一 0.85–0.99（2026-11-11 用户红线定），
+            // 往外弹带已恢复 0.55–0.93（2026-11-04 左滑修复），
             // 往里拖仍只认普通带。
             // 2026-11-04 2 号机制修：位移门槛跟起手位置挂钩——
             // 贴边起手（≤20pt，与客侧 kCZFEdgeTouchMax 同值）
@@ -1740,7 +1751,7 @@ extension Notification.Name {
             // = 源面板。与插件侧判定保持一致；门槛跟着物理方向
             // 走：往里拖与 App 内横滑同轨，30 的门槛只认边缘起手
             // 的决断横拖，不抢 App 自己的滑动。
-            // 往外弹带与普通带统一 0.85–0.99（2026-11-11 用户红线定），
+            // 往外弹带已恢复 0.55–0.93（2026-11-04 左滑修复），
             // 往里拖仍只认普通带——带外起手的往里拖到这里返回
             // false 不闩锁，之后改往外弹仍能触发。
             if draggingRight {

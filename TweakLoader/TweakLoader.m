@@ -178,11 +178,13 @@ static const void *kCZFDockGesturePanKey = &kCZFDockGesturePanKey;
 static const void *kCZFDockGestureCancelKey = &kCZFDockGestureCancelKey;
 // 起手位置：0=不在边缘 1=左边缘 2=右边缘（shouldReceive 时记录，handler 里判定）
 static NSInteger gCZFStartEdge = 0;
-// 起手高度是否在启用带内：边缘手势只认屏幕高度 85%–99% 一段
-//（2026-11-11 用户红线定，与宿主同值；上下两段不调防误触）
+// 起手高度是否在启用带内：边缘手势只认屏幕高度 70%–90% 一段
+//（=距底部 10%–30%，2026-10-24 用户红圈定，别再放中间，
+// 与宿主中档同值；上下两段不调防误触）
 static BOOL gCZFStartInBand = YES;
-// 起手高度是否在往外弹专用带内：2026-11-11 用户红线定，与
-// 普通带统一到 85%–99%；只给左缘往外弹（→源面板）用，往里拖
+// 起手高度是否在往外弹专用带内：用户 2026-11-03 令往外弹
+// 高度跟 App 面板一样——即上面普通带 70%–90%（原往外弹带
+// 0.55–0.93 已废）；只给左缘往外弹（→源面板）用，往里拖
 // 与右边缘一律不认它。
 static BOOL gCZFStartInOutwardBand = YES;
 // 起手是否真正碰到左边缘（用户 2026-11-02 亲令“面板碰到边缘
@@ -243,7 +245,7 @@ static BOOL CZFTouchOnSliderOrProgress(UITouch *touch) {
 }
 
 // 边缘带拦截识别器（手势双触发修正）：只负责一件事——起手
-// 在边缘带（左 16pt / 右 44pt 内 + 高度 85%–99%，见 shouldReceiveTouch
+// 在边缘带（左 16pt / 右 44pt 内 + 高度 70%–90%，见 shouldReceiveTouch
 // 分支）且约 6pt 内横向占优时，立刻认是手势并取消 App 那路
 // 触摸（cancelsTouchesInView=YES）。6pt 是刻意卡在系统 pan
 // 门槛（约 10pt）之前：拦截先认，App 的滚动/返回识别器才
@@ -455,18 +457,18 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     if (gestureRecognizer == cancelPan) {
         // 拦截器只接边缘带起手：左边缘贴边 16pt 内（与面板触发
         // 同值，免得 App 内滑动被白白取消）、右边缘 44pt 内 +
-        // 高度 85%–99%（2026-11-11 用户红线定，与宿主同值）；
-        // 其余一律不接，App 完全不受影响；
+        // 高度 70%–90%；其余一律不接，App 完全不受影响；
         // 全局变量只归观察 pan 写，不碰
-        BOOL inBand = (loc.y >= height * 0.85 && loc.y <= height * 0.99);
+        BOOL inBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
         return inBand && (loc.x <= kCZFEdgeTouchMax || loc.x >= width - 44);
     }
-    gCZFStartInBand = (loc.y >= height * 0.85 && loc.y <= height * 0.99);
-    // 往外弹带 2026-11-11 用户红线定，与普通带统一到
-    // 85%–99%，与宿主同值；拦截器分支（上面）仍只认普通
-    // 带——放宽取消区会误取消 App 触摸，往外弹不需要取消
-    // App 触摸，故不动它。
-    gCZFStartInOutwardBand = (loc.y >= height * 0.85 && loc.y <= height * 0.99);
+    gCZFStartInBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
+    // 往外弹带恢复收窄前的好用值 0.55–0.93（用户 2026-11-04
+    // 令：左往左滑根本不好用，检查好修复；11-03 收窄到跟
+    // App 面板一致后左滑大半高度认不出）；拦截器分支（上
+    // 面）仍只认普通带——放宽取消区会误取消 App 触摸，往外
+    // 弹不需要取消 App 触摸，故不动它。
+    gCZFStartInOutwardBand = (loc.y >= height * 0.55 && loc.y <= height * 0.93);
     // 面板只认贴边起手（见文件头 kCZFEdgeTouchMax 注释）
     gCZFStartAtEdge = (loc.x <= kCZFEdgeTouchMax);
     // 全部接收、只记录起手位置；是否触发在 handler 按起手+位移判定
@@ -674,14 +676,15 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                 }
                 gCZFTapStarts[key] = @[ @(loc.x), @(loc.y) ];
                 // 记录带放宽到 96：抬手兜底规则需要它。高度带：
-                // 2026-11-11 用户红线定，记录带即普通带
-                // 0.85–0.99；第 4 位记起手是否在普通带内——记
+                // 用户 2026-11-03 令往外弹高度跟 App 面板一样，
+                // 记录带即普通带 0.70–0.90（原往外弹带 0.55–
+                // 0.93 已废）；第 4 位记起手是否在普通带内——记
                 // 录带既已等于普通带，录入的触摸该位恒为真，
                 // 字段留着不动结构。触发起手带见各分支（往里拖
                 // 20pt、往外弹 44pt）。
                 CGFloat winHeight = window.bounds.size.height;
-                if (loc.x <= 96 && loc.y >= winHeight * 0.85 && loc.y <= winHeight * 0.99) {
-                    BOOL inOldBand = (loc.y >= winHeight * 0.85 && loc.y <= winHeight * 0.99);
+                if (loc.x <= 96 && loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90) {
+                    BOOL inOldBand = (loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90);
                     // 后三位记最后一段位移的起点（终结时算 flick
                     // 速度用）：起手时最后一段就是起手本身。
                     gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO, @(inOldBand), @(loc.x), @(loc.y), @(touch.timestamp) ];
