@@ -132,10 +132,14 @@ public struct DocModifier: ViewModifier {
         self.types = types
         self.multiple = multiple
         self._isPresented = isPresented
-        // shutdown 闭包要捕获 self，须等全部存储属性初始化完才能写；
-        // 先放一个空 shutdown 的占位 Coordinator，再换成带真 shutdown 的。
-        self.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
-        self.delegate = Coordinator(callback: callback, onDismiss: onDismiss, shutdown: { self.shutdown() })
+        // 3.8.428 #35：Coordinator 回调要复位 isPresented/docController。
+        // struct 的 init 里 escaping 闭包不能抓 mutating self
+        //（{ self.shutdown() } 编不过），改抓 isPresented 这个
+        // Binding 本身（值类型，写 wrappedValue 直通父级状态）；
+        // 置 false 后 onChange 走 handlePresentationChange(false)，
+        // 在那里 dismiss 并把 docController 置 nil，效果与
+        // shutdown() 相同。占位的那行已删，只留这一行。
+        self.delegate = Coordinator(callback: callback, onDismiss: onDismiss, shutdown: { isPresented.wrappedValue = false })
     }
 
     public func body(content: Content) -> some View {
@@ -172,11 +176,6 @@ public struct DocModifier: ViewModifier {
         }
     }
 
-    private func shutdown() {
-        isPresented = false
-        docController = nil
-    }
-    
     class Coordinator: NSObject, UIDocumentPickerDelegate {
         var callback: ([URL]) -> ()
         private let onDismiss: () -> Void
@@ -314,6 +313,12 @@ public struct TextFieldAlertModifier: ViewModifier {
 
     private func makeAlertController() -> UIAlertController {
         let controller = UIAlertController(title: title, message: nil, preferredStyle: .alert)
+        // 3.8.428 #35 同款：UIAlertAction 的 handler 是 escaping 闭包，
+        // 不能在里面调 mutating 的 shutdown()（抓 mutating self 编不过）。
+        // 先把 isPresented 这个 Binding 拷到局部量，闭包只抓它；
+        // 置 false 后 onChange 走 handlePresentationChange(false)，
+        // 在那里 dismiss 并把 alertController 置 nil。
+        let czfIsPresented = isPresented
         controller.addTextField {
             $0.placeholder = self.placeholder
             $0.text = self.text.wrappedValue
@@ -321,18 +326,13 @@ public struct TextFieldAlertModifier: ViewModifier {
         }
         controller.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in
             self.actionCancel(nil)
-            shutdown()
+            czfIsPresented.wrappedValue = false
         })
         controller.addAction(UIAlertAction(title: "lc.common.ok".loc, style: .default) { _ in
             self.action(controller.textFields?.first?.text)
-            shutdown()
+            czfIsPresented.wrappedValue = false
         })
         return controller
-    }
-
-    private func shutdown() {
-        isPresented = false
-        alertController = nil
     }
 
 }
