@@ -42,6 +42,13 @@ struct CZFSourceGridView: View {
     }
 
     var body: some View {
+        // 3.8.416：连续网格已撤回——.gridCellColumns 通栏组头
+        // 仍会在组尾留空位（组头占 5 列、塞不进上一组剩的 1 格，
+        // 只能换行，空位还在），消不掉组尾空位，反而多一路
+        // iOS 16+ 分支、徒增风险。组尾空位是分组网格的固有
+        // 形态（每组单独 LazyVGrid），与 App 资源库同款，不再
+        // 强行连续化。组头已抽成 CZFSourceGridGroupHeaderView
+        // 独立结构（两路共用，无行为变化），留着。
         LazyVStack(alignment: .leading, spacing: 16) {
             ForEach(items, id: \.id) { item in
                 CZFSourceGridGroupView(
@@ -60,6 +67,70 @@ struct CZFSourceGridView: View {
                     selectedIDs: selectedIDs,
                     onToggleSelect: onToggleSelect
                 )
+            }
+        }
+    }
+}
+
+// 一个源的组头（标题推入源详情页）：独立出来，供连续网格
+// （iOS 16+ 单 LazyVGrid，组头通栏）与分组网格（iOS 15
+// 回落）两路共用。样式照抄 AltStoreSourceSectionView。
+struct CZFSourceGridGroupHeaderView: View {
+    let item: AltStoreSourcesViewModel.SourceItem
+    let apps: [AltStoreSourceApp]
+    let isFiltering: Bool
+    let onRefresh: () -> Void
+    let onInstall: (AltStoreSourceApp) -> Void
+    let onInstallAsNew: (AltStoreSourceApp) -> Void
+    let onDownload: (AltStoreSourceApp) -> Void
+    let onDownloadVersion: (URL) -> Void
+    let onRemove: () -> Void
+    let isBatchMode: Bool
+    let selectedIDs: Set<String>
+    let onToggleSelect: (AltStoreSourceApp) -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            NavigationLink {
+                CZFSourceDetailView(
+                    item: item,
+                    filteredApps: apps,
+                    isFiltering: isFiltering,
+                    onRefresh: onRefresh,
+                    onInstall: onInstall,
+                    onInstallAsNew: onInstallAsNew,
+                    onDownload: onDownload,
+                    onDownloadVersion: onDownloadVersion,
+                    onRemove: onRemove,
+                    isBatchMode: isBatchMode,
+                    selectedIDs: selectedIDs,
+                    onToggleSelect: onToggleSelect
+                )
+            } label: {
+                HStack(spacing: 10) {
+                    SourceIconView(url: item.primaryIconURL)
+                        .frame(width: 36, height: 36)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    Text(item.source?.name ?? item.displayName)
+                        .font(.system(.title2).bold())
+                }
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            if item.isLoading {
+                ProgressView()
+            } else {
+                Menu {
+                    Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
+                    Button("复制源链接", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = item.url.absoluteString
+                    }
+                    Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .imageScale(.large)
+                        .foregroundColor(.secondary)
+                }
             }
         }
     }
@@ -130,53 +201,21 @@ struct CZFSourceGridGroupView: View {
         }
     }
 
-    // 组头：标题部分是 NavigationLink，推入原来的 CZFSourceDetailView；
-    // 右侧加载中 ProgressView / Menu（刷新 / 复制源链接 / 删除源）
-    // 与列表 section 头部同款。
     private var czfGroupHeader: some View {
-        HStack(alignment: .center, spacing: 12) {
-            NavigationLink {
-                CZFSourceDetailView(
-                    item: item,
-                    filteredApps: apps,
-                    isFiltering: isFiltering,
-                    onRefresh: onRefresh,
-                    onInstall: onInstall,
-                    onInstallAsNew: onInstallAsNew,
-                    onDownload: onDownload,
-                    onDownloadVersion: onDownloadVersion,
-                    onRemove: onRemove,
-                    isBatchMode: isBatchMode,
-                    selectedIDs: selectedIDs,
-                    onToggleSelect: onToggleSelect
-                )
-            } label: {
-                HStack(spacing: 10) {
-                    SourceIconView(url: item.primaryIconURL)
-                        .frame(width: 36, height: 36)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    Text(item.source?.name ?? item.displayName)
-                        .font(.system(.title2).bold())
-                }
-            }
-            .buttonStyle(.plain)
-            Spacer()
-            if item.isLoading {
-                ProgressView()
-            } else {
-                Menu {
-                    Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
-                    Button("复制源链接", systemImage: "doc.on.doc") {
-                        UIPasteboard.general.string = item.url.absoluteString
-                    }
-                    Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .imageScale(.large)
-                        .foregroundColor(.secondary)
-                }
-            }
-        }
+        CZFSourceGridGroupHeaderView(
+            item: item,
+            apps: apps,
+            isFiltering: isFiltering,
+            onRefresh: onRefresh,
+            onInstall: onInstall,
+            onInstallAsNew: onInstallAsNew,
+            onDownload: onDownload,
+            onDownloadVersion: onDownloadVersion,
+            onRemove: onRemove,
+            isBatchMode: isBatchMode,
+            selectedIDs: selectedIDs,
+            onToggleSelect: onToggleSelect
+        )
     }
 }
 
@@ -238,6 +277,12 @@ struct CZFSourceAppGridCell: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
         }
+        // 板色（3.8.416）：格子加 AppBannerBG 浅蓝卡片底，与 App
+        // 列表行（LCAppBannerView）同款色——之前格子是白底无卡片，
+        // 跟 App 页颜色对不上（用户 17:16 报）。圆角 16（图标
+        // 圆角 14，卡片稍大一圈）。
+        .background(Color("AppBannerBG"))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
             if isBatchMode {

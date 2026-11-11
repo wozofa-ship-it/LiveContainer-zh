@@ -3847,21 +3847,12 @@ struct SourcesPanelView: View {
     // sceneDelegate 两个 @EnvironmentObject，系统自动注入）。
     // 宿主是独立 UIHostingController（其 view 是目标窗口的子
     // 视图，见 ensureSourcesOverlay），sheet 从它 present，
-    // 圆角、不盖满（同设置页数据管理 sheet）；closePanel 只隐藏宿主 view（不摘
-    // 里的 dismiss() 在 cover 里同样关掉 cover，回源面板。
-    // 3.8.350：改 sheet（见下方 .sheet 注释），“cover”指
-    // 本页的呈现（sheet/fullScreenCover 通称），收尾逻辑不动。
-    @State private var czfDirectDataPage: CZFSettingsPage? = nil
-    // 3.8.349：.backupScope 直出范围框要备的那个 App（面板
-    // 快捷行 appbackup: 条目点按时填，cover 里随
-    // czfDirectDataPage 一起传给 LCDataManagementView；
-    // 只在 page == .backupScope 时读，其余四路不用，残留
-    // 不清也不影响——点按时每次都重填。“关闭”按钮里顺手清掉。
-    @State private var czfDirectBackupApp: LCAppModel? = nil
-    // 3.8.359：面板单独弹窗预选的范围（nil = 没预选；点备份
-    // 快捷方式时先弹确认框让用户选，选完再开页，页里直接按
-    // 预选备份、不再弹范围框）。随 sheet 关闭一起清掉。
-    @State private var czfPreselectedLoginOnly: Bool? = nil
+    // 3.8.416：本地直出 sheet 已删——面板宿主是孤儿控制器，
+    // 挂它身上的 .sheet 弹不出来（411/412/414 三版全灭），
+    // 改走 SharedModel 触发器 + 根 TabView 代弹（见 SharedModel
+    // 的 czfDirectPage 与 LCTabView 的 sheet）。本地
+    // czfDirectDataPage/czfDirectBackupApp/czfPreselectedLoginOnly
+    // 三个 @State 一并删掉，不留摆设。
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
@@ -4027,14 +4018,17 @@ struct SourcesPanelView: View {
     // 上没有）才走老路 deepLink，保证不丢路由。
     private func openSettingsPage(_ page: String) {
         if let czfPage = CZFSettingsPage(rawValue: page) {
-            // 3.8.411：先开 sheet 再说，别先关面板——closePanel()
-            // 会把面板 host.view 藏掉（isHidden = true），而本
-            // sheet 就挂在面板的 view 上，关面板再开 sheet 是
-            // 在正在消失的 view 上弹 sheet，SwiftUI 静默丢掉，
-            // 点“备份全部”什么都不出（用户 11-08 起反复报的
-            // 备份没弹窗，根因就在这）。sheet 是模态全屏，盖
-            // 住面板，不用先关；关 sheet 后面板还在，正好接着点。
-            czfDirectDataPage = czfPage
+            // 3.8.416：改走主 App 代弹——面板宿主是孤儿控制器，
+            // 挂它身上的 .sheet 弹不出来（411/412/414 三版全灭，
+            // addChild 还会崩）；只写 SharedModel 的触发器，
+            // 根 TabView（LCTabView）监听到就弹 sheet。本地
+            // czfDirectDataPage 不再写（它身上的 sheet 已成摆设，
+            // 见下方注释）。快捷方式开的页不带指定 App，App 与
+            // 预选清掉（单 App 备份走 per-App 按钮，直接写
+            // SharedModel，不走这里）。
+            DataManager.shared.model.czfDirectApp = nil
+            DataManager.shared.model.czfDirectLoginOnly = nil
+            DataManager.shared.model.czfDirectPage = czfPage
             return
         }
         closePanel()
@@ -4435,9 +4429,12 @@ struct SourcesPanelView: View {
                             // 选页（见 czfDirectScopeOpen），用户在页
                             // 里选范围再备。面板弹窗函数已删。
                             Button {
-                                self.czfPreselectedLoginOnly = nil
-                                self.czfDirectBackupApp = app
-                                self.czfDirectDataPage = .backupScope
+                                // 3.8.416：改走主 App 代弹（见 openSettingsPage）：
+                                // 本地 czfDirectDataPage 身上的 sheet 弹不出来，
+                                // 写 SharedModel 触发器，由根 TabView 代弹。
+                                DataManager.shared.model.czfDirectApp = app
+                                DataManager.shared.model.czfDirectLoginOnly = nil
+                                DataManager.shared.model.czfDirectPage = .backupScope
                             } label: {
                                 ZStack(alignment: .bottomTrailing) {
                                     RunningAppIcon(appInfo: app.appInfo)
@@ -4539,25 +4536,10 @@ struct SourcesPanelView: View {
                 refreshSettingStates()
             }
         }
-        // 3.8.353：sheet 下滑关闭也清 czfDirectBackupApp——
-        // 之前只有关闭按钮清它，下滑关 sheet 时 SwiftUI 只把
-        // czfDirectDataPage 置 nil，czfDirectBackupApp 残留。
-        // 虽然点按每次都重填（3830 注释），残留不致错，但
-        // 状态不一致就是隐患：下次直进非 backupScope 页时
-        // destinationView(forDirectBackupApp:) 仍带着上个 App。
-        // onDismiss 里清掉，关闭按钮与下滑关行为一致。
-        .sheet(item: $czfDirectDataPage, onDismiss: { czfDirectBackupApp = nil; czfPreselectedLoginOnly = nil }) { page in
-            NavigationView {
-                page.destinationView(forDirectBackupApp: czfDirectBackupApp, preselectedLoginOnly: czfPreselectedLoginOnly)
-                    .navigationTitle(page.title)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("关闭") { czfDirectDataPage = nil; czfDirectBackupApp = nil; czfPreselectedLoginOnly = nil }
-                        }
-                    }
-            }
-        }
+        // 3.8.416：本地直出 sheet 已删——面板宿主是孤儿控制器，
+        // 挂它身上的 .sheet 弹不出来（411/412/414 三版全灭），
+        // 改走 SharedModel 触发器 + 根 TabView（LCTabView）代弹。
+        // 关 sheet 清 SharedModel 的事由 LCTabView 那边做。
     }
 
     @ViewBuilder

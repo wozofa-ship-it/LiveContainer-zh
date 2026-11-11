@@ -562,6 +562,14 @@ struct LCSourcesView: View {
     @EnvironmentObject private var sharedModel : SharedModel
     
     @State private var isViewAppeared = false
+
+    // 自定义背景（3.8.416）：与 App 页同一张图、同一把键
+    // （CZFAppBackground.versionKey）——App 页网格设置里选
+    // 的图，这里跟着显示；源页之前根本没接背景（17:44 用户
+    // 报“源背景图不生效”）。读法与 App 页同款（.background
+    // 挂 ScrollView，不包 ZStack，不动 NavigationView 排布）。
+    @AppStorage(CZFAppBackground.versionKey) private var czfBackgroundVersion = 0
+    @State private var czfBackgroundImage: UIImage? = nil
     
     var body: some View {
         NavigationView {
@@ -648,6 +656,25 @@ struct LCSourcesView: View {
                             }
                         }
                         .padding(.vertical)
+                    }
+                    // 自定义背景（3.8.416）：与 App 页同款——图挂
+                    // ScrollView 的 .background，不包 ZStack，
+                    // 不动 NavigationView 排布（415 血泪：ZStack
+                    // 会把大标题/搜索栏/切换行叠到一块）。
+                    .background {
+                        if let bg = czfBackgroundImage {
+                            Image(uiImage: bg)
+                                .resizable()
+                                .scaledToFill()
+                                .ignoresSafeArea()
+                                .overlay(Color.black.opacity(0.12))
+                        }
+                    }
+                    .onAppear {
+                        czfBackgroundImage = CZFAppBackground.loadImage()
+                    }
+                    .onChange(of: czfBackgroundVersion) { _ in
+                        czfBackgroundImage = CZFAppBackground.loadImage()
                     }
                     // 切换行固定在顶部（3.8.410）：原来放在 ScrollView
                     // 内容里，往下一滑就被卷走、回顶才再出现；改成

@@ -142,6 +142,34 @@ struct LCTabView: View {
                 .navigationBarTitleDisplayMode(.inline)
             }
         }
+        // 3.8.416：坞面板直出设置页（主 App 代弹）——面板宿主是
+        // 孤儿控制器，挂它身上的 .sheet 弹不出来（411/412/414
+        // 三版全灭），addChild 还会崩；改走 SharedModel 触发器：
+        // 面板只写 sharedModel.czfDirectPage/App/LoginOnly，
+        // 根 TabView 在这里弹 sheet（根控制器是正经
+        // rootViewController，能弹）。内容与面板旧 sheet 同款
+        // （NavigationView 包 destinationView，左上“关闭”）。
+        // 关 sheet 清触发器（关闭按钮与下滑关行为一致），下次
+        // 点按才能再触发（值不变 SwiftUI 不重弹）。
+        .sheet(item: $sharedModel.czfDirectPage, onDismiss: {
+            sharedModel.czfDirectApp = nil
+            sharedModel.czfDirectLoginOnly = nil
+        }) { page in
+            NavigationView {
+                page.destinationView(forDirectBackupApp: sharedModel.czfDirectApp, preselectedLoginOnly: sharedModel.czfDirectLoginOnly)
+                    .navigationTitle(page.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") {
+                                sharedModel.czfDirectPage = nil
+                                sharedModel.czfDirectApp = nil
+                                sharedModel.czfDirectLoginOnly = nil
+                            }
+                        }
+                    }
+            }
+        }
         .task {
             closeDuplicatedWindow()
             checkLastLaunchError()

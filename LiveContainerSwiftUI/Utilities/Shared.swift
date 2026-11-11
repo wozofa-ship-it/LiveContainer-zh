@@ -63,6 +63,17 @@ class SharedModel: ObservableObject {
     @Published var multiLCStatus = 0
     @Published var isJITModalOpen = false
     
+    // 3.8.416：坞面板直出设置页的触发器（主 App 代弹）——
+    // 面板宿主是孤儿控制器，挂它身上的 .sheet 弹不出来
+    // （411/412/414 三版全灭）；改走主 App 代弹：面板只
+    // 写这三个值，根 TabView（LCTabView）监听到就弹 sheet
+    // （根控制器是正经 rootViewController，能弹）。不再用
+    // addChild。czfDirectApp 只在单 App 备份（.backupScope）
+    // 时填，其余页不用；弹完由 LCTabView 的关闭/onDismiss 清掉。
+    @Published var czfDirectPage: CZFSettingsPage? = nil
+    @Published var czfDirectApp: LCAppModel? = nil
+    @Published var czfDirectLoginOnly: Bool? = nil
+    
     @Published var enableMultipleWindow = false
 
     @Published var appDataFolderNames: [String] = []
