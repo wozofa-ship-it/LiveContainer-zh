@@ -202,15 +202,16 @@ struct CZFAppGridCell: View {
             }
             .aspectRatio(1, contentMode: .fit)
             Text(app.displayName)
-                // 名字（3.8.419）：字号小一号 + 允许两行，治 5 列
-                // 名字截断（用户 20:08 报“源 APP 还是显示不全”、
-                // 20:07 建议第 1 条）；两行定高，格子等高；名字
-                // 加白晕影，深色背景图上也能看清（建议第 5 条）。
+                // 名字（3.8.421，建议第 3、4 条）：长名字自动缩小
+                // （minimumScaleFactor 0.7），超长名缩到两行内显示全，
+                // 不再截断；白晕影加粗（opacity 0.85→0.95、radius 3→4），
+                // 黑字压在深色背景图上也能读。与源格子同款。
                 .font(.footnote)
                 .lineLimit(2)
+                .minimumScaleFactor(0.7)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
-                .shadow(color: .white.opacity(0.85), radius: 3, x: 0, y: 0)
+                .shadow(color: .white.opacity(0.95), radius: 4, x: 0, y: 0)
         }
         // 去阴影（3.8.418）：417 刚加的 AppBannerBG 卡片底撤掉——
         // 卡片在白底上看着像一层阴影，用户 19:09 报“源有阴影”。

@@ -655,7 +655,12 @@ struct LCSourcesView: View {
                                 .padding(.horizontal)
                             }
                         }
-                        .padding(.vertical)
+                        // 顶部留白 + 底部留白（3.8.421，建议第 1、6 条）：
+                        // 顶部 8pt，第一组完整露出来，不顶到搜索栏下；
+                        // 底部 100pt，滑到底最后一行名字完整露出来，
+                        // 不被底部 tab 栏盖住一半。
+                        .padding(.top, 8)
+                        .padding(.bottom, 100)
                     }
                     // 自定义背景（3.8.416）：与 App 页同款——图挂
                     // ScrollView 的 .background，不包 ZStack，
@@ -718,14 +723,6 @@ struct LCSourcesView: View {
                         }
                     }
                 }
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        czfSourceGridMode = true
-                        czfSourceGridSettingsShow = true
-                    } label: {
-                        Label("网格设置", systemImage: "slider.horizontal.3")
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack {
                         if isBatchMode {
@@ -733,6 +730,16 @@ struct LCSourcesView: View {
                                 batchInstallSelected()
                             }
                             .disabled(selectedIDs.isEmpty)
+                        }
+                        // 网格设置挪到 trailing（3.8.421，建议第 2 条）：
+                        // leading 原来三个图标（刷新/批量/网格设置）挤一个
+                        // 宽 pill，太宽、中间“源”字没地方；网格设置挪到
+                        // 右边“+”旁边，leading 只留刷新+批量，pill 变窄。
+                        Button {
+                            czfSourceGridMode = true
+                            czfSourceGridSettingsShow = true
+                        } label: {
+                            Label("网格设置", systemImage: "slider.horizontal.3")
                         }
                         Button("lc.sources.addSource".loc, systemImage: "plus") {
                             isManagingSources = true

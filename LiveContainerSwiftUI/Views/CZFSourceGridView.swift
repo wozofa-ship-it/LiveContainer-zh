@@ -49,24 +49,49 @@ struct CZFSourceGridView: View {
         // 形态（每组单独 LazyVGrid），与 App 资源库同款，不再
         // 强行连续化。组头已抽成 CZFSourceGridGroupHeaderView
         // 独立结构（两路共用，无行为变化），留着。
-        LazyVStack(alignment: .leading, spacing: 16) {
+        //
+        // 组头钉住置顶（3.8.421，建议第 5 条）：每组包进 Section，
+        // LazyVStack 开 pinnedViews，组头（源图标+源名）滑到顶
+        // 就钉住，滑哪个源的一直看得见，不用滑回顶才知道；
+        // 组头挂 ultraThinMaterial 底，内容从下面滑过不透出来。
+        LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
             ForEach(items, id: \.id) { item in
-                CZFSourceGridGroupView(
-                    item: item,
-                    apps: filteredApps(item),
-                    isFiltering: isFiltering,
-                    columns: czfGridColumns,
-                    iconFactor: czfIconFactor,
-                    onRefresh: { onRefresh(item) },
-                    onInstall: onInstall,
-                    onInstallAsNew: onInstallAsNew,
-                    onDownload: onDownload,
-                    onDownloadVersion: onDownloadVersion,
-                    onRemove: { onRemove(item) },
-                    isBatchMode: isBatchMode,
-                    selectedIDs: selectedIDs,
-                    onToggleSelect: onToggleSelect
-                )
+                Section {
+                    CZFSourceGridGroupContentView(
+                        item: item,
+                        apps: filteredApps(item),
+                        isFiltering: isFiltering,
+                        columns: czfGridColumns,
+                        iconFactor: czfIconFactor,
+                        onRefresh: { onRefresh(item) },
+                        onInstall: onInstall,
+                        onInstallAsNew: onInstallAsNew,
+                        onDownload: onDownload,
+                        onDownloadVersion: onDownloadVersion,
+                        onRemove: { onRemove(item) },
+                        isBatchMode: isBatchMode,
+                        selectedIDs: selectedIDs,
+                        onToggleSelect: onToggleSelect
+                    )
+                } header: {
+                    CZFSourceGridGroupHeaderView(
+                        item: item,
+                        apps: filteredApps(item),
+                        isFiltering: isFiltering,
+                        onRefresh: { onRefresh(item) },
+                        onInstall: onInstall,
+                        onInstallAsNew: onInstallAsNew,
+                        onDownload: onDownload,
+                        onDownloadVersion: onDownloadVersion,
+                        onRemove: { onRemove(item) },
+                        isBatchMode: isBatchMode,
+                        selectedIDs: selectedIDs,
+                        onToggleSelect: onToggleSelect
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                    .background(.ultraThinMaterial)
+                }
             }
         }
     }
@@ -140,7 +165,12 @@ struct CZFSourceGridGroupHeaderView: View {
 
 // 一个源的组：组头（标题推入源详情页）+ 该源 App 的网格 / 空态 /
 // 错误块 / 加载态。组头样式照抄 AltStoreSourceSectionView。
-struct CZFSourceGridGroupView: View {
+// 一组的内容（错误/空提示/App 网格/加载中）：从
+// CZFSourceGridGroupView 里抽出来，供 Section 的 content 用；
+// 组头另走 CZFSourceGridGroupHeaderView（Section header，钉住置顶）。
+// 3.8.421 前的 CZFSourceGridGroupView（组头+内容合一个 VStack）
+// 已随 Section 化删掉，只剩这一处用。
+struct CZFSourceGridGroupContentView: View {
     let item: AltStoreSourcesViewModel.SourceItem
     let apps: [AltStoreSourceApp]
     let isFiltering: Bool
@@ -157,13 +187,10 @@ struct CZFSourceGridGroupView: View {
     let onToggleSelect: (AltStoreSourceApp) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            czfGroupHeader
-
-            // 组头瘦身（3.8.419，建议第 4 条）：副标题/host 行删掉，
-            // 收到详情页里（CZFSourceDetailView 本来就显示 subtitle），
-            // 组头只剩标题一行，少占地方。
-
+        // 组头瘦身（3.8.419，建议第 4 条）：副标题/host 行删掉，
+        // 收到详情页里（CZFSourceDetailView 本来就显示 subtitle），
+        // 组头只剩标题一行，少占地方。
+        Group {
             if let error = item.error {
                 CZFSourceGridErrorView(error: error, onRefresh: onRefresh)
             } else if let source = item.source {
@@ -195,23 +222,6 @@ struct CZFSourceGridGroupView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-    }
-
-    private var czfGroupHeader: some View {
-        CZFSourceGridGroupHeaderView(
-            item: item,
-            apps: apps,
-            isFiltering: isFiltering,
-            onRefresh: onRefresh,
-            onInstall: onInstall,
-            onInstallAsNew: onInstallAsNew,
-            onDownload: onDownload,
-            onDownloadVersion: onDownloadVersion,
-            onRemove: onRemove,
-            isBatchMode: isBatchMode,
-            selectedIDs: selectedIDs,
-            onToggleSelect: onToggleSelect
-        )
     }
 }
 
@@ -269,16 +279,17 @@ struct CZFSourceAppGridCell: View {
             }
             .aspectRatio(1, contentMode: .fit)
             Text(app.name)
-                // 名字（3.8.419）：字号小一号 + 允许两行，治 5 列
-                // 名字截断（用户 20:08 报“源 APP 还是显示不全”、
-                // 20:07 建议第 1 条）；两行定高，格子等高；名字
-                // 加白晕影，深色背景图上也能看清（建议第 5 条）。
-                // 与 App 格子同款。
+                // 名字（3.8.421，建议第 3、4 条）：长名字自动缩小
+                // （minimumScaleFactor 0.7），“闲鱼_7.28.50_...”
+                // 这类超长名缩到两行内显示全，不再截断成“去...”；
+                // 白晕影加粗（opacity 0.85→0.95、radius 3→4），
+                // 黑字压在黑佛像上也能读。与 App 格子同款。
                 .font(.footnote)
                 .lineLimit(2)
+                .minimumScaleFactor(0.7)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
-                .shadow(color: .white.opacity(0.85), radius: 3, x: 0, y: 0)
+                .shadow(color: .white.opacity(0.95), radius: 4, x: 0, y: 0)
         }
         // 去阴影（3.8.418）：格子上的 AppBannerBG 卡片底撤掉——
         // 416 加的卡片在白底上看着像一层阴影，用户 19:09 报
