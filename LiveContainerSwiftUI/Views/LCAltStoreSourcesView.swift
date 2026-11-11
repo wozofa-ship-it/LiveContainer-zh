@@ -708,8 +708,10 @@ struct LCSourcesView: View {
             // 下面透出来，顶部干净。
             .navigationTitle("lc.tabView.sources".loc)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+            // 顶栏实底走 czfSolidToolbarBackground（3.8.424：
+            // .toolbarBackground 是 iOS 16+ API，部署目标 15.0
+            // 下直接调编不过，包 #available）。
+            .czfSolidToolbarBackground()
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if viewModel.isRefreshingAll {

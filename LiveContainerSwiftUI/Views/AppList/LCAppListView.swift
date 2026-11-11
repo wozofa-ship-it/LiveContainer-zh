@@ -1465,8 +1465,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 看着“显示不全”），顶部干净。
             .navigationTitle("lc.appList.myApps".loc)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+            // 顶栏实底走 czfSolidToolbarBackground（3.8.424：
+            // .toolbarBackground 是 iOS 16+ API，部署目标 15.0
+            // 下直接调编不过，包 #available）。
+            .czfSolidToolbarBackground()
             .toolbar { appListToolbar }
         }
         // 新4（3.8.277）：批量操作底栏——多选模式时才出现。备份/

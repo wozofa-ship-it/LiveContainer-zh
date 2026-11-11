@@ -46,6 +46,21 @@ extension View {
         self.modifier(DocModifier(isPresented: isPresented, types: types, multiple: multiple, callback: callback, onDismiss: onDismiss))
     }
 
+    // 顶栏实底（3.8.424 修 424 红字）：.toolbarBackground 是
+    // iOS 16+ 才有的 API，部署目标 15.0 下直接调编不过
+    // （'toolbarBackground' is only available in iOS 16.0
+    // or newer）。包一层 #available，iOS 16+ 走实底，15
+    // 走默认玻璃顶栏。
+    @ViewBuilder
+    func czfSolidToolbarBackground() -> some View {
+        if #available(iOS 16.0, *) {
+            self.toolbarBackground(.visible, for: .navigationBar)
+                .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+        } else {
+            self
+        }
+    }
+
     // 文件夹选择器（3.8.423 本地 IPA 文件夹）：与 betterFileImporter
     // 同款 DocModifier 思路，但 asCopy 必须 false——文件夹不能
     // 拷一份（会把整个文件夹拷进临时目录、又大又不同步），要
