@@ -1684,7 +1684,9 @@ struct LCSourceAppBanner: View {
     }
 }
 
-private struct LCSourceAppDetailView: View {
+// LCSourceAppDetailView 不再 private：源页 App 网格格子
+//（CZFSourceGridView.swift）点格子/长按菜单也要弹同一份详情 sheet。
+struct LCSourceAppDetailView: View {
     let app: AltStoreSourceApp
     let source: AltStoreSource
     // 3.8.307：历史版本下载——点版本行下载该版本的 URL。
