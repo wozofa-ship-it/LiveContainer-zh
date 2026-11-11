@@ -200,7 +200,7 @@ struct CZFSourceGridGroupContentView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    LazyVGrid(columns: columns, spacing: 16) {
+                    LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(apps, id: \.bundleIdentifier) { app in
                             CZFSourceAppGridCell(
                                 app: app,
@@ -275,6 +275,10 @@ struct CZFSourceAppGridCell: View {
                 SourceIconView(url: app.iconURL)
                     .frame(width: side, height: side)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    // 图标淡底影（3.8.422，建议第 2 条）：很淡的一层黑影
+                    // （opacity 0.15），只把图标从亮背景（天空/云）上托
+                    // 出来一点；不是 418 撤掉的那种卡片底，别回去了。
+                    .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
             }
             .aspectRatio(1, contentMode: .fit)

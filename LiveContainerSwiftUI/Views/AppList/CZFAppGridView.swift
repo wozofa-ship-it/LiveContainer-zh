@@ -127,7 +127,7 @@ struct CZFAppGridView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LazyVGrid(columns: czfGridColumns, spacing: 16) {
+            LazyVGrid(columns: czfGridColumns, spacing: 12) {
             ForEach(apps, id: \.self) { app in
                 CZFAppGridCell(
                     app: app,
@@ -198,6 +198,11 @@ struct CZFAppGridCell: View {
                 let side = max(geo.size.width * iconFactor, 44)
                 IconImageView(icon: app.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage())
                     .frame(width: side, height: side)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    // 图标淡底影（3.8.422，建议第 2 条）：与源格子同款，
+                    // 很淡的一层黑影（opacity 0.15），只把图标从亮背景
+                    // 上托出来一点；不是 418 撤掉的那种卡片底。
+                    .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
             }
             .aspectRatio(1, contentMode: .fit)

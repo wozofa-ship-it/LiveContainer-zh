@@ -535,7 +535,7 @@ struct LCSourcesView: View {
     // 源页网格模式（3.8.407）：默认 false=原来列表；列数/图标
     // 大小复用 App 页同一套 @AppStorage 键，两处同改同生效。
     @AppStorage("CZFSourceListGridMode") private var czfSourceGridMode = false
-    @AppStorage("CZFAppGridColumns") private var czfSourceGridColumns = 4
+    @AppStorage("CZFAppGridColumns") private var czfSourceGridColumns = 5
     @AppStorage("CZFAppGridIconSize") private var czfSourceGridIconSize = 0
     @State private var czfSourceGridSettingsShow = false
     // 可更新数量写到这里，底部「源」标签上显示红点数字
@@ -690,8 +690,13 @@ struct LCSourcesView: View {
             }
             // 大标题改内联（3.8.420）：与 App 页同款，标题收进顶栏
             // 一行，页面更紧凑，顶栏不留大片空白。
+            // 顶栏改实底（3.8.422，建议第 1 条）：与 App 页同款，
+            // 导航栏背景改不透明，内容往上滑不从玻璃顶栏/搜索栏
+            // 下面透出来，顶部干净。
             .navigationTitle("lc.tabView.sources".loc)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if viewModel.isRefreshingAll {
@@ -800,7 +805,7 @@ struct LCSourcesView: View {
                 )
             }
         }
-        .searchable(text: $searchContext.query, placement: .navigationBarDrawer(displayMode: .always))
+        .searchable(text: $searchContext.query)
 
         .onAppear {
             refreshUpdatableCache()

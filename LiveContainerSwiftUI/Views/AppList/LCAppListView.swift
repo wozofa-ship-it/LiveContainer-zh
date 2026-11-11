@@ -630,7 +630,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 网格模式（3.8.406）：标准 UserDefaults。默认网格，
     // 列数默认 4，图标大小默认 0=大（1=中，2=小）。
     @AppStorage("CZFAppListGridMode") private var czfGridMode = true
-    @AppStorage("CZFAppGridColumns") private var czfGridColumns = 4
+    @AppStorage("CZFAppGridColumns") private var czfGridColumns = 5
     @AppStorage("CZFAppGridIconSize") private var czfGridIconSize = 0
     @State private var czfGridSettingsShow = false
     // 自定义背景（3.8.413）：版本号与网格设置页共用，选图/清除时 +1；
@@ -1419,8 +1419,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // （用户 20:11 截图：工具栏和搜索栏之间一大片空白，
             // 大标题“我的 App”没露出来，白占地方），改内联后标题
             // 收进顶栏一行，搜索栏上移，页面更紧凑。
+            // 顶栏改实底（3.8.422，建议第 1 条）：导航栏背景改不透明，
+            // 内容往上滑不从玻璃顶栏/搜索栏下面透出来（糊成一片、
+            // 看着“显示不全”），顶部干净。
             .navigationTitle("lc.appList.myApps".loc)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
             .toolbar { appListToolbar }
         }
         // 新4（3.8.277）：批量操作底栏——多选模式时才出现。备份/
