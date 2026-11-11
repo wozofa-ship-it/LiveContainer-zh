@@ -1304,9 +1304,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 hiddenCount: sharedModel.hiddenApps.count,
                 darkModeIcon: darkModeIcon,
                 batchMode: batchMode,
-                isSearching: !searchContext.debouncedQuery.isEmpty,
                 columns: czfGridColumns,
                 iconSize: czfGridIconSize,
+                isSearching: !searchContext.debouncedQuery.isEmpty,
                 actions: CZFAppGridActions(
                     isBatchSelected: { app in self.isBatchSelected(app) },
                     onToggleBatchSelection: { app in self.toggleBatchSelection(app) },
