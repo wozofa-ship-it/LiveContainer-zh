@@ -117,6 +117,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 并置这个标记，等 sheet 的 onDismiss 回调里再弹选择器；
     // 同一代码块里 sheet=false + picker=true 时选择器可能弹不出。
     @State private var czfIpaFolderChangeRequested = false
+    // 3.8.429 文件夹选完没反应标记：选完文件夹后等 picker 关完
+    // 再弹 IPA 网格 sheet（见下面 betterFolderImporter 的
+    // onDismiss）；回调里直接 sheet=true 时 picker 还在上面，
+    // sheet 会被 UIKit 静默吞掉、选完什么都不出。
+    @State private var czfIpaFolderPicked = false
     // 长按标记（3.8.426）：文件夹按钮长按=选文件夹、点按=
     // 显示 IPA 网格。长按松手时 Button 的 action 也会触发，
     // 用这个标记拦住，不让长按后又弹一次网格。
@@ -1811,9 +1816,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .betterFolderImporter(isPresented: $czfIpaFolderPickerShow, callback: { folderURL in
             czfSaveIpaFolder(folderURL)
             czfIpaFolderURL = folderURL
-            czfIpaFolderSheetShow = true
+            // 3.8.429 选完没反应：回调里直接 czfIpaFolderSheetShow
+            // = true 时 picker 还没关，sheet 会被 UIKit 静默吞掉
+            //（present 时已有控制器在上面）。只记 URL + 置标记，
+            // 等下面的 onDismiss（picker 关完）再弹 sheet。
+            czfIpaFolderPicked = true
         }, onDismiss: {
             czfIpaFolderPickerShow = false
+            // 3.8.429：picker 关完再弹 sheet；再往下一帧推，
+            // 等 picker 的 dismiss 走完，sheet 才不会被吞。
+            if czfIpaFolderPicked {
+                czfIpaFolderPicked = false
+                DispatchQueue.main.async {
+                    czfIpaFolderSheetShow = true
+                }
+            }
         })
         .sheet(isPresented: $czfIpaFolderSheetShow, onDismiss: {
             // 3.8.428 安装#4：换文件夹——等 sheet 关完再弹选择器；
