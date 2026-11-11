@@ -610,6 +610,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
+    // 网格模式（3.8.406）：标准 UserDefaults。默认网格，
+    // 列数默认 4，图标大小默认 0=大（1=中，2=小）。
+    @AppStorage("CZFAppListGridMode") private var czfGridMode = true
+    @AppStorage("CZFAppGridColumns") private var czfGridColumns = 4
+    @AppStorage("CZFAppGridIconSize") private var czfGridIconSize = 0
+    @State private var czfGridSettingsShow = false
     
     @State private var isViewAppeared = false
     
@@ -1000,119 +1006,362 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         _installOptions = State(initialValue: [])
     }
     
+    // 浏览器式搜索快捷行（2026-10-24 用户定）：列表与网格共用——
+    // 输入像网址就把网址放最上面点开直达，其他输入给一行网上搜索。
+    @ViewBuilder
+    private var czfSearchShortcutRows: some View {
+        // 浏览器式搜索行：有输入时才出现，网址放最上面
+        // 3.8.322 液体化繁为简：提示行圆角 16→22，与 App
+        // 横幅行同圆角；计数行灰色走 .secondary，与行下
+        // 备份状态小字同色。底栏固定铬走玻璃（见下）。
+        if !czfSearchText.isEmpty {
+            if let url = czfSearchURL {
+                Button {
+                    Task { await openWebView(urlString: url.absoluteString) }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "globe")
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("打开网址")
+                                .font(.headline)
+                            Text(url.absoluteString)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(10)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 22))
+                }
+                .buttonStyle(.plain)
+            }
+            Button {
+                if let url = czfSearchWebURL {
+                    Task { await openWebView(urlString: url.absoluteString) }
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.title3)
+                    Text("在网上搜索“\(czfSearchText)”")
+                        .font(.headline)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundColor(.secondary)
+                }
+                .padding(10)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 22))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // 原来的列表内容（body 里 ScrollView 的旧内容，原样抽出，
+    // 一行未改，只换了缩进；搜索快捷行走上面共用的那份）。
+    @ViewBuilder
+    private var czfListContent: some View {
+            NavigationLink(
+                destination: navigateTo,
+                isActive: $isNavigationActive,
+                label: {
+                    EmptyView()
+            })
+            .hidden()
+
+            LazyVStack {
+                czfSearchShortcutRows
+                ForEach(filteredApps, id: \.self) { app in
+                    appRow(for: app)
+                }
+                .transition(.scale)
+            }
+            .padding()
+            .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredApps)
+
+            VStack {
+                // 隐藏区（3.8.280）：没人脸识别 = 只留一个 App 行高的
+                // 空白，连“隐藏 App”几个字都不留，不留任何“这里藏了
+                // 东西”的痕迹；长按空白处弹人脸识别，通过后 App 直接
+                // 显示在列表里，不带标题。严格/非严格开关不再管列表
+                // 显示（只剩 LCWebView 的链接跳转还在用它）。
+                if sharedModel.hiddenApps.count > 0 {
+                    if sharedModel.isHiddenAppUnlocked {
+                        LazyVStack {
+                            ForEach(filteredHiddenApps, id: \.self) { app in
+                                // 3.8.281：隐藏行也走 appRow——多选模式时行首
+                                // 挂勾选圈才能勾上；平时 appRow 的拖拽对隐藏
+                                // 行是死的（commitDragReorder 只认可见 App，
+                                // 拖隐藏行/往隐藏行上放都直接 no-op）。
+                                appRow(for: app)
+                            }
+                            .transition(.scale)
+                        }
+                        .padding()
+                        .transition(.opacity)
+                        .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredHiddenApps)
+                    } else {
+                        Color.clear
+                            .frame(height: LCAppBannerRootView.bannerHeight)
+                            .contentShape(Rectangle())
+                            .onLongPressGesture {
+                                Task { await authenticateUser() }
+                            }
+                    }
+                }
+
+                let appCount = sharedModel.isHiddenAppUnlocked ? filteredApps.count + filteredHiddenApps.count : filteredApps.count
+                Text(appCount > 0 || searchContext.debouncedQuery != "" ? "lc.appList.appCounter %lld".localizeWithFormat(appCount) : (sharedModel.multiLCStatus == 2 ? "lc.appList.convertToSharedToShowInLC2".loc : "lc.appList.installTip".loc))
+                    .padding(.horizontal)
+                    .foregroundStyle(.secondary)
+                    .animation(searchContext.isTyping ? nil : .easeInOut, value: appCount)
+                    .onTapGesture(count: 3) {
+                        Task { await authenticateUser() }
+                    }
+            }.animation(searchContext.isTyping ? nil : .easeInOut, value: LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding"))
+
+            if sharedModel.multiLCStatus == 2 {
+                Text("lc.appList.manageInPrimaryTip".loc).foregroundStyle(.secondary).padding()
+            }
+    }
+
+    // 网格模式计数行文案：与列表计数行同一条表达式、同一文案。
+    private var czfGridCounterText: String {
+        let appCount = sharedModel.isHiddenAppUnlocked ? filteredApps.count + filteredHiddenApps.count : filteredApps.count
+        if appCount > 0 || searchContext.debouncedQuery != "" {
+            return "lc.appList.appCounter %lld".localizeWithFormat(appCount)
+        }
+        return sharedModel.multiLCStatus == 2 ? "lc.appList.convertToSharedToShowInLC2".loc : "lc.appList.installTip".loc
+    }
+
+    // 网格模式内容（自上而下）：搜索快捷行 / 恢复原生 + 网格设置 /
+    // LazyVGrid（CZFAppGridView）/ 底部居中计数行。搜索栏沿用系统
+    // .searchable，不另画搜索框；拖拽重排不挂（只在列表无搜索时
+    // 才有意义）；滚动位置与列表不共享。
+    @ViewBuilder
+    private var czfGridContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            czfSearchShortcutRows
+            HStack {
+                Button {
+                    czfGridMode = false
+                } label: {
+                    Label("恢复原生", systemImage: "arrow.uturn.left")
+                }
+                Spacer()
+                Button {
+                    czfGridSettingsShow = true
+                } label: {
+                    Label("网格设置", systemImage: "slider.horizontal.3")
+                }
+            }
+            .foregroundColor(.blue)
+            CZFAppGridView(
+                apps: filteredApps,
+                hiddenApps: filteredHiddenApps,
+                hiddenUnlocked: sharedModel.isHiddenAppUnlocked,
+                hiddenCount: sharedModel.hiddenApps.count,
+                darkModeIcon: darkModeIcon,
+                batchMode: batchMode,
+                columns: czfGridColumns,
+                iconSize: czfGridIconSize,
+                actions: CZFAppGridActions(
+                    isBatchSelected: { app in self.isBatchSelected(app) },
+                    onToggleBatchSelection: { app in self.toggleBatchSelection(app) },
+                    onLaunch: { app in
+                        self.czfGridLaunch(app: app)
+                    },
+                    onLaunchMultitask: { app in self.czfGridLaunchMultitask(app: app) },
+                    onOpenSettings: { app in self.openNavigationView(view: AnyView(LCAppSettingsView(model: app))) }
+                ),
+                onRemoveApp: { app in self.removeApp(app: app) },
+                onAuthenticateHidden: { Task { await self.authenticateUser() } },
+                promptForGeneratedIconStyle: { await self.promptForGeneratedIconStyle() },
+                installMdm: { data in self.installMdm(data: data) }
+            )
+            Text(czfGridCounterText)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .foregroundStyle(.secondary)
+                .animation(searchContext.isTyping ? nil : .easeInOut, value: czfGridCounterText)
+            if sharedModel.multiLCStatus == 2 {
+                Text("lc.appList.manageInPrimaryTip".loc)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+        }
+        .padding()
+    }
+
+    // 网格长按菜单里的多任务启动（banner runApp(multitask:) 同款，
+    // 锁屏认证走列表的 launchAppWithBundleId 同款逻辑）：
+    // 锁了先人脸，过了再按反向偏好起（多任务↔直接）。
+    private func czfGridLaunchMultitask(app: LCAppModel) {
+        Task {
+            if app.appInfo.isLocked && !sharedModel.isHiddenAppUnlocked {
+                do {
+                    guard try await LCUtils.authenticateUser() else { return }
+                } catch {
+                    errorInfo = error.localizedDescription
+                    errorShow = true
+                    return
+                }
+            }
+            do {
+                try await app.runApp(multitask: !app.shouldLaunchInMultitaskMode)
+            } catch {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
+        }
+    }
+
+    // 网格点图标启动（banner runButtonTapped 同款语义，3.8.406）：
+    // 点已在运行的 App 不能走 runApp 空转（LCAppModel.runApp 开头
+    // 就是 isAppRunning 就 return）——先按实例 UUID 在 dock 里找
+    // 条目、验相对路径归属，带回并拉满；没带回才是新起：记启动偏好
+    // .large、走 launchAppWithBundleId（锁屏认证路径不变）、起完
+    // 轮询拉满。长按守卫是 banner 按钮独有的，网格不要。
+    private func czfGridLaunch(app: LCAppModel) {
+        if #available(iOS 16.0, *),
+           let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID {
+            let dockManager = MultitaskDockManager.shared
+            if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
+                let belongsToOther: Bool
+                if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                    belongsToOther = runningPath != app.appInfo.relativeBundlePath
+                } else {
+                    belongsToOther = true
+                }
+                if !belongsToOther {
+                    var brought = false
+                    if #available(iOS 16.1, *) {
+                        brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
+                    }
+                    if !brought {
+                        brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
+                    }
+                    // 带回成功拉满；带回失败但条目还在且不是本次
+                    // C4 清掉的死窗（窗已在前台、只是 bring 没抬动）
+                    // 同样拉满，别再静默空转回小窗。
+                    let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == uuid
+                    let entryGone = !dockManager.apps.contains(where: { $0.appUUID == uuid })
+                    if brought || (!cleanedByC4 && !entryGone) {
+                        // maximizeWindow 是切换式，先判 !isMaximized，
+                        // 否则已是最大窗会被反切回小窗。
+                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
+                           !vc.isMaximized {
+                            vc.maximizeWindow()
+                        }
+                        return
+                    }
+                }
+            } else {
+                // 没有 dock 条目（原生窗口模式等）：保留旧行为，
+                // 只带回不拉满（没 decorated VC 可拉），带回失败
+                // 再落到新起。
+                var brought = false
+                if #available(iOS 16.1, *) {
+                    brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
+                }
+                if !brought {
+                    brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
+                }
+                if brought {
+                    return
+                }
+            }
+        }
+
+        Task {
+            Self.czfSetLastLaunchMode(.large, for: app)
+            await self.launchAppWithBundleId(bundleId: app.appInfo.relativeBundlePath ?? "", container: nil)
+            // 新开路拉满（banner pollAndMaximizeFreshWindow 同款）：
+            // uuid 在起完再取——无容器的 App 首启时 runApp 会新建
+            // 容器并改 dataUUID（LCAppModel.runApp:402–436），起前取的
+            // 是旧值，轮询永远找不到新窗；banner 的轮询是每 tick
+            // 重取，这里起完取一次等价（轮询 6 秒内选中不再变）。
+            await MainActor.run {
+                if #available(iOS 16.0, *),
+                   let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID {
+                    Self.czfPollAndMaximizeFreshWindow(uuid: uuid, expectedPath: app.appInfo.relativeBundlePath)
+                }
+            }
+        }
+    }
+
+    // 启动偏好记忆（banner setLastLaunchMode 同款 5 行）：键
+    // LCAppLastLaunchMode：[唯一 ID: "large"/"small"/"minimized"]，
+    // 存 App Group。启动一律记 .large（用户亲定：启动=大窗）。
+    private static let czfGridLastLaunchModeKey = "LCAppLastLaunchMode"
+
+    private enum CZFGridLaunchMode: String {
+        case large, small, minimized
+    }
+
+    private static func czfSetLastLaunchMode(_ mode: CZFGridLaunchMode, for model: LCAppModel) {
+        guard let id = LCAppSortManager.shared.getUniqueIdentifier(for: model) else { return }
+        var dict = LCUtils.appGroupUserDefault.dictionary(forKey: czfGridLastLaunchModeKey) as? [String: String] ?? [:]
+        dict[id] = mode.rawValue
+        LCUtils.appGroupUserDefault.set(dict, forKey: czfGridLastLaunchModeKey)
+        LCDataManagementView.writeCZFSettingsBackupDebounced()
+    }
+
+    // 启动新开路拉满（banner pollAndMaximizeFreshWindow 同款）：
+    // runApp 起完新窗可能还没进 dock（签名耗时），0.1 秒×60 次
+    // 轮询等它出现；归属按路径验，别人的窗口占着 uuid 就停表
+    // 不碰；vc 没就绪继续等；拉满或 60 次后停表。
+    // 静态方法：不捕获 struct 的 self——Timer 闭包是逃逸闭包，
+    // 但 LCAppListView 是 struct，[weak self] 编不过（weak 只
+    // 能用于 class，见 3.8.277 构建 #42013239934）；静态方法只
+    // 捕获 uuid/expectedPath/attempts 三个值，无循环引用。
+    @available(iOS 16.0, *)
+    private static func czfPollAndMaximizeFreshWindow(uuid: String, expectedPath: String?) {
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            attempts += 1
+            guard let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
+                if attempts >= 60 {
+                    timer.invalidate()
+                }
+                return
+            }
+            let owned: Bool
+            if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+                owned = runningPath == expectedPath
+            } else {
+                owned = false
+            }
+            if !owned {
+                timer.invalidate()
+                return
+            }
+            guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
+                if attempts >= 60 {
+                    timer.invalidate()
+                }
+                return
+            }
+            if !vc.isMaximized {
+                vc.maximizeWindow()
+            }
+            if vc.isMaximized || attempts >= 60 {
+                timer.invalidate()
+            }
+        }
+    }
+
     var body: some View {
         NavigationView {
             ScrollView {
-                NavigationLink(
-                    destination: navigateTo,
-                    isActive: $isNavigationActive,
-                    label: {
-                        EmptyView()
-                })
-                .hidden()
-                
-                LazyVStack {
-                    // 浏览器式搜索行：有输入时才出现，网址放最上面
-                    // 3.8.322 液体化繁为简：提示行圆角 16→22，与 App
-                    // 横幅行同圆角；计数行灰色走 .secondary，与行下
-                    // 备份状态小字同色。底栏固定铬走玻璃（见下）。
-                    if !czfSearchText.isEmpty {
-                        if let url = czfSearchURL {
-                            Button {
-                                Task { await openWebView(urlString: url.absoluteString) }
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: "globe")
-                                        .font(.title3)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("打开网址")
-                                            .font(.headline)
-                                        Text(url.absoluteString)
-                                            .font(.subheadline)
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(10)
-                                .background(Color(.secondarySystemBackground))
-                                .clipShape(RoundedRectangle(cornerRadius: 22))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Button {
-                            if let url = czfSearchWebURL {
-                                Task { await openWebView(urlString: url.absoluteString) }
-                            }
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "magnifyingglass")
-                                    .font(.title3)
-                                Text("在网上搜索“\(czfSearchText)”")
-                                    .font(.headline)
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(10)
-                            .background(Color(.secondarySystemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 22))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    ForEach(filteredApps, id: \.self) { app in
-                        appRow(for: app)
-                    }
-                    .transition(.scale)
-                }
-                .padding()
-                .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredApps)
-
-                VStack {
-                    // 隐藏区（3.8.280）：没人脸识别 = 只留一个 App 行高的
-                    // 空白，连“隐藏 App”几个字都不留，不留任何“这里藏了
-                    // 东西”的痕迹；长按空白处弹人脸识别，通过后 App 直接
-                    // 显示在列表里，不带标题。严格/非严格开关不再管列表
-                    // 显示（只剩 LCWebView 的链接跳转还在用它）。
-                    if sharedModel.hiddenApps.count > 0 {
-                        if sharedModel.isHiddenAppUnlocked {
-                            LazyVStack {
-                                ForEach(filteredHiddenApps, id: \.self) { app in
-                                    // 3.8.281：隐藏行也走 appRow——多选模式时行首
-                                    // 挂勾选圈才能勾上；平时 appRow 的拖拽对隐藏
-                                    // 行是死的（commitDragReorder 只认可见 App，
-                                    // 拖隐藏行/往隐藏行上放都直接 no-op）。
-                                    appRow(for: app)
-                                }
-                                .transition(.scale)
-                            }
-                            .padding()
-                            .transition(.opacity)
-                            .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredHiddenApps)
-                        } else {
-                            Color.clear
-                                .frame(height: LCAppBannerRootView.bannerHeight)
-                                .contentShape(Rectangle())
-                                .onLongPressGesture {
-                                    Task { await authenticateUser() }
-                                }
-                        }
-                    }
-
-                    let appCount = sharedModel.isHiddenAppUnlocked ? filteredApps.count + filteredHiddenApps.count : filteredApps.count
-                    Text(appCount > 0 || searchContext.debouncedQuery != "" ? "lc.appList.appCounter %lld".localizeWithFormat(appCount) : (sharedModel.multiLCStatus == 2 ? "lc.appList.convertToSharedToShowInLC2".loc : "lc.appList.installTip".loc))
-                        .padding(.horizontal)
-                        .foregroundStyle(.secondary)
-                        .animation(searchContext.isTyping ? nil : .easeInOut, value: appCount)
-                        .onTapGesture(count: 3) {
-                            Task { await authenticateUser() }
-                        }
-                }.animation(searchContext.isTyping ? nil : .easeInOut, value: LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding"))
-
-                if sharedModel.multiLCStatus == 2 {
-                    Text("lc.appList.manageInPrimaryTip".loc).foregroundStyle(.secondary).padding()
+                if czfGridMode {
+                    czfGridContent
+                } else {
+                    czfListContent
                 }
 
             }
@@ -1513,6 +1762,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         .searchable(text: $searchContext.query)
+        .sheet(isPresented: $czfGridSettingsShow) {
+            CZFAppGridSettingsView(columns: $czfGridColumns, iconSize: $czfGridIconSize, gridMode: $czfGridMode)
+        }
 
     }
     
