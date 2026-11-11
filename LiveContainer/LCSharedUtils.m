@@ -59,7 +59,17 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
     dispatch_once(&once, ^{
         NSArray* possibleAppGroups = @[
             [@"group.com.SideStore.SideStore." stringByAppendingString:[self teamIdentifier]],
-            [@"group.com.rileytestut.AltStore." stringByAppendingString:[self teamIdentifier]]
+            [@"group.com.rileytestut.AltStore." stringByAppendingString:[self teamIdentifier]],
+            // 3.8.411：Release 的 entitlements 是不带团队后缀的
+            // （Global.xcconfig 里 DEVELOPMENT_TEAM_SUFFIX[Release]
+            // 为空，APP_GROUP_* = group.com.*.SideStore/AltStore），
+            // 只试带后缀的两组永远命中不了，全靠后面 SecTask 读
+            // entitlement 兜底；扩展进程里 SecTask 一旦拿不到，
+            // App Group 就解析成 Unknown，收件箱写不进、分享
+            // 就死在这。把不带后缀的两组也放进候选，entitlements
+            // 是哪种就命中哪种，不再只依赖 SecTask 兜底。
+            @"group.com.SideStore.SideStore",
+            @"group.com.rileytestut.AltStore"
         ];
         
         // we prefer app groups with "Apps" in it, which indicate this app group is actually used by the store.

@@ -4017,7 +4017,13 @@ struct SourcesPanelView: View {
     // 上没有）才走老路 deepLink，保证不丢路由。
     private func openSettingsPage(_ page: String) {
         if let czfPage = CZFSettingsPage(rawValue: page) {
-            closePanel()
+            // 3.8.411：先开 sheet 再说，别先关面板——closePanel()
+            // 会把面板 host.view 藏掉（isHidden = true），而本
+            // sheet 就挂在面板的 view 上，关面板再开 sheet 是
+            // 在正在消失的 view 上弹 sheet，SwiftUI 静默丢掉，
+            // 点“备份全部”什么都不出（用户 11-08 起反复报的
+            // 备份没弹窗，根因就在这）。sheet 是模态全屏，盖
+            // 住面板，不用先关；关 sheet 后面板还在，正好接着点。
             czfDirectDataPage = czfPage
             return
         }
