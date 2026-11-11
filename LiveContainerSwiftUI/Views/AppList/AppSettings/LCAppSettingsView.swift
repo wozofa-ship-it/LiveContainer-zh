@@ -36,6 +36,9 @@ struct LCAppSettingsView: View {
     
     @State private var errorShow = false
     @State private var errorInfo = ""
+    // #13：隐藏确认框；#18：语言列表加载失败态
+    @State private var hideConfirmShow = false
+    @State private var languageLoadFailed = false
     // 修复区默认折叠（平时不常用，页面先短一截）
     @State private var fixesExpanded = false
     @State private var selectUnusedContainerSheetShow = false
@@ -323,11 +326,28 @@ struct LCAppSettingsView: View {
             
             Section {
                 List{
+                    if model.uiContainers.isEmpty {
+                        Text("暂无数据文件夹，可新建一个。")
+                            .foregroundStyle(.secondary)
+                    }
                     ForEach(model.uiContainers.indices, id:\.self) { i in
                         NavigationLink {
                             LCContainerView(container: model.uiContainers[i], uiDefaultDataFolder: $model.uiDefaultDataFolder, delegate: self)
                         } label: {
-                            Text(model.uiContainers[i].name)
+                            HStack {
+                                Text(model.uiContainers[i].name)
+                                Spacer()
+                                if model.uiContainers[i].folderName == model.uiDefaultDataFolder {
+                                    Text("默认")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if model.uiSelectedContainer?.folderName == model.uiContainers[i].folderName {
+                                    Text("当前")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
                 }
@@ -436,6 +456,10 @@ struct LCAppSettingsView: View {
                             Text("lc.appSettings.selected32BitEmulator".loc)
                         }
                     }
+                    // #16：单 App 优先于全局（LCBootstrap.m:636 先读单 App 的值）
+                    Text("单 App 设置优先于全局设置")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             } footer: {
                     if #available(iOS 26.0, *), model.uiIsJITNeeded {
@@ -458,16 +482,26 @@ struct LCAppSettingsView: View {
                 })
 
                 if model.uiIsLocked {
-                    Toggle(isOn: $model.uiIsHidden) {
+                    // #13：拨开先弹确认（说明隐藏后返回列表），确认才
+                    // 调 toggleHidden（它会关页面）；取消则什么都不做。
+                    // 直接绑 $model.uiIsHidden + onChange 会在拨开瞬间
+                    // 就关页面，看起来像闪退，所以用自定义 Binding 拦截。
+                    Toggle(isOn: Binding(
+                        get: { model.uiIsHidden },
+                        set: { newValue in
+                            if newValue {
+                                hideConfirmShow = true
+                            } else {
+                                Task { await toggleHidden() }
+                            }
+                        }
+                    )) {
                         HStack {
                             LCSettingsIcon(systemName: "eye.slash.fill", color: .gray)
                             Text("lc.appSettings.hideApp".loc)
                         }
                     }
-                    .onChange(of: model.uiIsHidden, perform: { _ in
-                        Task { await toggleHidden() }
-                    })
-                    .transition(.opacity.combined(with: .slide)) 
+                    .transition(.opacity.combined(with: .slide))
                 }
             } footer: {
                 if model.uiIsLocked {
@@ -516,6 +550,16 @@ struct LCAppSettingsView: View {
                             .pickerStyle(.inline)
                         }
 
+                    } else if languageLoadFailed {
+                        // #18：加载失败不在这里只显示“加载中”，给错误加重试
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("语言列表加载失败")
+                                .foregroundStyle(.secondary)
+                            Button("重试") {
+                                languageLoadFailed = false
+                                Task { loadSupportedLanguages() }
+                            }
+                        }
                     } else {
                         Text("lc.common.loading".loc)
                             .onAppear() {
@@ -762,11 +806,26 @@ struct LCAppSettingsView: View {
         .navigationTitle(appInfo.displayName())
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { loadSchedMinSettings(); loadKeepAliveSetting() }
+        // #17：从后台切回前台时重读一次（别处改了同一批键后本页不再显示旧值）
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            loadSchedMinSettings()
+            loadKeepAliveSetting()
+        }
         .alert("lc.common.error".loc, isPresented: $errorShow) {
             Button("lc.common.ok".loc, action: {
             })
         } message: {
             Text(errorInfo)
+        }
+        // #13：隐藏确认框
+        .alert("lc.appSettings.hideApp".loc, isPresented: $hideConfirmShow) {
+            Button("lc.appSettings.hideApp".loc) {
+                Task { await toggleHidden() }
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {
+            }
+        } message: {
+            Text("隐藏后将返回 App 列表。")
         }
         
         .textFieldAlert(
@@ -1107,9 +1166,14 @@ struct LCAppSettingsView: View {
     func loadSupportedLanguages() {
         do {
             try model.loadSupportedLanguages()
+            languageLoadFailed = false
         } catch {
-            errorShow = true
-            errorInfo = error.localizedDescription
+            // #18：model 里失败时 supportedLanguages 已被置成 []，
+            // 不重置回 nil 的话页面会进“有语言”分支（空 Picker），
+            // 永远看不到失败态；重置后走 else if 分支显示重试。
+            // 这里不弹全局 error 弹窗，错误就显示在语言页内。
+            model.supportedLanguages = nil
+            languageLoadFailed = true
             return
         }
     }

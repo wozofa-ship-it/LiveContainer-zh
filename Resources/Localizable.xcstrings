@@ -5607,7 +5607,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请出提供一个IPA文件用于安装。"
+            "value": "请提供一个IPA文件用于安装。"
           }
         },
         "zh-Hant": {

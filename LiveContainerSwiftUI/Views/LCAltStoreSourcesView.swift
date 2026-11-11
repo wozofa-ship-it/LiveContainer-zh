@@ -539,6 +539,10 @@ struct LCSourcesView: View {
     @State private var sourcePendingRemoval: AltStoreSourcesViewModel.SourceItem?
     @ObservedObject public var searchContext: SearchContext = SearchContext()
     @State private var expandedSources: Set<URL> = []
+    // 源中 #3：上次见过的源 id 集合——onChange 里用它判断哪个
+    // 源是真正新加入的（只用 expandedSources 作基准不行：
+    // 被用户收起的旧源也不在展开集里，会被误判为新源）。
+    @State private var czfKnownSourceIDs: Set<URL> = []
     @State private var isManagingSources = false
     @State private var isBatchMode = false
     @State private var selectedIDs = Set<String>()
@@ -628,7 +632,7 @@ struct LCSourcesView: View {
                             )
                             .padding(.horizontal)
                         } else {
-                            ForEach(viewModel.sources, id: \.id) { item in
+                            ForEach(czfVisibleListSources, id: \.id) { item in
                                 let apps = filteredApps(for: item)
                                 AltStoreSourceSectionView(
                                     item: item,
@@ -845,20 +849,31 @@ struct LCSourcesView: View {
         .onAppear {
             refreshUpdatableCache()
             autoRefreshSourcesIfNeeded()
-            // 默认自动展开所有源
-            expandedSources = Set(viewModel.sources.map { $0.id })
+            // 设置 #22：只在首次出现时全展开，之后切 Tab 回源页
+            // 保留 expandedSources，不再无条件全展开。原来这行
+            // 写在 isViewAppeared 守卫之外，每次出现都全展开；
+            // 且 isViewAppeared 原来只在有 deepLink 时才置真，
+            // 无深链时永远 false、首次判断也失效——这里首次出
+            // 现时先置真，deepLink 只在首次出现时处理一次。
             if !isViewAppeared {
+                expandedSources = Set(viewModel.sources.map { $0.id })
+                czfKnownSourceIDs = Set(viewModel.sources.map { $0.id })
+                isViewAppeared = true
                 guard sharedModel.selectedTab == .sources, let link = sharedModel.deepLink else { return }
                 sharedModel.deepLink = nil
                 handleURL(url: link)
-                isViewAppeared = true
             }
         }
         .onChange(of: viewModel.sources) { newSources in
             refreshUpdatableCache()
             let newSet = Set(newSources.map { $0.id })
-            // 新加入的源自动展开，保留已有的展开状态
-            expandedSources = expandedSources.intersection(newSet).union(newSet)
+            // 源中 #3：只把真正新加入的源加进展开集——新加入 =
+            // 在新列表里、不在上次见过的源 id 里。原来
+            // intersection(newSet).union(newSet) 恒等于全部源，
+            // 收起的源一刷新就又展开。
+            let newlyAdded = newSet.subtracting(czfKnownSourceIDs)
+            expandedSources = expandedSources.intersection(newSet).union(newlyAdded)
+            czfKnownSourceIDs = newSet
         }
         .onChange(of: sharedModel.apps) { _ in
             refreshUpdatableCache()
@@ -882,6 +897,13 @@ struct LCSourcesView: View {
     
     private var isFiltering: Bool {
         !searchContext.debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // 源中 #6（列表路）：搜索中过滤掉 filteredApps 为空的源组，
+    // 不渲染空组头；非搜索时不过滤。
+    private var czfVisibleListSources: [AltStoreSourcesViewModel.SourceItem] {
+        guard isFiltering else { return viewModel.sources }
+        return viewModel.sources.filter { !filteredApps(for: $0).isEmpty }
     }
     
     private var totalFilteredAppCount: Int {
@@ -932,9 +954,13 @@ struct LCSourcesView: View {
             guard let source = item.source else { return [] }
             return source.apps.filter { selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: $0.bundleIdentifier)) }
         }
+        // 源中 #5：按 bundleIdentifier 去重，同一 App 在两个源
+        // 里只装一次（保留第一次出现的记录）。
+        var seenBundleIDs = Set<String>()
+        let dedupedApps = appsToInstall.filter { seenBundleIDs.insert($0.bundleIdentifier).inserted }
         isBatchMode = false
         selectedIDs.removeAll()
-        installBatch(appsToInstall)
+        installBatch(dedupedApps)
     }
 
     /// 批量安装一组 App（勾选批量装、「全部更新」共用）：
@@ -958,9 +984,9 @@ struct LCSourcesView: View {
                 }
                 switchedTab = true
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL, "autoReplace": true])
-            }
+            // 3.8.428 设置#25：不再发 0.5 秒延迟通知（App 页若未出现会丢），
+            // 改写入共享待装队列，App 页 onAppear 时排空进安装队列。
+            CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: true, preview: false, forceAsNew: false))
         }
     }
 
@@ -1009,9 +1035,8 @@ struct LCSourcesView: View {
         withAnimation {
             DataManager.shared.model.selectedTab = .apps
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL, "preview": true])
-        }
+        // 3.8.428 设置#25：改写入共享待装队列（见批量处注释），App 页 onAppear 时排空。
+        CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: false))
 
 
     }
@@ -1032,9 +1057,8 @@ struct LCSourcesView: View {
         withAnimation {
             DataManager.shared.model.selectedTab = .apps
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL, "preview": true, "forceAsNew": true])
-        }
+        // 3.8.428 设置#25：改写入共享待装队列（见批量处注释），App 页 onAppear 时排空。
+        CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: true))
     }
 
     @MainActor

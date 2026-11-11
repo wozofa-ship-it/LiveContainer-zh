@@ -36,6 +36,10 @@ struct CZFAppGridView: View {
     var batchMode: Bool
     var columns: Int
     var iconSize: Int
+    // 搜索中（3.8.428，设置审计 #28）：调用方传搜索是否有词；
+    // 默认 false，老调用点不传也能编；有词时空态不显示安装提示。
+    // LCAppListView 接线：isSearching: searchContext.debouncedQuery != ""
+    var isSearching: Bool = false
     var actions: CZFAppGridActions
     var onRemoveApp: (LCAppModel) -> Void
     var onAuthenticateHidden: () -> Void
@@ -149,6 +153,16 @@ struct CZFAppGridView: View {
                 }
             }
         }
+        // 空态（3.8.428，设置审计 #28 / App 页 #2）：网格 0 个 App
+        // 时原来只有搜索行、页面全空白；补列表模式同一句安装提示
+        //（LCAppListView.swift:1182）。可见为空 = 可见 App 为空，
+        // 且隐藏 App 未解锁或也为空；搜索有词时不显示。
+        if apps.isEmpty && (!hiddenUnlocked || hiddenApps.isEmpty) && !isSearching {
+            Text("lc.appList.installTip".loc)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 24)
+        }
         // 未解锁时保留原来的透明长按区（人脸识别唤起），不要删。
         if hiddenCount > 0 && !hiddenUnlocked {
             Color.clear
@@ -185,6 +199,40 @@ struct CZFAppGridView: View {
     }
 }
 
+// 格子点按手势（3.8.428，设置审计 #32 / App 页 #5）：批量与
+// 非批量要挂的手势类型不同（普通单击 vs 双击优先），用具名
+// ViewModifier 包一层分支——.gesture 一行只能是一种手势类型，
+// 本仓零用法的 AnyGesture 不用。非批量保留双击优先（双击进
+// 设置、单击启动）；批量只挂普通单击，直接勾选、不等双击超时。
+private struct CZFAppGridTapGesture: ViewModifier {
+    var batchMode: Bool
+    var app: LCAppModel
+    var actions: CZFAppGridActions
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if batchMode {
+            content.gesture(
+                TapGesture(count: 1)
+                    .onEnded {
+                        actions.onToggleBatchSelection(app)
+                    }
+            )
+        } else {
+            content.gesture(
+                TapGesture(count: 2)
+                    .onEnded {
+                        actions.onOpenSettings(app)
+                    }
+                    .exclusively(before: TapGesture(count: 1)
+                        .onEnded {
+                            actions.onLaunch(app)
+                        })
+            )
+        }
+    }
+}
+
 // 网格单元：大图标 + 下方单行名字。图标取法照抄 banner
 //（LCAppBannerView.update：appInfo.iconIsDarkIcon(darkModeIcon)）。
 // GeometryReader + aspectRatio(1) 让图标区成正方形，图标宽 =
@@ -197,6 +245,9 @@ struct CZFAppGridCell: View {
     var actions: CZFAppGridActions
 
     @State private var czfCellError: String?
+    // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、
+    // 深色黑晕影（源格子 CZFSourceGridView.swift:316 同款）。
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 6) {
@@ -204,27 +255,51 @@ struct CZFAppGridCell: View {
                 // 图标边长不小于 44，但不许超出单元格宽（小屏格子不足 44pt
                 // 时原 max 会盖住相邻格子）；iconFactor 逻辑不动。
                 let side = min(max(geo.size.width * iconFactor, 44), geo.size.width)
-                IconImageView(icon: app.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage())
+                // 图标缺失占位（3.8.428，设置审计 #29）：图标取不到
+                // 或为空图时，原 ?? UIImage() 是一张 0 尺寸空图，
+                // 格子只剩名字；改显示与源格子同款灰底占位
+                //（SourceIconView.placeholder：systemGray5 底 +
+                // app.fill glyph），灰底铺满整个图标框。
+                if let icon = app.appInfo.iconIsDarkIcon(darkModeIcon),
+                   icon.size.width > 0, icon.size.height > 0 {
+                    IconImageView(icon: icon)
+                        .frame(width: side, height: side)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        // 图标淡底影（3.8.422，建议第 2 条）：与源格子同款，
+                        // 很淡的一层黑影（opacity 0.15），只把图标从亮背景
+                        // 上托出来一点；不是 418 撤掉的那种卡片底。
+                        .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                } else {
+                    ZStack {
+                        Color(uiColor: .systemGray5)
+                        Image(systemName: "app.fill")
+                            .resizable()
+                            .scaledToFit()
+                            .padding(12)
+                            .foregroundStyle(.secondary)
+                    }
                     .frame(width: side, height: side)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    // 图标淡底影（3.8.422，建议第 2 条）：与源格子同款，
-                    // 很淡的一层黑影（opacity 0.15），只把图标从亮背景
-                    // 上托出来一点；不是 418 撤掉的那种卡片底。
                     .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
             }
             .aspectRatio(1, contentMode: .fit)
             Text(app.displayName)
                 // 名字（3.8.421，建议第 3、4 条）：长名字自动缩小
-                // （minimumScaleFactor 0.7），超长名缩到两行内显示全，
-                // 不再截断；白晕影加粗（opacity 0.85→0.95、radius 3→4），
-                // 黑字压在深色背景图上也能读。与源格子同款。
+                // （minimumScaleFactor 0.7），最多两行、超长仍截断
+                // 加省略号（3.8.428，设置审计 #30：旧注释写“缩到
+                // 两行内显示全、不再截断”，与 .lineLimit(2) 矛盾，
+                // 只改注释、行数行为不动）；晕影按深浅模式换色
+                //（3.8.428，设置审计 #37：源格子同款，深色黑晕影、
+                // 浅色白晕影），黑字压在深色背景图上也能读。
                 .font(.footnote)
                 .lineLimit(2)
                 .minimumScaleFactor(0.7)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
-                .shadow(color: .white.opacity(0.95), radius: 4, x: 0, y: 0)
+                .shadow(color: colorScheme == .dark ? .black.opacity(0.95) : .white.opacity(0.95), radius: 4, x: 0, y: 0)
         }
         // 去阴影（3.8.418）：417 刚加的 AppBannerBG 卡片底撤掉——
         // 卡片在白底上看着像一层阴影，用户 19:09 报“源有阴影”。
@@ -241,27 +316,12 @@ struct CZFAppGridCell: View {
             actions.onLaunch(app)
         }
         // 单双击（3.8.419）：跟列表 banner 原来一样——单击启动、
-        // 双击进设置。双击优先（exclusively），双击成功时单击
-        // 不触发；单击会等双击超时（约 0.3 秒）再启动，是双击
-        // 必然的代价。批量模式下双击也只算一次勾选。
-        .gesture(
-            TapGesture(count: 2)
-                .onEnded {
-                    if batchMode {
-                        actions.onToggleBatchSelection(app)
-                    } else {
-                        actions.onOpenSettings(app)
-                    }
-                }
-                .exclusively(before: TapGesture(count: 1)
-                    .onEnded {
-                        if batchMode {
-                            actions.onToggleBatchSelection(app)
-                        } else {
-                            actions.onLaunch(app)
-                        }
-                    })
-        )
+        // 双击进设置。批量模式下改普通单击直接勾选，不要双击识别
+        //（3.8.428，设置审计 #32 / App 页 #5：原来批量也走双击优先，
+        // 单击要等约 0.3 秒双击超时才勾选）；手势分支见下
+        // CZFAppGridTapGesture，VoiceOver 的 accessibilityAction
+        // 调 onLaunch 不动（427 U8）。
+        .modifier(CZFAppGridTapGesture(batchMode: batchMode, app: app, actions: actions))
         .overlay(alignment: .topTrailing) {
             if batchMode {
                 Image(systemName: actions.isBatchSelected(app) ? "checkmark.circle.fill" : "circle")
@@ -462,6 +522,9 @@ struct CZFAppGridSettingsView: View {
     @AppStorage(CZFAppBackground.versionKey) private var backgroundVersion = 0
     @State private var showBackgroundPicker = false
     @State private var backgroundThumb: UIImage?
+    // 自定义排序页（3.8.428，App 页 #6）：网格没有拖拽排序，
+    // 从设置页进；与 LCAppListView 的排序菜单同款 sheet。
+    @State private var showCustomSort = false
 
     var body: some View {
         NavigationView {
@@ -475,6 +538,19 @@ struct CZFAppGridSettingsView: View {
                         Text("列表模式").tag(false)
                     }
                     .pickerStyle(.segmented)
+                }
+                // 排序入口（3.8.428，App 页 #6）：网格不能拖动排序
+                //（LazyVGrid 拖拽重排风险大，这批只做设置入口），
+                // 在设置页放显眼入口进自定义排序页；文案/图标照抄
+                // App 页排序菜单里的“编辑排序”项
+                //（LCAppListView.swift:606）。LCCustomSortView 保存时
+                // 自己置排序类型为自定义，与菜单入口同款。
+                Section("排序") {
+                    Button {
+                        showCustomSort = true
+                    } label: {
+                        Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
+                    }
                 }
                 Section("列数") {
                     Picker("列数", selection: $columns) {
@@ -532,6 +608,9 @@ struct CZFAppGridSettingsView: View {
                     backgroundThumb = CZFAppBackground.loadImage()
                     backgroundVersion += 1
                 }
+            }
+            .sheet(isPresented: $showCustomSort) {
+                LCCustomSortView()
             }
         }
     }

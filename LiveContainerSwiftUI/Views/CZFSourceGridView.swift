@@ -43,41 +43,24 @@ struct CZFSourceGridView: View {
         }
     }
 
+    // 源中 #6：搜索中过滤掉 filteredApps 为空的源组，不渲染
+    // 空组头；非搜索时不过滤（空源仍显示“没有 App”）。
+    private var czfVisibleItems: [AltStoreSourcesViewModel.SourceItem] {
+        guard isFiltering else { return items }
+        return items.filter { !filteredApps($0).isEmpty }
+    }
+
     var body: some View {
-        // 3.8.416：连续网格已撤回——.gridCellColumns 通栏组头
-        // 仍会在组尾留空位（组头占 5 列、塞不进上一组剩的 1 格，
-        // 只能换行，空位还在），消不掉组尾空位，反而多一路
-        // iOS 16+ 分支、徒增风险。组尾空位是分组网格的固有
-        // 形态（每组单独 LazyVGrid），与 App 资源库同款，不再
-        // 强行连续化。组头已抽成 CZFSourceGridGroupHeaderView
-        // 独立结构（两路共用，无行为变化），留着。
-        //
-        // 组头钉住已撤回（3.8.424，用户 22:19 视频报“源网格
-        // 还是有 bug，好多图标显示不全”）：421 把组头钉住置顶
-        // （pinnedViews），组头钉在顶上不动，格子往上滑就从
-        // 组头下面过、图标被组头盖住一半（视频里第一行图标
-        // 全程只露一半/全被盖掉）。钉住和图标露全不可兼得，
-        // 图标露全优先，组头改回跟着内容一起滑走，不再钉住。
+        // 3.8.428 组头横排 bug（用户 23:27 截图实证：5 个源名
+        // 挤在一行）：原来 LazyVStack + Section（组头）+ 每组
+        // LazyVGrid，Section 组头在分组网格里横向排布出问题。
+        // 改成每个源一个普通 VStack（组头 + 该源内容），彻底
+        // 不用 Section、不用 pinnedViews；每组 VStack 整行宽、
+        // 纵向堆叠。组头 material 底已撤（3.8.426）、钉住已撤
+        // （3.8.424），组头跟着内容一起滑走，不再钉住。
         LazyVStack(alignment: .leading, spacing: 16) {
-            ForEach(items, id: \.id) { item in
-                Section {
-                    CZFSourceGridGroupContentView(
-                        item: item,
-                        apps: filteredApps(item),
-                        isFiltering: isFiltering,
-                        columns: czfGridColumns,
-                        iconFactor: czfIconFactor,
-                        onRefresh: { onRefresh(item) },
-                        onInstall: onInstall,
-                        onInstallAsNew: onInstallAsNew,
-                        onDownload: onDownload,
-                        onDownloadVersion: onDownloadVersion,
-                        onRemove: { onRemove(item) },
-                        isBatchMode: isBatchMode,
-                        selectedIDs: selectedIDs,
-                        onToggleSelect: onToggleSelect
-                    )
-                } header: {
+            ForEach(czfVisibleItems, id: \.id) { item in
+                VStack(alignment: .leading, spacing: 8) {
                     CZFSourceGridGroupHeaderView(
                         item: item,
                         apps: filteredApps(item),
@@ -94,21 +77,32 @@ struct CZFSourceGridView: View {
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
-                    // 组头 material 底已撤（3.8.426，用户 23:00 报
-                    // “源还是显示不全”）：421 加的 ultraThinMaterial
-                    // 是给钉住组头准备的（图标从它下面滑过时糊一
-                    // 层、不至于生盖）。424 撤了钉住，组头跟着内
-                    // 容滑走，material 底没用了，还可能让组头看
-                    // 着像一层盖在图标上的膜。撤掉，组头回透明底。
+                    CZFSourceGridGroupContentView(
+                        item: item,
+                        apps: filteredApps(item),
+                        isFiltering: isFiltering,
+                        columns: czfGridColumns,
+                        iconFactor: czfIconFactor,
+                        onRefresh: { onRefresh(item) },
+                        onInstall: onInstall,
+                        onInstallAsNew: onInstallAsNew,
+                        onDownload: onDownload,
+                        onDownloadVersion: onDownloadVersion,
+                        onRemove: { onRemove(item) },
+                        isBatchMode: isBatchMode,
+                        selectedIDs: selectedIDs,
+                        onToggleSelect: onToggleSelect
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 }
 
-// 一个源的组头（标题推入源详情页）：独立出来，供连续网格
-// （iOS 16+ 单 LazyVGrid，组头通栏）与分组网格（iOS 15
-// 回落）两路共用。样式照抄 AltStoreSourceSectionView。
+// 一个源的组头（标题推入源详情页）：独立出来，供每源 VStack
+// （组头 + 内容）用。样式照抄 AltStoreSourceSectionView。
 struct CZFSourceGridGroupHeaderView: View {
     let item: AltStoreSourcesViewModel.SourceItem
     let apps: [AltStoreSourceApp]
@@ -174,11 +168,9 @@ struct CZFSourceGridGroupHeaderView: View {
 
 // 一个源的组：组头（标题推入源详情页）+ 该源 App 的网格 / 空态 /
 // 错误块 / 加载态。组头样式照抄 AltStoreSourceSectionView。
-// 一组的内容（错误/空提示/App 网格/加载中）：从
-// CZFSourceGridGroupView 里抽出来，供 Section 的 content 用；
-// 组头另走 CZFSourceGridGroupHeaderView（Section header，钉住置顶）。
-// 3.8.421 前的 CZFSourceGridGroupView（组头+内容合一个 VStack）
-// 已随 Section 化删掉，只剩这一处用。
+// 一组的内容（错误/空提示/App 网格/加载中）：3.8.428 起由
+// CZFSourceGridView 的每源 VStack 直接拼组头 + 本视图，
+// 不再走 Section（组头横排 bug，见 body 注释）。
 struct CZFSourceGridGroupContentView: View {
     let item: AltStoreSourcesViewModel.SourceItem
     let apps: [AltStoreSourceApp]
@@ -237,6 +229,14 @@ struct CZFSourceGridGroupContentView: View {
                 CZFSourceGridErrorView(error: error, onRefresh: onRefresh)
             } else if item.isLoading {
                 ProgressView("lc.sources.loading".loc)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                // 设置 #33：error 与 source 同时为 nil 且不在加载
+                // 时（如加载结束无源无错），之前整个 Group 渲染
+                // 为空、只剩组头；补空态文案。
+                Text("lc.sources.section.noApps".loc)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -310,6 +310,11 @@ struct CZFSourceAppGridCell: View {
 
     @State private var showDetail = false
 
+    // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、
+    // 深色黑晕影；原来写死白晕影，深色模式下白字 + 白晕影
+    // 配浅色背景看不清。
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         VStack(spacing: 6) {
             GeometryReader { geo in
@@ -329,16 +334,17 @@ struct CZFSourceAppGridCell: View {
             .aspectRatio(1, contentMode: .fit)
             Text(app.name)
                 // 名字（3.8.421，建议第 3、4 条）：长名字自动缩小
-                // （minimumScaleFactor 0.7），“闲鱼_7.28.50_...”
-                // 这类超长名缩到两行内显示全，不再截断成“去...”；
-                // 白晕影加粗（opacity 0.85→0.95、radius 3→4），
-                // 黑字压在黑佛像上也能读。与 App 格子同款。
+                // （minimumScaleFactor 0.7），最多显示两行，超长
+                // 仍截断加省略号（.lineLimit(2)）；白晕影加粗
+                // （opacity 0.85→0.95、radius 3→4），黑字压在
+                // 黑佛像上也能读；深色模式用黑晕影（设置 #37）。
+                // 与 App 格子同款。
                 .font(.footnote)
                 .lineLimit(2)
                 .minimumScaleFactor(0.7)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
-                .shadow(color: .white.opacity(0.95), radius: 4, x: 0, y: 0)
+                .shadow(color: colorScheme == .dark ? .black.opacity(0.95) : .white.opacity(0.95), radius: 4, x: 0, y: 0)
         }
         // 去阴影（3.8.418）：格子上的 AppBannerBG 卡片底撤掉——
         // 416 加的卡片在白底上看着像一层阴影，用户 19:09 报
@@ -473,6 +479,13 @@ struct CZFSourceDetailView: View {
                     )
                 } else if item.isLoading {
                     ProgressView("lc.sources.loading".loc)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    // 设置 #33：同款缺口——error 与 source 同时为
+                    // nil 且不在加载时，之前这里渲染为空；补空态文案。
+                    Text("lc.sources.section.noApps".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }

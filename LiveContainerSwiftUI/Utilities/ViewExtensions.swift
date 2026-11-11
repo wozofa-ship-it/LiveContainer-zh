@@ -131,29 +131,44 @@ public struct DocModifier: ViewModifier {
         self.onDismiss = onDismiss
         self.types = types
         self.multiple = multiple
-        self.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
         self._isPresented = isPresented
+        // shutdown 闭包要捕获 self，须等全部存储属性初始化完才能写；
+        // 先放一个空 shutdown 的占位 Coordinator，再换成带真 shutdown 的。
+        self.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
+        self.delegate = Coordinator(callback: callback, onDismiss: onDismiss, shutdown: { self.shutdown() })
     }
 
     public func body(content: Content) -> some View {
-        content.onChange(of: isPresented) { isPresented in
-            if isPresented, docController == nil {
-                let controller = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
-                controller.allowsMultipleSelection = multiple
-                controller.delegate = delegate
-                guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
-                    // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-                    // 不把 isPresented 置 false、不占 docController，
-                    // 下次 onChange 再触发时重试，并留日志。
-                    print("[DocModifier] present skipped: rootViewController already presenting")
-                    return
-                }
-                self.docController = controller
-                rootViewController.present(controller, animated: true)
-            } else if !isPresented, let docController = docController {
-                docController.dismiss(animated: true)
-                self.docController = nil
+        content
+            .onChange(of: isPresented) { newValue in
+                handlePresentationChange(newValue)
             }
+            .onAppear {
+                // #34：isPresented 在挂载时已是 true 时 onChange 不触发，
+                // 在这里补发一次，否则选文件框永远不弹。
+                if isPresented {
+                    handlePresentationChange(true)
+                }
+            }
+    }
+
+    private func handlePresentationChange(_ presented: Bool) {
+        if presented, docController == nil {
+            let controller = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
+            controller.allowsMultipleSelection = multiple
+            controller.delegate = delegate
+            guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
+                // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+                // 不把 isPresented 置 false、不占 docController，
+                // 下次 onChange 再触发时重试，并留日志。
+                print("[DocModifier] present skipped: rootViewController already presenting")
+                return
+            }
+            self.docController = controller
+            rootViewController.present(controller, animated: true)
+        } else if !presented, let docController = docController {
+            docController.dismiss(animated: true)
+            self.docController = nil
         }
     }
 
@@ -165,17 +180,21 @@ public struct DocModifier: ViewModifier {
     class Coordinator: NSObject, UIDocumentPickerDelegate {
         var callback: ([URL]) -> ()
         private let onDismiss: () -> Void
+        private let shutdown: () -> Void
         
-        init(callback: @escaping ([URL]) -> Void, onDismiss: @escaping () -> Void) {
+        init(callback: @escaping ([URL]) -> Void, onDismiss: @escaping () -> Void, shutdown: @escaping () -> Void = {}) {
             self.callback = callback
             self.onDismiss = onDismiss
+            self.shutdown = shutdown
         }
         
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             callback(urls)
+            shutdown()
             onDismiss()
         }
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            shutdown()
             onDismiss()
         }
     }
@@ -197,24 +216,36 @@ public struct CZFFolderPickerModifier: ViewModifier {
     }
 
     public func body(content: Content) -> some View {
-        content.onChange(of: isPresented) { isPresented in
-            if isPresented, docController == nil {
-                let controller = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
-                controller.allowsMultipleSelection = false
-                controller.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
-                guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
-                    // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-                    // 不把 isPresented 置 false、不占 docController，
-                    // 下次 onChange 再触发时重试，并留日志。
-                    print("[CZFFolderPickerModifier] present skipped: rootViewController already presenting")
-                    return
-                }
-                self.docController = controller
-                rootViewController.present(controller, animated: true)
-            } else if !isPresented, let docController = docController {
-                docController.dismiss(animated: true)
-                self.docController = nil
+        content
+            .onChange(of: isPresented) { newValue in
+                handlePresentationChange(newValue)
             }
+            .onAppear {
+                // #34：isPresented 在挂载时已是 true 时 onChange 不触发，
+                // 在这里补发一次，否则文件夹选择器永远不弹。
+                if isPresented {
+                    handlePresentationChange(true)
+                }
+            }
+    }
+
+    private func handlePresentationChange(_ presented: Bool) {
+        if presented, docController == nil {
+            let controller = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+            controller.allowsMultipleSelection = false
+            controller.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
+            guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
+                // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+                // 不把 isPresented 置 false、不占 docController，
+                // 下次 onChange 再触发时重试，并留日志。
+                print("[CZFFolderPickerModifier] present skipped: rootViewController already presenting")
+                return
+            }
+            self.docController = controller
+            rootViewController.present(controller, animated: true)
+        } else if !presented, let docController = docController {
+            docController.dismiss(animated: true)
+            self.docController = nil
         }
     }
 
@@ -250,22 +281,34 @@ public struct TextFieldAlertModifier: ViewModifier {
     let actionCancel: (String?) -> Void
 
     public func body(content: Content) -> some View {
-        content.onChange(of: isPresented) { isPresented in
-            if isPresented, alertController == nil {
-                let alertController = makeAlertController()
-                guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
-                    // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-                    // 不把 isPresented 置 false、不占 alertController，
-                    // 下次 onChange 再触发时重试，并留日志。
-                    print("[TextFieldAlertModifier] present skipped: rootViewController already presenting")
-                    return
-                }
-                self.alertController = alertController
-                rootViewController.present(alertController, animated: true)
-            } else if !isPresented, let alertController = alertController {
-                alertController.dismiss(animated: true)
-                self.alertController = nil
+        content
+            .onChange(of: isPresented) { newValue in
+                handlePresentationChange(newValue)
             }
+            .onAppear {
+                // #34：isPresented 在挂载时已是 true 时 onChange 不触发，
+                // 在这里补发一次，否则输入框永远不弹。
+                if isPresented {
+                    handlePresentationChange(true)
+                }
+            }
+    }
+
+    private func handlePresentationChange(_ presented: Bool) {
+        if presented, alertController == nil {
+            let alertController = makeAlertController()
+            guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
+                // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+                // 不把 isPresented 置 false、不占 alertController，
+                // 下次 onChange 再触发时重试，并留日志。
+                print("[TextFieldAlertModifier] present skipped: rootViewController already presenting")
+                return
+            }
+            self.alertController = alertController
+            rootViewController.present(alertController, animated: true)
+        } else if !presented, let alertController = alertController {
+            alertController.dismiss(animated: true)
+            self.alertController = nil
         }
     }
 
@@ -318,8 +361,14 @@ private struct NavigationBarProgressView: UIViewControllerRepresentable {
 
     class ProgressInjectorViewController: UIViewController {
         private var progressView: UIProgressView?
+        // #36：init 收到的初始进度、以及注入前 updateProgress 送来的
+        // 最新进度/隐藏态都要先存下来，注入后补设，否则早期进度
+        // 会被 progressView == nil 的可选链静默丢掉。
+        private var currentProgress: Float
+        private var currentHidden: Bool = false
 
         init(progress: Float) {
+            self.currentProgress = progress
             super.init(nibName: nil, bundle: nil)
         }
 
@@ -333,6 +382,8 @@ private struct NavigationBarProgressView: UIViewControllerRepresentable {
         }
 
         func updateProgress(_ hidden: Bool, _ progress: Float) {
+            currentHidden = hidden
+            currentProgress = progress
             progressView?.setProgress(progress, animated: false)
             progressView?.isHidden = hidden
         }
@@ -342,22 +393,18 @@ private struct NavigationBarProgressView: UIViewControllerRepresentable {
 
             let barProgress = UIProgressView(progressViewStyle: .bar)
             barProgress.translatesAutoresizingMaskIntoConstraints = false
-            var contentView : UIView? = nil
-            for curView in navigationBar.subviews {
-                if NSStringFromClass(curView.classForCoder) == "_UINavigationBarContentView" ||
-                    NSStringFromClass(curView.classForCoder) == "UIKit.NavigationBarContentView" {
-                    contentView = curView
-                    break
-                }
-            }
-            if let contentView {
-                contentView.addSubview(barProgress)
-                NSLayoutConstraint.activate([
-                    barProgress.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-                    barProgress.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-                    barProgress.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-                ])
-            }
+            // #36：先把存下来的进度/隐藏态补设到新注入的进度条上。
+            barProgress.setProgress(currentProgress, animated: false)
+            barProgress.isHidden = currentHidden
+            // #36：不再靠字符串匹配私有类名 "_UINavigationBarContentView"
+            // 找内容视图（iOS 一改名进度条就悄悄消失），直接把进度条
+            // 加到 navigationBar 上、用相对底部的约束定位。
+            navigationBar.addSubview(barProgress)
+            NSLayoutConstraint.activate([
+                barProgress.leadingAnchor.constraint(equalTo: navigationBar.leadingAnchor),
+                barProgress.trailingAnchor.constraint(equalTo: navigationBar.trailingAnchor),
+                barProgress.bottomAnchor.constraint(equalTo: navigationBar.bottomAnchor)
+            ])
             self.progressView = barProgress
         }
 
@@ -403,7 +450,9 @@ struct RainbowAnimation: ViewModifier {
 
 struct BasicButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
+        // #39：按压时给 0.6 透明度，否则所有用它的行点按零视觉反馈。
         configuration.label
+            .opacity(configuration.isPressed ? 0.6 : 1.0)
     }
 }
 

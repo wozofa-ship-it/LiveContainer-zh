@@ -23,6 +23,12 @@ final class CZFLocalIpaFolderModel: ObservableObject {
 
     let folderURL: URL
     private var didStartAccessing = false
+    // 详情解包任务（安装审计 #5 / App #15）：分块任务组限流
+    // 3 个并发；弹窗关闭时 cancelDetailTasks() 取消它。
+    private var detailTask: Task<Void, Never>?
+    // 弹窗已关/已取消刷新时为真：在后台解包跑完回主线程前
+    // 再拦一道，拦住已失效的旧解包刷进新列表。
+    private var detailsCancelled = false
 
     init(folderURL: URL) {
         self.folderURL = folderURL
@@ -34,29 +40,52 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         }
     }
 
+    // 弹窗关闭时取消未完成的解包（安装审计 #5 / App #15）：
+    // 组内未开始的解包不再启动；在途的解包跑完后被
+    // detailsCancelled 拦住，不再刷进列表。
+    func cancelDetailTasks() {
+        detailsCancelled = true
+        detailTask?.cancel()
+        detailTask = nil
+    }
+
     func scan() {
+        cancelDetailTasks()
+        detailsCancelled = false
         scanning = true
         errorText = nil
         items = []
         Task {
             didStartAccessing = folderURL.startAccessingSecurityScopedResource()
             let fm = FileManager.default
-            guard let urls = try? fm.contentsOfDirectory(
-                at: folderURL,
-                includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
-                options: [.skipsHiddenFiles]
-            ) else {
-                errorText = "打不开这个文件夹"
+            // 安装审计 #17：打不开要分原因，不许再用一句笼统的
+            // “打不开这个文件夹”盖住所有情况。startAccessing
+            // 返回 false 本身不直接报错（沙盒内目录也会返回
+            // false 但照常能读），读失败时再结合它定文案。
+            let ipaURLs: [URL]
+            do {
+                var found: [URL] = []
+                try collectIpaURLs(in: folderURL, into: &found)
+                ipaURLs = found
+            } catch let error as NSError {
+                if !didStartAccessing {
+                    errorText = "没有权限访问这个文件夹，请重新选择文件夹"
+                } else if error.domain == NSCocoaErrorDomain && error.code == 260 {
+                    // Cocoa 260 = NSFileReadNoSuchFileError（LCUtilsExtensions 同款判法）
+                    errorText = "这个文件夹已被移动或删除，请重新选择文件夹"
+                } else if error.domain == NSCocoaErrorDomain && error.code == 257 {
+                    // Cocoa 257 = NSFileReadNoPermissionError
+                    errorText = "没有权限访问这个文件夹：\(error.localizedDescription)"
+                } else {
+                    errorText = "读取文件夹失败：\(error.localizedDescription)"
+                }
                 scanning = false
                 return
             }
-            let ipaURLs = urls.filter {
-                $0.pathExtension.lowercased() == "ipa"
-                && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true
-            }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            let sortedURLs = ipaURLs.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             let fmt = ByteCountFormatter()
             fmt.countStyle = .file
-            items = ipaURLs.map { url in
+            items = sortedURLs.map { url in
                 let size = ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
                 return CZFLocalIpaItem(
                     url: url,
@@ -70,10 +99,69 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             scanning = false
             // 名字和图标逐个在后台解包读，读好一行刷一行；
             // 文件名先顶着，不用等全部解完才显示列表。
-            for item in items {
-                Task.detached { await self.loadDetails(for: item) }
+            detailTask = Task { await loadAllDetails() }
+        }
+    }
+
+    // 递归扫子文件夹（App #14）：contentsOfDirectory 不递归，
+    // 子文件夹里的 IPA 原来静默忽略。跳过隐藏文件
+    // （.skipsHiddenFiles）、不跟进软链目录（LCDataManagementView
+    // .folderSize 同款防死循环）、不钻进 .app/.ipa 包内部。
+    private func collectIpaURLs(in folder: URL, into out: inout [URL]) throws {
+        let fm = FileManager.default
+        let urls = try fm.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        )
+        for url in urls {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if values?.isSymbolicLink == true { continue }
+            if values?.isDirectory == true {
+                let ext = url.pathExtension.lowercased()
+                if ext == "app" || ext == "ipa" { continue }
+                try collectIpaURLs(in: url, into: &out)
+            } else if url.pathExtension.lowercased() == "ipa"
+                        || url.pathExtension.lowercased() == "tipa" {
+                // 安装审计 #10 / App #13：扫描加上 .tipa，
+                // 与 + 号导入接受 [.ipa, .tipa] 保持一致。
+                out.append(url)
             }
         }
+    }
+
+    // 详情解包限流 3 个并发（安装审计 #5 / App #15）：
+    // 抄 LCAltStoreSourcesView.refreshAllSources 的分块任务组
+    // 写法，每 3 个一组并行解包，组间顺序等；100 个 IPA
+    // 不再是 100 个并发解压。取消时组内未开始的解包不再
+    // 启动（Task.isCancelled 守卫），在途的解包由
+    // loadDetails 里的 detailsCancelled 拦住不刷表。
+    // 全部读完后按显示名重排一次（App #28）。
+    private func loadAllDetails() async {
+        var start = 0
+        while start < items.count {
+            if Task.isCancelled { return }
+            let chunk = Array(items[start..<min(start + 3, items.count)])
+            await withTaskGroup(of: Void.self) { group in
+                for item in chunk {
+                    group.addTask {
+                        await Task.detached { await self.loadDetails(for: item) }.value
+                    }
+                }
+            }
+            start += 3
+        }
+        if Task.isCancelled { return }
+        sortItemsByDisplayName()
+    }
+
+    // 详情读完后按显示名重排一次（App #28）：格子里显示的
+    // 是 Info.plist 真名，按文件名排看着乱。显示名缺失时
+    // 回落文件名（建 items 时 displayName 已预填文件名）。
+    // 本函数跑在主线程（detailTask 继承 MainActor），直接
+    // 改 items，不在解包任务里改数组。
+    private func sortItemsByDisplayName() {
+        items.sort { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
 
     // 解包是同步重活，不许占主线程：nonisolated，在后台
@@ -82,6 +170,7 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     nonisolated private func loadDetails(for item: CZFLocalIpaItem) async {
         let info = Self.extractIpaInfo(url: item.url)
         await MainActor.run {
+            guard !self.detailsCancelled else { return }
             if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
                 if let name = info.name { self.items[idx].displayName = name }
                 if let version = info.version { self.items[idx].version = version }
@@ -165,7 +254,7 @@ struct CZFLocalIpaFolderView: View {
                         Image(systemName: "folder")
                             .font(.largeTitle)
                             .foregroundStyle(.secondary)
-                        Text("这个文件夹里没有 IPA")
+                        Text("这个文件夹里没有 IPA（已扫过子文件夹）")
                             .foregroundStyle(.secondary)
                     }
                 } else {
@@ -195,10 +284,20 @@ struct CZFLocalIpaFolderView: View {
                     Button("完成", action: onClose)
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    // 安装审计 #18 / App #18：刷新按钮，与
+                    // “换文件夹”并排；扫描中置灰防重复点。
+                    Button(action: { model.scan() }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .accessibilityLabel("刷新")
+                    .disabled(model.scanning)
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button("换文件夹", action: onChangeFolder)
                 }
             }
             .onAppear { model.scan() }
+            .onDisappear { model.cancelDetailTasks() }
         }
     }
 }
@@ -221,10 +320,12 @@ struct CZFLocalIpaGridCell: View {
                         Image(systemName: "app.badge")
                             .font(.system(size: 28))
                             .foregroundStyle(.secondary)
-                            .background(Color(.secondarySystemBackground))
                     }
                 }
                 .frame(width: side, height: side)
+                // App #17：灰底挂到定好宽高的外层 frame 上，
+                // 整格灰色占位，不再只贴在 glyph 大小的 Image 上。
+                .background(Color(.secondarySystemBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
                 .position(x: geo.size.width / 2, y: geo.size.height / 2)

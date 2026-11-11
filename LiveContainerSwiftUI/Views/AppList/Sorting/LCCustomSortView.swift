@@ -6,6 +6,7 @@
 //
 import SwiftUI
 import Combine
+import UIKit
 
 struct LCCustomSortView: View {
     @EnvironmentObject private var sharedModel: SharedModel
@@ -23,7 +24,11 @@ struct LCCustomSortView: View {
                 if !localApps.isEmpty {
                         ForEach(localApps, id: \.self) { app in
                             HStack {
-                                IconImageView(icon: app.appInfo.iconIsDarkIcon(darkModeIcon))
+                                // 图标判空（3.8.428，App 页 #3）：与网格格子
+                                // 同款 ?? UIImage() 兜底，图标生成失败时
+                                // iconIsDarkIcon 返回 nil，不直接传给要求
+                                // 非空 UIImage 的 IconImageView。
+                                IconImageView(icon: app.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage())
                                     .frame(width: 60, height: 60)
                                     .clipShape(RoundedRectangle(cornerRadius: 16))
                                 
@@ -54,7 +59,7 @@ struct LCCustomSortView: View {
                     Section("lc.appList.hiddenApps".loc) {
                         ForEach(localHiddenApps, id: \.self) { app in
                              HStack {
-                                 IconImageView(icon: app.appInfo.iconIsDarkIcon(darkModeIcon))
+                                 IconImageView(icon: app.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage())
                                     .frame(width: 60, height: 60)
                                 
                                 VStack(alignment: .leading, spacing: 2) {

@@ -37,7 +37,43 @@ struct AppReplaceOption : Hashable {
     var appToReplace: LCAppModel?
 }
 
-// 待安装队列项：url 安装与 plist 安装共用一个队
+// 3.8.428 安装#2：安装取消专用信号——取消（替换选择框点取消、
+// 多开输名点取消、隐藏认证被拒、覆盖运行中 App 时用户点取消、
+// 预览点取消、下载被取消、进度条旁点取消）不再走 return/返回
+// false 被批量计为成功；取消路径一律抛它，installFromUrl 侧
+// 单独 catch 记“已取消”，不计成功也不计失败。
+struct CZFInstallCancelled: Error {}
+
+// 3.8.428 安装#6：一次性标志（线程安全）——continuation 只能
+// resume 一次，正常完成与超时互斥用；timedOut 标明是哪边赢了。
+final class CZFOnceFlag: @unchecked Sendable {
+    private var done = false
+    private(set) var timedOut = false
+    private let lock = NSLock()
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if done { return false }
+        done = true
+        return true
+    }
+    func claimTimeout() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if done { return false }
+        done = true
+        timedOut = true
+        return true
+    }
+}
+
+// 待安装队列项：url 安装与 plist 安装共用一个队（cases 与
+// urlStr 原样保留，供 pendingInstalls 去重用）。
+// 3.8.428 设置#25：跨页待装队列不在这里——原来挂的 static
+// urls: [URL] 只存地址，三处来源的 autoReplace / preview /
+// forceAsNew 全丢了（批量丢 autoReplace、单装丢 preview、
+// 新建丢 preview + forceAsNew），已移到下面的
+// CZFSourcePendingInstall（四字段齐全），urls 已删。
 private enum CZFPendingInstall {
     case url(String, Bool, Bool, Bool)
     case plist(String)
@@ -49,6 +85,25 @@ private enum CZFPendingInstall {
     }
 }
 
+// 源页待装队列（3.8.428，设置审计 #25）：源页安装请求先写这里、
+// App 页出现时排空进安装队列，不再只靠 0.5 秒延迟通知（App 页
+// 没出现时通知静默丢失）。名字与上面的 CZFPendingInstall
+// 区分开，不重名、不复用；类型与静态数组都是模块可见
+//（不加 private），源页文件直接写。字段与安装队列元组同款：
+// (url, autoReplace, preview, forceAsNew)，三处来源各取所需——
+// 批量 autoReplace:true、单装 preview:true、新建 preview +
+// forceAsNew:true。
+struct CZFSourcePendingInstallItem {
+    let url: URL
+    let autoReplace: Bool
+    let preview: Bool
+    let forceAsNew: Bool
+}
+
+enum CZFSourcePendingInstall {
+    static var items: [CZFSourcePendingInstallItem] = []
+}
+
 struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var didAppear = false
     // ipa choosing stuff
@@ -58,6 +113,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var czfIpaFolderPickerShow = false
     @State var czfIpaFolderURL: URL? = nil
     @State var czfIpaFolderSheetShow = false
+    // 3.8.428 安装#4：换文件夹标记——点“换文件夹”时只关 sheet
+    // 并置这个标记，等 sheet 的 onDismiss 回调里再弹选择器；
+    // 同一代码块里 sheet=false + picker=true 时选择器可能弹不出。
+    @State private var czfIpaFolderChangeRequested = false
     // 长按标记（3.8.426）：文件夹按钮长按=选文件夹、点按=
     // 显示 IPA 网格。长按松手时 Button 的 action 也会触发，
     // 用这个标记拦住，不让长按后又弹一次网格。
@@ -74,6 +133,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var installPreviewText = ""
     @State var installPreviewContinuation: CheckedContinuation<Bool, Never>? = nil
     @State var installQueueRunning = false
+    // 3.8.428 安装#6：进度条旁取消按钮置的取消标志——队列轮询
+    // 到它时跳过当前项、继续下一项；installFromUrl 入口与解包
+    // 前检查点也会取走它（见 czfTakeInstallCancel）。
+    @State private var czfInstallCancelRequested = false
+    // 3.8.428 安装#2：最近一次 installFromUrl 是否以“取消”结束
+    //（抛 CZFInstallCancelled / 下载被取消 / 预览点取消或超时），
+    // 供 enqueueInstall 单独计取消数；由 enqueueInstall 在每次
+    // 调用前清 false、调用后读，取消路径才置 true。
+    @State private var czfLastInstallWasCancelled = false
     // 队列进度（App 页顶部小条显示用）
     @State var installQueueTotal = 0
     @State var installQueueDone = 0
@@ -105,6 +173,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @StateObject private var jitAlert = YesNoHelper()
     
     @StateObject private var runWhenMultitaskAlert = YesNoHelper()
+
+    // 3.8.428 安装#9：覆盖运行中 App 前的确认框——被替换的 App
+    // 在运行时先请用户退出，确认继续才装；取消=放弃这次安装。
+    @StateObject private var czfRunningAppConfirm = YesNoHelper()
+    @State private var czfRunningAppName = ""
     
     @StateObject private var generatedIconStyleSelector = AlertHelper<GeneratedIconStyle>()
     
@@ -158,8 +231,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 隐藏区行就算有了勾选圈、勾了也没用——批量备份/删除都
         // 拿不到它们；恢复备份本身不拦隐藏 App，拦的是这里）。
         (sharedModel.apps + sharedModel.hiddenApps).filter { app in
-            guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
-            return batchSelectedIDs.contains(id)
+            batchSelectedIDs.contains(czfBatchKey(for: app))
         }
     }
 
@@ -169,13 +241,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         !selectedBatchApps.isEmpty && selectedBatchApps.allSatisfy { $0.appInfo.isHidden }
     }
 
+    // 3.8.428 设置#31：批量勾选键——getUniqueIdentifier 在
+    // bundleIdentifier 或 relativeBundlePath 为 nil 时返回 nil，
+    // 原来 isBatchSelected/toggle 直接 guard-return，格子仍显示
+    // 空心勾选圈、点它静默无反应；取不到唯一 ID 时用对象身份
+    // 兜底，保证每个格子都有可用的勾选键（同一实例在会话内稳定；
+    // 批量相关的五处读写全走这个键，别处（备份表/拖拽/启动偏好）
+    // 的键不动，各用各的）。
+    private func czfBatchKey(for app: LCAppModel) -> String {
+        if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
+            return id
+        }
+        return "czf-obj-\(ObjectIdentifier(app))"
+    }
+
     private func isBatchSelected(_ app: LCAppModel) -> Bool {
-        guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
-        return batchSelectedIDs.contains(id)
+        batchSelectedIDs.contains(czfBatchKey(for: app))
     }
 
     private func toggleBatchSelection(_ app: LCAppModel) {
-        guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return }
+        let id = czfBatchKey(for: app)
         if batchSelectedIDs.contains(id) {
             batchSelectedIDs.remove(id)
         } else {
@@ -190,22 +275,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
     private var batchAllSelected: Bool {
         !batchCurrentList.isEmpty && batchCurrentList.allSatisfy { app in
-            guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
-            return batchSelectedIDs.contains(id)
+            batchSelectedIDs.contains(czfBatchKey(for: app))
         }
     }
     private func toggleBatchSelectAll() {
         if batchAllSelected {
             for app in batchCurrentList {
-                if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
-                    batchSelectedIDs.remove(id)
-                }
+                batchSelectedIDs.remove(czfBatchKey(for: app))
             }
         } else {
             for app in batchCurrentList {
-                if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
-                    batchSelectedIDs.insert(id)
-                }
+                batchSelectedIDs.insert(czfBatchKey(for: app))
             }
         }
     }
@@ -439,20 +519,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ToolbarItem(placement: .topBarLeading) {
             HStack(spacing: 16) {
                 if sharedModel.multiLCStatus != 2 {
-                    if !installprogressVisible {
-                        Menu {
+                    // 3.8.428 设置#26：进度圈与“+”菜单并存——原来安装
+                    // 进行中整个“+”被换成进度圈，安装期间没法再从
+                    // “+”选 IPA 排队；现在“+”常驻，进度圈只在进行
+                    // 中时跟在它后面。
+                    Menu {
 
-                            Button("lc.appList.installFromIpa".loc, systemImage: "doc.badge.plus", action: {
-                                choosingIPA = true
-                            })
-                            Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
-                                Task{ await startInstallFromUrl() }
-                            })
-                        } label: {
-                            Label("add", systemImage: "plus")
-                        }
+                        Button("lc.appList.installFromIpa".loc, systemImage: "doc.badge.plus", action: {
+                            choosingIPA = true
+                        })
+                        Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
+                            Task{ await startInstallFromUrl() }
+                        })
+                    } label: {
+                        Label("add", systemImage: "plus")
+                    }
 
-                    } else {
+                    if installprogressVisible {
                         ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
                     }
                 }
@@ -1221,6 +1304,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 hiddenCount: sharedModel.hiddenApps.count,
                 darkModeIcon: darkModeIcon,
                 batchMode: batchMode,
+                isSearching: !searchContext.debouncedQuery.isEmpty,
                 columns: czfGridColumns,
                 iconSize: czfGridIconSize,
                 actions: CZFAppGridActions(
@@ -1610,25 +1694,45 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } message: {
             Text(installPreviewText)
         }
-        .overlay(alignment: .top) {
+        // 3.8.428 设置#23：批量安装进度 pill 从 .overlay(alignment:
+        // .top) 移到 safeAreaInset(edge: .top)——原来贴在整个
+        // NavigationView 顶部、只留 6pt，会盖住内联标题和顶栏按钮、
+        // 拦截点按；现在 pill 排在导航栏下面、内容上面，不盖顶栏、
+        // 不拦点按；两条 pill 都没显示时 VStack 高度为零，不占地方。
+        .safeAreaInset(edge: .top) {
             VStack(spacing: 6) {
                 // 批量安装进行时，App 页顶部的小进度条：装到第几个、
                 // 正在装哪个，一眼能看到（单个安装不显示）
                 if installQueueRunning && installQueueTotal > 1 {
                     HStack(spacing: 8) {
-                        ProgressView()
-                        Text("队列安装中 \(installQueueDone + 1)/\(installQueueTotal)：\(installQueueCurrent)")
-                            .font(.caption.bold())
-                            .lineLimit(1)
+                        // 点进度文字开队列名单；取消按钮在手势区域
+                        // 外面，点它只取消、不弹队列 sheet。
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("队列安装中 \(installQueueDone + 1)/\(installQueueTotal)：\(installQueueCurrent)")
+                                .font(.caption.bold())
+                                .lineLimit(1)
+                        }
+                        .onTapGesture {
+                            queueSheetShow = true
+                        }
+                        // 3.8.428 安装#6：进度条旁的取消按钮——点后
+                        // 置取消标志，队列轮询到它时跳过当前项、继续
+                        // 下一项（与安装#2 的取消信号打通）。
+                        Button {
+                            czfInstallCancelRequested = true
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .accessibilityLabel("取消安装")
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(.ultraThinMaterial, in: Capsule())
                     .shadow(radius: 4)
                     .padding(.top, 6)
-                    .onTapGesture {
-                        queueSheetShow = true
-                    }
                 }
                 // 单个安装进行中又点了安装：排进 pendingInstalls，之前是
                 // 静默的，点完看不出排上了；给一条小提示，当前装完接着装
@@ -1711,7 +1815,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }, onDismiss: {
             czfIpaFolderPickerShow = false
         })
-        .sheet(isPresented: $czfIpaFolderSheetShow) {
+        .sheet(isPresented: $czfIpaFolderSheetShow, onDismiss: {
+            // 3.8.428 安装#4：换文件夹——等 sheet 关完再弹选择器；
+            // 同一代码块里 sheet=false + picker=true 时选择器可能
+            // 弹不出（ViewExtensions 的修饰符不改，另一位同事在改它）。
+            if czfIpaFolderChangeRequested {
+                czfIpaFolderChangeRequested = false
+                czfIpaFolderPickerShow = true
+            }
+        }) {
             if let folderURL = czfIpaFolderURL {
                 CZFLocalIpaFolderView(
                     folderURL: folderURL,
@@ -1720,8 +1832,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         enqueueInstall(url: ipaURL, autoReplace: false)
                     },
                     onChangeFolder: {
+                        czfIpaFolderChangeRequested = true
                         czfIpaFolderSheetShow = false
-                        czfIpaFolderPickerShow = true
                     },
                     onClose: {
                         czfIpaFolderSheetShow = false
@@ -1757,6 +1869,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         } message: {
             Text("lc.appBanner.confirmRunWhenMultitasking".loc)
+        }
+        // 3.8.428 安装#9：覆盖运行中 App 前的确认——不静默强杀，
+        // 请用户先退出该 App；“继续覆盖”才装，取消=放弃这次安装。
+        .alert("该 App 正在运行", isPresented: $czfRunningAppConfirm.show) {
+            Button("继续覆盖", role: .destructive) {
+                czfRunningAppConfirm.close(result: true)
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {
+                czfRunningAppConfirm.close(result: false)
+            }
+        } message: {
+            Text("「\(czfRunningAppName)」正在运行，覆盖安装前请先退出它，否则可能装坏或丢数据。确定要继续吗？")
         }
         .alert("lc.appList.generatedIconStyleSelector.title".loc, isPresented:$generatedIconStyleSelector.show) {
             Button {
@@ -1850,6 +1974,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 每行备份状态：每次进页都重算（备份可能在数据管理
             // 页刚做完，回来行上要对上）。
             refreshBackupStatus()
+            // 3.8.428 设置#25：源页同事往 CZFSourcePendingInstall.items
+            // 里写的待装队列，App 页出现时排空、逐个进安装队列；
+            // 消费完清空，避免重复装。下面的安装通知 onReceive
+            // 原样保留，不动。
+            if !CZFSourcePendingInstall.items.isEmpty {
+                let czfQueued = CZFSourcePendingInstall.items
+                CZFSourcePendingInstall.items.removeAll()
+                for item in czfQueued {
+                    enqueueInstall(url: item.url, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew)
+                }
+            }
             if !isViewAppeared {
                 if let webpageUrlStr = UserDefaults.standard.string(forKey: "webPageToOpen") {
                     Task { await openWebView(urlString: webpageUrlStr) }
@@ -2070,6 +2205,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 否则队里那个撞上正忙会重新排队、一直等不到
             self.installprogressVisible = false
             drainPendingInstalls()
+        } catch is CZFInstallCancelled {
+            // 3.8.428 安装#2：用户取消安装，不弹错误提示。
+            self.installprogressVisible = false
+            drainPendingInstalls()
         } catch {
             errorInfo = error.localizedDescription
             errorShow = true
@@ -2115,8 +2254,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         // decompress
+        // 3.8.428 安装#8：解包失败单独报“已损坏或下载不完整”，
+        // 不再复用 urlFileIsNotIpaError（那是“不是 IPA”的判断，
+        // 扩展名那路还用它，别动）。
         guard await decompress(url.path, fm.temporaryDirectory.path, decompressProgress) == 0 else {
-            throw "lc.appList.urlFileIsNotIpaError".loc
+            throw "这个 IPA 已损坏或下载不完整，请重新下载"
         }
 
         let payloadContents = try fm.contentsOfDirectory(atPath: payloadPath.path)
@@ -2159,16 +2301,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             
             // we found a hidden app, we need to authenticate before proceeding
             if sameBundleIdApp.count > 0 && !sharedModel.isHiddenAppUnlocked {
+                // 3.8.428 安装#2：认证被拒/失败=取消安装，抛专用
+                // 取消信号（原来直接 return，会被批量计为成功）；
+                // 抛错不走下面那个 catch（它会把取消写进 errorInfo
+                // 弹错），所以先在 do 外面算好再抛。
+                var czfAuthOK = true
                 do {
-                    if !(try await LCUtils.authenticateUser()) {
-                        self.installprogressVisible = false
-                        return
-                    }
+                    czfAuthOK = try await LCUtils.authenticateUser()
                 } catch {
                     errorInfo = error.localizedDescription
                     errorShow = true
                     self.installprogressVisible = false
                     return
+                }
+                if !czfAuthOK {
+                    self.installprogressVisible = false
+                    try? fm.removeItem(at: payloadPath)
+                    throw CZFInstallCancelled()
                 }
             }
             
@@ -2205,9 +2354,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
             guard let installOptionChosen else {
                 // user cancelled
+                // 3.8.428 安装#2：替换选择框点取消=取消安装，抛
+                // 专用取消信号（原来直接 return，会被批量计为成功）。
                 self.installprogressVisible = false
-                try fm.removeItem(at: payloadPath)
-                return
+                try? fm.removeItem(at: payloadPath)
+                throw CZFInstallCancelled()
             }
 
             // 多开（安装为新 App）：先让用户输个新名字，再往下装。
@@ -2217,16 +2368,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 let originalName = newAppInfo.displayName() ?? ""
                 let inputName = await installAsNewNameInput.open(initVal: originalName)
                 guard let inputName else {
+                    // 3.8.428 安装#2：输新名字点取消=取消安装，抛
+                    // 专用取消信号（原来直接 return，会被批量计为成功）。
                     self.installprogressVisible = false
-                    try fm.removeItem(at: payloadPath)
-                    return
+                    try? fm.removeItem(at: payloadPath)
+                    throw CZFInstallCancelled()
                 }
                 let trimmed = inputName.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty && trimmed != originalName {
                     czfCustomDisplayName = trimmed
                 }
             }
-            
             if let appToReplace = installOptionChosen.appToReplace, appToReplace.uiIsShared {
                 outputFolder = LCPath.lcGroupBundlePath.appendingPathComponent(installOptionChosen.nameOfFolderToInstall)
             } else {
@@ -2237,6 +2389,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // I1：覆盖时先不在这里删旧包——新包先搬到临时名，
             // 成功后再删旧包、把临时名改回正式名（下面 move
             // 处做），搬失败时旧包还在。
+        }
+        // 3.8.428 安装#9：覆盖已有 App 前，先查被替换的 App
+        // 是否正在运行（LCAppModel.isAppRunning，runApp 起窗时
+        // 置 true、退出时复位）——在运行就先请用户退出它，不静
+        // 默强杀；确认继续才装，取消=放弃这次安装（抛专用取消
+        // 信号，批量里单独计取消）。只在真有被替换对象时查，
+        // 残留文件夹无 App 记录那路不查。
+        if let appToReplace, appToReplace.isAppRunning {
+            czfRunningAppName = appToReplace.appInfo.displayName() ?? appToReplace.appInfo.bundleIdentifier() ?? ""
+            guard let czfProceed = await czfRunningAppConfirm.open(), czfProceed else {
+                try? fm.removeItem(at: payloadPath)
+                throw CZFInstallCancelled()
+            }
         }
         // 覆盖已有 App 前，先把它的整套数据自动备份一份
         //（容器+组数据+钥匙串，与手动备份同一位置、新的盖
@@ -2294,18 +2459,36 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // patch and sign it
         var signError : String? = nil
         var signSuccess = false
+        // 3.8.428 安装#6：签名 continuation 加 5 分钟超时兜底——
+        // patchExecAndSignIfNeed 回调一直不来时原来永远挂起，整
+        // 个安装队列僵死。超时与正常完成用 CZFOnceFlag 互斥，
+        // resume 只调一次；超时后走下面原有的失败路径（signError
+        // 非空、signSuccess 为 false），不在这里抛。
+        let czfSignResumeOnce = CZFOnceFlag()
         await withUnsafeContinuation({ c in
             if appToReplace?.uiDontSign ?? false || LCUtils.appGroupUserDefault.bool(forKey: "LCDontSignApp") {
                 finalNewApp.dontSign = true
             }
+            Task {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                if czfSignResumeOnce.claimTimeout() {
+                    c.resume()
+                }
+            }
             finalNewApp.patchExecAndSignIfNeed(completionHandler: { success, error in
-                signError = error
-                signSuccess = success
-                c.resume()
+                if czfSignResumeOnce.claim() {
+                    signError = error
+                    signSuccess = success
+                    c.resume()
+                }
             }, progressHandler: { signProgress in
                 installProgress.addChild(signProgress!, withPendingUnitCount: 20)
             }, forceSign: false)
         })
+        if czfSignResumeOnce.timedOut {
+            signError = "签名超时（已等待 5 分钟），请重试"
+            signSuccess = false
+        }
         
         // we leave it unsigned even if signing failed
         if let signError {
@@ -2463,7 +2646,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
 
     func startInstallFromUrl() async {
-        guard let installUrlStr = await installUrlInput.open(), installUrlStr.count > 0 else {
+        guard var installUrlStr = await installUrlInput.open(), installUrlStr.count > 0 else {
+            return
+        }
+        // 3.8.428 App#4：输入的链接先去首尾空格/换行（从微信复制
+        // 常带尾随换行），再走 itms-services 判断与 installFromUrl。
+        installUrlStr = installUrlStr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !installUrlStr.isEmpty else {
             return
         }
         if let url = URL(string:installUrlStr), url.scheme?.lowercased() == "itms-services" {
@@ -2558,6 +2747,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             var processed = 0
             var succeeded = 0
             var failedNames: [String] = []
+            // 3.8.428 安装#2：取消单独列——不计成功也不计失败。
+            var cancelledNames: [String] = []
             var batch = false
             // 预下载好的下一个安装包：装当前这个的同时，后台
             // 先把下一个下好，轮到它时直接装，省一半等待
@@ -2571,8 +2762,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 installQueueDone = processed
                 installQueueCurrent = item.url.lastPathComponent
                 // 等手动触发的安装先装完，别互相抢
+                // 3.8.428 安装#6：等的时候每秒查一次取消标志——
+                // 用户点了进度条旁的取消，就跳过当前项、继续下一项。
+                var czfWaitCancelled = false
                 while installprogressVisible {
+                    if czfInstallCancelRequested {
+                        czfWaitCancelled = true
+                        break
+                    }
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                if czfWaitCancelled {
+                    czfInstallCancelRequested = false
+                    czfLastInstallWasCancelled = true
+                    cancelledNames.append(item.url.lastPathComponent)
+                    // 上一轮可能已预下载了这一项的包，跳过就清掉，
+                    // 别把临时 IPA 漏在 tmp 里。
+                    if let pf = prefetched, pf.url == item.url {
+                        try? FileManager.default.removeItem(at: pf.file)
+                        prefetched = nil
+                    }
+                    processed += 1
+                    installQueueDone = processed
+                    continue
                 }
                 if batch {
                     // 批量期间下载弹窗保持用户上次的收起状态，
@@ -2603,8 +2815,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                     }
                 }
+                // 3.8.428 安装#2：调用前清取消标记、调用后读——
+                // 取消（抛 CZFInstallCancelled / 下载被取消 / 预览
+                // 取消或超时 / 进度条旁取消）单独计取消数，不计
+                // 成功也不计失败。
+                czfLastInstallWasCancelled = false
                 let installOK = await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew)
-                if installOK {
+                if czfLastInstallWasCancelled {
+                    cancelledNames.append(item.url.lastPathComponent)
+                    czfLastInstallWasCancelled = false
+                } else if installOK {
                     succeeded += 1
                 } else {
                     failedNames.append(item.url.lastPathComponent)
@@ -2621,13 +2841,27 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if processed > 1 {
                 // 汇总分开报成功/失败并点名失败的：原来只报总数，
                 // 装 10 个挂 3 个也显示"完成"，得逐个去核对
-                if failedNames.isEmpty {
+                // 3.8.428 安装#2：取消单独列出来，不混进成功/失败。
+                if failedNames.isEmpty && cancelledNames.isEmpty {
                     installInfo = "批量安装完成：共 \(processed) 个，全部成功"
                 } else {
-                    installInfo = "批量安装完成：成功 \(succeeded) 个，失败 \(failedNames.count) 个\n\n失败的：\n" + failedNames.joined(separator: "\n")
+                    var czfSummary = "批量安装完成：成功 \(succeeded) 个"
+                    if !failedNames.isEmpty {
+                        czfSummary += "，失败 \(failedNames.count) 个"
+                    }
+                    if !cancelledNames.isEmpty {
+                        czfSummary += "，取消 \(cancelledNames.count) 个"
+                    }
+                    if !failedNames.isEmpty {
+                        czfSummary += "\n\n失败的：\n" + failedNames.joined(separator: "\n")
+                    }
+                    if !cancelledNames.isEmpty {
+                        czfSummary += "\n\n取消的：\n" + cancelledNames.joined(separator: "\n")
+                    }
+                    installInfo = czfSummary
                 }
                 installInfoShow = true
-                notifyBatchDone(processed, succeeded: succeeded, failedNames: failedNames)
+                notifyBatchDone(processed, succeeded: succeeded, failedNames: failedNames, cancelledNames: cancelledNames)
             }
         }
     }
@@ -2635,7 +2869,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 批量安装全部完成时发一条本地通知：批量装十几个要
     /// 很久，用户切去干别的也能知道装完了（在 App 里时只
     /// 进通知中心，不弹横幅，靠顶部小条和汇总弹窗就够了）
-    func notifyBatchDone(_ count: Int, succeeded: Int, failedNames: [String]) {
+    func notifyBatchDone(_ count: Int, succeeded: Int, failedNames: [String], cancelledNames: [String] = []) {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else {
@@ -2643,7 +2877,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             let content = UNMutableNotificationContent()
             content.title = "批量安装完成"
-            content.body = failedNames.isEmpty ? "共 \(count) 个应用，全部成功" : "成功 \(succeeded) 个，失败 \(failedNames.count) 个：\(failedNames.joined(separator: "、"))"
+            // 3.8.428 安装#2：通知里也单独报取消数。
+            if failedNames.isEmpty && cancelledNames.isEmpty {
+                content.body = "共 \(count) 个应用，全部成功"
+            } else {
+                content.body = "成功 \(succeeded) 个，失败 \(failedNames.count) 个，取消 \(cancelledNames.count) 个：\((failedNames + cancelledNames).joined(separator: "、"))"
+            }
             content.sound = .default
             center.add(UNNotificationRequest(identifier: "CZFBatchInstall-\(UUID().uuidString)", content: content, trigger: nil))
         }
@@ -2818,13 +3057,36 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
+    // 3.8.428 安装#2/#6：取走一次取消请求——进度条旁取消按钮
+    // 置 czfInstallCancelRequested，调用方在这里取走；取到返回
+    // true 并把 czfLastInstallWasCancelled 置 true（供
+    // enqueueInstall 单独计取消数），取不到返回 false。
+    private func czfTakeInstallCancel() -> Bool {
+        guard czfInstallCancelRequested else { return false }
+        czfInstallCancelRequested = false
+        czfLastInstallWasCancelled = true
+        return true
+    }
+
     func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false, forceAsNew: Bool = false) async -> Bool {
+        // 3.8.428 App#4：粘贴的安装链接带首尾空格/换行就报“链接
+        // 无效”，先 trim（与 installFromPlist 同款处理）。
+        let urlStr = urlStr.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 3.8.428 安装#2：取消标记不在这里清——defer 里
+        // drainPendingInstalls 可能并发起下一次安装，入口清会把
+        // 上一次的取消标记冲掉；由 enqueueInstall 在每次调用前
+        // 清、调用后读（见 enqueueInstall），这里只在取消路径置 true。
         // 进行中再点安装：排进队、当前装完接着装，不再静默丢掉
         if self.installprogressVisible {
             let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew)
             if !pendingInstalls.contains(where: { $0.urlStr == urlStr }) {
                 pendingInstalls.append(item)
             }
+            return false
+        }
+        // 3.8.428 安装#6：进度条旁点了取消——还没开始装就直接
+        // 按取消返回，不进下载/解包。
+        if czfTakeInstallCancel() {
             return false
         }
 
@@ -2886,15 +3148,44 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return false
             }
             
+            // 3.8.428 安装#3：文件夹弹窗点安装就关 sheet，模型
+            // deinit 会 stopAccessing，大包解包中途可能丢访问权；
+            // 文件若在 CZFLocalIpaFolderBookmark 记住的文件夹里，
+            // 这里用文件夹书签重新取权再解包（与 426 的
+            // czfRestoreIpaFolder 同款取法），用完释放；文件夹
+            // 模型本身的 deinit 不动。
+            var czfFolderURL: URL? = nil
+            var czfFolderAccessHeld = false
+            if let folderURL = czfRestoreIpaFolder(),
+               installUrl.standardizedFileURL.path.hasPrefix(folderURL.standardizedFileURL.path + "/") {
+                czfFolderURL = folderURL
+                czfFolderAccessHeld = folderURL.startAccessingSecurityScopedResource()
+            }
+            defer {
+                if czfFolderAccessHeld, let folderURL = czfFolderURL {
+                    folderURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
             defer {
                 if didStartAccessing {
                     installUrl.stopAccessingSecurityScopedResource()
                 }
             }
-            
+
+            // 3.8.428 安装#6：解包前再查一次取消——进度条旁点取消
+            // 后，正在等前一个安装的这一项轮到时直接按取消返回。
+            if czfTakeInstallCancel() {
+                return false
+            }
+
             var installOK = true
             do {
                 try await installIpaFile(installUrl, autoReplace: autoReplace, forceAsNew: forceAsNew)
+            } catch is CZFInstallCancelled {
+                // 3.8.428 安装#2：取消不弹错、不计失败，记取消。
+                czfLastInstallWasCancelled = true
+                installOK = false
             } catch {
                 installOK = false
                 errorInfo = LCUtils.czfFriendlyError(error)
@@ -2922,15 +3213,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return installOK
         }
         
+        // 3.8.428 安装#2：fileManager/destinationURL 提到 do 外面，
+        // 下面那个 catch is CZFInstallCancelled 里要清临时包，
+        // do 里声明的变量 catch 里够不到。
+        let fileManager = FileManager.default
+        let destinationURL = fileManager.temporaryDirectory.appendingPathComponent(installUrl.lastPathComponent)
         do {
-            let fileManager = FileManager.default
-            let destinationURL = fileManager.temporaryDirectory.appendingPathComponent(installUrl.lastPathComponent)
             if fileManager.fileExists(atPath: destinationURL.path) {
                 try fileManager.removeItem(at: destinationURL)
             }
-            
+
             try await downloadHelper.download(url: installUrl, to: destinationURL)
             if downloadHelper.cancelled {
+                // 3.8.428 安装#2：用户取消下载=取消，不计失败。
+                czfLastInstallWasCancelled = true
+                return false
+            }
+            // 3.8.428 安装#6：下载完、解包前再查一次取消。
+            if czfTakeInstallCancel() {
+                try? fileManager.removeItem(at: destinationURL)
                 return false
             }
             if preview, let text = await makeInstallPreviewText(forIpa: destinationURL) {
@@ -2940,14 +3241,38 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     installPreviewContinuation = cont
                     installPreviewText = text
                     installPreviewShow = true
+                    // 3.8.428 设置#24：预览 alert 挂着 continuation，
+                    // 若被别的 alert 顶掉就永远挂起；5 分钟超时自动
+                    // 按取消 resume（与安装#2 的取消信号打通）。
+                    // 按钮与超时都在主线程串行，先抢到 continuation
+                    // 的那方 resume 并置 nil，另一方看到 nil 不动，
+                    // resume 只调一次。
+                    Task {
+                        try? await Task.sleep(nanoseconds: 300_000_000_000)
+                        await MainActor.run {
+                            if let cont = installPreviewContinuation {
+                                installPreviewContinuation = nil
+                                installPreviewShow = false
+                                cont.resume(returning: false)
+                            }
+                        }
+                    }
                 }
                 if !proceed {
+                    // 3.8.428 安装#2：预览点取消或超时=取消，不计失败。
+                    czfLastInstallWasCancelled = true
                     try? fileManager.removeItem(at: destinationURL)
                     return false
                 }
             }
             try await installIpaFile(destinationURL, autoReplace: autoReplace, forceAsNew: forceAsNew)
             try fileManager.removeItem(at: destinationURL)
+        } catch is CZFInstallCancelled {
+            // 3.8.428 安装#2：安装中途取消（替换选择/输名/运行中
+            // 确认），清掉临时包、不弹错，记取消。
+            czfLastInstallWasCancelled = true
+            try? fileManager.removeItem(at: destinationURL)
+            return false
         } catch {
             errorInfo = LCUtils.czfFriendlyError(error)
             errorShow = true

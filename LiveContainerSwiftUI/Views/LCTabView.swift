@@ -99,7 +99,14 @@ struct LCTabView: View {
         }
         .downloadAlert(helper: downloadHelper)
         .environmentObject(downloadHelper)
-        .alert("lc.common.error".loc, isPresented: $errorShow){
+        // #27：错误 alert 只在崩溃 sheet 没显示时弹——冷启动
+        // crashReportShow 与 errorShow 可同时为真，alert 会被
+        // sheet 盖住。派生 Binding：crash sheet 关掉后若
+        // errorShow 仍为真，alert 再出现；用户关掉 alert 才清 errorShow。
+        .alert("lc.common.error".loc, isPresented: Binding(
+            get: { errorShow && !crashReportShow },
+            set: { newValue in if !newValue { errorShow = false } }
+        )){
             Button("lc.common.ok".loc, action: {
             })
             Button("lc.common.copy".loc, action: {

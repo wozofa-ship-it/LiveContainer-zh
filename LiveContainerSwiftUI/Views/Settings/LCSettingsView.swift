@@ -120,18 +120,24 @@ struct LCSettingsView: View {
                     updateInfo = nil
                     updateStatusText = "检查失败，点一下重试"
                 case .success(let info):
-                    if let current = CZFUpdateCheck.currentCommit(), current == info.commit {
-                        updateInfo = nil
-                        updateStatusText = "已是最新（\(current)）"
-                    } else {
-                        updateInfo = info
-                        var text = "有新版：\(info.commit)"
-                        if let date = info.publishedAt {
-                            let formatter = DateFormatter()
-                            formatter.dateFormat = "yyyy-MM-dd"
-                            text += " · \(formatter.string(from: date))"
+                    // #14：current 为 nil 时不要断言有新版
+                    if let current = CZFUpdateCheck.currentCommit() {
+                        if current == info.commit {
+                            updateInfo = nil
+                            updateStatusText = "已是最新（\(current)）"
+                        } else {
+                            updateInfo = info
+                            var text = "有新版：\(info.commit)"
+                            if let date = info.publishedAt {
+                                let formatter = DateFormatter()
+                                formatter.dateFormat = "yyyy-MM-dd"
+                                text += " · \(formatter.string(from: date))"
+                            }
+                            updateStatusText = text
                         }
-                        updateStatusText = text
+                    } else {
+                        updateInfo = nil
+                        updateStatusText = "无法确认当前版本"
                     }
                 }
             }
@@ -448,7 +454,7 @@ struct LCSettingsView: View {
                     LCSettingsIcon(systemName: "iphone", color: .gray)
                     Text("lc.settings.JitUDID".loc)
                     Spacer()
-                    TextField("", text: $deviceUDID)
+                    TextField("lc.settings.JitUDID".loc, text: $deviceUDID)
                         .multilineTextAlignment(.trailing)
                 }
             }
@@ -485,6 +491,9 @@ struct LCSettingsView: View {
             }
         } header: {
             Text("模拟器")
+        } footer: {
+            // #16：单 App 优先于全局（LCBootstrap.m:636 先读单 App 的值）
+            Text("单 App 设置优先于全局设置")
         }
     }
 
@@ -526,8 +535,8 @@ struct LCSettingsView: View {
         // 杂项区：原来 5 个开关各占一个 Section、每段带一段
         // footer 说明，竖着占 5 段；并成一段，说明挪到各行
         // 下面的小字，意思一句不少。“清除通知”原来也单独
-        // 占一段，顺手并进这一段的末尾。严格隐藏那行只在
-        // 隐藏 App 已解锁时出现，原条件不变。
+        // 占一段，顺手并进这一段的末尾。#20：严格隐藏那行
+        // 锁定状态下也显示（置灰并注明需先解锁），不再消失。
         Section{
             Toggle(isOn: $frameShortIcon) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -562,19 +571,25 @@ struct LCSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if sharedModel.isHiddenAppUnlocked {
-                Toggle(isOn: $strictHiding) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            LCSettingsIcon(systemName: "hand.raised.fill", color: .red)
-                            Text("lc.settings.strictHiding".loc)
-                        }
-                        Text("lc.settings.strictHidingDesc".loc)
+            // #20：锁定状态下也显示该行（置灰并注明需先解锁），
+            // 否则重新锁定后开关消失、无法关掉已开启的严格隐藏。
+            Toggle(isOn: $strictHiding) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        LCSettingsIcon(systemName: "hand.raised.fill", color: .red)
+                        Text("lc.settings.strictHiding".loc)
+                    }
+                    Text("lc.settings.strictHidingDesc".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if !sharedModel.isHiddenAppUnlocked {
+                        Text("需先解锁隐藏 App 才能更改")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
+            .disabled(!sharedModel.isHiddenAppUnlocked)
             Toggle(isOn: $dontSignApp) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
@@ -956,6 +971,10 @@ struct LCSettingsView: View {
         if let embeddedURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") {
             let destinationURL = documentsURL.appendingPathComponent("embedded.mobileprovision")
             do {
+                // #21：写前先删已存在的目标文件，否则第二次导出 copyItem 必抛错
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
                 try fileManager.copyItem(at: embeddedURL, to: destinationURL)
                 print("Successfully copied embedded.mobileprovision to Documents.")
             } catch {
@@ -1012,6 +1031,10 @@ struct LCSettingsView: View {
         let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
         do {
             let destinationURL = documentsURL.appendingPathComponent(url.lastPathComponent)
+            // #21：写前先删已存在的目标文件，否则第二次导出 copyItem 必抛错
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
             try fileManager.copyItem(at: url, to: destinationURL)
             print("Successfully copied main bundle to Documents.")
             successInfo = "主包已导出到 Documents"
@@ -1181,6 +1204,10 @@ struct LCSettingsView: View {
         let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
         do {
             let destinationURL = documentsURL.appendingPathComponent(url.lastPathComponent)
+            // #21：写前先删已存在的目标文件，否则第二次导出 copyItem 必抛错
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
             try fileManager.copyItem(at: url, to: destinationURL)
             print("Successfully copied dyld to Documents.")
             successInfo = "dyld 已导出到 Documents"
@@ -1199,10 +1226,19 @@ struct LCSettingsView: View {
                 guard let encodedCert = queryItems["cert"]?.removingPercentEncoding,
                       let password = queryItems["password"],
                       let certData = Data(base64Encoded: encodedCert)
-                else { return }
+                else {
+                    // #19：证书 deep link 参数缺失/非法时不再静默 return，弹错误提示
+                    errorInfo = "证书链接无效，请检查链接参数后重试"
+                    errorShow = true
+                    return
+                }
                 
                 onSideStoreCertificateCallback(certificateData: certData, password: password)
                 
+            } else {
+                // #19：URLComponents 解析失败同样提示
+                errorInfo = "证书链接无效，请检查链接参数后重试"
+                errorShow = true
             }
         } else if let host = url.host, let page = CZFSettingsPage(rawValue: host) {
             // 3.8.308：源面板直开设置页——host 对上页标识就弹
