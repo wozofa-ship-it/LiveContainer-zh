@@ -51,14 +51,19 @@ struct CZFSourceGridView: View {
     }
 
     var body: some View {
-        // 3.8.428 组头横排 bug（用户 23:27 截图实证：5 个源名
-        // 挤在一行）：原来 LazyVStack + Section（组头）+ 每组
-        // LazyVGrid，Section 组头在分组网格里横向排布出问题。
-        // 改成每个源一个普通 VStack（组头 + 该源内容），彻底
-        // 不用 Section、不用 pinnedViews；每组 VStack 整行宽、
-        // 纵向堆叠。组头 material 底已撤（3.8.426）、钉住已撤
-        // （3.8.424），组头跟着内容一起滑走，不再钉住。
-        LazyVStack(alignment: .leading, spacing: 16) {
+        // 3.8.429 组头丢了（用户 00:51 截图实证：428 整页只有
+        // 底部一个“解剖自我”组头，其余组头全没了、App 混成
+        // 一大片连续网格）：428 把 Section 换成每源 VStack，
+        // 但外层仍是 LazyVStack——ScrollView > LazyVStack
+        // （父）> CZFSourceGridView > LazyVStack（本层）> 每源
+        // VStack > 组头 + LazyVGrid，嵌套懒栈。懒栈只按需
+        // 布子视图，组头这种小视图在嵌套里高度算不准/丢了，
+        // 只剩网格露出来；426 的 Section 版是组头横排一行的
+        // 同款毛病。修法：外层改普通 VStack（非懒），全部
+        // 组头立即定高排布，确定性布局；每组内容仍是 LazyVGrid
+        // （格子懒加载还在，性能不丢）。组头跟着内容一起滑走，
+        // 不钉住。
+        VStack(alignment: .leading, spacing: 16) {
             ForEach(czfVisibleItems, id: \.id) { item in
                 VStack(alignment: .leading, spacing: 8) {
                     CZFSourceGridGroupHeaderView(

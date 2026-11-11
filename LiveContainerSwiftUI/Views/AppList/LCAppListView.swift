@@ -2171,12 +2171,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     // 本地 IPA 文件夹（3.8.423）：文件夹 bookmark 存取。
     // bookmark 存进 UserDefaults，下次点文件夹按钮直接恢复，
-    // 不用重新选；失效了返回 nil、重选。注意：.withSecurityScope
-    // 是 macOS 才有的选项，iOS 上编不过——iOS 里文档选择器
-    // 给的 URL 本身就是 security-scoped，普通 bookmark 就够，
-    // 解析出来再 startAccessingSecurityScopedResource。
+    // 不用重新选；失效了返回 nil、重选。
+    // 3.8.429 根因（用户 00:51 报“文件夹点击也没有 IPA”）：
+    // bookmark 一直用 options: [] 建——不带 security scope。
+    // 点按走 czfRestoreIpaFolder() 恢复书签（不是选文件夹时
+    // 的 picker URL），解析出的 URL 不是 security-scoped，
+    // startAccessingSecurityScopedResource() 返回 false，沙盒
+    // 里读不到文件夹、扫出 0 个 IPA。修法：建书签和解析都用
+    // .withSecurityScope（iOS 8+ 就有，不是 macOS 专属，
+    // 之前注释写错了）。老书签（无 scope）解析时先试
+    // .withSecurityScope，不行回落 []，再不行才返回 nil 重选。
     private func czfSaveIpaFolder(_ url: URL) {
-        if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+        if let data = try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
         }
     }
@@ -2184,12 +2190,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func czfRestoreIpaFolder() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else { return nil }
         var isStale = false
+        if let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &isStale) {
+            // 书签旧了也别直接丢（3.8.426，用户 23:00 报“选了
+            // 文件夹、再点没有 IPA”）：isStale 只说明书签数据
+            // 过期，解析出的 URL 多半还能用。先把 URL 返回、
+            // 再重存一份新书签，下次就不走这条。直接返回 nil
+            // 的话，点按钮又弹选择器，看着像“没记住文件夹”。
+            if isStale {
+                czfSaveIpaFolder(url)
+            }
+            return url
+        }
+        // 老书签（3.8.429 前用 [] 建的，无 scope）：回落 [] 解析。
         guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale) else { return nil }
-        // 书签旧了也别直接丢（3.8.426，用户 23:00 报“选了
-        // 文件夹、再点没有 IPA”）：isStale 只说明书签数据
-        // 过期，解析出的 URL 多半还能用。先把 URL 返回、
-        // 再重存一份新书签，下次就不走这条。直接返回 nil
-        // 的话，点按钮又弹选择器，看着像“没记住文件夹”。
         if isStale {
             czfSaveIpaFolder(url)
         }
