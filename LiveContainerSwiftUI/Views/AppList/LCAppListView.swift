@@ -1075,6 +1075,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .hidden()
 
             LazyVStack {
+                // 3.8.407：列表模式回网格的入口——切到列表后网格
+                // 按钮就没了，用户回不去；顶部加一行与网格模式
+                // 同款式样：左“网格模式”切回网格，右“网格设置”
+                // 先切回网格再开设置 sheet，让用户落在网格上改。
+                HStack {
+                    Button {
+                        czfGridMode = true
+                    } label: {
+                        Label("网格模式", systemImage: "square.grid.2x2")
+                    }
+                    Spacer()
+                    Button {
+                        czfGridMode = true
+                        czfGridSettingsShow = true
+                    } label: {
+                        Label("网格设置", systemImage: "slider.horizontal.3")
+                    }
+                }
+                .foregroundColor(.blue)
                 czfSearchShortcutRows
                 ForEach(filteredApps, id: \.self) { app in
                     appRow(for: app)

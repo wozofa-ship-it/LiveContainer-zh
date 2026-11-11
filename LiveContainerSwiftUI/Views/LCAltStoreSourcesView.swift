@@ -528,6 +528,12 @@ struct LCSourcesView: View {
     @State private var isManagingSources = false
     @State private var isBatchMode = false
     @State private var selectedIDs = Set<String>()
+    // 源页网格模式（3.8.407）：默认 false=原来列表；列数/图标
+    // 大小复用 App 页同一套 @AppStorage 键，两处同改同生效。
+    @AppStorage("CZFSourceListGridMode") private var czfSourceGridMode = false
+    @AppStorage("CZFAppGridColumns") private var czfSourceGridColumns = 4
+    @AppStorage("CZFAppGridIconSize") private var czfSourceGridIconSize = 0
+    @State private var czfSourceGridSettingsShow = false
     // 可更新数量写到这里，底部「源」标签上显示红点数字
     @AppStorage("CZFUpdatableAppCount") private var updatableCountBadge = 0
     // 可更新名单缓存：原来 updatableApps 是计算属性，body 每次
@@ -570,20 +576,37 @@ struct LCSourcesView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 16) {
-                            ForEach(viewModel.sources, id: \.id) { item in
-                                let apps = filteredApps(for: item)
-                                AltStoreSourceSectionView(
-                                    item: item,
-                                    filteredApps: apps,
+                            // 切换行（App 页同款式样）：左切模式，
+                            // 右开网格设置（先落到网格上再改）。
+                            HStack {
+                                Button {
+                                    czfSourceGridMode.toggle()
+                                } label: {
+                                    Label(czfSourceGridMode ? "恢复原生" : "网格模式", systemImage: czfSourceGridMode ? "arrow.uturn.left" : "square.grid.2x2")
+                                }
+                                Spacer()
+                                Button {
+                                    czfSourceGridMode = true
+                                    czfSourceGridSettingsShow = true
+                                } label: {
+                                    Label("网格设置", systemImage: "slider.horizontal.3")
+                                }
+                            }
+                            .foregroundColor(.blue)
+                            .padding(.horizontal)
+                            if czfSourceGridMode {
+                                CZFSourceGridView(
+                                    items: viewModel.sources,
+                                    columns: czfSourceGridColumns,
+                                    iconSize: czfSourceGridIconSize,
+                                    filteredApps: { item in filteredApps(for: item) },
                                     isFiltering: isFiltering,
-                                    isExpanded: expandedSources.contains(item.id),
-                                    onRefresh: { Task { await viewModel.refreshSource(item) } },
+                                    onRefresh: { item in Task { await viewModel.refreshSource(item) } },
                                     onInstall: install(app:),
                                     onInstallAsNew: installAsNew(app:),
                                     onDownload: download(app:),
                                     onDownloadVersion: downloadVersion(url:),
-                                    onRemove: { sourcePendingRemoval = item },
-                                    toggleExpanded: { toggleExpansion(for: item.id) },
+                                    onRemove: { item in sourcePendingRemoval = item },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
                                     onToggleSelect: { app in
@@ -596,7 +619,35 @@ struct LCSourcesView: View {
                                     }
                                 )
                                 .padding(.horizontal)
-                                .animation(.easeInOut, value: apps.count)
+                            } else {
+                                ForEach(viewModel.sources, id: \.id) { item in
+                                    let apps = filteredApps(for: item)
+                                    AltStoreSourceSectionView(
+                                        item: item,
+                                        filteredApps: apps,
+                                        isFiltering: isFiltering,
+                                        isExpanded: expandedSources.contains(item.id),
+                                        onRefresh: { Task { await viewModel.refreshSource(item) } },
+                                        onInstall: install(app:),
+                                        onInstallAsNew: installAsNew(app:),
+                                        onDownload: download(app:),
+                                        onDownloadVersion: downloadVersion(url:),
+                                        onRemove: { sourcePendingRemoval = item },
+                                        toggleExpanded: { toggleExpansion(for: item.id) },
+                                        isBatchMode: isBatchMode,
+                                        selectedIDs: selectedIDs,
+                                        onToggleSelect: { app in
+                                            let bid = app.bundleIdentifier
+                                            if selectedIDs.contains(bid) {
+                                                selectedIDs.remove(bid)
+                                            } else {
+                                                selectedIDs.insert(bid)
+                                            }
+                                        }
+                                    )
+                                    .padding(.horizontal)
+                                    .animation(.easeInOut, value: apps.count)
+                                }
                             }
                             
                             if totalFilteredAppCount == 0 {
@@ -683,6 +734,9 @@ struct LCSourcesView: View {
             } else {
                 Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(""))
             }
+        }
+        .sheet(isPresented: $czfSourceGridSettingsShow) {
+            CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode)
         }
         .sheet(isPresented: $isManagingSources) {
             if #available(iOS 16.0, *) {
@@ -1130,6 +1184,49 @@ private struct ManageSourcesSheet: View {
     }
 }
 
+// 源里 App 列表的共享子视图（3.8.407）：列表 section 展开后
+// 与网格详情页共用——同一份 50 条上限 +“展开全部”、同一份
+// LCSourceAppBanner 行（安装/下载/批量勾选原样）。
+struct CZFSourceAppListView: View {
+    let source: AltStoreSource
+    let filteredApps: [AltStoreSourceApp]
+    let isFiltering: Bool
+    let onInstall: (AltStoreSourceApp) -> Void
+    let onInstallAsNew: (AltStoreSourceApp) -> Void
+    let onDownload: (AltStoreSourceApp) -> Void
+    let onDownloadVersion: (URL) -> Void
+    let isBatchMode: Bool
+    let selectedIDs: Set<String>
+    let onToggleSelect: (AltStoreSourceApp) -> Void
+    @State private var showAllApps = false
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))]) { app in
+                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
+            }
+            if filteredApps.isEmpty {
+                if source.apps.isEmpty || isFiltering {
+                    Text("lc.sources.section.noApps".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if filteredApps.count > 50 && !showAllApps {
+                Text("lc.sources.section.tooManyApps".loc)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("展开全部（共 \(filteredApps.count) 个）") {
+                    showAllApps = true
+                }
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
 private struct AltStoreSourceSectionView: View {
     let item: AltStoreSourcesViewModel.SourceItem
     let filteredApps: [AltStoreSourceApp]
@@ -1147,7 +1244,6 @@ private struct AltStoreSourceSectionView: View {
     let isBatchMode: Bool
     let selectedIDs: Set<String>
     let onToggleSelect: (AltStoreSourceApp) -> Void
-    @State private var showAllApps = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1209,29 +1305,18 @@ private struct AltStoreSourceSectionView: View {
                         .fill(Color(uiColor: UIColor.secondarySystemBackground))
                 )
             } else if let source = item.source, isExpanded || isFiltering {
-                VStack(spacing: 12) {
-                    ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))]) { app in
-                        LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(app.bundleIdentifier), onToggleSelect: { onToggleSelect(app) })
-                    }
-                    if filteredApps.isEmpty {
-                        if source.apps.isEmpty || isFiltering {
-                            Text("lc.sources.section.noApps".loc)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    } else if filteredApps.count > 50 && !showAllApps {
-                        Text("lc.sources.section.tooManyApps".loc)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("展开全部（共 \(filteredApps.count) 个）") {
-                            showAllApps = true
-                        }
-                        .font(.footnote)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
+                CZFSourceAppListView(
+                    source: source,
+                    filteredApps: filteredApps,
+                    isFiltering: isFiltering,
+                    onInstall: onInstall,
+                    onInstallAsNew: onInstallAsNew,
+                    onDownload: onDownload,
+                    onDownloadVersion: onDownloadVersion,
+                    isBatchMode: isBatchMode,
+                    selectedIDs: selectedIDs,
+                    onToggleSelect: onToggleSelect
+                )
             } else if item.isLoading {
                 ProgressView("lc.sources.loading".loc)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1240,7 +1325,9 @@ private struct AltStoreSourceSectionView: View {
     }
 }
 
-private struct LCSourceAppBanner: View {
+// LCSourceAppBanner 不再 private：网格详情页（CZFSourceGridView.swift）
+// 复用同一份行（见 CZFSourceAppListView）。
+struct LCSourceAppBanner: View {
     let app: AltStoreSourceApp
     let source: AltStoreSource
     let installAction: (AltStoreSourceApp) -> Void
@@ -1837,7 +1924,9 @@ private final class CZFSourceIconCache {
     }
 }
 
-private struct SourceIconView: View {
+// SourceIconView 不再 private：网格单元/详情页（CZFSourceGridView.swift）
+// 与管理源 sheet 共用同一份图标加载。
+struct SourceIconView: View {
     let url: URL?
     @State private var image: UIImage?
 
