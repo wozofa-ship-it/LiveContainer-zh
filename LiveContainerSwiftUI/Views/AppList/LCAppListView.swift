@@ -1348,9 +1348,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     var body: some View {
         NavigationView {
-            ZStack {
-                // 自定义背景（3.8.413）：图片铺满整页 + 轻压暗；
-                // 列表/网格都是 ScrollView（背景透明），图从空隙透出来。
+            ScrollView {
+                if czfGridMode {
+                    czfGridContent
+                } else {
+                    czfListContent
+                }
+
+            }
+            // 自定义背景（3.8.415）：图挂在 ScrollView 的 .background
+            // 里，不包 ZStack——413 把 ScrollView 包进 ZStack 后，
+            // NavigationView 的大标题/搜索栏/切换行全叠到一块
+            // （用户 414 截图：App 标题压住图标、搜索栏压住名字，
+            // 太丑）。background 不动视图层级，标题/搜索/切换行
+            // 原样排布，图只从透明处透出来。
+            .background {
                 if let bg = czfBackgroundImage {
                     Image(uiImage: bg)
                         .resizable()
@@ -1358,49 +1370,41 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         .ignoresSafeArea()
                         .overlay(Color.black.opacity(0.12))
                 }
-                ScrollView {
-                    if czfGridMode {
-                        czfGridContent
+            }
+            // 模式切换行固定在顶部（3.8.410）：原来在 ScrollView
+            // 内容里（网格/列表各一份），往下一滑就被卷走；
+            // 改成 safeAreaInset 钉在滚动区顶部，滑多远都在。
+            .safeAreaInset(edge: .top) {
+                HStack {
+                    Button {
+                        czfGridMode.toggle()
+                    } label: {
+                        Label(czfGridMode ? "恢复原生" : "网格模式", systemImage: czfGridMode ? "arrow.uturn.left" : "square.grid.2x2")
+                    }
+                    Spacer()
+                    Button {
+                        czfGridMode = true
+                        czfGridSettingsShow = true
+                    } label: {
+                        Label("网格设置", systemImage: "slider.horizontal.3")
+                    }
+                }
+                .foregroundColor(.blue)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .modifier { content in
+                    // 液态化（3.8.413）：切换行是固定不动的铬，
+                    // iOS 26 走玻璃；非玻璃系统走原来实底。
+                    // 行在滚动列表里，绝不挂玻璃（同底栏）。
+                    if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                        content.glassEffect(.regular, in: .rect(cornerRadius: 20))
                     } else {
-                        czfListContent
-                    }
-
-                }
-                // 模式切换行固定在顶部（3.8.410）：原来在 ScrollView
-                // 内容里（网格/列表各一份），往下一滑就被卷走；
-                // 改成 safeAreaInset 钉在滚动区顶部，滑多远都在。
-                .safeAreaInset(edge: .top) {
-                    HStack {
-                        Button {
-                            czfGridMode.toggle()
-                        } label: {
-                            Label(czfGridMode ? "恢复原生" : "网格模式", systemImage: czfGridMode ? "arrow.uturn.left" : "square.grid.2x2")
-                        }
-                        Spacer()
-                        Button {
-                            czfGridMode = true
-                            czfGridSettingsShow = true
-                        } label: {
-                            Label("网格设置", systemImage: "slider.horizontal.3")
-                        }
-                    }
-                    .foregroundColor(.blue)
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
-                    .modifier { content in
-                        // 液态化（3.8.413）：切换行是固定不动的铬，
-                        // iOS 26 走玻璃；非玻璃系统走原来实底。
-                        // 行在滚动列表里，绝不挂玻璃（同底栏）。
-                        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                            content.glassEffect(.regular, in: .rect(cornerRadius: 20))
-                        } else {
-                            content.background(Color(.systemBackground))
-                        }
+                        content.background(Color(.systemBackground))
                     }
                 }
-                .coordinateSpace(name: "scroll")
             }
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
+            .coordinateSpace(name: "scroll")
             .onAppear {
                 czfBackgroundImage = CZFAppBackground.loadImage()
                 if !didAppear {
