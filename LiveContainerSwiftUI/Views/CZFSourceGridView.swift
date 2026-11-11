@@ -50,11 +50,13 @@ struct CZFSourceGridView: View {
         // 强行连续化。组头已抽成 CZFSourceGridGroupHeaderView
         // 独立结构（两路共用，无行为变化），留着。
         //
-        // 组头钉住置顶（3.8.421，建议第 5 条）：每组包进 Section，
-        // LazyVStack 开 pinnedViews，组头（源图标+源名）滑到顶
-        // 就钉住，滑哪个源的一直看得见，不用滑回顶才知道；
-        // 组头挂 ultraThinMaterial 底，内容从下面滑过不透出来。
-        LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
+        // 组头钉住已撤回（3.8.424，用户 22:19 视频报“源网格
+        // 还是有 bug，好多图标显示不全”）：421 把组头钉住置顶
+        // （pinnedViews），组头钉在顶上不动，格子往上滑就从
+        // 组头下面过、图标被组头盖住一半（视频里第一行图标
+        // 全程只露一半/全被盖掉）。钉住和图标露全不可兼得，
+        // 图标露全优先，组头改回跟着内容一起滑走，不再钉住。
+        LazyVStack(alignment: .leading, spacing: 16) {
             ForEach(items, id: \.id) { item in
                 Section {
                     CZFSourceGridGroupContentView(

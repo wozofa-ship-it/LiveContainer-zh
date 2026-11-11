@@ -694,7 +694,11 @@ struct LCSourcesView: View {
         }
     }
 
-    var body: some View {
+    // body 再拆分（3.8.424，423 构建仍红字）：与 App 页同款，
+    // body 还是算不过来。抽 Group 不够，改两段拆：A=导航栏+
+    // 弹层，body=A+搜索+事件回调。只拆不改逻辑。
+    @ViewBuilder
+    private var czfSourcesBodyA: some View {
         NavigationView {
             czfSourcesContent
             // 大标题改内联（3.8.420）：与 App 页同款，标题收进顶栏
@@ -814,6 +818,10 @@ struct LCSourcesView: View {
                 )
             }
         }
+    }
+
+    var body: some View {
+        czfSourcesBodyA
         .searchable(text: $searchContext.query)
 
         .onAppear {

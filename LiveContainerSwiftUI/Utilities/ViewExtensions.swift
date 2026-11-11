@@ -45,6 +45,19 @@ extension View {
     ) -> some View {
         self.modifier(DocModifier(isPresented: isPresented, types: types, multiple: multiple, callback: callback, onDismiss: onDismiss))
     }
+
+    // 文件夹选择器（3.8.423 本地 IPA 文件夹）：与 betterFileImporter
+    // 同款 DocModifier 思路，但 asCopy 必须 false——文件夹不能
+    // 拷一份（会把整个文件夹拷进临时目录、又大又不同步），要
+    // 原位访问，靠 bookmark 持久化。选完回调给文件夹 URL，
+    // 调用方自己 startAccessing + 存 bookmark。
+    public func betterFolderImporter(
+        isPresented: Binding<Bool>,
+        callback: @escaping (URL) -> (),
+        onDismiss: @escaping () -> Void
+    ) -> some View {
+        self.modifier(CZFFolderPickerModifier(isPresented: isPresented, callback: callback, onDismiss: onDismiss))
+    }
     
     func onBackground(_ f: @escaping () -> Void) -> some View {
         self.onReceive(
@@ -146,19 +159,6 @@ public struct DocModifier: ViewModifier {
     }
 
 }
-
-    // 文件夹选择器（3.8.423 本地 IPA 文件夹）：与 betterFileImporter
-    // 同款 DocModifier 思路，但 asCopy 必须 false——文件夹不能
-    // 拷一份（会把整个文件夹拷进临时目录、又大又不同步），要
-    // 原位访问，靠 security-scoped bookmark 持久化。选完回
-    // 调给文件夹 URL，调用方自己 startAccessing + 存 bookmark。
-    public func betterFolderImporter(
-        isPresented: Binding<Bool>,
-        callback: @escaping (URL) -> (),
-        onDismiss: @escaping () -> Void
-    ) -> some View {
-        self.modifier(CZFFolderPickerModifier(isPresented: isPresented, callback: callback, onDismiss: onDismiss))
-    }
 
 public struct CZFFolderPickerModifier: ViewModifier {
     @EnvironmentObject var sceneDelegate: SceneDelegate

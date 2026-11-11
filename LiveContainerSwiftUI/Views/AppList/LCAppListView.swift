@@ -1447,7 +1447,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
-    var body: some View {
+    // body 再拆分（3.8.424，423 构建仍红字）：body 420 行、35 个
+    // 修饰符串在一个表达式里，编译器还是算不过来。抽 ScrollView
+    // 不够，改三段拆：A=导航栏+批量底栏+前面几弹层，B=A+文件
+    // 选择器+后面几弹层，body=B+事件回调。只拆不改逻辑。
+    @ViewBuilder
+    private var czfAppBodyA: some View {
         NavigationView {
             czfAppScrollContent
             
@@ -1670,6 +1675,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var czfAppBodyB: some View {
+        czfAppBodyA
         .betterFileImporter(isPresented: $choosingIPA, types: [.ipa, .tipa], multiple: false, callback: { fileUrls in
             Task { await startInstallApp(fileUrls[0]) }
         }, onDismiss: {
@@ -1813,6 +1823,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .sheet(isPresented: $sortSchemesViewPresent) {
             LCAppSortSchemesView()
         }
+    }
+
+    var body: some View {
+        czfAppBodyB
         .onAppear() {
             // 3.8.281：每次进 App 页都刷新一次 VPN 开关状态（核心可能
             // 在别处被起停，本地 @State 不自己猜）。
@@ -1866,7 +1880,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .sheet(isPresented: $czfGridSettingsShow) {
             CZFAppGridSettingsView(columns: $czfGridColumns, iconSize: $czfGridIconSize, gridMode: $czfGridMode)
         }
-
     }
     
     var JITEnablingModal : some View {
@@ -2006,10 +2019,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     
     // 本地 IPA 文件夹（3.8.423）：文件夹 bookmark 存取。
-    // bookmark 带 security scope，存进 UserDefaults，下次点
-    // 文件夹按钮直接恢复，不用重新选；失效了返回 nil、重选。
+    // bookmark 存进 UserDefaults，下次点文件夹按钮直接恢复，
+    // 不用重新选；失效了返回 nil、重选。注意：.withSecurityScope
+    // 是 macOS 才有的选项，iOS 上编不过——iOS 里文档选择器
+    // 给的 URL 本身就是 security-scoped，普通 bookmark 就够，
+    // 解析出来再 startAccessingSecurityScopedResource。
     private func czfSaveIpaFolder(_ url: URL) {
-        if let data = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+        if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
         }
     }
@@ -2017,7 +2033,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func czfRestoreIpaFolder() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else { return nil }
         var isStale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale),
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale),
               !isStale else { return nil }
         return url
     }
