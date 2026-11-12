@@ -2205,14 +2205,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     // 本地 IPA 文件夹（3.8.423）：文件夹 bookmark 存取。
     // bookmark 存进 UserDefaults，下次点文件夹按钮直接恢复，
-    // 不用重新选；失效了返回 nil、重选。注意：.withSecurityScope
-    // 是 macOS 才有的选项，iOS 上编不过（3.8.429 实证：
-    // 用了它构建报 'withSecurityScope' is unavailable in iOS，
-    // 已撤回）——iOS 里文档选择器给的 URL 本身就是
-    // security-scoped，普通 bookmark 就够，解析出来再
-    // startAccessingSecurityScopedResource。
+    // 不用重新选；失效了返回 nil、重选。
+    // 3.8.435 根因（用户 11:04 报“文件夹没有显示 APP”，
+    // 426/429/430 三版都没修住）：bookmark 必须带
+    // .withSecurityScope，否则解析出的 URL 没有 security
+    // scope，startAccessing 返回 false、读不到文件夹。
+    // 之前注释里“普通 bookmark 就够”是错的——
+    // 只有 picker 当场给的 URL 自带 scope，存进 UserDefaults
+    // 再取出来就没了。iOS 上具名常量标了 unavailable（429
+    // 实证编不过），只能用 rawValue 1 << 10（与下面
+    // LCLaunchExtensionFileBookmark 同款写法，431 已证能编）。
+    // 老书签（无 scope）解析出来仍没权，读失败时文件夹页
+    // 会报“没有权限…请重新选择”，点“换文件夹”重选一次
+    // 即生成带 scope 的新书签，之后点按直接开。
     private func czfSaveIpaFolder(_ url: URL) {
-        if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+        let czfWithSecurityScope: UInt = 1 << 10
+        if let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
         }
     }
@@ -2220,7 +2228,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func czfRestoreIpaFolder() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else { return nil }
         var isStale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale) else { return nil }
+        let czfWithSecurityScope: UInt = 1 << 10
+        guard let url = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: czfWithSecurityScope), relativeTo: nil, bookmarkDataIsStale: &isStale) else { return nil }
         // 书签旧了也别直接丢（3.8.426，用户 23:00 报“选了
         // 文件夹、再点没有 IPA”）：isStale 只说明书签数据
         // 过期，解析出的 URL 多半还能用。先把 URL 返回、
