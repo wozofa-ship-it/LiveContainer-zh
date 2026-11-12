@@ -1434,7 +1434,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 直接看到内容，人脸一次都不弹。
             guard await self.czfAuthenticateLockedApp(app) else { return }
             // 带回是 UIKit 活，主线程上做；带回成功直接 return，不再新起。
-            if await MainActor.run({ self.czfBringRunningGridAppToFront(app: app) }) { return }
+            if await MainActor.run(body: { self.czfBringRunningGridAppToFront(app: app) }) { return }
             Self.czfSetLastLaunchMode(.large, for: app)
             await self.launchAppWithBundleId(bundleId: app.appInfo.relativeBundlePath ?? "", container: nil)
             // 新开路拉满（banner pollAndMaximizeFreshWindow 同款）：

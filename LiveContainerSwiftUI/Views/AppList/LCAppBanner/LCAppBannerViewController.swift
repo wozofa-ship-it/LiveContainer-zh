@@ -272,7 +272,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             // 看到内容，人脸一次都不弹。
             guard await self.czfAuthenticateIfLocked() else { return }
             // 带回是 UIKit 活，主线程上做；带回成功直接 return，不再新起。
-            if await MainActor.run({ self.czfBringRunningAppToFront() }) { return }
+            if await MainActor.run(body: { self.czfBringRunningAppToFront() }) { return }
             // 启动一律大窗口（用户亲定：启动=大窗，小窗口按钮=
             // 小窗，两按钮不得都开小窗）。3.8.277 新3 让启动按
             // 记忆开——上次点过小窗口/最小化，记忆就是 small/
