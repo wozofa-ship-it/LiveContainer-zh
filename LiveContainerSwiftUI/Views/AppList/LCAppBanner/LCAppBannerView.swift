@@ -31,6 +31,10 @@ final class LCAppBannerRootView: UIView {
     private let nameStack = UIStackView()
     private let detailStack = UIStackView()
 
+    // O-13：最近一次 update 的图标归属键（bundlePath+明暗）；
+    // 后台生成回来时对不上就不刷新（视图复用到别的 App 时）。
+    private var czfIconKey: String?
+
     override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric, height: Self.bannerHeight)
     }
@@ -185,7 +189,20 @@ final class LCAppBannerRootView: UIView {
         darkModeIcon: Bool,
         traitCollection: UITraitCollection
     ) {
-        let icon = appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage()
+        // O-13：update 只同步读内存/磁盘缓存（快路径）；未命中
+        // 才后台生成，生成完重跑一次 update（此时内存缓存已
+        // 就绪，走快路径、不再触发后台，不循环）。动态取色用
+        // 占位空图时会先算出 .clear，图标回来重跑即修正。
+        let iconKey = appInfo.bundlePath() + (darkModeIcon ? "|dark" : "|light")
+        czfIconKey = iconKey
+        let cachedIcon = CZFAppIconLoader.cachedIconOnly(for: appInfo, darkModeIcon: darkModeIcon)
+        let icon = cachedIcon ?? UIImage()
+        if cachedIcon == nil {
+            CZFAppIconLoader.loadIconAsync(for: appInfo, darkModeIcon: darkModeIcon) { [weak self] _ in
+                guard let self, self.czfIconKey == iconKey else { return }
+                self.update(model: model, appInfo: appInfo, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon, traitCollection: traitCollection)
+            }
+        }
         // 无用计算：动态取色关着时 mainColor 根本不用（下面两处都走
         // 非动态分支），还白算一次；关着就不算
         let mainColor = dynamicColors ? Self.extractMainHueColor(appInfo: appInfo, icon: icon, darkModeIcon: darkModeIcon) : .clear

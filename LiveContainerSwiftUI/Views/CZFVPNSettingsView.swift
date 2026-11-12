@@ -70,6 +70,9 @@ struct CZFVPNSettingsView: View {
     @State var vpnPingPhase = "测速"
     @State var vpnPrewarmSuppressed = false
     @State private var showVPNHelp = false
+    // O-7：查看核心日志（只读展示尾部，脱敏后显示）
+    @State var showCoreLog = false
+    @State var coreLogText = ""
 
     /// 任一出现）：批量操作行只在此时才出现，平时不占一行。
     /// 清理只认网络失败——转换失败（不支持）的不算，避免只剩
@@ -459,6 +462,31 @@ struct CZFVPNSettingsView: View {
         .onAppear {
             refreshVPNState()
         }
+        // O-7：查看核心日志（只读展示尾部 N 行，脱敏后显示；
+        // 日志落盘在 Documents/singbox/sing-box.log 与
+        // Documents/xray/，见 CZFVPNManager.coreLogTail）。
+        Button("查看核心日志") {
+            loadCoreLog()
+        }
+        .buttonStyle(.borderless)
+        .sheet(isPresented: $showCoreLog) {
+            NavigationView {
+                ScrollView {
+                    Text(coreLogText)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .navigationTitle("核心日志")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("关闭") { showCoreLog = false }
+                    }
+                }
+            }
+        }
         // 测完后的批量操作单独放一行：原来启动/测延迟/
         // 切最快/清理/排序/被拒提示/状态全挤在一行，
         // 按钮一多就互相挤压截断；拆开后主操作行永远
@@ -844,6 +872,17 @@ struct CZFVPNSettingsView: View {
                     errorShow = true
                 }
             }
+        }
+    }
+
+    // O-7：读核心日志尾部（后台读、主线程显示；只读展示，
+    // 不改文件；脱敏在 CZFVPNManager.coreLogTail 里做）。
+    func loadCoreLog() {
+        showCoreLog = true
+        coreLogText = "正在读取…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let text = CZFVPNManager.coreLogTail()
+            DispatchQueue.main.async { coreLogText = text }
         }
     }
 

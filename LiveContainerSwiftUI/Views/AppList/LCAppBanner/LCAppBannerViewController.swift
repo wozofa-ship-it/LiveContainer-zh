@@ -186,19 +186,28 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         LCDataManagementView.writeCZFSettingsBackupDebounced()
     }
 
-    @objc private func runButtonTapped() {
-        if let pressedAt = runControlLongPressAt, Date().timeIntervalSince(pressedAt) < 1.5 {
-            runControlLongPressAt = nil
-            return
+    // O-3：锁屏守卫——runButtonTapped 带回路与 runApp / launchForAux 新起路
+    // 共用：锁了且没解锁过就先人脸，通过返回 true；取消返回 false、抛错弹错
+    // 返回 false，调用方直接 return。LCUtils.authenticateUser 成功后置
+    // isHiddenAppUnlocked，后面 runApp 里的同款检查直接短路，不弹第二次人脸。
+    private func czfAuthenticateIfLocked() async -> Bool {
+        guard configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked else { return true }
+        do {
+            return try await LCUtils.authenticateUser()
+        } catch {
+            showError(error.localizedDescription)
+            return false
         }
-        // 启动 = 大窗口（3.8.238 重修：3.8.237 只在 isUsing 门
-        // 内的带回路上拉满，门一关（isUsing 不同步、或归属
-        // 不明）就落到 runApp 空转、窗还是小的，用户看到的
-        // 就是没修）。现改走面板同款 dock+路径归属路（最小
-        // 化/小窗口按钮同款，已验证能顶回窗口）：dock 里有
-        // 本条目、路径对得上就带回并拉满；归属对不上才走
-        // runApp 拆容器起新窗。isUsing 门不再拦——dock 条目
-        // 本身就是窗口在跑的证据，面板两路同样不查它。
+    }
+
+    // O-3：列表带回已在运行的 App（原 runButtonTapped 前半段原样抽出）：
+    // dock 里有本条目、路径对得上就带回并拉满，返回 true，调用方直接 return；
+    // 归属对不上不碰，返回 false 走 runApp 拆容器起新窗。认证不在这里做，
+    // 调用方带回前先过 czfAuthenticateIfLocked。启动 = 大窗口（3.8.238
+    // 重修：3.8.237 只在 isUsing 门内的带回路上拉满，门一关（isUsing 不同步、
+    // 或归属不明）就落到 runApp 空转、窗还是小的；现改走面板同款 dock+
+    // 路径归属路，isUsing 门不再拦——dock 条目本身就是窗口在跑的证据）。
+    private func czfBringRunningAppToFront() -> Bool {
         if #available(iOS 16.0, *),
            let uuid = bannerInstanceUUID() {
             let dockManager = MultitaskDockManager.shared
@@ -229,7 +238,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                            !vc.isMaximized {
                             vc.maximizeWindow()
                         }
-                        return
+                        return true
                     }
                 }
             } else {
@@ -244,13 +253,26 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                     brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
                 }
                 if brought {
-                    return
+                    return true
                 }
             }
         }
+        return false
+    }
 
+    @objc private func runButtonTapped() {
+        if let pressedAt = runControlLongPressAt, Date().timeIntervalSince(pressedAt) < 1.5 {
+            runControlLongPressAt = nil
+            return
+        }
         Task { [weak self] in
             guard let self else { return }
+            // O-3：带回前先认证（与 runApp 共用守卫 czfAuthenticateIfLocked）：
+            // 原来带回成功直接 return，锁了的 App 正在运行时点启动直接
+            // 看到内容，人脸一次都不弹。
+            guard await self.czfAuthenticateIfLocked() else { return }
+            // 带回是 UIKit 活，主线程上做；带回成功直接 return，不再新起。
+            if await MainActor.run({ self.czfBringRunningAppToFront() }) { return }
             // 启动一律大窗口（用户亲定：启动=大窗，小窗口按钮=
             // 小窗，两按钮不得都开小窗）。3.8.277 新3 让启动按
             // 记忆开——上次点过小窗口/最小化，记忆就是 small/
@@ -461,6 +483,19 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 新3：记偏好（启动不再读它，只写；启动一律大窗口）。
         // 记的是点的意图，启动失败也不改回。
         Self.setLastLaunchMode(.small, for: configuration.model)
+        // O-3：小窗口按钮同款旁路——已在运行的带回并还原小窗会直接露出
+        // 内容，原来不走认证。锁了先人脸，过了重进本函数（此时
+        // isHiddenAppUnlocked 已置 true，不会重复弹；未运行分支走
+        // launchForAux，里面也有同款认证）。
+        if configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked {
+            Task { [weak self] in
+                guard let self else { return }
+                if await self.czfAuthenticateIfLocked() {
+                    await MainActor.run { self.smallWindowButtonTapped() }
+                }
+            }
+            return
+        }
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；60 次内没出现就停（启动失败已由
         // launch 侧 showError）。

@@ -12,6 +12,84 @@
 import SwiftUI
 import UIKit
 
+// O-13：图标加载异步化——body 只同步读内存/磁盘缓存（快路径），
+// 磁盘未命中才到后台生成（generateIconForBundleURL + 写盘），
+// 生成完回主线程调 completion；不改图标生成的实际逻辑
+//（生成仍是原同步 iconIsDarkIcon，内部先重查内存/磁盘、
+// 未命中才生成+写盘）。同一 App+明暗在途只生成一次：
+// saveCGImage 是直写目标文件（IconServices.m:227），并发
+// 写同一文件会互相损坏，须去重（锁 + 待回调用表，同款见
+// LCUtilsExtensions.verifiedTweakFoldersLock）。
+enum CZFAppIconLoader {
+    private static let czfLock = NSLock()
+    private static var czfPending: [String: [(UIImage?) -> Void]] = [:]
+
+    private static func czfKey(for appInfo: LCAppInfo, darkModeIcon: Bool) -> String {
+        appInfo.bundlePath() + (darkModeIcon ? "|dark" : "|light")
+    }
+
+    /// 只读内存/磁盘缓存，不生成图标。磁盘命中时同步返回并
+    /// 写内存缓存（与 LCAppInfo.m:203-219 原版对称）。
+    /// 磁盘文件名以 LCAppInfo.m:185-222 为准，别另发明。
+    static func cachedIconOnly(for appInfo: LCAppInfo, darkModeIcon: Bool) -> UIImage? {
+        if darkModeIcon {
+            if let icon = appInfo.cachedIconDark { return icon }
+        } else if let icon = appInfo.cachedIcon {
+            return icon
+        }
+        if let builtin = appInfo as? BuiltInSideStoreAppInfo {
+            return builtin.czfCachedIconOnly(isDarkIcon: darkModeIcon)
+        }
+        let fileName = darkModeIcon ? "LCAppIconDark.png" : "LCAppIconLight.png"
+        let path = (appInfo.bundlePath() as NSString).appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: path),
+              let icon = UIImage(contentsOfFile: path) else { return nil }
+        if darkModeIcon {
+            appInfo.cachedIconDark = icon
+        } else {
+            appInfo.cachedIcon = icon
+        }
+        return icon
+    }
+
+    /// 后台生成图标；completion 一律回主线程。调用前请先走
+    /// cachedIconOnly 快路径——已缓存的不要进这里。
+    static func loadIconAsync(for appInfo: LCAppInfo, darkModeIcon: Bool, completion: @escaping (UIImage?) -> Void) {
+        let key = czfKey(for: appInfo, darkModeIcon: darkModeIcon)
+        czfLock.lock()
+        if var list = czfPending[key] {
+            list.append(completion)
+            czfPending[key] = list
+            czfLock.unlock()
+            return
+        }
+        czfPending[key] = [completion]
+        czfLock.unlock()
+        DispatchQueue.global(qos: .userInitiated).async {
+            // 生成逻辑不动：原同步方法内部先重查内存/磁盘，
+            // 仍未命中才 generateIconForBundleURL + 写盘。
+            let icon: UIImage? = appInfo.iconIsDarkIcon(darkModeIcon)
+            DispatchQueue.main.async {
+                czfLock.lock()
+                let completions = czfPending.removeValue(forKey: key) ?? []
+                czfLock.unlock()
+                for pendingCompletion in completions {
+                    pendingCompletion(icon)
+                }
+            }
+        }
+    }
+
+    /// loadIconAsync 的 async/await 包装（供 cell 的 .task 用）。
+    static func loadIcon(for appInfo: LCAppInfo, darkModeIcon: Bool) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            loadIconAsync(for: appInfo, darkModeIcon: darkModeIcon) { icon in
+                continuation.resume(returning: icon)
+            }
+        }
+    }
+}
+
 // 网格单元要调的一组动作：启动类走 LCAppListView 已有的方法，
 // 删除/插件/VPN 等在 CZFAppGridView 里就地实现（见下）。
 struct CZFAppGridActions {
@@ -237,8 +315,8 @@ private struct CZFAppGridTapGesture: ViewModifier {
     }
 }
 
-// 网格单元：大图标 + 下方单行名字。图标取法照抄 banner
-//（LCAppBannerView.update：appInfo.iconIsDarkIcon(darkModeIcon)）。
+// 网格单元：大图标 + 下方单行名字。图标取法与 banner 同款
+//（O-13：CZFAppIconLoader 快路径同步读缓存，未命中后台生成）。
 // GeometryReader + aspectRatio(1) 让图标区成正方形，图标宽 =
 // 单元宽 × 系数（最小 44），不依赖父视图量宽。
 struct CZFAppGridCell: View {
@@ -249,9 +327,27 @@ struct CZFAppGridCell: View {
     var actions: CZFAppGridActions
 
     @State private var czfCellError: String?
+    // O-13：后台生成的图标 + 它属于哪个 App/明暗；cell 复用
+    // （滚动/明暗切换）后 key 对不上就不用，避免刷到别的 cell。
+    @State private var czfLoadedIcon: UIImage?
+    @State private var czfLoadedIconKey: String?
     // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、
     // 深色黑晕影（源格子 CZFSourceGridView.swift:316 同款）。
     @Environment(\.colorScheme) private var colorScheme
+
+    // O-13：图标归属键——bundlePath 每个 App 唯一 + 明暗。
+    private var czfCurrentIconKey: String {
+        app.appInfo.bundlePath() + (darkModeIcon ? "|dark" : "|light")
+    }
+
+    // O-13：body 只同步读缓存——先看后台已生成的，再走
+    // 内存/磁盘快路径；两处都没有才显示占位，后台任务补。
+    private var czfResolvedIcon: UIImage? {
+        if let loaded = czfLoadedIcon, czfLoadedIconKey == czfCurrentIconKey {
+            return loaded
+        }
+        return CZFAppIconLoader.cachedIconOnly(for: app.appInfo, darkModeIcon: darkModeIcon)
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -264,7 +360,7 @@ struct CZFAppGridCell: View {
                 // 格子只剩名字；改显示与源格子同款灰底占位
                 //（SourceIconView.placeholder：systemGray5 底 +
                 // app.fill glyph），灰底铺满整个图标框。
-                if let icon = app.appInfo.iconIsDarkIcon(darkModeIcon),
+                if let icon = czfResolvedIcon,
                    icon.size.width > 0, icon.size.height > 0 {
                     IconImageView(icon: icon)
                         .frame(width: side, height: side)
@@ -348,6 +444,20 @@ struct CZFAppGridCell: View {
             }
         } message: {
             Text(czfCellError ?? "")
+        }
+        // O-13：图标首次生成放后台——快路径已有图标直接返回，
+        // 未命中才后台生成，生成完回主线程刷 state；task 的 id
+        // 是 App+明暗，cell 复用/滚动走后旧 task 即取消，
+        // 取消了就不刷 state，不会刷到已复用的别的 cell。
+        .task(id: czfCurrentIconKey) {
+            if CZFAppIconLoader.cachedIconOnly(for: app.appInfo, darkModeIcon: darkModeIcon) != nil {
+                return
+            }
+            let key = czfCurrentIconKey
+            let icon = await CZFAppIconLoader.loadIcon(for: app.appInfo, darkModeIcon: darkModeIcon)
+            guard !Task.isCancelled else { return }
+            czfLoadedIcon = icon
+            czfLoadedIconKey = key
         }
     }
 

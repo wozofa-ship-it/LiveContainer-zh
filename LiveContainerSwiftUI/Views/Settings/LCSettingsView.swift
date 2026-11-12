@@ -725,12 +725,10 @@ struct LCSettingsView: View {
 
     @ViewBuilder private var aboutSection: some View {
         Section {
-            // 3.8.445（用户 13:53 令“关于折叠起来就显示一个
-            // 检查更新”，13:55 纠正“不拆掉、只是隐藏、留着”）：
-            // 关于段平时只显示“检查更新”一行，三条作者链接
-            // （LiveContainer、khanhduytran0、Huge_Black）折
-            // 进“关于作者”里，默认收起、点开才看，不删代码。
-            // 点检查更新后有新版时，下面两行跳转按钮照旧出现。
+            // 3.8.456（用户 21:34 令“关于作者隐藏到更新里面”）：
+            // 关于段平时只显示“检查更新”一行；点检查更新后有新版
+            // 时，下面两行跳转按钮 +“关于作者”一起出现，没新版
+            // 时不显示作者。三条作者链接代码不动，只是换了位置。
             Button {
                 startUpdateCheck()
             } label: {
@@ -764,44 +762,46 @@ struct LCSettingsView: View {
                 Text("点更新会跳到 SideInstaller 🅥 下载安装，安装时会关闭 LiveContainer，装好后重新打开；更新前建议先在数据管理里备份一次。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-            }
-            // 三条作者链接折在这里，默认收起。
-            DisclosureGroup("关于作者") {
-                // 3.8.322 液体化繁为简：品牌图统一 30 圆角框，与
-                // LCSettingsIcon 同尺寸同圆角，行高不再随图大小抖。
-                // 第三批低 #45：整行包成一个 Button，图标也能点
-                //（之前只有文字是 Button，图标点不到）。
-                Button {
-                    openGitHub()
-                } label: {
-                    HStack {
-                        Image("GitHub")
-                            .resizable()
-                            .frame(width: 30, height: 30)
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
-                        Text("LiveContainer/LiveContainer")
+                // 3.8.456（用户 21:34 令“关于作者隐藏到更新里面”）：
+                // 关于作者只在有更新时出现（跟两行跳转按钮一起），
+                // 没更新时关于段只剩“检查更新”一行，不显示作者。
+                DisclosureGroup("关于作者") {
+                    // 3.8.322 液体化繁为简：品牌图统一 30 圆角框，与
+                    // LCSettingsIcon 同尺寸同圆角，行高不再随图大小抖。
+                    // 第三批低 #45：整行包成一个 Button，图标也能点
+                    //（之前只有文字是 Button，图标点不到）。
+                    Button {
+                        openGitHub()
+                    } label: {
+                        HStack {
+                            Image("GitHub")
+                                .resizable()
+                                .frame(width: 30, height: 30)
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                            Text("LiveContainer/LiveContainer")
+                        }
                     }
-                }
-                Button {
-                    openTwitter()
-                } label: {
-                    HStack {
-                        Image("Twitter")
-                            .resizable()
-                            .frame(width: 30, height: 30)
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
-                        Text("khanhduytran0")
+                    Button {
+                        openTwitter()
+                    } label: {
+                        HStack {
+                            Image("Twitter")
+                                .resizable()
+                                .frame(width: 30, height: 30)
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                            Text("khanhduytran0")
+                        }
                     }
-                }
-                Button {
-                    openGitHub2()
-                } label: {
-                    HStack {
-                        Image("GitHub")
-                            .resizable()
-                            .frame(width: 30, height: 30)
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
-                        Text("Huge_Black")
+                    Button {
+                        openGitHub2()
+                    } label: {
+                        HStack {
+                            Image("GitHub")
+                                .resizable()
+                                .frame(width: 30, height: 30)
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                            Text("Huge_Black")
+                        }
                     }
                 }
             }

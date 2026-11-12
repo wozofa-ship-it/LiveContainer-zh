@@ -554,15 +554,21 @@ func czfDedupSourceApps(_ apps: [AltStoreSourceApp]) -> [AltStoreSourceApp] {
 
 // 全部更新清单 sheet（用户 18:46 令）：列出全部可更新 App，
 // 每行图标 + 名字 + 已装版本 → 新版本 + 单独“更新”按钮；
-// 底部“全部更新”走批量队列。单点更新先关 sheet 再进安装
-// 队列（install 内部会切到 App 页）。
+// 底部“全部更新”走批量队列。O-4：单行更新不关整单——点过
+// 的行标“已入队”并从名单剔除，可连续点下一行；onUpdateOne
+// 返回是否已接单（无下载链接返回 false，行保留）。
 struct CZFUpdatableAppsSheet: View {
     let apps: [AltStoreSourceApp]
-    let onUpdateOne: (AltStoreSourceApp) -> Void
+    let onUpdateOne: (AltStoreSourceApp) -> Bool
     let onUpdateAll: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var sharedModel: SharedModel
+    // O-4：行内“已入队”状态——点过“更新”的行先标已入队，
+    // 父级同时把它从 cachedUpdatableApps 剔除，行随后消失；
+    // 父级名单没刷新时，已入队的行至少显示状态、不让重
+    // 复点。
+    @State private var updatingIDs: Set<String> = []
 
     private func installedVersion(for app: AltStoreSourceApp) -> String {
         (sharedModel.apps + sharedModel.hiddenApps)
@@ -589,11 +595,19 @@ struct CZFUpdatableAppsSheet: View {
                                 .lineLimit(1)
                         }
                         Spacer()
-                        Button("更新") {
-                            onUpdateOne(app)
+                        if updatingIDs.contains(app.czfStableID) {
+                            Text("已入队")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Button("更新") {
+                                if onUpdateOne(app) {
+                                    updatingIDs.insert(app.czfStableID)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
                     }
                 }
             }
@@ -963,12 +977,24 @@ struct LCSourcesView: View {
             CZFUpdatableAppsSheet(
                 apps: cachedUpdatableApps,
                 onUpdateOne: { app in
-                    showUpdatableList = false
+                    // O-4：单行更新不关整单。无下载链接不接单，
+                    // 行保留（install 里的 errorMessage 在 sheet
+                    // 盖着时弹不出来，见 B-11；至少行还在、用户
+                    // 看得到它没入队）。
+                    guard app.latestVersion?.downloadURL != nil else {
+                        errorMessage = "lc.sources.error.missingDownload".loc
+                        return false
+                    }
                     install(app: app)
+                    cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                    return true
                 },
                 onUpdateAll: {
                     showUpdatableList = false
-                    installBatch(cachedUpdatableApps)
+                    Task { @MainActor in
+                        let result = await installBatch(cachedUpdatableApps)
+                        czfShowBatchResult(result)
+                    }
                 }
             )
         }
@@ -1125,22 +1151,75 @@ struct LCSourcesView: View {
         let dedupedApps = appsToInstall.filter { seenBundleIDs.insert($0.bundleIdentifier).inserted }
         isBatchMode = false
         selectedIDs.removeAll()
-        installBatch(dedupedApps)
+        Task { @MainActor in
+            let result = await installBatch(dedupedApps)
+            czfShowBatchResult(result)
+        }
+    }
+
+    // O-4：installBatch 的汇总——queued 是已交给 App 页安装
+    // 队列的 IPA（还没装完，成败由 App 页队列的汇总报）；
+    // succeeded 是同步装完的 dylib；skipped 是无下载链接、
+    // 直接跳过的；failed 是 dylib 下载/签名失败的（名 + 原因）。
+    struct CZFInstallBatchResult {
+        var queued: [String] = []
+        var succeeded: [String] = []
+        var skipped: [String] = []
+        var failed: [(name: String, reason: String)] = []
+    }
+
+    // O-4：批量汇总的就地反馈——installBatch 只负责数数，显示
+    // 在这里。errorMessage 的 alert 挂在源页上：只有没切走
+    // （一个都没入队）时用户才看得见；一旦有 IPA 入队就切到
+    // App 页，跳过/失败的汇总目前没有可见通道（见 installBatch
+    // 注释里 dylib 那一段），只能等 App 页接线。
+    @MainActor
+    private func czfShowBatchResult(_ result: CZFInstallBatchResult) {
+        guard !result.skipped.isEmpty || !result.failed.isEmpty else { return }
+        guard result.queued.isEmpty else { return }
+        var lines: [String] = []
+        if !result.skipped.isEmpty {
+            lines.append("跳过 \(result.skipped.count) 个（无下载链接）：\(result.skipped.joined(separator: "、"))")
+        }
+        if !result.failed.isEmpty {
+            lines.append("失败 \(result.failed.count) 个：\(result.failed.map { "\($0.name)：\($0.reason)" }.joined(separator: "、"))")
+        }
+        errorMessage = lines.joined(separator: "\n")
     }
 
     /// 批量安装一组 App（勾选批量装、「全部更新」共用）：
     /// 全部发给 App 页的安装队列串行执行，autoReplace =
     /// 已装同款直接覆盖、不逐个弹框确认
+    /// O-4：返回（入队/跳过/失败）汇总，不再静默跳过。入队
+    /// 只是“已交给 App 页队列”，真正的成功/失败由 App 页安
+    /// 装队列的汇总报（LCAppListView 的批量收尾）；这里的
+    /// failed 只是批量前置失败（无下载链接、dylib 下载/签
+    /// 名失败）。
+    /// dylib 失败的可见反馈目前接不上：失败写源页
+    /// errorMessage 时用户已被切到 App 页、源页 alert 看不
+    /// 见。要让 App 页在安装队列收尾处报这笔失败，得改
+    /// LCAppListView.swift——在 drainPendingInstalls /
+    /// notifyBatchDone 处接一份“源页批量前置失败”名单（例
+    /// 如 CZFSourcePendingInstall 同款共享数组，App 页排空
+    /// 时读出来拼进批量汇总/通知）。本次只把汇总返回出来，
+    /// 调用方在没切走时就地提示（见 czfShowBatchResult）。
     @MainActor
-    private func installBatch(_ apps: [AltStoreSourceApp]) {
+    private func installBatch(_ apps: [AltStoreSourceApp]) async -> CZFInstallBatchResult {
+        var result = CZFInstallBatchResult()
         var switchedTab = false
         for app in apps {
             guard let downloadURL = app.latestVersion?.downloadURL else {
+                result.skipped.append(app.name)
                 continue
             }
             if downloadURL.pathExtension.lowercased() == "dylib" {
-                // 插件（dylib）走插件安装通道，和以前一样
-                Task { await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) }
+                // 插件（dylib）走插件安装通道：等它装完再数，
+                // 失败进汇总，不再后台 Task 静默丢掉。
+                if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
+                    result.failed.append((name: app.name, reason: error.localizedDescription))
+                } else {
+                    result.succeeded.append(app.name)
+                }
                 continue
             }
             if !switchedTab {
@@ -1152,7 +1231,9 @@ struct LCSourcesView: View {
             // 3.8.428 设置#25：不再发 0.5 秒延迟通知（App 页若未出现会丢），
             // 改写入共享待装队列，App 页 onAppear 时排空进安装队列。
             CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: true, preview: false, forceAsNew: false))
+            result.queued.append(app.name)
         }
+        return result
     }
 
     /// 已装且源里有更高版本的 App（「全部更新」的名单）：
@@ -1194,7 +1275,13 @@ struct LCSourcesView: View {
             return
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
-            Task { await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) }
+            // O-4：单装 dylib 不切 Tab，用户还留在源页，失败走
+            // 源页 errorMessage 能看见；等 Task 跑完再写。
+            Task {
+                if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
+                    errorMessage = error.localizedDescription
+                }
+            }
             return
         }
         withAnimation {
@@ -1229,7 +1316,11 @@ struct LCSourcesView: View {
             return
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
-            Task { await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) }
+            Task {
+                if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
+                    errorMessage = error.localizedDescription
+                }
+            }
             return
         }
         withAnimation {
@@ -1242,8 +1333,11 @@ struct LCSourcesView: View {
     // 低 #10：插件安装文件夹名加上 bundleIdentifier，防同名
     // 插件互相覆盖——原来只用 app.name，两个源里同名不同款的
     // 插件会写进同一个文件夹、互相覆盖。
+    // O-4：返回失败的 Error（nil = 成功），不再自己写源页
+    // errorMessage——批量时用户已被切到 App 页，源页的
+    // errorMessage 写了也看不见；由调用方决定在哪提示。
     @MainActor
-    private func installTweak(from url: URL, name: String, bundleIdentifier: String) async {
+    private func installTweak(from url: URL, name: String, bundleIdentifier: String) async -> Error? {
         do {
             let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: url)
             let fm = FileManager.default
@@ -1258,8 +1352,9 @@ struct LCSourcesView: View {
             }
             try fm.moveItem(at: tempURL, to: destURL)
             try await LCUtils.signTweaks(tweakFolderUrl: folderURL, force: true)
+            return nil
         } catch {
-            errorMessage = error.localizedDescription
+            return error
         }
     }
 
@@ -2297,8 +2392,13 @@ private struct LCSourceAppVersionDetailView: View {
 // 200 个上限）+ Caches/CZFSourceIcons 落盘，文件名
 // 是链接的 base64url（跨启动稳定，不用 hashValue），
 // 失败仍回占位图，行为与原来一致。
+// O-16：磁盘只加 TTL 与数量上限——30 天过期重下（同 URL
+// 换图不再永显示旧图），写完顺手剪掉最旧的、文件数不超
+// 200 个；内存缓存不动，不大改。
 private final class CZFSourceIconCache {
     static let shared = CZFSourceIconCache()
+    private static let diskTTL: TimeInterval = 30 * 24 * 3600
+    private static let diskMaxCount = 200
     private let memory = NSCache<NSString, UIImage>()
     private let ioQueue = DispatchQueue(label: "czf.sourceicon.cache", qos: .utility)
     private init() { memory.countLimit = 200 }
@@ -2319,7 +2419,10 @@ private final class CZFSourceIconCache {
     func load(url: URL) async -> UIImage? {
         let key = url.absoluteString as NSString
         if let hit = memory.object(forKey: key) { return hit }
-        if let data = await diskData(for: url), let img = UIImage(data: data) {
+        // 磁盘命中先验 TTL：过期当未命中，重新下载覆盖旧文件；
+        // 文件不存在也算过期（直接走下载）。
+        if !(await diskIsExpired(for: url)),
+           let data = await diskData(for: url), let img = UIImage(data: data) {
             memory.setObject(img, forKey: key)
             return img
         }
@@ -2330,9 +2433,43 @@ private final class CZFSourceIconCache {
             ioQueue.async {
                 try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try? data.write(to: dest, options: .atomic)
+                // 写完顺手剪掉最旧的，磁盘文件数不超过上限。
+                Self.pruneDisk(base: dest.deletingLastPathComponent(), maxCount: Self.diskMaxCount)
             }
         }
         return img
+    }
+
+    // 磁盘文件按修改时间验 30 天 TTL（见 load）。
+    private func diskIsExpired(for url: URL) async -> Bool {
+        guard let dest = diskURL(for: url) else { return true }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            ioQueue.async {
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: dest.path),
+                      let mtime = attrs[.modificationDate] as? Date else {
+                    cont.resume(returning: true)
+                    return
+                }
+                cont.resume(returning: Date().timeIntervalSince(mtime) > Self.diskTTL)
+            }
+        }
+    }
+
+    // 磁盘文件数超上限时删最旧的（按修改时间），只在写缓存
+    // 后顺手跑一次，不另起定时任务；刚写的文件最新，不会
+    // 被自己删掉。
+    private static func pruneDisk(base: URL, maxCount: Int) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]),
+              files.count > maxCount else { return }
+        let sorted = files.sorted {
+            let d0 = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let d1 = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return d0 < d1
+        }
+        for old in sorted.prefix(files.count - maxCount) {
+            try? fm.removeItem(at: old)
+        }
     }
 }
 

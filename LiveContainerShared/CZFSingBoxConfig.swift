@@ -244,7 +244,10 @@ public enum CZFSingBoxConfig {
     /// hysteria2：sing-box outbound/hysteria2（v1.14.4 内置）：
     /// server / server_port / password 必填，tls 必填（Hysteria2
     /// 强制 TLS，enabled 恒 true）；server_ports 端口跳跃（1.11+
-    /// 才认，本工程 1.14.4）；obfs 只有 salamander 一种。
+    /// 才认，本工程 1.14.4）；obfs 只认 salamander / gecko
+    /// （sing-box 1.14 起 gecko 同款 type+password；其它值直接
+    /// 抛 invalidValue("obfs")，不静默丢弃——O-6：以前非
+    /// salamander 的值既不进配置也不报错，节点假装能连）。
     /// 链接格式 hysteria2://PASSWORD@host:port?sni=&insecure=&
     /// pinSHA256=&mport=61000-62000#名，hy2 是同协议别名。
     /// password 在 userinfo：user 即密码，含冒号时整串
@@ -288,9 +291,19 @@ public enum CZFSingBoxConfig {
                 out["server_ports"] = ["\(lo):\(hi)"]
             }
         }
-        if let obfs = CZFSingBoxRouting.firstQuery(map, "obfs"), obfs.lowercased() == "salamander",
-           let obfsPwd = CZFSingBoxRouting.firstQuery(map, "obfs-password", "obfs_password"), !obfsPwd.isEmpty {
-            out["obfs"] = ["type": "salamander", "password": obfsPwd] as [String: Any]
+        if let obfs = CZFSingBoxRouting.firstQuery(map, "obfs") {
+            // O-6：obfs 只认 salamander / gecko（gecko 与
+            // salamander 同款 type+password）；其它值直接抛错，
+            // 让节点在测速/启动前就显示“不支持”，而不是生成
+            // 一个没 obfs 块的配置假装能连。salamander / gecko
+            // 没给密码时沿用老行为：不写 obfs 块、不抛错。
+            let kind = obfs.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard kind == "salamander" || kind == "gecko" else {
+                throw CZFSingBoxConfigError.invalidValue("obfs")
+            }
+            if let obfsPwd = CZFSingBoxRouting.firstQuery(map, "obfs-password", "obfs_password"), !obfsPwd.isEmpty {
+                out["obfs"] = ["type": kind, "password": obfsPwd] as [String: Any]
+            }
         }
         if let up = CZFSingBoxRouting.firstQuery(map, "up_mbps", "up"), let upInt = Int(up) {
             out["up_mbps"] = upInt
@@ -315,8 +328,21 @@ public enum CZFSingBoxConfig {
 
     // MARK: 对外接口
 
+    /// sing-box 日志落盘路径（O-7）：Documents/singbox/sing-box.log
+    /// 的绝对路径。只算路径字符串，不读写文件。必须用绝对路径：
+    /// 相对路径由进程 cwd 解析，iOS 上 cwd 不保证是沙盒根，
+    /// 写 "Documents/..." 相对路径可能落到 /Documents 去、甚至
+    /// 让核心启动失败；绝对路径一定落在 Documents/singbox 下。
+    /// 目录由 CZFSingBoxCore.setupIfNeeded 在 start 前建好。
+    public static var singBoxLogPath: String {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("singbox/sing-box.log").path
+    }
+
     /// 生成完整 sing-box 配置 JSON（JSONSerialization，sortedKeys）。
-    /// 固定骨架：log.level=warning（不写 log.output 文件）；
+    /// 固定骨架：log.level=info + log.output 落盘到
+    /// Documents/singbox/sing-box.log（O-7；原来是 warning 且
+    /// 不写文件，节点断流时无据可查）；
     /// dns.servers=[{tag:local,type:local}] + final=local；
     /// inbounds：mixed（listen 127.0.0.1，listen_port=socksPort），
     /// httpPort 非 nil 时再加一个 http 入站（listen_port=httpPort）；
@@ -352,7 +378,7 @@ public enum CZFSingBoxConfig {
         }
 
         var root: [String: Any] = [
-            "log": ["level": "warning"],
+            "log": ["level": "info", "output": singBoxLogPath],
             "dns": [
                 "servers": [["tag": "local", "type": "local"]],
                 "final": "local",
@@ -406,7 +432,7 @@ public enum CZFSingBoxConfig {
             ])
         }
         var root: [String: Any] = [
-            "log": ["level": "warning"],
+            "log": ["level": "info", "output": singBoxLogPath],
             "dns": [
                 "servers": [["tag": "local", "type": "local"]],
                 "final": "local",

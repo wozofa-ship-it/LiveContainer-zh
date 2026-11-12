@@ -11,6 +11,20 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     init() {
+        // 壁纸顶栏黑底（3.8.457）：App 页顶栏与源页同款
+        // czfSolidToolbarBackground（.toolbarBackground 实底），
+        // 但真机上 App 页顶仍透出壁纸变黑——SwiftUI 的
+        // .toolbarBackground 在本页没生效（两页代码逐行同款，
+        // 根因未定位）。改走 UIKit 外观代理强制不透明导航栏，
+        // 与源页白顶一致；只设背景色不改别的。放 init 最前面，
+        // 导航栏创建前就生效。
+        let czfNavAppearance = UINavigationBarAppearance()
+        czfNavAppearance.configureWithOpaqueBackground()
+        czfNavAppearance.backgroundColor = .systemBackground
+        UINavigationBar.appearance().standardAppearance = czfNavAppearance
+        UINavigationBar.appearance().scrollEdgeAppearance = czfNavAppearance
+        UINavigationBar.appearance().compactAppearance = czfNavAppearance
+
         // 保活启动同步：重装后开关默认开，第一次启动即把
         // dylib 部署进全局 Tweaks，不等用户打开设置页
         LCSettingsView.syncKeepAliveAtLaunch()

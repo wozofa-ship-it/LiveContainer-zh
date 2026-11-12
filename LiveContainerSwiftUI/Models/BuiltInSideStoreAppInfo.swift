@@ -40,6 +40,13 @@ final class BuiltInSideStoreAppInfo : LCAppInfo {
         }
         
         if let ans {
+            // O-13：磁盘命中也写内存缓存，与 LCAppInfo.m 原版
+            // 对称——否则每次 body 都重新读盘。
+            if isDarkIcon {
+                cachedIconDark = ans
+            } else {
+                cachedIcon = ans
+            }
             return ans
         }
         
@@ -55,6 +62,35 @@ final class BuiltInSideStoreAppInfo : LCAppInfo {
         }
 
         return ans;
+    }
+
+    // O-13：只读内存/磁盘缓存，不生成图标（供 CZFAppIconLoader
+    // 快路径用；本类的磁盘缓存目录与 LCAppInfo.m 不同，
+    // 不能走基类的 bundlePath/LCAppIcon*.png 路径）。
+    func czfCachedIconOnly(isDarkIcon: Bool) -> UIImage? {
+        if isDarkIcon {
+            if let cachedIconDark {
+                return cachedIconDark
+            }
+        } else {
+            if let cachedIcon {
+                return cachedIcon
+            }
+        }
+        guard let iconCacheUrl = ensureAndGetIconCacheFolder() else {
+            return nil
+        }
+        let cachedIconURL = iconCacheUrl.appendingPathComponent(isDarkIcon ? "LCAppIconDark.png" : "LCAppIconLight.png")
+        guard FileManager.default.fileExists(atPath: cachedIconURL.path),
+              let icon = UIImage(contentsOfFile: cachedIconURL.path) else {
+            return nil
+        }
+        if isDarkIcon {
+            cachedIconDark = icon
+        } else {
+            cachedIcon = icon
+        }
+        return icon
     }
     
     override var lastLaunched: Date!{

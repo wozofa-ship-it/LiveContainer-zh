@@ -106,6 +106,12 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // 再拦一道，拦住已失效的旧解包刷进新列表。
     private var detailsCancelled = false
 
+    // 上次扫过的文件夹（O-5 扫前短路用）：切 Tab 重建视图时
+    // onAppear 又调 scan()，文件夹没变且已有列表就直接返回，
+    // 不重扫；文件夹换了（模型随 .id(url) 重建）或上次扫失败
+    // 时这里是 nil，照常扫。
+    private var lastScannedFolderURL: URL?
+
     init(folderURL: URL) {
         self.folderURL = folderURL
     }
@@ -126,11 +132,28 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     }
 
     func scan() {
+        // O-5 扫前短路（模型上移与扫前短路二选一，选这个）：
+        // 文件夹未变且已有列表，直接返回，不重扫。但切走时
+        // onDisappear 取消过详情任务，没读完的详情要续上，
+        // 否则没详情的行永远没名字没图标；正在扫时不续，
+        // 等这次扫完统一刷。
+        if folderURL == lastScannedFolderURL, !items.isEmpty {
+            if !scanning, detailTask == nil, items.contains(where: { !$0.detailLoaded }) {
+                detailsCancelled = false
+                detailTask = Task { await loadAllDetails() }
+            }
+            return
+        }
+        lastScannedFolderURL = folderURL
         cancelDetailTasks()
         detailsCancelled = false
         scanning = true
         errorText = nil
-        items = []
+        // O-5：不清 items，旧列表一直可见到新列表就绪（枚举
+        // 完再整体替换）；初次扫 items 为空，照常显示
+        // ProgressView（见 Grid 的 scanning && items.isEmpty）。
+        // 首次扫顺手做一次磁盘缓存 LRU 清理（O-16）。
+        _ = Self.czfCachePruneOnce
         Task {
             didStartAccessing = folderURL.startAccessingSecurityScopedResource()
             let fm = FileManager.default
@@ -144,6 +167,9 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                 try collectIpaURLs(in: folderURL, into: &found)
                 ipaURLs = found
             } catch let error as NSError {
+                // O-5：扫失败时把短路标记清掉，下次出现重扫；
+                // 否则旧列表非空会直接短路返回，错误一直挂着。
+                lastScannedFolderURL = nil
                 if !didStartAccessing {
                     errorText = "没有权限访问这个文件夹，请重新选择文件夹"
                 } else if error.domain == NSCocoaErrorDomain && error.code == 260 {
@@ -214,6 +240,9 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // loadDetails 里的 detailsCancelled 拦住不刷表。
     // 全部读完后按显示名重排一次（App #28）。
     private func loadAllDetails() async {
+        // O-16：缓存键用相对文件夹根的相对路径，根传给
+        // loadDetails（后台解包任务里直接用，不回主线程取）。
+        let root = folderURL
         var start = 0
         while start < items.count {
             if Task.isCancelled { return }
@@ -221,7 +250,7 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             await withTaskGroup(of: Void.self) { group in
                 for item in chunk {
                     group.addTask {
-                        await Task.detached { await self.loadDetails(for: item) }.value
+                        await Task.detached { await self.loadDetails(for: item, folderRoot: root) }.value
                     }
                 }
             }
@@ -246,41 +275,57 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // 详情磁盘缓存（3.8.446，用户 14:53 令“切换过来每次，
     // 加载图标”）：切到 App 页 onAppear 就重扫重解包，图标
     // 每次现解。把解出的名字/版本/包名/图标缩略图存到
-    // Caches/CZFIpaFolderCache，键 = 路径|修改时间|大小 的
-    // SHA256，文件一换键就变、自动失效；再切回来先读缓存，
-    // 命中直接显示，只有缓存没有才解包。每个 IPA 各存一份
+    // Caches/CZFIpaFolderCache，每个 IPA 各存一份
     // <key>.json + <key>.png，并发写不撞同一个文件。
+    // O-16：键改用相对文件夹根的相对路径 + 修改时间 + 大小
+    // 的 SHA256（原来是绝对路径：文件夹重选/改名/移动就全
+    // 部失效）；两级缓存——无图标时也存 .json（名字/版本/
+    // 包名），读缓存时图标缺失不判整条未命中（原来缺 png
+    // 即未命中，无图标的包每次切 Tab 都全量解包重读）。
     nonisolated private static var czfCacheDir: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
             .appendingPathComponent("CZFIpaFolderCache", isDirectory: true)
     }
 
-    nonisolated private static func czfCacheKey(for url: URL) -> String? {
+    nonisolated private static func czfCacheKey(for url: URL, relativeTo folderRoot: URL?) -> String? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970,
               let size = (attrs[.size] as? NSNumber)?.int64Value else { return nil }
-        let raw = "\(url.path)|\(mtime)|\(size)"
+        // 相对路径：文件在文件夹根下时用根下相对路径（子文件
+        // 夹也一样，如 sub/xxx.ipa）；不在根下时回落绝对路径
+        //（旧行为，至少还能命中）。
+        let rel: String
+        if let root = folderRoot, url.path.hasPrefix(root.path) {
+            var r = String(url.path.dropFirst(root.path.count))
+            if r.hasPrefix("/") { r.removeFirst() }
+            rel = r
+        } else {
+            rel = url.path
+        }
+        let raw = "\(rel)|\(mtime)|\(size)"
         let digest = SHA256.hash(data: Data(raw.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    // 读缓存：名字/版本/图标/包名缺任何一项都算未命中（图标
-    // 没存下来时不认缓存，下次再解一次）。
-    nonisolated private static func czfLoadCachedDetail(for url: URL) -> (name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?)? {
+    // 读缓存：.json 在即命中，图标缺失不判整条未命中（无图
+    // 标的包照常用名字/版本/包名，icon 为 nil）；只有 .json
+    // 没有（或解析失败）才算未命中、走解包。
+    nonisolated private static func czfLoadCachedDetail(for url: URL, relativeTo folderRoot: URL?) -> (name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?)? {
         guard let dir = czfCacheDir,
-              let key = czfCacheKey(for: url),
+              let key = czfCacheKey(for: url, relativeTo: folderRoot),
               let metaData = try? Data(contentsOf: dir.appendingPathComponent(key + ".json")),
-              let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
-              let iconData = try? Data(contentsOf: dir.appendingPathComponent(key + ".png")),
-              let icon = UIImage(data: iconData) else { return nil }
+              let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
+        let icon = (try? Data(contentsOf: dir.appendingPathComponent(key + ".png"))).flatMap { UIImage(data: $0) }
         return (meta["name"] as? String, meta["version"] as? String, icon, meta["bundleIdentifier"] as? String)
     }
 
-    nonisolated private static func czfSaveCachedDetail(for url: URL, name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?) {
+    // 存缓存：.json 总是存（无图标也存名字/版本/包名；解包
+    // 完全失败时存空 {}，下次不再重复解这个坏包——键含修改
+    // 时间 + 大小，文件一换键就变、自动失效）；.png 只有有
+    // 图标时才存。
+    nonisolated private static func czfSaveCachedDetail(for url: URL, relativeTo folderRoot: URL?, name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?) {
         guard let dir = czfCacheDir,
-              let key = czfCacheKey(for: url),
-              let icon = icon,
-              let png = icon.pngData() else { return }
+              let key = czfCacheKey(for: url, relativeTo: folderRoot) else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var meta: [String: Any] = [:]
         if let name { meta["name"] = name }
@@ -288,13 +333,64 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         if let bundleIdentifier { meta["bundleIdentifier"] = bundleIdentifier }
         if let data = try? JSONSerialization.data(withJSONObject: meta) {
             try? data.write(to: dir.appendingPathComponent(key + ".json"))
+        }
+        if let icon, let png = icon.pngData() {
             try? png.write(to: dir.appendingPathComponent(key + ".png"))
         }
     }
 
-    nonisolated private func loadDetails(for item: CZFLocalIpaItem) async {
+    // O-16：磁盘缓存 LRU 清理——启动后第一次扫文件夹时跑一
+    // 次（static let 只初始化一次，线程安全）：条目超 200
+    // 个或总大小超 100MB 时删最旧的（按修改时间），直到两
+    // 项都回到上限内；无 .json 的孤儿 .png 一并清掉（读缓
+    // 存时永远用不上）。
+    nonisolated private static let czfCachePruneOnce: Bool = {
+        czfPruneCache()
+        return true
+    }()
+
+    nonisolated private static func czfPruneCache() {
+        guard let dir = czfCacheDir else { return }
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { return }
+        let maxEntries = 200
+        let maxTotalBytes: Int64 = 100 * 1024 * 1024
+        var totalSize: Int64 = 0
+        var entries: [(key: String, mtime: Date, size: Int64)] = []
+        var orphanPNGs: [(url: URL, size: Int64)] = []
+        for file in files {
+            let size = ((try? fm.attributesOfItem(atPath: file.path))?[.size] as? NSNumber)?.int64Value ?? 0
+            totalSize += size
+            if file.pathExtension == "json" {
+                let key = file.deletingPathExtension().lastPathComponent
+                let pngSize = ((try? fm.attributesOfItem(atPath: dir.appendingPathComponent(key + ".png").path))?[.size] as? NSNumber)?.int64Value ?? 0
+                let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                entries.append((key: key, mtime: mtime, size: size + pngSize))
+            } else if file.pathExtension == "png" {
+                let key = file.deletingPathExtension().lastPathComponent
+                if !fm.fileExists(atPath: dir.appendingPathComponent(key + ".json").path) {
+                    orphanPNGs.append((url: file, size: size))
+                }
+            }
+        }
+        for orphan in orphanPNGs {
+            try? fm.removeItem(at: orphan.url)
+            totalSize -= orphan.size
+        }
+        var remaining = entries.count
+        guard remaining > maxEntries || totalSize > maxTotalBytes else { return }
+        for entry in entries.sorted(by: { $0.mtime < $1.mtime }) {
+            if remaining <= maxEntries && totalSize <= maxTotalBytes { break }
+            try? fm.removeItem(at: dir.appendingPathComponent(entry.key + ".json"))
+            try? fm.removeItem(at: dir.appendingPathComponent(entry.key + ".png"))
+            totalSize -= entry.size
+            remaining -= 1
+        }
+    }
+
+    nonisolated private func loadDetails(for item: CZFLocalIpaItem, folderRoot: URL) async {
         // 先读磁盘缓存：命中直接用，不解包。
-        if let cached = Self.czfLoadCachedDetail(for: item.url) {
+        if let cached = Self.czfLoadCachedDetail(for: item.url, relativeTo: folderRoot) {
             await MainActor.run {
                 guard !self.detailsCancelled else { return }
                 if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
@@ -308,8 +404,8 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             return
         }
         let info = Self.extractIpaInfo(url: item.url)
-        // 解出来了就存缓存，下次切回来直接读。
-        Self.czfSaveCachedDetail(for: item.url, name: info.name, version: info.version, icon: info.icon, bundleIdentifier: info.bundleIdentifier)
+        // 解出来了就存缓存，下次切回来直接读（无图标也存 .json）。
+        Self.czfSaveCachedDetail(for: item.url, relativeTo: folderRoot, name: info.name, version: info.version, icon: info.icon, bundleIdentifier: info.bundleIdentifier)
         await MainActor.run {
             guard !self.detailsCancelled else { return }
             if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
@@ -466,7 +562,9 @@ struct CZFInlineIpaFolderGrid: View {
 
     var body: some View {
         Group {
-            if model.scanning {
+            // O-5：重扫时旧列表非空就不盖 ProgressView，列表一
+            // 直可见到新列表就绪；只有初次扫（列表为空）才转圈。
+            if model.scanning && model.items.isEmpty {
                 ProgressView("正在读取文件夹…")
                     .frame(maxWidth: .infinity, alignment: .center)
             } else if let errorText = model.errorText {

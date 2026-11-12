@@ -952,8 +952,18 @@ public final class CZFVPNManager {
             node["mux"] = ["enabled": true, "concurrency": 8] as [String: Any]
         }
 
+        // O-7：Xray 日志目录先建出来——Xray 自己不建目录，
+        // 目录不存在时 access/error 文件打不开。建失败也不拦
+        // 启动（try?，失败时 Xray 侧写日志失败而已）。
+        try? FileManager.default.createDirectory(at: Self.xrayLogDirectory, withIntermediateDirectories: true)
+
         let config: [String: Any] = [
-            "log": ["loglevel": "warning"],
+            // O-7：loglevel warning → info，并落盘 access/error
+            // 到 Documents/xray/（原来只 warning 且不写文件，
+            // 节点断流时无据可查）。sing-box 侧同款在
+            // CZFSingBoxConfig.configJSON 里（level info +
+            // output → Documents/singbox/sing-box.log）。
+            "log": ["loglevel": "info", "access": Self.xrayAccessLogURL.path, "error": Self.xrayErrorLogURL.path],
             "inbounds": [
                 [
                     "tag": "socks-in",
@@ -1954,6 +1964,91 @@ public final class CZFVPNManager {
         guard let dict = proxyStatsDict(for: appInfo) else { return nil }
         guard let load = dict["load"] else { return nil }
         return "插件统计（加载 \(load) · 自检 \(dict["selftest"] ?? "?")）：解析共 \(dict["gaiPass"] ?? "0") 次（假IP \(dict["gaiFake"] ?? "0")）· 代理连接 \(dict["proxied"] ?? "0") · 失败 \(dict["failed"] ?? "0") · 直连 \(dict["direct"] ?? "0") · 放行 \(dict["pass"] ?? "0") · connectx \(dict["connectx"] ?? "0")（代理 \(dict["connectxProxied"] ?? "0")）· 会话改写 \(dict["swizzled"] ?? "0") · 配置改写 \(dict["cfg"] ?? "0") · 拦QUIC \(dict["quic"] ?? "0") · QUIC代理 \(dict["quicProxied"] ?? "0")"
+    }
+
+    // MARK: - 核心日志（O-7：日志落盘 + VPN 页查看）
+
+    /// sing-box 日志文件（configJSON 里 log.output 的同一路径，
+    /// 定义在 CZFSingBoxConfig.singBoxLogPath，这里只转 URL）。
+    public static var singBoxLogURL: URL {
+        URL(fileURLWithPath: CZFSingBoxConfig.singBoxLogPath)
+    }
+
+    /// Xray 日志目录（Documents/xray；start 前建出来，见
+    /// start(withLink:) 里的 createDirectory）。
+    public static var xrayLogDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("xray", isDirectory: true)
+    }
+    public static var xrayAccessLogURL: URL { xrayLogDirectory.appendingPathComponent("access.log") }
+    public static var xrayErrorLogURL: URL { xrayLogDirectory.appendingPathComponent("error.log") }
+
+    /// 读核心日志尾部（VPN 页“查看核心日志”只读展示用）：
+    /// sing-box 日志 + Xray error 日志各取尾部 maxLinesPerFile
+    /// 行（默认 60 行/文件），逐行按探针同款规则脱敏（见
+    /// sanitizeCoreLogLine）。Xray access 日志不展示——每行
+    /// 都是连接记录、几乎全是目标地址，脱敏后剩不下可读内容，
+    /// 文件仍落盘，供 Files 里查。文件不存在（核心还没跑过）
+    /// 时该段写“（无日志文件）”。只读文件尾部 64KB，不整
+    /// 文件读进内存；日志文件无轮转/上限（O-7 不做，见汇报）。
+    public static func coreLogTail(maxLinesPerFile: Int = 60) -> String {
+        let sections: [(title: String, url: URL)] = [
+            ("sing-box", singBoxLogURL),
+            ("Xray error", xrayErrorLogURL),
+        ]
+        var out: [String] = []
+        for (title, url) in sections {
+            out.append("—— \(title) ——")
+            guard let text = tailOfFile(url, maxBytes: 64 * 1024) else {
+                out.append("（无日志文件）")
+                continue
+            }
+            let tail = Array(text.components(separatedBy: .newlines).suffix(maxLinesPerFile))
+            if tail.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                out.append("（日志为空）")
+            } else {
+                out.append(contentsOf: tail.map { sanitizeCoreLogLine($0) })
+            }
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// 只读文件尾部 maxBytes 字节并解成字符串；文件不存在/
+    /// 为空/读不出返回 nil。截断点若切在行中间，丢掉首个
+    /// 不完整行。UTF-8 用 lossy 解码，截断处的半个字符不报错。
+    private static func tailOfFile(_ url: URL, maxBytes: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd(), size > 0 else { return nil }
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        guard (try? handle.seek(toOffset: start)) != nil,
+              let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+        var text = String(decoding: data, as: UTF8.self)
+        if start > 0, let firstNL = text.firstIndex(of: "\n") {
+            text = String(text[text.index(after: firstNL)...])
+        }
+        return text
+    }
+
+    /// 核心日志单行脱敏（探针同款规则：错误字符串只含阶段名，
+    /// 不含链接、密码、密钥、token——见 CZFSingBoxProbe 头注释）：
+    /// - URL 里的 userinfo（密码）整段抹掉：`://xxx@` → `://***@`
+    /// - URL query 串整段抹掉（obfs-password 常在 query 里）
+    /// - 凭证类 key=value 的值抹掉（password / obfs-password /
+    ///   token / secret / uuid / key 等）
+    /// - Authorization 头的值抹掉
+    /// - IPv4 地址（含端口）抹掉
+    /// 局限：域名形式的目标地址（如 dial 报错里的 example.com:443）
+    /// 没抹——正则分不清节点域名与普通域名/版本号，全抹会把日志
+    /// 砍得没法读；日志只在本机查看、不上传、不进错误上报。
+    public static func sanitizeCoreLogLine(_ line: String) -> String {
+        var s = line
+        s = s.replacingOccurrences(of: "://[^/\\s@]+@", with: "://***@", options: .regularExpression)
+        s = s.replacingOccurrences(of: "\\?[^\\s]*", with: "?***", options: .regularExpression)
+        s = s.replacingOccurrences(of: "(?i)\\b(password|passwd|pwd|obfs[-_]?password|secret|token|api[-_]?key|private[-_]?key|uuid|key)\\s*[:=]\\s*[^\\s,;\"']+", with: "$1=***", options: .regularExpression)
+        s = s.replacingOccurrences(of: "(?i)(authorization:\\s*)\\S+", with: "$1***", options: .regularExpression)
+        s = s.replacingOccurrences(of: "\\b(?:\\d{1,3}\\.){3}\\d{1,3}(?::\\d+)?\\b", with: "***", options: .regularExpression)
+        return s
     }
 
     // MARK: - libXray 调用
