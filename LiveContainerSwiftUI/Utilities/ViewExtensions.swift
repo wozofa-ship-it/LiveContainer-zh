@@ -233,9 +233,12 @@ public struct CZFFolderPickerModifier: ViewModifier {
             controller.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
             guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
                 // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-                // 不把 isPresented 置 false、不占 docController，
-                // 下次 onChange 再触发时重试，并留日志。
+                // 3.8.439：原来只打日志、不把 isPresented 置 false，
+                // 下次点按钮时值已是 true、onChange 不触发，选择器
+                // 再也弹不出来（用户点“选择文件夹”没反应）。这里
+                // 置回 false，下次点按钮 onChange 能再触发。
                 print("[CZFFolderPickerModifier] present skipped: rootViewController already presenting")
+                isPresented = false
                 return
             }
             self.docController = controller

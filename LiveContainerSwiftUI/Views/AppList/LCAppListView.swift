@@ -2232,27 +2232,59 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 老书签（无 scope）解析出来仍没权，读失败时文件夹页
     // 会报“没有权限…请重新选择”，点“换文件夹”重选一次
     // 即生成带 scope 的新书签，之后点按直接开。
-    private func czfSaveIpaFolder(_ url: URL) {
+    // 文件夹书签持久化（3.8.439 加固）：先试带 security scope
+    // 的书签（1 << 10，iOS 上具名常量标 unavailable，只能用
+    // rawValue，429 实证），不行回落到普通书签（options: []）。
+    // 原来只试一种，失败就静默丢、什么都没存，下次打开还是
+    // “选择文件夹”按钮（用户 12:37 报 437 仍不显示）。回落的
+    // 普通书签至少把 URL 记下来，恢复时能拼出路径再试访问。
+    // 返回是否存下了点什么（任一方式成功即 true）。
+    @discardableResult
+    private func czfSaveIpaFolder(_ url: URL) -> Bool {
         let czfWithSecurityScope: UInt = 1 << 10
+        // 路径每次都存一份（书签丢了/解不出来时按路径回落）。
+        UserDefaults.standard.set(url.path, forKey: "CZFLocalIpaFolderPath")
         if let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
+            return true
         }
+        if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
+            return true
+        }
+        // 书签两种都建不出来，路径已存（恢复时按路径拼 URL 再试）。
+        return false
     }
 
     private func czfRestoreIpaFolder() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else { return nil }
+        guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else {
+            // 没书签时试路径回落（保存时两种书签都失败才走这里）。
+            if let path = UserDefaults.standard.string(forKey: "CZFLocalIpaFolderPath"), !path.isEmpty {
+                return URL(fileURLWithPath: path)
+            }
+            return nil
+        }
         var isStale = false
         let czfWithSecurityScope: UInt = 1 << 10
-        guard let url = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: czfWithSecurityScope), relativeTo: nil, bookmarkDataIsStale: &isStale) else { return nil }
-        // 书签旧了也别直接丢（3.8.426，用户 23:00 报“选了
-        // 文件夹、再点没有 IPA”）：isStale 只说明书签数据
-        // 过期，解析出的 URL 多半还能用。先把 URL 返回、
-        // 再重存一份新书签，下次就不走这条。直接返回 nil
-        // 的话，点按钮又弹选择器，看着像“没记住文件夹”。
-        if isStale {
-            czfSaveIpaFolder(url)
+        // 先按 security scope 解析，不行再按普通方式解析（与
+        // 保存的回落对应：存的是哪种，这里就按哪种解）。
+        if let url = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: czfWithSecurityScope), relativeTo: nil, bookmarkDataIsStale: &isStale) {
+            if isStale {
+                czfSaveIpaFolder(url)
+            }
+            return url
         }
-        return url
+        if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale) {
+            if isStale {
+                czfSaveIpaFolder(url)
+            }
+            return url
+        }
+        // 书签彻底解不出来，试路径回落。
+        if let path = UserDefaults.standard.string(forKey: "CZFLocalIpaFolderPath"), !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
     }
 
     func startInstallApp(_ fileUrl:URL) async {
