@@ -930,7 +930,7 @@ struct LCSourcesView: View {
                 apps: cachedUpdatableApps,
                 onUpdateOne: { app in
                     showUpdatableList = false
-                    install(app)
+                    install(app: app)
                 },
                 onUpdateAll: {
                     showUpdatableList = false
