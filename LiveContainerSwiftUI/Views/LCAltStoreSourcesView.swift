@@ -1949,16 +1949,29 @@ struct LCSourceAppDetailView: View {
                             dismiss()
                             onInstall(app)
                         } label: {
-                            Label("安装", systemImage: "square.and.arrow.down")
-                                .frame(maxWidth: .infinity)
+                            // 3.8.450（用户 17:47 报“安装按钮不整齐”，
+                            // 放大截图实证）：安装用 Label 时图标根本没
+                            // 画出来——.borderedProminent 下 Label 的
+                            // 图标被吞了，只剩“安装”俩字居中，新建/
+                            // 复制是图标+字，三处对不上。改显式 HStack
+                            // （Image + Text），图标是独立视图，不走
+                            // Label，三处结构完全一致才对齐。
+                            HStack(spacing: 6) {
+                                Image(systemName: "square.and.arrow.down")
+                                Text("安装")
+                            }
+                            .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         Button {
                             dismiss()
                             onInstallAsNew(app)
                         } label: {
-                            Label("新建", systemImage: "plus.square.on.square")
-                                .frame(maxWidth: .infinity)
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.square.on.square")
+                                Text("新建")
+                            }
+                            .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         if let downloadURL = app.latestVersion?.downloadURL {
@@ -1966,8 +1979,11 @@ struct LCSourceAppDetailView: View {
                                 UIPasteboard.general.string = downloadURL.absoluteString
                                 copiedDownloadURL = true
                             } label: {
-                                Label(copiedDownloadURL ? "已复制" : "复制", systemImage: copiedDownloadURL ? "checkmark" : "doc.on.doc")
-                                    .frame(maxWidth: .infinity)
+                                HStack(spacing: 6) {
+                                    Image(systemName: copiedDownloadURL ? "checkmark" : "doc.on.doc")
+                                    Text(copiedDownloadURL ? "已复制" : "复制")
+                                }
+                                .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
                         }
