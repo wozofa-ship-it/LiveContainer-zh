@@ -2458,12 +2458,12 @@ private final class CZFSourceIconCache {
         // 磁盘命中先验 TTL：过期当未命中，重新下载覆盖旧文件；
         // 文件不存在也算过期（直接走下载）。
         if !(await diskIsExpired(for: url)),
-           let data = await diskData(for: url), let img = decodedImage(from: data) {
+           let data = await diskData(for: url), let img = Self.decodedImage(from: data) {
             store(img, forKey: key)
             return img
         }
         guard let (data, _) = try? await URLSession.shared.data(from: url),
-              let img = decodedImage(from: data) else { return nil }
+              let img = Self.decodedImage(from: data) else { return nil }
         store(img, forKey: key)
         if let dest = diskURL(for: url) {
             ioQueue.async {

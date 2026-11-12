@@ -3405,7 +3405,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 下面那个 catch is CZFInstallCancelled 里要清临时包，
         // do 里声明的变量 catch 里够不到。
         let fileManager = FileManager.default
-        let destinationURL = fileManager.temporaryDirectory.appendingPathComponent(installUrl.lastPathComponent)
+        // 朋友源下载链接最后一段常是裸 UUID（无 .ipa 后缀），多次
+        // 装/重试/并发都撞同一个 tmp 路径——下载完 moveItem 报
+        // “已存在同名项目”（真机两张截图同款）。每次安装前缀一
+        // 段 UUID，落盘路径唯一，彻底避开残留与并发撞名；原文件
+        // 名（含后缀）原样保留在后面。
+        let destinationURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-\(installUrl.lastPathComponent)")
         // O-8：远程下载的 IPA 只在安装成功时删（与本地 Inbox 路径“只成功
         // 才删”对齐）：installIpaFile 抛错/取消时不删，留着方便重试；
         // 删包失败本身不算安装失败（本地 Inbox 路同款 try?）。

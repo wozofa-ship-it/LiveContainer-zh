@@ -127,7 +127,15 @@ public final class DownloadHelper : ObservableObject {
                            fm.fileExists(atPath: to.path) {
                             try? fm.removeItem(at: to)
                         }
-                        try fm.moveItem(at: tempFileURL, to: to)
+                        do {
+                            try fm.moveItem(at: tempFileURL, to: to)
+                        } catch let moveError as NSError where moveError.domain == NSCocoaErrorDomain && moveError.code == NSFileWriteFileExistsError {
+                            // 仍撞上“已存在”：并发另一路刚搬到位、或
+                            // 上面那下 removeItem 静默失败了。再清一
+                            // 次、再搬一次；还不行才把错往上抛。
+                            try? fm.removeItem(at: to)
+                            try fm.moveItem(at: tempFileURL, to: to)
+                        }
                     } catch {
                         ansError = error
                     }
