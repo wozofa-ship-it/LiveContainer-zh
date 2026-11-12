@@ -39,8 +39,12 @@ struct AltStoreSourceApp: Identifiable, Hashable {
     // 同包名在两个源里是两条记录也不怕：身份按 ForEach 作用
     // 域算，两个源是两个 ForEach；同源内同包名重复条目由
     // B-10 渲染前显式去重（只留一条），不再靠版本号区分。
+    // 3.8.450：身份改成包名 + 名字——同源内同包名有汉化版/
+    // 原版两个变体时，只按包名会把第二个当重复杀掉（Erosion
+    // 中文版 0.3.1 被 Erosion 0.3.1 盖掉，用户 23:19 报）；
+    // 名字区分变体，版本号仍不进身份，刷新升版不重建 cell。
     var czfStableID: String {
-        bundleIdentifier
+        bundleIdentifier + "|" + name
     }
 }
 

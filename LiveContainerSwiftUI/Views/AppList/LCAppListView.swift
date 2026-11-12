@@ -3110,6 +3110,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 否则 installFromUrl 会把这次排进 pendingInstalls，
                 // 队里的那份装完 JSON 还在，下次前台又装一遍。
                 guard !self.installprogressVisible else { continue }
+                // 3.8.450：死条目预检——分享的 IPA 文件已删/书签失效
+                // 时，installFromUrl 的书签解析会抛“该文件不存在”
+                // 并弹错，失败又留 JSON 下次重试，每次进 App 页
+                // 都弹一次（用户 23:21 报“更新个 IPA 一直弹窗”）。
+                // 先验书签：解析抛错即文件已死，静默删 JSON、不装、
+                // 不弹；解析成功（含 stale，文件可能只是挪了位置）
+                // 才继续走安装。只验书签，不动无书签条目。
+                if let b64 = entry.bookmarkBase64,
+                   let bookmarkData = Data(base64Encoded: b64) {
+                    var czfPreflightStale = false
+                    do {
+                        _ = try URL(resolvingBookmarkData: bookmarkData,
+                                    options: URL.BookmarkResolutionOptions(rawValue: 1 << 10),
+                                    relativeTo: nil, bookmarkDataIsStale: &czfPreflightStale)
+                    } catch {
+                        try? fm.removeItem(at: url)
+                        continue
+                    }
+                }
                 if let b64 = entry.bookmarkBase64,
                    let bookmarkData = Data(base64Encoded: b64) {
                     LCUtils.appGroupUserDefault.set(bookmarkData, forKey: "LCLaunchExtensionFileBookmark")

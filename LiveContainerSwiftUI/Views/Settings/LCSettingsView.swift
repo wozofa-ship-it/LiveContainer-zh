@@ -110,6 +110,11 @@ struct LCSettingsView: View {
     @State private var updateStatusText = "点一下检查"
     @State private var updateChecking = false
     @State private var updateInfo: CZFUpdateInfo?
+    // 3.8.450：点版本页脚出作者信息——单击出作者 sheet，5 下进开发者模式；
+    // 单击要等 0.35 秒确认不是连点，避免 sheet 弹出来挡住后 4 下。
+    @State private var czfShowAuthorSheet = false
+    @State private var czfVersionTapCount = 0
+    @State private var czfVersionTapWorkItem: DispatchWorkItem?
     private func startUpdateCheck() {
         guard !updateChecking else { return }
         updateChecking = true
@@ -541,70 +546,12 @@ struct LCSettingsView: View {
         // 下面的小字，意思一句不少。“清除通知”原来也单独
         // 占一段，顺手并进这一段的末尾。#20：严格隐藏那行
         // 锁定状态下也显示（置灰并注明需先解锁），不再消失。
+        // 3.8.450（用户 23:40 令“杂项改成杂项设置，折叠起来只
+        // 显示多任务一个”）：段名改“杂项设置”，5 个开关收进
+        // “更多设置”折叠组默认合上，只留多任务一行；多任务
+        // 仍是直达链接，点进多任务设置页。
         Section{
-            Toggle(isOn: $frameShortIcon) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        LCSettingsIcon(systemName: "plus.app", color: .green)
-                        Text("lc.settings.FrameIcon".loc)
-                    }
-                    Text("lc.settings.FrameIconDesc".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Toggle(isOn: $silentSwitchApp) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        LCSettingsIcon(systemName: "eye.slash", color: .gray)
-                        Text("lc.settings.silentSwitchApp".loc)
-                    }
-                    Text("lc.settings.silentSwitchAppDesc".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Toggle(isOn: $silentOpenWebPage) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        LCSettingsIcon(systemName: "globe", color: .teal)
-                        Text("lc.settings.silentOpenWebPage".loc)
-                    }
-                    Text("lc.settings.silentOpenWebPageDesc".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            // #20：锁定状态下也显示该行（置灰并注明需先解锁），
-            // 否则重新锁定后开关消失、无法关掉已开启的严格隐藏。
-            Toggle(isOn: $strictHiding) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        LCSettingsIcon(systemName: "hand.raised.fill", color: .red)
-                        Text("lc.settings.strictHiding".loc)
-                    }
-                    Text("lc.settings.strictHidingDesc".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    if !sharedModel.isHiddenAppUnlocked {
-                        Text("需先解锁隐藏 App 才能更改")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .disabled(!sharedModel.isHiddenAppUnlocked)
-            Toggle(isOn: $dontSignApp) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        LCSettingsIcon(systemName: "signature", color: .orange)
-                        Text("lc.settings.dontSign".loc)
-                    }
-                    Text("lc.settings.dontSignDesc".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            // 多任务：折叠后唯一可见的一行，直达多任务设置页。
             // 精简（7）：多任务设置原来单独占一段（一个链接 +
             // 一段 footer），并进杂项当一行，说明挪到行下小字。
             if #available(iOS 16.1, *) {
@@ -622,8 +569,73 @@ struct LCSettingsView: View {
                     }
                 }
             }
+            DisclosureGroup("更多设置") {
+                Toggle(isOn: $frameShortIcon) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            LCSettingsIcon(systemName: "plus.app", color: .green)
+                            Text("lc.settings.FrameIcon".loc)
+                        }
+                        Text("lc.settings.FrameIconDesc".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $silentSwitchApp) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            LCSettingsIcon(systemName: "eye.slash", color: .gray)
+                            Text("lc.settings.silentSwitchApp".loc)
+                        }
+                        Text("lc.settings.silentSwitchAppDesc".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $silentOpenWebPage) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            LCSettingsIcon(systemName: "globe", color: .teal)
+                            Text("lc.settings.silentOpenWebPage".loc)
+                        }
+                        Text("lc.settings.silentOpenWebPageDesc".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                // #20：锁定状态下也显示该行（置灰并注明需先解锁），
+                // 否则重新锁定后开关消失、无法关掉已开启的严格隐藏。
+                Toggle(isOn: $strictHiding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            LCSettingsIcon(systemName: "hand.raised.fill", color: .red)
+                            Text("lc.settings.strictHiding".loc)
+                        }
+                        Text("lc.settings.strictHidingDesc".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if !sharedModel.isHiddenAppUnlocked {
+                            Text("需先解锁隐藏 App 才能更改")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .disabled(!sharedModel.isHiddenAppUnlocked)
+                Toggle(isOn: $dontSignApp) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            LCSettingsIcon(systemName: "signature", color: .orange)
+                            Text("lc.settings.dontSign".loc)
+                        }
+                        Text("lc.settings.dontSignDesc".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
         } header: {
-            Text("lc.common.miscellaneous".loc)
+            Text("杂项设置")
         }
     }
 
@@ -727,8 +739,8 @@ struct LCSettingsView: View {
         Section {
             // 3.8.456（用户 21:34 令“关于作者隐藏到更新里面”）：
             // 关于段平时只显示“检查更新”一行；点检查更新后有新版
-            // 时，下面两行跳转按钮 +“关于作者”一起出现，没新版
-            // 时不显示作者。三条作者链接代码不动，只是换了位置。
+            // 时，下面两行跳转按钮一起出现，没新版时不显示。
+            // 3.8.450：三条作者链接已搬到版本页脚（点版本号出 sheet）。
             Button {
                 startUpdateCheck()
             } label: {
@@ -762,48 +774,8 @@ struct LCSettingsView: View {
                 Text("点更新会跳到 SideInstaller 🅥 下载安装，安装时会关闭 LiveContainer，装好后重新打开；更新前建议先在数据管理里备份一次。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                // 3.8.456（用户 21:34 令“关于作者隐藏到更新里面”）：
-                // 关于作者只在有更新时出现（跟两行跳转按钮一起），
-                // 没更新时关于段只剩“检查更新”一行，不显示作者。
-                DisclosureGroup("关于作者") {
-                    // 3.8.322 液体化繁为简：品牌图统一 30 圆角框，与
-                    // LCSettingsIcon 同尺寸同圆角，行高不再随图大小抖。
-                    // 第三批低 #45：整行包成一个 Button，图标也能点
-                    //（之前只有文字是 Button，图标点不到）。
-                    Button {
-                        openGitHub()
-                    } label: {
-                        HStack {
-                            Image("GitHub")
-                                .resizable()
-                                .frame(width: 30, height: 30)
-                                .clipShape(RoundedRectangle(cornerRadius: 7))
-                            Text("LiveContainer/LiveContainer")
-                        }
-                    }
-                    Button {
-                        openTwitter()
-                    } label: {
-                        HStack {
-                            Image("Twitter")
-                                .resizable()
-                                .frame(width: 30, height: 30)
-                                .clipShape(RoundedRectangle(cornerRadius: 7))
-                            Text("khanhduytran0")
-                        }
-                    }
-                    Button {
-                        openGitHub2()
-                    } label: {
-                        HStack {
-                            Image("GitHub")
-                                .resizable()
-                                .frame(width: 30, height: 30)
-                                .clipShape(RoundedRectangle(cornerRadius: 7))
-                            Text("Huge_Black")
-                        }
-                    }
-                }
+                // 3.8.450：三条作者链接搬到版本页脚——点“解剖自我 🅥
+                // LiveContainer 版本号”弹出作者 sheet，不再藏在更新里。
             }
         } header: {
             Text("lc.settings.about".loc)
@@ -816,11 +788,27 @@ struct LCSettingsView: View {
         // 3.8.322 液体化繁为简：VStack + systemGroupedBackground
         // 是多余的——Form 本来就是分组底色，再套一层没意义；
         // 只留文字，居中、灰字、点 5 下进开发者模式，一字不动。
+        // 3.8.450：单击出作者 sheet（三条作者链接搬到这里），5 下
+        // 进开发者模式——单击等 0.35 秒确认不是连点，免得 sheet
+        // 弹出来挡住后 4 下；5 下连点直接进开发者模式不出 sheet。
         Text(LCUtils.getVersionInfo())
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .center)
-            .onTapGesture(count: 5) {
-                sharedModel.developerMode = true
+            .onTapGesture {
+                czfVersionTapCount += 1
+                czfVersionTapWorkItem?.cancel()
+                if czfVersionTapCount >= 5 {
+                    czfVersionTapCount = 0
+                    czfVersionTapWorkItem = nil
+                    sharedModel.developerMode = true
+                } else {
+                    let workItem = DispatchWorkItem {
+                        czfVersionTapCount = 0
+                        czfShowAuthorSheet = true
+                    }
+                    czfVersionTapWorkItem = workItem
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+                }
             }
             // 第三批低 #57：点 5 下进开发者模式没有无障碍入口，
             // VoiceOver 用户无法触发，补一个 accessibilityAction。
@@ -828,6 +816,60 @@ struct LCSettingsView: View {
                 sharedModel.developerMode = true
             }
             .listRowInsets(EdgeInsets())
+            .sheet(isPresented: $czfShowAuthorSheet) {
+                czfAuthorSheet
+            }
+    }
+
+    @ViewBuilder private var czfAuthorSheet: some View {
+        // 3.8.450：作者信息 sheet——点版本页脚弹出，三条链接
+        // 原样从 aboutSection 的“关于作者”搬过来。
+        NavigationView {
+            List {
+                Button {
+                    openGitHub()
+                } label: {
+                    HStack {
+                        Image("GitHub")
+                            .resizable()
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        Text("LiveContainer/LiveContainer")
+                    }
+                }
+                Button {
+                    openTwitter()
+                } label: {
+                    HStack {
+                        Image("Twitter")
+                            .resizable()
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        Text("khanhduytran0")
+                    }
+                }
+                Button {
+                    openGitHub2()
+                } label: {
+                    HStack {
+                        Image("GitHub")
+                            .resizable()
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        Text("Huge_Black")
+                    }
+                }
+            }
+            .navigationTitle("关于作者")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") {
+                        czfShowAuthorSheet = false
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder private var developerSection: some View {
