@@ -218,10 +218,10 @@ struct LCSettingsView: View {
                 emulatorSection
                 interfaceSection
                 miscSection
+                notificationSection
                 storageSection
                 keepAliveSection
                 aboutSection
-                updateSection
                 versionFooter
                 developerSection
             }
@@ -589,6 +589,34 @@ struct LCSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            // 精简（7）：多任务设置原来单独占一段（一个链接 +
+            // 一段 footer），并进杂项当一行，说明挪到行下小字。
+            if #available(iOS 16.1, *) {
+                NavigationLink {
+                    LCMultitaskSettingView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            LCSettingsIcon(systemName: "rectangle.stack", color: .purple)
+                            Text("lc.appBanner.multitask".loc)
+                        }
+                        Text("lc.settings.multitaskDesc".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } header: {
+            Text("lc.common.miscellaneous".loc)
+        }
+    }
+
+    // 设置页整齐化（3.8.440，用户 12:49 令“太乱”）：杂项
+    // 原来 8 行混在一起（5 个开关 + 清除通知 + 通知权限 +
+    // 多任务），一屏装不下、看着像杂物堆。通知两行单拎
+    // 出来成段，杂项只剩 App 行为开关 + 多任务。
+    @ViewBuilder private var notificationSection: some View {
+        Section {
             Button {
                 clearNotifications()
             } label: {
@@ -630,25 +658,8 @@ struct LCSettingsView: View {
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 refreshNotificationAuth()
             }
-            // 精简（7）：多任务设置原来单独占一段（一个链接 +
-            // 一段 footer），并进杂项当一行，说明挪到行下小字。
-            if #available(iOS 16.1, *) {
-                NavigationLink {
-                    LCMultitaskSettingView()
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            LCSettingsIcon(systemName: "rectangle.stack", color: .purple)
-                            Text("lc.appBanner.multitask".loc)
-                        }
-                        Text("lc.settings.multitaskDesc".loc)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
         } header: {
-            Text("lc.common.miscellaneous".loc)
+            Text("通知")
         }
     }
 
@@ -735,19 +746,9 @@ struct LCSettingsView: View {
                     Text("Huge_Black")
                 }
             }
-        } header: {
-            Text("lc.settings.about".loc)
-        } footer: {
-            Text("lc.settings.warning".loc)
-        }
-    }
-
-    @ViewBuilder private var updateSection: some View {
-        // App 内更新检查：只查 fork 自己的 update release，不查
-        // 上游源（会丢 fork 改动）。有新版时下面多两行
-        // “去 SideInstaller 更新”和“去 Seal 更新”，点它直接跳
-        // 对应 App 的 install 链接下载安装，不用再去聊天里拿直链。
-        Section {
+            // 设置页整齐化（3.8.440）：更新原来单独占一段（就
+            // “检查更新”一行），并进关于段当一行；有新版时
+            // 下面两行跳转按钮照旧出现。
             Button {
                 startUpdateCheck()
             } label: {
@@ -783,7 +784,9 @@ struct LCSettingsView: View {
                     .foregroundStyle(.secondary)
             }
         } header: {
-            Text("更新")
+            Text("lc.settings.about".loc)
+        } footer: {
+            Text("lc.settings.warning".loc)
         }
     }
 
