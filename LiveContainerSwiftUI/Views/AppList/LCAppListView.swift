@@ -1340,6 +1340,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
+            // App 页下方内嵌文件夹 IPA 区（3.8.436，用户 11:15 令）：
+            // 选过的文件夹的 IPA 显示在已装 App 下方，点格子直接安装。
+            CZFInlineIpaFolderSection(
+                folderURL: czfIpaFolderURL,
+                onPickFolder: { czfIpaFolderPickerShow = true },
+                onInstall: { url in enqueueInstall(url: url, autoReplace: false) }
+            )
+            .padding(.top, 8)
         }
         .padding()
     }
@@ -1541,6 +1549,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfBackgroundImage = CZFAppBackground.loadImage()
             if !didAppear {
                 onAppear()
+            }
+            // 3.8.436：App 页下方内嵌文件夹区要直接显示，出现时
+            // 把记过的文件夹 URL 恢复出来（没记过保持 nil，
+            // 内嵌区显示“选择文件夹”按钮）。
+            if czfIpaFolderURL == nil {
+                czfIpaFolderURL = czfRestoreIpaFolder()
             }
             // 3.8.404：每次回到本页都扫分享收件箱（切回 App
             // 页时 onAppear 也触发，didAppear 守卫只拦 onAppear()）。

@@ -380,6 +380,117 @@ struct CZFLocalIpaFolderView: View {
     }
 }
 
+// App 页下方内嵌文件夹 IPA 区（3.8.436，用户 11:15 令，红框处）：
+// 选过的文件夹的 IPA 直接显示在已装 App 下方，不用再点
+// 文件夹按钮弹 sheet（sheet 426/429/430/435 四版都没稳住）。
+// 复用 CZFLocalIpaFolderModel 扫描 + CZFLocalIpaGridCell 格子，
+// 点格子直接安装。没选过文件夹时只显示一个“选择文件夹”按钮。
+struct CZFInlineIpaFolderSection: View {
+    var folderURL: URL?
+    var onPickFolder: () -> Void
+    var onInstall: (URL) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "folder")
+                    .foregroundStyle(.secondary)
+                Text("本地 IPA 文件夹")
+                    .font(.headline)
+                Spacer()
+                if folderURL != nil {
+                    Button("换文件夹", action: onPickFolder)
+                        .font(.footnote)
+                }
+            }
+            if let url = folderURL {
+                // 文件夹换了就重建模型重扫（StateObject 的
+                // folderURL 是 let，不重建就还是旧文件夹）。
+                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall)
+                    .id(url)
+            } else {
+                Button(action: onPickFolder) {
+                    HStack {
+                        Image(systemName: "folder.badge.plus")
+                        Text("选择 IPA 文件夹")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+// 内嵌区格子：自带 CZFLocalIpaFolderModel，出现即扫。
+// 用实格子（VStack + HStack 按 4 列切行，全量渲染），不用
+// LazyVGrid——嵌在 App 页 ScrollView 的 VStack 里，懒格子
+// 高度按可见行算、滑动会跳（源页 433 同款毛病）。
+struct CZFInlineIpaFolderGrid: View {
+    let folderURL: URL
+    var onPickFolder: () -> Void
+    var onInstall: (URL) -> Void
+
+    @StateObject private var model: CZFLocalIpaFolderModel
+
+    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void) {
+        self.folderURL = folderURL
+        self.onPickFolder = onPickFolder
+        self.onInstall = onInstall
+        _model = StateObject(wrappedValue: CZFLocalIpaFolderModel(folderURL: folderURL))
+    }
+
+    private var czfColCount: Int { 4 }
+
+    var body: some View {
+        Group {
+            if model.scanning {
+                ProgressView("正在读取文件夹…")
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else if let errorText = model.errorText {
+                VStack(spacing: 8) {
+                    Text(errorText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("重新选择文件夹", action: onPickFolder)
+                        .font(.footnote)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+            } else if model.items.isEmpty {
+                Text("这个文件夹里没有 IPA")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                let rows = stride(from: 0, to: model.items.count, by: czfColCount).map { start in
+                    Array(model.items[start..<min(start + czfColCount, model.items.count)])
+                }
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(rows.indices, id: \.self) { rowIndex in
+                        HStack(spacing: 16) {
+                            ForEach(rows[rowIndex]) { item in
+                                CZFLocalIpaGridCell(item: item) {
+                                    onInstall(item.url)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            ForEach(0..<(czfColCount - rows[rowIndex].count), id: \.self) { _ in
+                                Color.clear.frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear { model.scan() }
+        .onDisappear { model.cancelDetailTasks() }
+    }
+}
+
 // 一个 IPA 的格子（3.8.426）：源页同款——大图标 + 下方名字
 // （两行）+ 版本/大小，点格子直接安装。图标没解出来之前
 // 先显示占位，解出来那一行自己刷出来。
