@@ -220,22 +220,43 @@ struct CZFSourceGridGroupContentView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(apps, id: \.bundleIdentifier) { app in
-                                CZFSourceAppGridCell(
-                                    app: app,
-                                    source: source,
-                                    iconFactor: iconFactor,
-                                    isBatchMode: isBatchMode,
-                                    // U10：勾选键 = 源 feed URL + bundleIdentifier，
-                                    // 同一 App 在两个源里不再两边同打勾。
-                                    isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: app.bundleIdentifier)),
-                                    onToggleSelect: { onToggleSelect(item.url, app) },
-                                    onInstall: onInstall,
-                                    onInstallAsNew: onInstallAsNew,
-                                    onDownload: onDownload,
-                                    onDownloadVersion: onDownloadVersion
-                                )
+                        // 3.8.433 滑动闪烁（用户 09:57 报：组显示出来了，
+                        // 但滑动时有时显示有时不显示）：每组内容是
+                        // LazyVGrid，懒格子在 ScrollView 里高度按可
+                        // 见行算，滑着滑着高度变、下面的组头跟着跳，
+                        // 看着像时有时无。改成实格子：按列数切行，
+                        // VStack + HStack 全量渲染，高度一开始就定
+                        // 死，滑动不再跳。组里最多几十个格子，全量
+                        // 渲染没压力。
+                        let czfColCount = max(1, columns.count)
+                        let czfRows = stride(from: 0, to: apps.count, by: czfColCount).map { czfStart in
+                            Array(apps[czfStart..<min(czfStart + czfColCount, apps.count)])
+                        }
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(czfRows.indices, id: \.self) { czfRowIndex in
+                                HStack(spacing: 16) {
+                                    ForEach(czfRows[czfRowIndex], id: \.bundleIdentifier) { app in
+                                        CZFSourceAppGridCell(
+                                            app: app,
+                                            source: source,
+                                            iconFactor: iconFactor,
+                                            isBatchMode: isBatchMode,
+                                            // U10：勾选键 = 源 feed URL + bundleIdentifier，
+                                            // 同一 App 在两个源里不再两边同打勾。
+                                            isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: app.bundleIdentifier)),
+                                            onToggleSelect: { onToggleSelect(item.url, app) },
+                                            onInstall: onInstall,
+                                            onInstallAsNew: onInstallAsNew,
+                                            onDownload: onDownload,
+                                            onDownloadVersion: onDownloadVersion
+                                        )
+                                        .frame(maxWidth: .infinity)
+                                    }
+                                    // 末行不满时补透明占位，格子宽度与满行一致。
+                                    ForEach(0..<(czfColCount - czfRows[czfRowIndex].count), id: \.self) { _ in
+                                        Color.clear.frame(maxWidth: .infinity)
+                                    }
+                                }
                             }
                         }
                     }
