@@ -106,6 +106,9 @@ int extract(NSString* fileToExtract, NSString* extractionPath, NSProgress* progr
     archive_read_free(a);
     archive_write_close(ext);
     archive_write_free(ext);
-    
-    return 0;
+
+    // O-2 修法：第二遍循环正常走完以 ARCHIVE_EOF 退出；中途 break
+    //（读头/拷数据/收尾失败）时 r 是错误码，损坏、截断的 IPA 不能
+    // 当成解包成功。之前无条件 return 0，坏包一路往下报的全是错的错。
+    return (r == ARCHIVE_EOF) ? 0 : 1;
 }

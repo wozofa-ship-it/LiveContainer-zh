@@ -2173,17 +2173,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 用户去“文件”里点一下它、等下载完成再装。非 iCloud
     // 文件、或已下完的直接过。
     private func czfEnsureFileDownloaded(_ url: URL) async throws {
-        let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        // O-1 修法：只等“不再是 .notDownloaded”就返回是错的——下载中途
+        // 状态就会变（本地已有部分副本），必须等到真正下完才返回。
+        // 下完的判据：状态是 .current（最新版），或状态是 .downloaded
+        // 且不在下载中（本地副本完整，只是不是最新云端版，装 IPA 够用）。
+        let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .ubiquitousItemIsDownloadingKey]
+        func czfIsDownloaded(_ v: URLResourceValues) -> Bool {
+            v.ubiquitousItemDownloadingStatus == .current ||
+            (v.ubiquitousItemDownloadingStatus == .downloaded && v.ubiquitousItemIsDownloading != true)
+        }
         guard let values = try? url.resourceValues(forKeys: keys),
-              values.isUbiquitousItem == true,
-              values.ubiquitousItemDownloadingStatus == .notDownloaded else {
+              values.isUbiquitousItem == true else {
             return
         }
+        if czfIsDownloaded(values) { return }
         try? FileManager.default.startDownloadingUbiquitousItem(at: url)
         for _ in 0..<120 {
-            try await Task.sleep(nanoseconds: 500_000_000)
-            if let v = try? url.resourceValues(forKeys: keys),
-               v.ubiquitousItemDownloadingStatus != .notDownloaded {
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch is CancellationError {
+                throw CZFInstallCancelled()
+            }
+            if let v = try? url.resourceValues(forKeys: keys), czfIsDownloaded(v) {
                 return
             }
         }
