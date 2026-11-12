@@ -1235,7 +1235,7 @@ struct LCSourcesView: View {
             }
             // 3.8.428 设置#25：不再发 0.5 秒延迟通知（App 页若未出现会丢），
             // 改写入共享待装队列，App 页 onAppear 时排空进安装队列。
-            CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: true, preview: false, forceAsNew: false))
+            CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: true, preview: false, forceAsNew: false))
             result.queued.append(app.name)
         }
         return result
@@ -1293,7 +1293,7 @@ struct LCSourcesView: View {
             DataManager.shared.model.selectedTab = .apps
         }
         // 3.8.428 设置#25：改写入共享待装队列（见批量处注释），App 页 onAppear 时排空。
-        CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: false))
+        CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: false))
 
 
     }
@@ -1308,7 +1308,7 @@ struct LCSourcesView: View {
         withAnimation {
             DataManager.shared.model.selectedTab = .apps
         }
-        CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: url, autoReplace: false, preview: false, forceAsNew: false))
+        CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: url, autoReplace: false, preview: false, forceAsNew: false))
     }
 
     // 源页已装 App 的「新建」：不弹替换/新建选择框，直接按
@@ -1332,7 +1332,7 @@ struct LCSourcesView: View {
             DataManager.shared.model.selectedTab = .apps
         }
         // 3.8.428 设置#25：改写入共享待装队列（见批量处注释），App 页 onAppear 时排空。
-        CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: true))
+        CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: true))
     }
 
     // 低 #10：插件安装文件夹名加上 bundleIdentifier，防同名

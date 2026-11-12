@@ -115,6 +115,12 @@ struct CZFSourcePendingInstallItem {
 
 enum CZFSourcePendingInstall {
     static var items: [CZFSourcePendingInstallItem] = []
+    // 同一请求重复点/批量与单点重叠时只留一份：四字段全同才
+    // 算重复；排空后列表清空，后续再点可重新进队，不影响多开。
+    static func append(_ item: CZFSourcePendingInstallItem) {
+        guard !items.contains(where: { $0.url == item.url && $0.autoReplace == item.autoReplace && $0.preview == item.preview && $0.forceAsNew == item.forceAsNew }) else { return }
+        items.append(item)
+    }
 }
 
 struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
@@ -3410,7 +3416,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // “已存在同名项目”（真机两张截图同款）。每次安装前缀一
         // 段 UUID，落盘路径唯一，彻底避开残留与并发撞名；原文件
         // 名（含后缀）原样保留在后面。
-        let destinationURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-\(installUrl.lastPathComponent)")
+        // 链接没有文件名时 lastPathComponent 为空，用默认名兜底，
+        // 避免落盘文件名只剩 “<UUID>-” 这种怪名。
+        let czfBaseName = installUrl.lastPathComponent.isEmpty ? "app.ipa" : installUrl.lastPathComponent
+        let destinationURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-\(czfBaseName)")
         // O-8：远程下载的 IPA 只在安装成功时删（与本地 Inbox 路径“只成功
         // 才删”对齐）：installIpaFile 抛错/取消时不删，留着方便重试；
         // 删包失败本身不算安装失败（本地 Inbox 路同款 try?）。
