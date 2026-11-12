@@ -164,19 +164,11 @@ struct CZFAppGridView: View {
                 .padding(.top, 24)
         }
         // 未解锁时保留原来的透明长按区（人脸识别唤起），不要删。
+        // 3.8.441（用户 13:07 令）：“解锁隐藏 App”按钮去掉，
+        // 改成长按 App 页空白处显示隐藏 App——可见按钮会暴露
+        // “这里藏了东西”，长按空白处才是隐蔽入口。透明长按
+        // 区还在下面，点按不到、长按才弹人脸识别。
         if hiddenCount > 0 && !hiddenUnlocked {
-            // 可见入口（低 #11）：原来只有一块透明长按区，用户看不见、
-            // App 多时还要滑到底才能按到；加一个可见的小按钮，点它
-            // 同样调人脸识别。网格设置里加行要 LCAppListView 接线，
-            // 不在这次手里，改放网格底部。
-            Button {
-                onAuthenticateHidden()
-            } label: {
-                Label("解锁隐藏 App", systemImage: "lock")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
             Color.clear
                 .frame(height: LCAppBannerRootView.bannerHeight)
                 .contentShape(Rectangle())

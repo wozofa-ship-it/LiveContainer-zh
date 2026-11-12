@@ -347,6 +347,27 @@ extension LCUtils {
         }
         return true
     }
+
+    // 解锁已锁定 App 用（3.8.441，用户 13:07 令“锁定 App
+    // 想解锁必须人脸识别”）：每次都弹人脸识别，不走上面
+    // isHiddenAppUnlocked 的短路——隐藏 App 解锁过一次后
+    // 上面那个直接放行，锁定的 App 点“解锁”就不弹人脸了。
+    // 这里不碰 isHiddenAppUnlocked（只管 App 锁，不管隐藏）。
+    public static func authenticateUserForced() async throws -> Bool {
+        var success = false
+        var error: Error? = nil
+        await withUnsafeContinuation { c in
+            LCUtils.authenticateUser { success1, error1 in
+                success = success1
+                error = error1
+                c.resume()
+            }
+        }
+        if let error = error {
+            throw error
+        }
+        return success
+    }
     
     public static func getStoreName() -> String {
         switch LCUtils.store() {

@@ -201,6 +201,14 @@ public struct DocModifier: ViewModifier {
 public struct CZFFolderPickerModifier: ViewModifier {
     @EnvironmentObject var sceneDelegate: SceneDelegate
     @State private var docController: UIDocumentPickerViewController?
+    // 3.8.442 文件夹真因：Coordinator 必须被强引用——原来
+    // handlePresentationChange 里 `controller.delegate =
+    // Coordinator(...)` 是内联创建，delegate 是 weak，没人
+    // 强引用，Coordinator 当场释放，选完文件夹回调永不触发，
+    // czfIpaFolderURL 永远 nil、按钮永远在（436/437/439 三版
+    // 都栽在这，书签修法全是白修）。文件选择器 DocModifier
+    // 是 @State 持有 delegate 才没事，照抄它。
+    @State private var delegate: UIDocumentPickerDelegate
 
     @Binding var isPresented: Bool
     var callback: (URL) -> ()
@@ -210,6 +218,7 @@ public struct CZFFolderPickerModifier: ViewModifier {
         self.callback = callback
         self.onDismiss = onDismiss
         self._isPresented = isPresented
+        self.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
     }
 
     public func body(content: Content) -> some View {
@@ -230,7 +239,9 @@ public struct CZFFolderPickerModifier: ViewModifier {
         if presented, docController == nil {
             let controller = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
             controller.allowsMultipleSelection = false
-            controller.delegate = Coordinator(callback: callback, onDismiss: onDismiss)
+            // 3.8.442：用 @State 持有的 delegate，不再内联创建
+            //（内联的当场释放，回调永不触发）。
+            controller.delegate = delegate
             guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
                 // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
                 // 3.8.439：原来只打日志、不把 isPresented 置 false，

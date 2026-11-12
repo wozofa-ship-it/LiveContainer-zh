@@ -842,8 +842,12 @@ class LCAppModel: ObservableObject, Hashable {
             appInfo.isLocked = true
         } else {
             // authenticate before cancelling locked state
+            // 3.8.441：解锁必须每次都弹人脸识别——原来调
+            // LCUtils.authenticateUser()，隐藏 App 解锁过一次后
+            // 它直接短路放行，锁定的 App 点“解锁”就不弹人脸了。
+            // 改走强制认证（不短路、不碰隐藏解锁态）。
             do {
-                let result = try await LCUtils.authenticateUser()
+                let result = try await LCUtils.authenticateUserForced()
                 if !result {
                     uiIsLocked = true
                     return
