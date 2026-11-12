@@ -2257,16 +2257,27 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let czfWithSecurityScope: UInt = 1 << 11
         // 路径每次都存一份（书签丢了/解不出来时按路径回落）。
         UserDefaults.standard.set(url.path, forKey: "CZFLocalIpaFolderPath")
-        if let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
-            return true
+        // 3.8.447 文件夹真因（440 用户实测“还是一样”）：
+        // 建 security-scoped 书签前必须先 startAccessing，
+        // 否则 bookmarkData(withSecurityScope:) 校验不到访问
+        // 权限、静默失败，代码回落到无 scope 书签——存下来
+        // 也打不开（439 的 1<<10 错值 + 440 的缺 startAccessing
+        // 都是同一结果：重开要重选）。先 startAccessing 再建，
+        // 建完当场解出来验 startAccessing 能过，才算真有 scope、
+        // 才存；验不过就不存，别拿无 scope 书签冒充。
+        let started = url.startAccessingSecurityScopedResource()
+        defer { if started { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) else {
+            return false
         }
-        if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
-            return true
+        var isStale = false
+        guard let resolved = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), relativeTo: nil, bookmarkDataIsStale: &isStale),
+              resolved.startAccessingSecurityScopedResource() else {
+            return false
         }
-        // 书签两种都建不出来，路径已存（恢复时按路径拼 URL 再试）。
-        return false
+        resolved.stopAccessingSecurityScopedResource()
+        UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
+        return true
     }
 
     private func czfRestoreIpaFolder() -> URL? {
@@ -3256,10 +3267,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         relativeTo: nil,
                         bookmarkDataIsStale: &isStale
                     )
-                    if isStale, let newData = try? resolvedURL.bookmarkData(
-                        options: URL.BookmarkCreationOptions(rawValue: 1 << 11),
-                        includingResourceValuesForKeys: nil, relativeTo: nil) {
-                        LCUtils.appGroupUserDefault.set(newData, forKey: "LCLaunchExtensionFileBookmark")
+                    if isStale {
+                        // 3.8.447：重存书签前先 startAccessing 再建
+                        //（文件夹同款真因：没 startAccessing 就建
+                        // scope 书签会静默失败）。建完先停掉，
+                        // 下面 didStartAccessing 再为本次安装起一次。
+                        let started = resolvedURL.startAccessingSecurityScopedResource()
+                        if let newData = try? resolvedURL.bookmarkData(
+                            options: URL.BookmarkCreationOptions(rawValue: 1 << 11),
+                            includingResourceValuesForKeys: nil, relativeTo: nil) {
+                            LCUtils.appGroupUserDefault.set(newData, forKey: "LCLaunchExtensionFileBookmark")
+                        }
+                        if started { resolvedURL.stopAccessingSecurityScopedResource() }
                     }
                     installUrl = resolvedURL
                     didStartAccessing = resolvedURL.startAccessingSecurityScopedResource()
