@@ -33,6 +33,16 @@ struct AltStoreSourceApp: Identifiable, Hashable {
     let versions: [AltStoreSourceAppVersion]
     let latestVersion: AltStoreSourceAppVersion?
     let isBeta: Bool
+
+    // 2/3 行身份稳定：id 是每次解码重新生成的 UUID，刷新一
+    // 次全部行换身份、详情 sheet 被关掉；网格用 bundleIdentifier
+    // 作 id，源里同包名重复条目会丢格子。用包名 + 最新版本
+    // 号作稳定唯一身份：刷新前后不变（2），同包名不同版本
+    // 是两条记录、版本号能区分（3）；同包名同版本是重复
+    // 条目，渲染一条即去重。
+    var czfStableID: String {
+        bundleIdentifier + "|" + (latestVersion?.version ?? "")
+    }
 }
 
 struct AltStoreSource: Identifiable, Hashable {
@@ -950,15 +960,14 @@ struct LCSourcesView: View {
     }
     
     @MainActor
-    private func handleAddSource(_ rawValue: String) async -> Bool {
+    private func handleAddSource(_ rawValue: String) async -> String? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        let error = await viewModel.addSource(from: trimmed)
-        if let error {
-            errorMessage = error
-            return false
-        }
-        return true
+        guard !trimmed.isEmpty else { return nil }
+        // 1 添加源失败无反馈：原来返回 Bool、错误写父级
+        // errorMessage，sheet 盖在上面时父级 alert 被 UIKit
+        // 静默丢弃，输错地址毫无反应。改成返回错误文本，
+        // 调用方自己决定在哪显示：sheet 内本地弹、深链走父级。
+        return await viewModel.addSource(from: trimmed)
     }
     
     @MainActor
@@ -1170,7 +1179,13 @@ struct LCSourcesView: View {
                     // 低 #52：切 Tab 由 dispatchURL 做（LCTabView:220，
                     // host == "source" 时已写 selectedTab = .sources），
                     // 这里重复写已删。
-                    Task { await handleAddSource(sourceUrl) }
+                    // 1：深链添加失败走父级 errorMessage（此时没
+                    // sheet 盖着，父级 alert 能正常弹）。
+                    Task {
+                        if let error = await handleAddSource(sourceUrl) {
+                            errorMessage = error
+                        }
+                    }
                 } else {
                     // 低 #52：无 url 参数时弹提示，别静默无事。
                     errorMessage = "lc.sources.error.invalidUrl".loc
@@ -1183,11 +1198,14 @@ struct LCSourcesView: View {
 private struct ManageSourcesSheet: View {
     @ObservedObject var viewModel: AltStoreSourcesViewModel
     @Binding var isPresented: Bool
-    let onAdd: (String) async -> Bool
-    
+    let onAdd: (String) async -> String?
+
     @State private var manualSourceValue = ""
     @State private var isAddingManual = false
     @State private var sourcePendingRemoval: AltStoreSourcesViewModel.SourceItem?
+    // 1 添加源失败无反馈：sheet 内本地错误，父级 alert 盖在
+    // sheet 上会被 UIKit 静默丢弃，这里自己弹。
+    @State private var addError: String?
     @FocusState private var isManualFieldFocused: Bool
     
     var body: some View {
@@ -1282,6 +1300,16 @@ private struct ManageSourcesSheet: View {
             Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(item.displayName))
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        // 1 添加源失败无反馈：sheet 内本地弹错误，挂在 sheet
+        // 自己的层级上，不会被 sheet 盖住吞掉。
+        .alert("lc.common.error".loc, isPresented: Binding<Bool>(
+            get: { addError != nil },
+            set: { if !$0 { addError = nil } })
+        ) {
+            Button("lc.common.ok".loc, role: .cancel) { addError = nil }
+        } message: {
+            Text(addError ?? "")
+        }
     }
     
     // 低 #7：删第二段冗余查找——ManageSourcesSheet 的 ForEach
@@ -1297,8 +1325,11 @@ private struct ManageSourcesSheet: View {
         guard !trimmed.isEmpty, !isAddingManual else { return }
         isAddingManual = true
         Task {
-            let success = await onAdd(trimmed)
-            if success {
+            // 1：onAdd 返回错误文本（nil = 成功），失败时 sheet
+            // 内本地弹，不再指望父级 alert（会被 sheet 盖住吞掉）。
+            if let error = await onAdd(trimmed) {
+                addError = error
+            } else {
                 manualSourceValue = ""
                 isManualFieldFocused = false
             }
@@ -1328,7 +1359,10 @@ struct CZFSourceAppListView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))]) { app in
+            // 2 列表行身份稳定：ForEach 不用默认 UUID id（每次
+            // 解码重新生成，刷新一次全部行换身份、详情 sheet
+            // 被关掉），改用包名+版本号的稳定身份。
+            ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))], id: \.czfStableID) { app in
                 LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)), onToggleSelect: { onToggleSelect(sourceURL, app) })
             }
             if filteredApps.isEmpty {

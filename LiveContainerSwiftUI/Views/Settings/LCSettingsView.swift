@@ -214,7 +214,6 @@ struct LCSettingsView: View {
             Form {
                 jitLessSection
                 multiLCSection
-                multitaskSection
                 jitSection
                 emulatorSection
                 interfaceSection
@@ -423,23 +422,6 @@ struct LCSettingsView: View {
         }
     }
 
-    @ViewBuilder private var multitaskSection: some View {
-        if #available(iOS 16.1, *) {
-            Section {
-                NavigationLink {
-                    LCMultitaskSettingView()
-                } label: {
-                    HStack {
-                        LCSettingsIcon(systemName: "rectangle.stack", color: .purple)
-                        Text("lc.appBanner.multitask".loc)
-                    }
-                }
-            } footer: {
-                Text("lc.settings.multitaskDesc".loc)
-            }
-        }
-    }
-
     @ViewBuilder private var jitSection: some View {
         Section {
             if JITEnabler == .SideJITServer || JITEnabler == .JITStreamerEBLegacy {
@@ -479,23 +461,27 @@ struct LCSettingsView: View {
     }
 
     @ViewBuilder private var emulatorSection: some View {
-        Section {
-            Picker(selection: $selected32BitEmulator) {
-                Text("lc.common.none".loc).tag("")
-                ForEach(sharedModel.arm32EmuApps, id: \.self) { app in
-                    Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath ?? "")
+        // 精简（7）：没有 32 位 App 时不显示——选择器里只剩
+        // “无”，占一整段没意义；有 32 位 App 时再出现。
+        if !sharedModel.arm32EmuApps.isEmpty {
+            Section {
+                Picker(selection: $selected32BitEmulator) {
+                    Text("lc.common.none".loc).tag("")
+                    ForEach(sharedModel.arm32EmuApps, id: \.self) { app in
+                        Text(app.appInfo.displayName()).tag(app.appInfo.relativeBundlePath ?? "")
+                    }
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "cpu", color: .purple)
+                        Text("lc.settings.selected32BitEmulator".loc)
+                    }
                 }
-            } label: {
-                HStack {
-                    LCSettingsIcon(systemName: "cpu", color: .purple)
-                    Text("lc.settings.selected32BitEmulator".loc)
-                }
+            } header: {
+                Text("模拟器")
+            } footer: {
+                // #16：单 App 优先于全局（LCBootstrap.m:636 先读单 App 的值）
+                Text("单 App 设置优先于全局设置")
             }
-        } header: {
-            Text("模拟器")
-        } footer: {
-            // #16：单 App 优先于全局（LCBootstrap.m:636 先读单 App 的值）
-            Text("单 App 设置优先于全局设置")
         }
     }
 
@@ -643,6 +629,23 @@ struct LCSettingsView: View {
             .onAppear { refreshNotificationAuth() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 refreshNotificationAuth()
+            }
+            // 精简（7）：多任务设置原来单独占一段（一个链接 +
+            // 一段 footer），并进杂项当一行，说明挪到行下小字。
+            if #available(iOS 16.1, *) {
+                NavigationLink {
+                    LCMultitaskSettingView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            LCSettingsIcon(systemName: "rectangle.stack", color: .purple)
+                            Text("lc.appBanner.multitask".loc)
+                        }
+                        Text("lc.settings.multitaskDesc".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         } header: {
             Text("lc.common.miscellaneous".loc)

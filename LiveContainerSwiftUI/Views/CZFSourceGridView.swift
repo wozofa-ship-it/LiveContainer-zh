@@ -235,7 +235,7 @@ struct CZFSourceGridGroupContentView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             ForEach(czfRows.indices, id: \.self) { czfRowIndex in
                                 HStack(spacing: 16) {
-                                    ForEach(czfRows[czfRowIndex], id: \.bundleIdentifier) { app in
+                                    ForEach(czfRows[czfRowIndex], id: \.czfStableID) { app in
                                         CZFSourceAppGridCell(
                                             app: app,
                                             source: source,
@@ -354,7 +354,24 @@ struct CZFSourceAppGridCell: View {
     @EnvironmentObject private var sharedModel: SharedModel
 
     private var isInstalled: Bool {
-        (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+        if (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier } {
+            return true
+        }
+        // 4 已安装绿勾不认插件：dylib 插件已装也不打勾，而
+        // 详情页 LCSourceAppBanner 有 isPluginInstalled 会
+        // 显示“已安装”。同款判据：tweak 文件夹里有该插件文件。
+        return isPluginInstalled
+    }
+
+    private var isPluginInstalled: Bool {
+        guard let downloadURL = app.latestVersion?.downloadURL,
+              downloadURL.pathExtension.lowercased() == "dylib" else { return false }
+        // 文件夹名与 installTweak 同款“名-包名”；老版只有
+        // app.name 的文件夹也认（已装的插件不用重装）。
+        let newURL = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(downloadURL.lastPathComponent)
+        if FileManager.default.fileExists(atPath: newURL.path) { return true }
+        let oldURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
+        return FileManager.default.fileExists(atPath: oldURL.path)
     }
 
     // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、

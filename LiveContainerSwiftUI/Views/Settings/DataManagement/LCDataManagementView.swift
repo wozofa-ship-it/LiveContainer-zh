@@ -1196,6 +1196,11 @@ struct LCDataManagementView : View {
         // 3.8.404：范围选择独立成页——直进范围选完置
         // czfScopeChosen，收尾靠它触发（旧 dialog 位已删）。
         .onChange(of: czfScopeChosen) { _ in czfDismissIfDirectEntryDone() }
+        // 12：备份结果弹窗点掉（successShow/errorShow 由
+        // true 变 false）时也查一遍——直进备份跑完后结果弹着，
+        // 收尾被 guard 拦住，用户点掉弹窗后才轮到关页。
+        .onChange(of: successShow) { _ in czfDismissIfDirectEntryDone() }
+        .onChange(of: errorShow) { _ in czfDismissIfDirectEntryDone() }
         // 真全屏：325 的 sheet + large detent 顶上仍留一条缝——
         // sheet 的 large 本来就不是全屏，顶边留边距+圆角，底下
         // 的设置页总从缝里露出来，detent 再调也盖不住（系统
@@ -1443,10 +1448,21 @@ struct LCDataManagementView : View {
     private func czfDismissIfDirectEntryDone() {
         guard initialSheet != nil else { return }
         guard didApplyInitialSheet else { return }
+        // 12：备份进行中（backupRestoreProgress 非空）或结果
+        // 弹窗正弹着（successShow/errorShow）时不关页——原来
+        // 选完范围 0.3 秒就关，备份后台跑几分钟，结果 alert
+        // 挂在已关的页上弹不出（用户报“备份弹窗从来没弹过”）。
+        // 关页等备份跑完、用户点掉结果弹窗后再由 onChange 触发。
+        guard backupRestoreProgress == nil else { return }
+        guard !successShow, !errorShow else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             guard self.initialSheet != nil else { return }
             guard !self.showRestoreSelect, !self.showBackupSelect, !self.showScheduleBackup,
                   !self.czfDirectScopeOpen else { return }
+            // 12：0.3 秒里备份可能刚启动、结果弹窗可能刚弹，
+            // 关前再拦一道，别把进行中的备份/正弹的结果关掉。
+            guard self.backupRestoreProgress == nil else { return }
+            guard !self.successShow, !self.errorShow else { return }
             self.dismiss()
         }
     }
@@ -2569,7 +2585,7 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String]) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // v216：同款多开各写各的文件夹（见 backupFolderName：
         // 同实例沿用旧名、新实例加实例后缀；老文件夹不改名）。
@@ -2596,6 +2612,10 @@ struct LCDataManagementView : View {
         var loginBreakdown: [String: Int] = [:]
         var loginSkipped = 0
         var loginSkippedPaths: [String] = []
+        // 13：拷失败清单（完整备份的容器/.app 拷失败 + 登录态
+        // 档的 copyLoginStateFiles 失败都记这里，进回执）。
+        var loginFailed = 0
+        var loginFailedPaths: [String] = []
         // 保存 manifest.json（含 bundleID、版本，用于恢复时自动安装）
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
@@ -2635,7 +2655,11 @@ struct LCDataManagementView : View {
         if let bundlePath = app.appInfo.bundlePath() {
             let bundleURL = URL(fileURLWithPath: bundlePath)
             let destAppURL = appBackupURL.appendingPathComponent(bundleURL.lastPathComponent)
-            try? fm.copyItem(at: bundleURL, to: destAppURL)
+            // 13：.app 拷失败也记失败清单，别静默丢。
+            if (try? fm.copyItem(at: bundleURL, to: destAppURL)) == nil {
+                loginFailed += 1
+                if loginFailedPaths.count < 50 { loginFailedPaths.append(bundleURL.lastPathComponent) }
+            }
         }
         for container in app.uiContainers {
             let srcURL = container.containerURL
@@ -2645,6 +2669,10 @@ struct LCDataManagementView : View {
             if fm.fileExists(atPath: srcURL.path), (try? fm.copyItem(at: srcURL, to: destURL)) != nil {
                 containerCount += 1
                 containerNames.append(srcURL.lastPathComponent)
+            } else if fm.fileExists(atPath: srcURL.path) {
+                // 13：容器拷失败记失败清单，别静默丢。
+                loginFailed += 1
+                if loginFailedPaths.count < 50 { loginFailedPaths.append(srcURL.lastPathComponent) }
             }
         }
         // 组容器数据（App 与它的扩展/小组件共用的那份）：不在
@@ -2659,7 +2687,11 @@ struct LCDataManagementView : View {
                 let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
                 if fm.fileExists(atPath: src.path) {
                     try? fm.createDirectory(at: groupRoot, withIntermediateDirectories: true)
-                    try? fm.copyItem(at: src, to: groupRoot.appendingPathComponent(groupID))
+                    // 13：组容器拷失败记失败清单，别静默丢。
+                    if (try? fm.copyItem(at: src, to: groupRoot.appendingPathComponent(groupID))) == nil {
+                        loginFailed += 1
+                        if loginFailedPaths.count < 50 { loginFailedPaths.append("AppGroup/\(groupID)") }
+                    }
                 }
             }
         }
@@ -2677,6 +2709,9 @@ struct LCDataManagementView : View {
                     loginFileCount += r.count
                     loginSkipped += r.skipped
                     if loginSkippedPaths.count < 50 { loginSkippedPaths.append(contentsOf: r.skippedPaths.prefix(50 - loginSkippedPaths.count)) }
+                    // 13：拷失败数与路径也累上来，进回执。
+                    loginFailed += r.failed
+                    if loginFailedPaths.count < 50 { loginFailedPaths.append(contentsOf: r.failedPaths.prefix(50 - loginFailedPaths.count)) }
                     for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
                 }
             }
@@ -2690,6 +2725,9 @@ struct LCDataManagementView : View {
                         loginFileCount += r.count
                         loginSkipped += r.skipped
                         if loginSkippedPaths.count < 50 { loginSkippedPaths.append(contentsOf: r.skippedPaths.prefix(50 - loginSkippedPaths.count)) }
+                        // 13：拷失败数与路径也累上来，进回执。
+                        loginFailed += r.failed
+                        if loginFailedPaths.count < 50 { loginFailedPaths.append(contentsOf: r.failedPaths.prefix(50 - loginFailedPaths.count)) }
                         for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
                     }
                 }
@@ -2768,7 +2806,7 @@ struct LCDataManagementView : View {
             try fm.removeItem(at: finalURL)
         }
         try fm.moveItem(at: appBackupURL, to: finalURL)
-        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkipped, newestDumpDate, loginSkippedPaths, folderName, containerCount, containerNames)
+        return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkipped, newestDumpDate, loginSkippedPaths, folderName, containerCount, containerNames, loginFailed, loginFailedPaths)
     }
 
     /// 覆盖安装前的自动备份入口：把被覆盖 App 的整套数据备
@@ -2866,6 +2904,11 @@ struct LCDataManagementView : View {
     }
 
     func backupApps(_ apps: [LCAppModel], loginOnly: Bool = false) async {
+        // 6 计时（备份只加计时，不改并行）：串行队列是正确性
+        // 要求（3.8.318 注释写死，钥匙串两遍全量并发会把
+        // dump 和回执写岔、令牌丢了），提速动不了，只量耗时。
+        // 从本函数开始计时，到回执为止，整批总耗时。
+        let czfBackupStart = Date()
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
             errorInfo = "lc.settings.backupFail".loc
@@ -2889,7 +2932,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String], [String], [String], [String], [String]) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames, loginFailedTotal, loginFailedPathsTotal): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String], [String], [String], [String], [String], Int, [String]) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -2906,6 +2949,9 @@ struct LCDataManagementView : View {
                     var loginBreakdownTotal: [String: Int] = [:]
                     var loginSkippedTotal = 0
                     var loginSkippedPathsTotal: [String] = []
+                    // 13：拷失败总数与路径（进回执）。
+                    var loginFailedTotal = 0
+                    var loginFailedPathsTotal: [String] = []
                     var snapshotMissing = false
                     var bridgeStatuses: [String] = []
                     var snapshotDates: [String] = []
@@ -2941,6 +2987,9 @@ struct LCDataManagementView : View {
                             for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
                             loginSkippedTotal += one.loginSkipped
                             if loginSkippedPathsTotal.count < 10 { loginSkippedPathsTotal.append(contentsOf: one.loginSkippedPaths.prefix(10 - loginSkippedPathsTotal.count)) }
+                            // 13：拷失败数与路径累上来，进回执。
+                            loginFailedTotal += one.loginFailed
+                            if loginFailedPathsTotal.count < 10 { loginFailedPathsTotal.append(contentsOf: one.loginFailedPaths.prefix(10 - loginFailedPathsTotal.count)) }
                             if !one.keychainHasSnapshot {
                                 snapshotMissing = true
                             }
@@ -2966,9 +3015,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackupDebounced()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames, loginFailedTotal, loginFailedPathsTotal))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], [], [], [], []))
+                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], [], [], [], [], 0, []))
                 }
             }
         }
@@ -3012,6 +3061,18 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
+                // 13：拷失败清单——以前拷失败直接丢、回执里一个
+                // 字没有；现在失败也报数+列路径（前 10 条），
+                // 让用户知道这次备份里哪些文件没拷上。
+                if loginFailedTotal > 0 {
+                    successInfo += "\n⚠️ 拷贝失败 \(loginFailedTotal) 个文件"
+                    if !loginFailedPathsTotal.isEmpty {
+                        successInfo += "（前 \(loginFailedPathsTotal.count) 条：\n" + loginFailedPathsTotal.joined(separator: "\n") + "）"
+                        if loginFailedTotal > loginFailedPathsTotal.count {
+                            successInfo += "\n另有 \(loginFailedTotal - loginFailedPathsTotal.count) 个未列出"
+                        }
+                    }
+                }
             }
             if !bridgeStatuses.isEmpty {
                 successInfo += "\n—— 桥回执 ——\n" + bridgeStatuses.joined(separator: "\n")
@@ -3031,6 +3092,16 @@ struct LCDataManagementView : View {
             // 失败的 App 已在上面失败清单里，这里只列成功的。
             if !healthLines.isEmpty {
                 successInfo += "\n—— 备份健康（缺项标 ❌）——\n" + healthLines.joined(separator: "\n")
+            }
+            // 6 计时：整批总耗时（从 backupApps 开始到回执）。
+            // 不到 1 分钟只显示秒，超过显示分+秒。
+            let czfElapsed = Date().timeIntervalSince(czfBackupStart)
+            if czfElapsed < 60 {
+                successInfo += "\n用时 \(String(format: "%.0f", czfElapsed)) 秒"
+            } else {
+                let czfMinutes = Int(czfElapsed) / 60
+                let czfSeconds = Int(czfElapsed) % 60
+                successInfo += "\n用时 \(czfMinutes) 分 \(czfSeconds) 秒"
             }
             successInfo += "\n" + backupRoot.path
             successShow = true
@@ -3124,7 +3195,23 @@ struct LCDataManagementView : View {
         // 点取消就回到选页接着挑，不丢已勾的 App）。
         showBackupSelect = false
         showRestoreSelect = false
-        Task { await backupApps(apps, loginOnly: loginOnly) }
+        // 12：同步置备份进行中（backupApps 里也会置，但 Task 是
+        // 异步的；直进收尾的 0.3 秒关页可能抢在 Task 启动前，
+        // 误把进行中的备份关掉）。
+        if let first = apps.first {
+            let firstName = first.appInfo.displayName() ?? first.appInfo.bundleIdentifier() ?? "Unknown"
+            backupRestoreProgress = "正在备份 \(firstName)（1/\(apps.count)）"
+        } else {
+            backupRestoreProgress = "正在备份（0/\(apps.count)）…"
+        }
+        Task {
+            await backupApps(apps, loginOnly: loginOnly)
+            // 12：跑完后调收尾——此时结果弹窗正弹着，收尾里
+            // 的 guard 会拦住；等用户点掉弹窗，onChange 再调
+            // 收尾，关页（见 1193 附近 successShow/errorShow
+            // 的 onChange）。
+            czfDismissIfDirectEntryDone()
+        }
     }
     private func doRestoreScope(loginOnly: Bool) {
         UserDefaults.standard.set(loginOnly, forKey: "LCRestoreLastLoginOnly")
@@ -3837,9 +3924,15 @@ struct LCDataManagementView : View {
                 await MainActor.run {
                     NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL])
                 }
-                // 装好后 App 会进 sharedModel 的列表；2 秒一查，最多等 10 分钟
+                // 装好后 App 会进 sharedModel 的列表；2 秒一查，最多等 5 分钟。
+                // 14：原来等 10 分钟（300 × 2 秒）——安装失败（坏链接/
+                // 签名错）没有任何失败回传，循环只能跑满才报失败，
+                // 一个坏 App 就空等 10 分钟。改成 5 分钟（150 × 2 秒）：
+                // 正常下载+安装多在 1–2 分钟内，5 分钟够慢网大包，
+                // 失败时最多空等一半。彻底修要安装队列在失败时发
+                // 通知、这里接信号提前退出，那是下一步。
                 var installedApp: LCAppModel?
-                for _ in 0..<300 {
+                for _ in 0..<150 {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     let currentApps = sharedModel.apps + sharedModel.hiddenApps
                     installedApp = currentApps.first(where: {
@@ -4814,7 +4907,7 @@ struct LCDataManagementView : View {
     /// 文件排后面被截断。返回（实拷的会话文件数，目录分
     /// 布，超预算跳过数）——身份文件照拷但不计入文件数
     @discardableResult
-    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> (count: Int, breakdown: [String: Int], skipped: Int, skippedPaths: [String]) {
+    static func copyLoginStateFiles(from src: URL, to dst: URL, fm: FileManager) -> (count: Int, breakdown: [String: Int], skipped: Int, skippedPaths: [String], failed: Int, failedPaths: [String]) {
         var count = 0
         var bytes = 0
         var skipped = 0
@@ -4822,6 +4915,11 @@ struct LCDataManagementView : View {
         // 也证伪不了会话文件在不在跳过里；现在把相对路径也带
         // 出来（只收前 50 条防 2985 个全列出把报告撑爆，数照全计）。
         var skippedPaths: [String] = []
+        // 13：拷失败清单——以前 try? 拷失败直接丢、回执里一个
+        // 字没有，会话文件拷丢了用户只看到“备份成功”。现在
+        // 失败也计数+列路径（前 50 条），进回执。
+        var failed = 0
+        var failedPaths: [String] = []
         var copied: [String] = []
         // 3.8.312：登录关键文件优先——以前按大小升序拷、300MB
         // 封顶，假设“会话文件普遍小”。但红果这类 App 的登录态
@@ -4851,6 +4949,10 @@ struct LCDataManagementView : View {
                 if e.rel != "LCContainerInfo.plist" {
                     count += 1
                 }
+            } else {
+                // 13：拷失败记入失败清单（不静默丢弃）。
+                failed += 1
+                if failedPaths.count < 50 { failedPaths.append(e.rel) }
             }
         }
         // 再拷其余文件，按大小升序、300MB 封顶
@@ -4868,9 +4970,13 @@ struct LCDataManagementView : View {
                 if e.rel != "LCContainerInfo.plist" {
                     count += 1
                 }
+            } else {
+                // 13：拷失败记入失败清单（不静默丢弃）。
+                failed += 1
+                if failedPaths.count < 50 { failedPaths.append(e.rel) }
             }
         }
-        return (count, loginStateDirBreakdown(for: copied), skipped, skippedPaths)
+        return (count, loginStateDirBreakdown(for: copied), skipped, skippedPaths, failed, failedPaths)
     }
 
     /// 把登录态文件合并进现有容器（恢复用：同名文件逐个覆盖，
@@ -4881,6 +4987,33 @@ struct LCDataManagementView : View {
     /// 游客读组数据走哪边取决于容器当时的隔离开关，两边都
     /// 落一份才不会因开关状态错位而读空（不计入合并数）
     @discardableResult
+    // 11 登录态恢复先删后拷：照 replaceContainerOffMain 同款，
+    // 单文件先拷临时文件再原子替换。原来先删目标再拷，拷失败
+    // （iCloud 占位未下完、磁盘满）时 live 登录文件已删、没回来。
+    // tmp 与目标同目录（同卷，replaceItemAt 才成立）；哪步失败
+    // 都清 tmp、目标原样不动，返回 false。
+    static func czfReplaceFileAtomic(from src: URL, to dest: URL, fm: FileManager) -> Bool {
+        let tmp = dest.deletingLastPathComponent()
+            .appendingPathComponent(".restore-tmp-\(UUID().uuidString)")
+        do {
+            try fm.copyItem(at: src, to: tmp)
+        } catch {
+            try? fm.removeItem(at: tmp)
+            return false
+        }
+        do {
+            if fm.fileExists(atPath: dest.path) {
+                _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+            } else {
+                try fm.moveItem(at: tmp, to: dest)
+            }
+        } catch {
+            try? fm.removeItem(at: tmp)
+            return false
+        }
+        return true
+    }
+
     static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager, mirrorGroupToHost: URL? = nil) -> Int {
         var count = 0
         for e in loginStateEntries(in: src, fm: fm) {
@@ -4889,10 +5022,8 @@ struct LCDataManagementView : View {
             let s = e.src
             let d = dst.appendingPathComponent(rel)
             try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if fm.fileExists(atPath: d.path) {
-                try? fm.removeItem(at: d)
-            }
-            if (try? fm.copyItem(at: s, to: d)) != nil {
+            // 11：先拷临时文件再原子替换，拷失败时 live 文件不动。
+            if czfReplaceFileAtomic(from: s, to: d, fm: fm) {
                 count += 1
             }
             if let host = mirrorGroupToHost {
@@ -4901,10 +5032,8 @@ struct LCDataManagementView : View {
                     let rest = parts.dropFirst(2).joined(separator: "/")
                     let hd = host.appendingPathComponent(String(parts[1])).appendingPathComponent(rest)
                     try? fm.createDirectory(at: hd.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if fm.fileExists(atPath: hd.path) {
-                        try? fm.removeItem(at: hd)
-                    }
-                    try? fm.copyItem(at: s, to: hd)
+                    // 11：镜像份同款原子替换。
+                    _ = czfReplaceFileAtomic(from: s, to: hd, fm: fm)
                 }
             }
         }
