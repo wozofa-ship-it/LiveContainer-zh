@@ -61,6 +61,22 @@ extension View {
         }
     }
 
+    // 壁纸页顶栏（3.8.453）：App/源两页顶栏要透出壁纸、且两页一致。
+    // 之前 czfSolidToolbarBackground 用实底 systemBackground，
+    // App 页 .toolbarBackground 没生效、透出深色壁纸变黑，源页
+    // 实底白，两页顶黑白不一。改走超薄材质：背景图带
+    // .ignoresSafeArea() 铺到顶栏区，顶栏透出壁纸的模糊影子，
+    // 两页同款；滚动内容滑到顶栏下只剩模糊影子、不糊成一片。
+    // iOS 15 没有 .toolbarBackground，走默认半透明。
+    func czfWallpaperToolbarBackground() -> some View {
+        if #available(iOS 16.0, *) {
+            self.toolbarBackground(.visible, for: .navigationBar)
+                .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+        } else {
+            self
+        }
+    }
+
     // 文件夹选择器（3.8.423 本地 IPA 文件夹）：与 betterFileImporter
     // 同款 DocModifier 思路，但 asCopy 必须 false——文件夹不能
     // 拷一份（会把整个文件夹拷进临时目录、又大又不同步），要

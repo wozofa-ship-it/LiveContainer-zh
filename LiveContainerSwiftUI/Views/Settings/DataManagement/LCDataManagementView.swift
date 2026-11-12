@@ -4078,15 +4078,16 @@ struct LCDataManagementView : View {
             let czfMissingWaits = await withTaskGroup(of: CZFMissingWaitResult.self) { group in
                 for plan in missingPlan {
                     group.addTask {
-                        // 多开缺失实例自动新建：forceAsNew 让安装直接
-                        // 走“安装为新 App”（有同款在装时不弹替换/
-                        // 新建选择框），customDisplayName 把备份里
-                        // 的实例名（muse8）当预设名带进去，装出来
-                        // 就是 muse8，不用用户再输名；单实例缺失时
-                        // 这两项无害（无同款不走新建分支，预设名与
-                        // 包内原名相同即不设）。预设名先剥掉文件夹
-                        // 名尾巴可能带的实例后缀“（xxxxxxxx）”。
-                        let czfPresetName = Self.czfStripInstanceSuffix(from: plan.name)
+                        // 还原分身数据自带分身名（3.8.453）：预设名从备份
+                        // 文件夹名（分身数据的名字）取，剥掉实例后缀
+                        // “（xxxxxxxx）”。文件夹名是每实例的稳定标识，
+                        // 用户在备份列表里看到的就是它；之前只用
+                        // plan.name（manifest displayName），旧备份的
+                        // manifest 还是原名时，预设名等于包内原名、
+                        // 输名框照弹，用户还得手输分身名。文件夹名
+                        // 为空才回落 plan.name。
+                        let czfFolderPreset = Self.czfStripInstanceSuffix(from: plan.folder.lastPathComponent)
+                        let czfPresetName = czfFolderPreset.isEmpty ? Self.czfStripInstanceSuffix(from: plan.name) : czfFolderPreset
                         await MainActor.run {
                             NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": plan.url, "forceAsNew": true, "customDisplayName": czfPresetName])
                         }

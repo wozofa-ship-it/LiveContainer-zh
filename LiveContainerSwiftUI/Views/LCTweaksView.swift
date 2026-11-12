@@ -559,6 +559,12 @@ struct LCTweaksView: View {
             .navigationTitle("lc.tabView.tweaks".loc)
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        // R-1：App 页盾牌菜单“前往 VPN 设置”切过来时，本地
+        // selectedTab 默认还是 .local，监听 SharedModel 的触发
+        // 计数，切到 VPN 分段。
+        .onChange(of: sharedModel.czfTweakVPNRequest) { _ in
+            selectedTab = .vpn
+        }
 
     }
 }

@@ -206,6 +206,13 @@ final class AltStoreSourcesViewModel: ObservableObject {
         guard !sources.isEmpty else {
             return
         }
+        // O-10：重入守卫——顶栏刷新、组头刷新、管理源添加后
+        // 刷新都能调这里，慢源拖住整组时再点会并行跑两组，
+        // 两组 defer 各置一次 false，状态提前归零、刷新
+        // 指示器提前灭。已在刷直接返回，不改刷新逻辑本身。
+        guard !isRefreshingAll else {
+            return
+        }
         isRefreshingAll = true
         defer { isRefreshingAll = false }
         // 原来 for 循环一个个 await：源多时等待时间累加。
@@ -695,12 +702,13 @@ struct LCSourcesView: View {
     
     @State private var isViewAppeared = false
 
-    // 自定义背景（3.8.416）：与 App 页同一张图、同一把键
-    // （CZFAppBackground.versionKey）——App 页网格设置里选
-    // 的图，这里跟着显示；源页之前根本没接背景（17:44 用户
-    // 报“源背景图不生效”）。读法与 App 页同款（.background
-    // 挂 ScrollView，不包 ZStack，不动 NavigationView 排布）。
-    @AppStorage(CZFAppBackground.versionKey) private var czfBackgroundVersion = 0
+    // 自定义背景（3.8.416，3.8.453 分家）：源页用自己的图与键
+    // （CZFSourceBackground.versionKey / CZFSourceBackground.jpg）
+    // ——之前与 App 页共用同一张 CZFAppBackground.jpg，源页设的
+    // 图会盖掉 App 页的、反之亦然，用户报“源是源壁纸、App 是
+    // App 壁纸也没生效”。读法与 App 页同款（图铺 ScrollView
+    // 背后，不包 ZStack，不动 NavigationView 排布）。
+    @AppStorage(CZFSourceBackground.versionKey) private var czfBackgroundVersion = 0
     @State private var czfBackgroundImage: UIImage? = nil
     
     // body 拆分（3.8.423，422 构建红字）：body 太大编译器
@@ -724,7 +732,11 @@ struct LCSourcesView: View {
                     CZFInlineIpaFolderSection(
                         folderURL: czfIpaFolderURL,
                         onPickFolder: { czfIpaFolderPickerShow = true },
-                        onInstall: { url in czfInstallFolderIpa(url) }
+                        onInstall: { url in czfInstallFolderIpa(url) },
+                        onClearFolder: {
+                            CZFLocalIpaFolderStore.clear()
+                            czfIpaFolderURL = nil
+                        }
                     )
                     .padding()
                 }
@@ -857,10 +869,10 @@ struct LCSourcesView: View {
                     }
                 }
                 .onAppear {
-                    czfBackgroundImage = CZFAppBackground.loadImage()
+                    czfBackgroundImage = CZFSourceBackground.loadImage()
                 }
                 .onChange(of: czfBackgroundVersion) { _ in
-                    czfBackgroundImage = CZFAppBackground.loadImage()
+                    czfBackgroundImage = CZFSourceBackground.loadImage()
                 }
                 // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在
                 // 顶部的“恢复原生 / 网格设置”行删掉，模式开关收到
@@ -885,10 +897,12 @@ struct LCSourcesView: View {
             // 下面透出来，顶部干净。
             .navigationTitle("lc.tabView.sources".loc)
             .navigationBarTitleDisplayMode(.inline)
-            // 顶栏实底走 czfSolidToolbarBackground（3.8.424：
-            // .toolbarBackground 是 iOS 16+ API，部署目标 15.0
-            // 下直接调编不过，包 #available）。
-            .czfSolidToolbarBackground()
+            // 顶栏走超薄材质透壁纸（3.8.453）：之前实底
+            // czfSolidToolbarBackground，App 页 .toolbarBackground
+            // 没生效透出深色壁纸变黑、源页实底白，两页顶黑白不一。
+            // 改走 czfWallpaperToolbarBackground，壁纸模糊透出、
+            // 两页一致；iOS 15 走默认半透明。
+            .czfWallpaperToolbarBackground()
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if viewModel.isRefreshingAll {
@@ -976,7 +990,7 @@ struct LCSourcesView: View {
             }
         }
         .sheet(isPresented: $czfSourceGridSettingsShow) {
-            CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode, showSort: false)
+            CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode, showSort: false, isSource: true)
         }
         .sheet(isPresented: $showUpdatableList) {
             CZFUpdatableAppsSheet(
@@ -1475,6 +1489,9 @@ private struct ManageSourcesSheet: View {
 
     @State private var manualSourceValue = ""
     @State private var isAddingManual = false
+    // S-9 回退（3.8.453 核查）：sheet 内删源不能走父级的 .alert——
+    // 父级 alert 被 sheet 盖住会被 UIKit 静默丢弃（S-3 同款），
+    // 删了没反应。sheet 内必须自己留 confirmationDialog。
     @State private var sourcePendingRemoval: AltStoreSourcesViewModel.SourceItem?
     // 1 添加源失败无反馈：sheet 内本地错误，父级 alert 盖在
     // sheet 上会被 UIKit 静默丢弃，这里自己弹。
@@ -1554,6 +1571,7 @@ private struct ManageSourcesSheet: View {
                 }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
         .confirmationDialog(
             "lc.sources.removeConfirmation.title".loc,
             isPresented: Binding<Bool>(
@@ -1572,7 +1590,6 @@ private struct ManageSourcesSheet: View {
         } message: { item in
             Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(item.displayName))
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         // 1 添加源失败无反馈：sheet 内本地弹错误，挂在 sheet
         // 自己的层级上，不会被 sheet 盖住吞掉。
         .alert("lc.common.error".loc, isPresented: Binding<Bool>(

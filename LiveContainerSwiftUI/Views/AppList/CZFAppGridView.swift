@@ -127,6 +127,38 @@ struct CZFAppGridView: View {
     @State private var czfGridDeleteTarget: LCAppModel?
     @State private var czfGridDeleteConfirm = false
     @State private var czfGridError: String?
+    // 网格拖拽重排（3.8.453）：长按图标拖到另一个图标上松手即换位，
+    // 复用列表模式的 LCAppReorderDropDelegate + 同款提交逻辑。
+    // 搜索中（显示子集）与批量模式（点按是勾选）不挂拖拽，见下面。
+    @State private var czfGridDragID: String?
+
+    // 网格拖拽提交（3.8.453）：与 LCAppListView.commitDragReorder
+    // 同款——按可见顺序重排 customSortOrder、切到自定义排序；
+    // 隐藏 App 追加在尾巴，不丢位置。写 customSortOrder 即写回
+    // App Group 并刷新设置备份（LCAppSortManager.didSet）。
+    private func czfCommitGridDragReorder(draggedID: String, targetApp: LCAppModel) {
+        defer { czfGridDragID = nil }
+        guard !isSearching && !batchMode else { return }
+        let manager = LCAppSortManager.shared
+        // 可见顺序 = 网格现在显示的 apps（已按排序排好）；隐藏的
+        // 追加在尾巴，与列表模式 commitDragReorder 同口径。
+        var visibleIDs = apps.compactMap { manager.getUniqueIdentifier(for: $0) }
+        guard let from = visibleIDs.firstIndex(of: draggedID),
+              let targetID = manager.getUniqueIdentifier(for: targetApp),
+              let to = visibleIDs.firstIndex(of: targetID), from != to else { return }
+        visibleIDs.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        var newOrder = visibleIDs
+        for hidden in hiddenApps {
+            guard let id = manager.getUniqueIdentifier(for: hidden), !newOrder.contains(id) else { continue }
+            newOrder.append(id)
+        }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            manager.customSortOrder = newOrder
+            manager.appSortType = .custom
+        }
+    }
 
     private var czfGridColumns: [GridItem] {
         let count = max(3, min(6, columns))
@@ -218,6 +250,22 @@ struct CZFAppGridView: View {
                     batchMode: batchMode,
                     actions: czfCellActions()
                 )
+                // 网格拖拽重排（3.8.453）：长按图标拖到另一个图标上松手
+                // 即换位，复用列表模式的 DropDelegate + 提交逻辑。
+                // 搜索中（子集）与批量模式（点按是勾选）不挂拖拽。
+                .onDrag {
+                    guard !isSearching && !batchMode,
+                          let id = LCAppSortManager.shared.getUniqueIdentifier(for: app) else {
+                        return NSItemProvider()
+                    }
+                    czfGridDragID = id
+                    return NSItemProvider(object: id as NSString)
+                }
+                .onDrop(of: [.text], delegate: LCAppReorderDropDelegate(
+                    targetApp: app,
+                    draggedID: { czfGridDragID },
+                    commit: { dragged, target in czfCommitGridDragReorder(draggedID: dragged, targetApp: target) }
+                ))
             }
             if hiddenUnlocked {
                 ForEach(hiddenApps, id: \.self) { app in
@@ -228,6 +276,19 @@ struct CZFAppGridView: View {
                         batchMode: batchMode,
                         actions: czfCellActions()
                     )
+                    .onDrag {
+                        guard !isSearching && !batchMode,
+                              let id = LCAppSortManager.shared.getUniqueIdentifier(for: app) else {
+                            return NSItemProvider()
+                        }
+                        czfGridDragID = id
+                        return NSItemProvider(object: id as NSString)
+                    }
+                    .onDrop(of: [.text], delegate: LCAppReorderDropDelegate(
+                        targetApp: app,
+                        draggedID: { czfGridDragID },
+                        commit: { dragged, target in czfCommitGridDragReorder(draggedID: dragged, targetApp: target) }
+                    ))
                 }
             }
         }
@@ -610,6 +671,38 @@ enum CZFAppBackground {
     }
 }
 
+// MARK: - 源页自定义背景（3.8.453）：与 App 页分开存。
+// 用户要“源是源壁纸、App 是 App 壁纸”——之前两页共用同一张
+// CZFAppBackground.jpg，源页设的图会盖掉 App 页的、反之亦然，
+// 各以为是自己的。分开：源页存 CZFSourceBackground.jpg，
+// 版本键 CZFSourceBackgroundVersion；App 页不动。
+enum CZFSourceBackground {
+    static let versionKey = "CZFSourceBackgroundVersion"
+    static let fileName = "CZFSourceBackground.jpg"
+    static var fileURL: URL { LCPath.docPath.appendingPathComponent(fileName) }
+    static func loadImage() -> UIImage? {
+        UIImage(contentsOfFile: fileURL.path)
+    }
+    static func save(_ image: UIImage) {
+        let maxSide: CGFloat = 1600
+        let size = image.size
+        let scale = min(1, maxSide / max(size.width, size.height))
+        let target = CGSize(width: size.width * scale, height: size.height * scale)
+        UIGraphicsBeginImageContextWithOptions(target, true, 1)
+        image.draw(in: CGRect(origin: .zero, size: target))
+        let scaled = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        guard let data = (scaled ?? image).jpegData(compressionQuality: 0.85) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+    }
+    static func clear() {
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+    static var hasImage: Bool {
+        FileManager.default.fileExists(atPath: fileURL.path)
+    }
+}
+
 struct CZFAppBackgroundPicker: UIViewControllerRepresentable {
     var onPick: (UIImage) -> Void
     func makeUIViewController(context: Context) -> UIImagePickerController {
@@ -642,11 +735,34 @@ struct CZFAppGridSettingsView: View {
     // “编辑排序”会打开 App 面板的排序页（用户 01:59 报
     // “编辑排序怎么编辑 APP 面板的了”）。源页传 false 藏掉。
     var showSort: Bool = true
+    // 壁纸分家（3.8.453）：源页传 true，背景段读写
+    // CZFSourceBackground；App 页默认 false，走 CZFAppBackground。
+    var isSource: Bool = false
     @Environment(\.dismiss) private var dismiss
     // 自定义背景：版本号与列表页共用，选图/清除时 +1 触发列表页重读。
-    @AppStorage(CZFAppBackground.versionKey) private var backgroundVersion = 0
+    // 两页各一把键，isSource 决定 bump 哪一把（见下面 helper）。
+    @AppStorage(CZFAppBackground.versionKey) private var appBackgroundVersion = 0
+    @AppStorage(CZFSourceBackground.versionKey) private var sourceBackgroundVersion = 0
     @State private var showBackgroundPicker = false
     @State private var backgroundThumb: UIImage?
+
+    // 壁纸分家 helper（3.8.453）：背景段一律走这里，不直接碰
+    // 某一页的存储，免得源页误写 App 的图。
+    private func loadBackgroundThumb() -> UIImage? {
+        isSource ? CZFSourceBackground.loadImage() : CZFAppBackground.loadImage()
+    }
+    private func saveBackground(_ image: UIImage) {
+        if isSource { CZFSourceBackground.save(image) } else { CZFAppBackground.save(image) }
+    }
+    private func clearBackground() {
+        if isSource { CZFSourceBackground.clear() } else { CZFAppBackground.clear() }
+    }
+    private var hasBackgroundImage: Bool {
+        isSource ? CZFSourceBackground.hasImage : CZFAppBackground.hasImage
+    }
+    private func bumpBackgroundVersion() {
+        if isSource { sourceBackgroundVersion += 1 } else { appBackgroundVersion += 1 }
+    }
     // 自定义排序页（3.8.428，App 页 #6）：网格没有拖拽排序，
     // 从设置页进；与 LCAppListView 的排序菜单同款 sheet。
     @State private var showCustomSort = false
@@ -708,11 +824,11 @@ struct CZFAppGridSettingsView: View {
                     Button("选择背景图片") {
                         showBackgroundPicker = true
                     }
-                    if CZFAppBackground.hasImage {
+                    if hasBackgroundImage {
                         Button("清除背景", role: .destructive) {
-                            CZFAppBackground.clear()
+                            clearBackground()
                             backgroundThumb = nil
-                            backgroundVersion += 1
+                            bumpBackgroundVersion()
                         }
                     }
                 }
@@ -729,13 +845,13 @@ struct CZFAppGridSettingsView: View {
                 }
             }
             .onAppear {
-                backgroundThumb = CZFAppBackground.loadImage()
+                backgroundThumb = loadBackgroundThumb()
             }
             .sheet(isPresented: $showBackgroundPicker) {
                 CZFAppBackgroundPicker { image in
-                    CZFAppBackground.save(image)
-                    backgroundThumb = CZFAppBackground.loadImage()
-                    backgroundVersion += 1
+                    saveBackground(image)
+                    backgroundThumb = loadBackgroundThumb()
+                    bumpBackgroundVersion()
                 }
             }
             .sheet(isPresented: $showCustomSort) {

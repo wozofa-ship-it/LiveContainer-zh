@@ -315,7 +315,10 @@ struct CZFSourceRefreshErrorRow: View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(.secondary)
-            Text("lc.sources.section.error".loc)
+            // O-17：之前只渲染通用标题，error 参数根本没用，
+            // 失败原因看不到。同一行内把原因接在标题后面，
+            // 仍一行（lineLimit 1，超长截断），不改布局结构。
+            Text("\("lc.sources.section.error".loc)：\(error)")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

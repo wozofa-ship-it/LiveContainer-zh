@@ -514,7 +514,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             .disabled(CZFVPNManager.shared.nodeLinks.isEmpty)
             Button("前往 VPN 设置") {
-                sharedModel.selectedTab = .settings
+                sharedModel.selectedTab = .tweaks
+                sharedModel.czfTweakVPNRequest += 1
             }
         } label: {
             Label("VPN", systemImage: vpnCoreRunning ? "shield.fill" : "shield")
@@ -1539,7 +1540,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // NavigationView 的大标题/搜索栏/切换行全叠到一块
         // （用户 414 截图：App 标题压住图标、搜索栏压住名字，
         // 太丑）。background 不动视图层级，标题/搜索/切换行
-        // 原样排布，图只从透明处透出来。
+        // 原样排布，图只从透明处透出来。图带 .ignoresSafeArea()
+        // 铺到顶栏区，顶栏走超薄材质（czfWallpaperToolbarBackground）
+        // 透出壁纸、两页一致。
         .background {
             if let bg = czfBackgroundImage {
                 Image(uiImage: bg)
@@ -1594,10 +1597,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 看着“显示不全”），顶部干净。
             .navigationTitle("lc.appList.myApps".loc)
             .navigationBarTitleDisplayMode(.inline)
-            // 顶栏实底走 czfSolidToolbarBackground（3.8.424：
-            // .toolbarBackground 是 iOS 16+ API，部署目标 15.0
-            // 下直接调编不过，包 #available）。
-            .czfSolidToolbarBackground()
+            // 顶栏走超薄材质透壁纸（3.8.453）：之前实底
+            // czfSolidToolbarBackground，App 页 .toolbarBackground
+            // 没生效透出深色壁纸变黑、源页实底白，两页顶黑白不一。
+            // 改走 czfWallpaperToolbarBackground，壁纸模糊透出、
+            // 两页一致；iOS 15 走默认半透明。
+            .czfWallpaperToolbarBackground()
             .toolbar { appListToolbar }
         }
         // 新4（3.8.277）：批量操作底栏——多选模式时才出现。备份/
@@ -3817,6 +3822,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 if let bundleId, bundleId != "ui"{
                     Task { await launchAppWithBundleId(bundleId: bundleId, container: containerName, urlStr: urlStr, forceJIT: forceJIT) }
+                } else if bundleId == nil {
+                    // R-8：缺 bundle-name 参数原来静默无事，调方以为
+                    // 已启动；补一次提示，与 open-web-page 分支同款
+                    // errorInfo/errorShow。bundleId == "ui" 是“只打开
+                    // LiveContainer 界面”的约定，本来就不启动 App，
+                    // 保持静默。
+                    errorInfo = "启动 App 失败：链接里没有 bundle-name 参数"
+                    errorShow = true
                 }
             }
         } else if url.host == "install" {
@@ -3829,6 +3842,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 if let installUrl {
                     Task { await installFromUrl(urlStr: installUrl) }
+                } else {
+                    // R-8：缺 url 参数原来静默无事，补一次提示。
+                    errorInfo = "安装失败：链接里没有 url 参数"
+                    errorShow = true
                 }
             }
         }
@@ -3843,7 +3860,9 @@ extension View {
 // 优2（3.8.277）：行拖放代理——只在 performDrop 里提交（松手即写），
 // 拖动过程中不改 customSortOrder（免得 didSet 每过一行就刷一次
 // 设置备份文件）。搜索时不启用（见 ForEach 处）。
-private struct LCAppReorderDropDelegate: DropDelegate {
+// 网格拖拽重排复用（3.8.453）：原来 private 只给列表模式用；
+// 网格模式长按拖图标排序走同一份 DropDelegate，不再各写一套。
+struct LCAppReorderDropDelegate: DropDelegate {
     let targetApp: LCAppModel
     let draggedID: () -> String?
     let commit: (String, LCAppModel) -> Void

@@ -75,6 +75,13 @@ enum CZFLocalIpaFolderStore {
         }
         return nil
     }
+
+    // S-11：清除已选文件夹——书签与路径两个键都删掉，
+    // 下次出现时 restore() 返回 nil，内嵌区回到“选择文件夹”。
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: bookmarkKey)
+        UserDefaults.standard.removeObject(forKey: pathKey)
+    }
 }
 
 struct CZFLocalIpaItem: Identifiable {
@@ -499,6 +506,9 @@ struct CZFInlineIpaFolderSection: View {
     var folderURL: URL?
     var onPickFolder: () -> Void
     var onInstall: (URL) -> Void
+    // S-11：清除文件夹回调——源页传进来，调 store.clear() 并置
+    // czfIpaFolderURL = nil（本节不直接碰那把 @State）。
+    var onClearFolder: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -509,6 +519,8 @@ struct CZFInlineIpaFolderSection: View {
                     .font(.headline)
                 Spacer()
                 if folderURL != nil {
+                    Button("清除文件夹", role: .destructive, action: onClearFolder)
+                        .font(.footnote)
                     Button("换文件夹", action: onPickFolder)
                         .font(.footnote)
                 }

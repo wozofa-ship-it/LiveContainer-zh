@@ -54,6 +54,12 @@ struct LCPath {
 
 class SharedModel: ObservableObject {
     @Published var selectedTab: LCTabIdentifier = .apps
+    // R-1：App 页盾牌菜单“前往 VPN 设置”的切分段触发器——
+    // VPN 已搬到模块页（LCTweaksView 的 .vpn 分段），光切
+    // .tweaks 还落在默认的“本机”分段。按钮置 .tweaks 的同时
+    // 把这个计数 +1，LCTweaksView 监听到就把本地 selectedTab
+    // 置 .vpn。用计数不用 Bool，连续点两次也能每次都触发。
+    @Published var czfTweakVPNRequest = 0
     // 第三批低 #53：deepLink 原是单值槽，连续两条链接到达时
     // 第二条直接覆盖第一条，第一条丢失。改成队列：当前槽空
     // 着就直接写，有链接在等就排队；消费方置 nil 时递补一条
