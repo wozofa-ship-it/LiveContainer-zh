@@ -1834,7 +1834,7 @@ struct LCSourceAppBanner: View {
             }
         }
         .sheet(isPresented: $showDetail) {
-            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: downloadVersionAction)
+            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: downloadVersionAction, onInstall: installAction, onInstallAsNew: installAsNewAction)
         }
         .sheet(isPresented: $showInstancePicker) {
             NavigationView {
@@ -1870,7 +1870,12 @@ struct LCSourceAppDetailView: View {
     let source: AltStoreSource
     // 3.8.307：历史版本下载——点版本行下载该版本的 URL。
     let onDownloadVersion: (URL) -> Void
+    // 3.8.448（用户 16:11 令“点开源应用详情有安装新建
+    // 复制”）：详情页顶部加安装/新建/复制三个按钮。
+    let onInstall: (AltStoreSourceApp) -> Void
+    let onInstallAsNew: (AltStoreSourceApp) -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var copiedDownloadURL = false
 
     // 从描述或下载链接里找 GitHub 地址
     private var githubURL: URL? {
@@ -1905,6 +1910,40 @@ struct LCSourceAppDetailView: View {
                             Text(app.bundleIdentifier)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                // 3.8.448：安装/新建/复制三个按钮（用户 16:11 令）。
+                // 安装/新建先关详情单再进队列（与下载按钮同款，
+                // 不然切到 App 页时详情单还盖在上面）；复制只写
+                // 剪贴板、不关单，按钮变“已复制”给反馈。
+                Section {
+                    HStack(spacing: 12) {
+                        Button {
+                            dismiss()
+                            onInstall(app)
+                        } label: {
+                            Label("安装", systemImage: "square.and.arrow.down")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button {
+                            dismiss()
+                            onInstallAsNew(app)
+                        } label: {
+                            Label("新建", systemImage: "plus.square.on.square")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        if let downloadURL = app.latestVersion?.downloadURL {
+                            Button {
+                                UIPasteboard.general.string = downloadURL.absoluteString
+                                copiedDownloadURL = true
+                            } label: {
+                                Label(copiedDownloadURL ? "已复制" : "复制", systemImage: copiedDownloadURL ? "checkmark" : "doc.on.doc")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
                         }
                     }
                 }

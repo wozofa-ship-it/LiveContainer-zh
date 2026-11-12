@@ -1715,30 +1715,51 @@ struct LCDataManagementView : View {
     // 注意：@discardableResult 必须紧贴 func 写，中间不能插
     // static let，否则编译报 attribute 不能用在这条声明上，
     // 269b523 那次构建 #233 就是这么挂的。
+    // 3.8.448 闪退真因（用户 16:10 报“打开APP都闪退”，
+    // Invalid type in JSON write (__NSCFData)）：payload 是
+    // 全量扫 CZF 前缀的 UserDefaults，书签
+    // CZFLocalIpaFolderBookmark（Data）也被扫进来，
+    // JSONSerialization 遇到 Data 抛 NSException——try? 拦
+    // 不住 NSException，直接闪退。修法：进 payload 前先验
+    // 是不是合法 JSON 值（String/数字/布尔/数组/字典/null），
+    // Data/Date 等一律跳过；书签本来就不该进设置备份。
+    private static func czfIsJSONValue(_ value: Any) -> Bool {
+        switch value {
+        case is String, is NSNumber, is NSNull:
+            return true
+        case let array as [Any]:
+            return array.allSatisfy { czfIsJSONValue($0) }
+        case let dict as [String: Any]:
+            return dict.values.allSatisfy { czfIsJSONValue($0) }
+        default:
+            return false
+        }
+    }
+
     @discardableResult
     static func writeCZFSettingsBackup() -> (local: URL?, externalFolderName: String?) {
         let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
         var payload: [String: Any] = [:]
-        for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) {
+        for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && czfIsJSONValue(value) {
             payload[key] = value
         }
         // App Group 里的 CZF 键也要：最小化省电三个开关存在
         // App Group 里，只扫标准库会漏掉它们；已在 payload
         // 里的（标准库同名）不动，标准库优先。
-        for (key, value) in LCUtils.appGroupUserDefault.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && payload[key] == nil {
+        for (key, value) in LCUtils.appGroupUserDefault.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && payload[key] == nil && czfIsJSONValue(value) {
             payload[key] = value
         }
         // 排序在 App Group 里、定时备份/清理在标准库里但前缀是 LC，
         // 原来只拷 CZF 的逻辑会漏掉这两类，这里显式补上。
         let standard = UserDefaults.standard
         for key in settingsBackupExtraStandardKeys {
-            if let value = standard.object(forKey: key) {
+            if let value = standard.object(forKey: key), czfIsJSONValue(value) {
                 payload[key] = value
             }
         }
         let appGroup = LCUtils.appGroupUserDefault
         for key in settingsBackupAppGroupKeys {
-            if let value = appGroup.object(forKey: key) {
+            if let value = appGroup.object(forKey: key), czfIsJSONValue(value) {
                 payload[key] = value
             }
         }

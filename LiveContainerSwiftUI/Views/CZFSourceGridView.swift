@@ -469,7 +469,7 @@ struct CZFSourceAppGridCell: View {
             }
         }
         .sheet(isPresented: $showDetail) {
-            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: onDownloadVersion)
+            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: onDownloadVersion, onInstall: onInstall, onInstallAsNew: onInstallAsNew)
         }
     }
 }
