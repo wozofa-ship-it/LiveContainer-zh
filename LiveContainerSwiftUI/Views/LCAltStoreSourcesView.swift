@@ -569,10 +569,15 @@ func czfDedupSourceApps(_ apps: [AltStoreSourceApp]) -> [AltStoreSourceApp] {
 // 底部“全部更新”走批量队列。O-4：单行更新不关整单——点过
 // 的行标“已入队”并从名单剔除，可连续点下一行；onUpdateOne
 // 返回是否已接单（无下载链接返回 false，行保留）。
+// 跳过（3.8.454，用户 03:16 令“更新这里也可以选择不更新”）：
+// 每行左滑出“跳过”，点了把该 App 从本次更新名单剔除（不装、
+// 不进批量队列），下次刷新源还会再出现——只跳过这一次，
+// 不是永久不更新。onSkip 只删名单，不动已装 App。
 struct CZFUpdatableAppsSheet: View {
     let apps: [AltStoreSourceApp]
     let onUpdateOne: (AltStoreSourceApp) -> Bool
     let onUpdateAll: () -> Void
+    let onSkip: (AltStoreSourceApp) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var sharedModel: SharedModel
@@ -619,6 +624,16 @@ struct CZFUpdatableAppsSheet: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
+                        }
+                    }
+                    // 跳过（3.8.454）：左滑出“跳过”，从本次更新名单
+                    // 剔除该 App（不装、不进批量队列），下次刷新源
+                    // 还会再出现。已入队的行不挂跳过（已在装了）。
+                    .swipeActions(edge: .trailing) {
+                        if !updatingIDs.contains(app.czfStableID) {
+                            Button("跳过", role: .destructive) {
+                                onSkip(app)
+                            }
                         }
                     }
                 }
@@ -1014,6 +1029,11 @@ struct LCSourcesView: View {
                         let result = await installBatch(cachedUpdatableApps)
                         czfShowBatchResult(result)
                     }
+                },
+                // 跳过（3.8.454）：只从本次更新名单剔除，不装、
+                // 不进批量队列；下次刷新源还会再出现。
+                onSkip: { app in
+                    cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
                 }
             )
         }
