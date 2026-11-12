@@ -13,6 +13,9 @@ struct CZFLocalIpaItem: Identifiable {
     var sizeText: String
     var icon: UIImage?
     var detailLoaded = false
+    // 3.8.444：包名（CFBundleIdentifier），供格子打“已安装”
+    // 绿勾——读 Info.plist 得来，读不到时不打勾。
+    var bundleIdentifier: String?
 }
 
 @MainActor
@@ -175,26 +178,29 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                 if let name = info.name { self.items[idx].displayName = name }
                 if let version = info.version { self.items[idx].version = version }
                 if let icon = info.icon { self.items[idx].icon = icon }
+                if let bundleIdentifier = info.bundleIdentifier { self.items[idx].bundleIdentifier = bundleIdentifier }
                 self.items[idx].detailLoaded = true
             }
         }
     }
 
-    nonisolated private static func extractIpaInfo(url: URL) -> (name: String?, version: String?, icon: UIImage?) {
+    nonisolated private static func extractIpaInfo(url: URL) -> (name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?) {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("CZFIpaFolder-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: tmp) }
         try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)
         let progress = Progress.discreteProgress(totalUnitCount: 100)
-        guard extract(url.path, tmp.path, progress) == 0 else { return (nil, nil, nil) }
+        guard extract(url.path, tmp.path, progress) == 0 else { return (nil, nil, nil, nil) }
         let payload = tmp.appendingPathComponent("Payload")
         guard let contents = try? fm.contentsOfDirectory(atPath: payload.path),
-              let appName = contents.first(where: { $0.hasSuffix(".app") }) else { return (nil, nil, nil) }
+              let appName = contents.first(where: { $0.hasSuffix(".app") }) else { return (nil, nil, nil, nil) }
         let appDir = payload.appendingPathComponent(appName)
         guard let data = try? Data(contentsOf: appDir.appendingPathComponent("Info.plist")),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return (nil, nil, nil) }
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return (nil, nil, nil, nil) }
         let name = (plist["CFBundleDisplayName"] as? String) ?? (plist["CFBundleName"] as? String)
         let version = plist["CFBundleShortVersionString"] as? String
+        // 3.8.444：包名供格子打“已安装”绿勾。
+        let bundleIdentifier = plist["CFBundleIdentifier"] as? String
         var icon: UIImage?
         // 图标名先看 CFBundleIconFiles，没有就试常见名。
         var candidates: [String] = []
@@ -233,7 +239,7 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         if let img = icon {
             icon = Self.czfMakeThumbnail(img)
         }
-        return (name, version, icon)
+        return (name, version, icon, bundleIdentifier)
     }
 
     // 安装低 #19：按显示尺寸缩成缩略图——格子只显示约 85pt，
@@ -503,6 +509,15 @@ struct CZFLocalIpaGridCell: View {
     let item: CZFLocalIpaItem
     var onTap: () -> Void
 
+    // 3.8.444：已安装标记（用户 13:51 令“不知道哪个安装了
+    // 哪个没安装”）——按包名比对已装 App（含隐藏 App），与源
+    // 页绿勾（CZFSourceGridView）同款判据、同款绿勾位置。
+    @EnvironmentObject private var sharedModel: SharedModel
+    private var czfIsInstalled: Bool {
+        guard let bid = item.bundleIdentifier, !bid.isEmpty else { return false }
+        return (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == bid }
+    }
+
     // App #16：detailLoaded 是“已尝试读详情”标记——读完
     // 仍没图标也没版本号 = 解包失败，挂一句“无法读取”，
     // 和“还在读”（占位图标）区分开。
@@ -512,26 +527,35 @@ struct CZFLocalIpaGridCell: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            GeometryReader { geo in
-                let side = max(geo.size.width, 44)
-                Group {
-                    if let icon = item.icon {
-                        IconImageView(icon: icon)
-                    } else {
-                        Image(systemName: "app.badge")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.secondary)
+            ZStack(alignment: .topTrailing) {
+                GeometryReader { geo in
+                    let side = max(geo.size.width, 44)
+                    Group {
+                        if let icon = item.icon {
+                            IconImageView(icon: icon)
+                        } else {
+                            Image(systemName: "app.badge")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(width: side, height: side)
+                    // App #17：灰底挂到定好宽高的外层 frame 上，
+                    // 整格灰色占位，不再只贴在 glyph 大小的 Image 上。
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
                 }
-                .frame(width: side, height: side)
-                // App #17：灰底挂到定好宽高的外层 frame 上，
-                // 整格灰色占位，不再只贴在 glyph 大小的 Image 上。
-                .background(Color(.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
-                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                .aspectRatio(1, contentMode: .fit)
+                if czfIsInstalled {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3)
+                        .foregroundColor(.green)
+                        .background(Color(.systemBackground).opacity(0.85), in: Circle())
+                        .offset(x: 6, y: -6)
+                }
             }
-            .aspectRatio(1, contentMode: .fit)
             Text(item.displayName)
                 .font(.footnote)
                 .lineLimit(2)
