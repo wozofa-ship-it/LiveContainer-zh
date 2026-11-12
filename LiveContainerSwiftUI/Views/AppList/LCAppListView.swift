@@ -929,7 +929,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
-        let (okNames, failedNames, skippedNames, overwrittenCount): ([String], [String], [String], Int) = await withCheckedContinuation { continuation in
+        let (okNames, failedNames, skippedNames, overwrittenCount, copyFailedCount): ([String], [String], [String], Int, Int) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
@@ -938,6 +938,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 3.8.281：锁了的跳过、覆盖计数
                 var skipped: [String] = []
                 var overwritten = 0
+                // B-2：单 App 里个别文件拷失败不抛错、也算“成功”，
+                // 原来只取 folderName、失败数直接丢了；累上来进回执。
+                var copyFailed = 0
                 for app in apps {
                     let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
                     // 3.8.281：锁了的跳过（报已锁定）；备之前先记有无
@@ -951,6 +954,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     do {
                         let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
                         ok.append(one.folderName)
+                        copyFailed += one.loginFailed
                         if hadBackup { overwritten += 1 }
                     } catch {
                         failed.append("\(name)：\(LCUtils.czfFriendlyError(error))")
@@ -960,7 +964,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     LCDataManagementView.syncBackupsToExternalFolder(appNames: ok, backupRoot: backupRoot)
                     LCDataManagementView.writeCZFSettingsBackupDebounced()
                 }
-                continuation.resume(returning: (ok, failed, skipped, overwritten))
+                continuation.resume(returning: (ok, failed, skipped, overwritten, copyFailed))
             }
         }
         if okNames.isEmpty && failedNames.isEmpty && !skippedNames.isEmpty {
@@ -971,7 +975,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
             errorShow = true
         } else {
-            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (loginOnly ? "（只备份登录态）" : "（完整备份）") + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n"))
+            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (loginOnly ? "（只备份登录态）" : "（完整备份）") + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")) + (copyFailedCount > 0 ? "\n其中 \(copyFailedCount) 个文件拷贝失败（备份可能不完整）" : "")
             installInfoShow = true
         }
         batchMode = false

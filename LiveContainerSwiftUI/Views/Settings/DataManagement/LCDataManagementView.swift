@@ -2827,6 +2827,14 @@ struct LCDataManagementView : View {
                     // 备份失败时不触发同步，外部文件夹里不留半成品。
                     if let one = try? Self.backupOneAppSync(app, backupRoot: root, fm: fm) {
                         Self.syncBackupsToExternalFolder(appNames: [one.folderName], backupRoot: root)
+                        // B-2：单 App 里个别文件拷失败不抛错、也算
+                        // “成功”，原来只取 folderName、失败数直接
+                        // 丢了；自动备份静默跳过不挡安装，记一条
+                        // 日志留痕（App 名 + 失败数 + 前 3 条路径）。
+                        if one.loginFailed > 0 {
+                            let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                            print("[AutoBackup] \(name) 覆盖安装前自动备份有 \(one.loginFailed) 个文件拷贝失败：\(one.loginFailedPaths.prefix(3).joined(separator: "、"))")
+                        }
                     }
                 }
                 continuation.resume()
@@ -3061,16 +3069,20 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
-                // 13：拷失败清单——以前拷失败直接丢、回执里一个
-                // 字没有；现在失败也报数+列路径（前 10 条），
-                // 让用户知道这次备份里哪些文件没拷上。
-                if loginFailedTotal > 0 {
-                    successInfo += "\n⚠️ 拷贝失败 \(loginFailedTotal) 个文件"
-                    if !loginFailedPathsTotal.isEmpty {
-                        successInfo += "（前 \(loginFailedPathsTotal.count) 条：\n" + loginFailedPathsTotal.joined(separator: "\n") + "）"
-                        if loginFailedTotal > loginFailedPathsTotal.count {
-                            successInfo += "\n另有 \(loginFailedTotal - loginFailedPathsTotal.count) 个未列出"
-                        }
+            }
+            // 13：拷失败清单——以前拷失败直接丢、回执里一个
+            // 字没有；现在失败也报数+列路径（前 10 条），
+            // 让用户知道这次备份里哪些文件没拷上。
+            // B-1：原来这块在 if loginOnly 里面，完整备份的
+            // .app/容器/组容器拷失败从来不显示；移出来两边
+            // 都报——完整备份列容器/组容器名，登录态档列会
+            // 话文件相对路径。
+            if loginFailedTotal > 0 {
+                successInfo += "\n⚠️ 拷贝失败 \(loginFailedTotal) 个文件"
+                if !loginFailedPathsTotal.isEmpty {
+                    successInfo += "（前 \(loginFailedPathsTotal.count) 条：\n" + loginFailedPathsTotal.joined(separator: "\n") + "）"
+                    if loginFailedTotal > loginFailedPathsTotal.count {
+                        successInfo += "\n另有 \(loginFailedTotal - loginFailedPathsTotal.count) 个未列出"
                     }
                 }
             }
@@ -5790,6 +5802,10 @@ struct LCDataManagementView : View {
                 // 写进 LCScheduleBackupLastFailure，设置页定时
                 // 备份区直接显示出来。
                 var failedNames: [String] = []
+                // B-2：单 App 里个别文件拷失败不抛错、也算“成功”，
+                // 原来只取 folderName、失败数直接丢了；按 App 记
+                // 下来，和整 App 失败一起写进上次失败记录。
+                var copyFailedNames: [String] = []
                 if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
                     let backupRoot = docs.appendingPathComponent("Backups")
                     try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
@@ -5807,6 +5823,9 @@ struct LCDataManagementView : View {
                         do {
                             let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
                             backedUpFolderNames.append(one.folderName)
+                            if one.loginFailed > 0 {
+                                copyFailedNames.append("\(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")（\(one.loginFailed) 个文件拷贝失败）")
+                            }
                         } catch {
                             failedNames.append(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
                         }
@@ -5815,12 +5834,20 @@ struct LCDataManagementView : View {
                         Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
                         Self.writeCZFSettingsBackupDebounced()
                     }
-                    if !failedNames.isEmpty {
+                    if !failedNames.isEmpty || !copyFailedNames.isEmpty {
                         let fmt = DateFormatter()
                         fmt.dateFormat = "MM月d日 HH:mm"
                         let when = fmt.string(from: Date())
-                        let names = failedNames.prefix(3).joined(separator: "、") + (failedNames.count > 3 ? "等 \(failedNames.count) 个" : "")
-                        UserDefaults.standard.set("\(when)：\(names)备份失败", forKey: "LCScheduleBackupLastFailure")
+                        var failureParts: [String] = []
+                        if !failedNames.isEmpty {
+                            let names = failedNames.prefix(3).joined(separator: "、") + (failedNames.count > 3 ? "等 \(failedNames.count) 个" : "")
+                            failureParts.append("\(names)备份失败")
+                        }
+                        if !copyFailedNames.isEmpty {
+                            let names = copyFailedNames.prefix(3).joined(separator: "、") + (copyFailedNames.count > 3 ? "等 \(copyFailedNames.count) 个" : "")
+                            failureParts.append("\(names)有文件拷贝失败")
+                        }
+                        UserDefaults.standard.set("\(when)：\(failureParts.joined(separator: "；"))", forKey: "LCScheduleBackupLastFailure")
                         UserDefaults.standard.synchronize()
                     }
                 }

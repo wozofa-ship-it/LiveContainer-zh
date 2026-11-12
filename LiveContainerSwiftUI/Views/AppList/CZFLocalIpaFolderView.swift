@@ -443,7 +443,12 @@ struct CZFInlineIpaFolderGrid: View {
         _model = StateObject(wrappedValue: CZFLocalIpaFolderModel(folderURL: folderURL))
     }
 
-    private var czfColCount: Int { 4 }
+    // 3.8.442：列数跟上面已装 App 网格一致——原来写死 4 列，
+    // 图标比上面 5 列的大、不对称。读同一份网格设置
+    //（CZFAppGridColumns，默认 5），用户改上面列数时下面
+    // 跟着变，永远对齐。
+    @AppStorage("CZFAppGridColumns") private var czfAppGridColumns = 5
+    private var czfColCount: Int { max(3, min(6, czfAppGridColumns)) }
 
     var body: some View {
         Group {
@@ -469,7 +474,7 @@ struct CZFInlineIpaFolderGrid: View {
                 let rows = stride(from: 0, to: model.items.count, by: czfColCount).map { start in
                     Array(model.items[start..<min(start + czfColCount, model.items.count)])
                 }
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
                     ForEach(rows.indices, id: \.self) { rowIndex in
                         HStack(spacing: 16) {
                             ForEach(rows[rowIndex]) { item in
