@@ -531,6 +531,11 @@ struct LCTweaksView: View {
         case local, shared, vpn
     }
     @State private var selectedTab: TweakTab = .local
+    // R-1（3.8.453 修 453 红字）：.onChange 要读 sharedModel，
+    // 但 LCTweaksView 本来没有这把 @EnvironmentObject——
+    // 有它的是子视图 LCTweakFolderView。补上，TabView 层已注入
+    // SharedModel（LCTabView:16 同款），环境里有，不会崩。
+    @EnvironmentObject private var sharedModel: SharedModel
 
     var body: some View {
         NavigationView {

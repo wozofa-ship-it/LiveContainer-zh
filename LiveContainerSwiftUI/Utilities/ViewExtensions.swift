@@ -68,6 +68,9 @@ extension View {
     // .ignoresSafeArea() 铺到顶栏区，顶栏透出壁纸的模糊影子，
     // 两页同款；滚动内容滑到顶栏下只剩模糊影子、不糊成一片。
     // iOS 15 没有 .toolbarBackground，走默认半透明。
+    // @ViewBuilder 不能少（同款 czfSolidToolbarBackground 也带）：
+    // if/else 两分支是两种 View 类型，没它报 mismatching types。
+    @ViewBuilder
     func czfWallpaperToolbarBackground() -> some View {
         if #available(iOS 16.0, *) {
             self.toolbarBackground(.visible, for: .navigationBar)
