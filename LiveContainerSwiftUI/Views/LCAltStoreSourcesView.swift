@@ -552,6 +552,74 @@ func czfDedupSourceApps(_ apps: [AltStoreSourceApp]) -> [AltStoreSourceApp] {
     return apps.filter { seen.insert($0.czfStableID).inserted }
 }
 
+// 全部更新清单 sheet（用户 18:46 令）：列出全部可更新 App，
+// 每行图标 + 名字 + 已装版本 → 新版本 + 单独“更新”按钮；
+// 底部“全部更新”走批量队列。单点更新先关 sheet 再进安装
+// 队列（install 内部会切到 App 页）。
+struct CZFUpdatableAppsSheet: View {
+    let apps: [AltStoreSourceApp]
+    let onUpdateOne: (AltStoreSourceApp) -> Void
+    let onUpdateAll: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var sharedModel: SharedModel
+
+    private func installedVersion(for app: AltStoreSourceApp) -> String {
+        (sharedModel.apps + sharedModel.hiddenApps)
+            .first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })?
+            .appInfo.version() ?? ""
+    }
+
+    var body: some View {
+        // 部署目标 iOS 15：NavigationStack 是 iOS 16+，用
+        // NavigationView + Stack 样式（与本文件其余 sheet 同款）。
+        NavigationView {
+            List {
+                ForEach(apps, id: \.czfStableID) { app in
+                    HStack(spacing: 12) {
+                        SourceIconView(url: app.iconURL)
+                            .frame(width: 44, height: 44)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(app.name)
+                                .lineLimit(1)
+                            Text("\(installedVersion(for: app)) → \(app.latestVersion?.version ?? "")")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Button("更新") {
+                            onUpdateOne(app)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+            }
+            .navigationTitle("全部更新(\(apps.count))")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    onUpdateAll()
+                } label: {
+                    Text("全部更新(\(apps.count))")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+                .background(Color(.systemBackground))
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+}
+
 struct LCSourcesView: View {
     @StateObject private var viewModel = AltStoreSourcesViewModel()
     @State private var errorMessage: String?
@@ -578,6 +646,11 @@ struct LCSourcesView: View {
     // 遍版本、还逐个读忽略记录；改成算一次存起来，只在源/已装/
     // 忽略变时重算（见 refreshUpdatableCache 调用点）
     @State private var cachedUpdatableApps: [AltStoreSourceApp] = []
+    // 全部更新点开先列清单（用户 18:46 令）：原来点“全部更新”
+    // 直接全装，用户看不到是哪几个要更新。改成先弹 sheet 列出
+    // 全部可更新 App（图标 + 名字 + 已装版本 → 新版本），每行
+    // 可单独更新，底部再放“全部更新”。
+    @State private var showUpdatableList = false
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
 
@@ -774,11 +847,11 @@ struct LCSourcesView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarLeading) {
-                    // 有已装 App 能更新时才出现：一键全走批量队列
-                    // （串行装、已装直接覆盖、覆盖前自动备份）
+                    // 有已装 App 能更新时才出现：点开先列清单
+                    // （见 showUpdatableList 注释），不在这直接装
                     if !cachedUpdatableApps.isEmpty {
                         Button("全部更新(\(cachedUpdatableApps.count))") {
-                            installBatch(cachedUpdatableApps)
+                            showUpdatableList = true
                         }
                     }
                 }
@@ -851,6 +924,19 @@ struct LCSourcesView: View {
         }
         .sheet(isPresented: $czfSourceGridSettingsShow) {
             CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode, showSort: false)
+        }
+        .sheet(isPresented: $showUpdatableList) {
+            CZFUpdatableAppsSheet(
+                apps: cachedUpdatableApps,
+                onUpdateOne: { app in
+                    showUpdatableList = false
+                    install(app)
+                },
+                onUpdateAll: {
+                    showUpdatableList = false
+                    installBatch(cachedUpdatableApps)
+                }
+            )
         }
         .sheet(isPresented: $isManagingSources) {
             if #available(iOS 16.0, *) {
