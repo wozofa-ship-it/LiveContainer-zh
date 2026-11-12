@@ -5,6 +5,78 @@
 import SwiftUI
 import CryptoKit
 
+// 本地 IPA 文件夹的持久化（3.8.454）：App 页与源页共用——
+// 文件夹从 App 页移到源页（用户 20:34 令“把文件夹移到源
+// 这里”+“一边源一边文件夹可以选择显示”），保存/恢复逻辑
+// 只写一份，两处都调它。书签创建值（1<<11）、解析值
+// （1<<10）、建前先 startAccessing、建完当场解验才存，与
+// 443/447 的教训一致，别改。
+enum CZFLocalIpaFolderStore {
+    static let pathKey = "CZFLocalIpaFolderPath"
+    static let bookmarkKey = "CZFLocalIpaFolderBookmark"
+
+    @discardableResult
+    static func save(_ url: URL) -> Bool {
+        // 创建侧 withSecurityScope = 1 << 11（不是 1 << 10，
+        // 那是 suitableForBookmarkFile）。
+        let czfWithSecurityScope: UInt = 1 << 11
+        // 路径每次都存一份（书签丢了/解不出来时按路径回落）。
+        UserDefaults.standard.set(url.path, forKey: pathKey)
+        // 3.8.447 文件夹真因（440 用户实测“还是一样”）：
+        // 建 security-scoped 书签前必须先 startAccessing，
+        // 否则 bookmarkData(withSecurityScope:) 校验不到访问
+        // 权限、静默失败，代码回落到无 scope 书签——存下来
+        // 也打不开（439 的 1<<10 错值 + 440 的缺 startAccessing
+        // 都是同一结果：重开要重选）。先 startAccessing 再建，
+        // 建完当场解出来验 startAccessing 能过，才算真有 scope、
+        // 才存；验不过就不存，别拿无 scope 书签冒充。
+        let started = url.startAccessingSecurityScopedResource()
+        defer { if started { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) else {
+            return false
+        }
+        var isStale = false
+        guard let resolved = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), relativeTo: nil, bookmarkDataIsStale: &isStale),
+              resolved.startAccessingSecurityScopedResource() else {
+            return false
+        }
+        resolved.stopAccessingSecurityScopedResource()
+        UserDefaults.standard.set(data, forKey: bookmarkKey)
+        return true
+    }
+
+    static func restore() -> URL? {
+        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else {
+            // 没书签时试路径回落（保存时两种书签都失败才走这里）。
+            if let path = UserDefaults.standard.string(forKey: pathKey), !path.isEmpty {
+                return URL(fileURLWithPath: path)
+            }
+            return nil
+        }
+        var isStale = false
+        let czfWithSecurityScope: UInt = 1 << 10
+        // 先按 security scope 解析，不行再按普通方式解析（与
+        // 保存的回落对应：存的是哪种，这里就按哪种解）。
+        if let url = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: czfWithSecurityScope), relativeTo: nil, bookmarkDataIsStale: &isStale) {
+            if isStale {
+                save(url)
+            }
+            return url
+        }
+        if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale) {
+            if isStale {
+                save(url)
+            }
+            return url
+        }
+        // 书签彻底解不出来，试路径回落。
+        if let path = UserDefaults.standard.string(forKey: pathKey), !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+}
+
 struct CZFLocalIpaItem: Identifiable {
     let id = UUID()
     let url: URL
@@ -322,136 +394,6 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     }
 }
 
-struct CZFLocalIpaFolderView: View {
-    @StateObject private var model: CZFLocalIpaFolderModel
-    var onInstall: (URL) -> Void
-    var onChangeFolder: () -> Void
-    var onClose: () -> Void
-
-    init(folderURL: URL, onInstall: @escaping (URL) -> Void, onChangeFolder: @escaping () -> Void, onClose: @escaping () -> Void) {
-        _model = StateObject(wrappedValue: CZFLocalIpaFolderModel(folderURL: folderURL))
-        self.onInstall = onInstall
-        self.onChangeFolder = onChangeFolder
-        self.onClose = onClose
-    }
-
-    // 4 列网格（3.8.426）：弹窗比整页窄，4 列比源页默认 5 列
-    // 松一点，图标大、名字看得清。
-    private var czfGridColumns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 16), count: 4)
-    }
-
-    @State private var czfSearchText = ""
-
-    // App #18：搜索过滤——显示名或文件名含关键字即命中。
-    private var czfFilteredItems: [CZFLocalIpaItem] {
-        let q = czfSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return model.items }
-        return model.items.filter {
-            $0.displayName.localizedCaseInsensitiveContains(q)
-            || $0.fileName.localizedCaseInsensitiveContains(q)
-        }
-    }
-
-    var body: some View {
-        NavigationView {
-            Group {
-                if model.scanning {
-                    ProgressView("正在读取文件夹…")
-                } else if let errorText = model.errorText {
-                    VStack(spacing: 12) {
-                        Image(systemName: "folder.badge.questionmark")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text(errorText)
-                            .foregroundStyle(.secondary)
-                    }
-                } else if model.items.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "folder")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text("这个文件夹里没有 IPA（已扫过子文件夹）")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    // 网格（3.8.426，用户 23:00 令“弹出页面跟源
-                    // 一样”）：列表改成源页同款网格——大图标 +
-                    // 名字 + 版本，4 列，点格子直接安装。不再
-                    // 用 List 行（行里名字版本号挤、图标小，
-                    // 看着不像源页）。
-                    // App #18：文件夹网格加搜索框（刷新按钮 428
-                    // 已有，只补搜索）；按显示名或文件名匹配。
-                    VStack(spacing: 0) {
-                        HStack {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(.secondary)
-                            TextField("搜索".loc, text: $czfSearchText)
-                                .textInputAutocapitalization(.never)
-                                .disableAutocorrection(true)
-                            if !czfSearchText.isEmpty {
-                                Button { czfSearchText = "" } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .padding(8)
-                        .background(Color(.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .padding(.horizontal)
-                        .padding(.top, 8)
-                        if czfFilteredItems.isEmpty {
-                            VStack(spacing: 12) {
-                                Image(systemName: "magnifyingglass")
-                                    .font(.largeTitle)
-                                    .foregroundStyle(.secondary)
-                                Text("没有匹配的 IPA".loc)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            ScrollView {
-                                LazyVGrid(columns: czfGridColumns, spacing: 16) {
-                                    ForEach(czfFilteredItems) { item in
-                                        CZFLocalIpaGridCell(item: item) {
-                                            onInstall(item.url)
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal)
-                                .padding(.top, 12)
-                                .padding(.bottom, 32)
-                            }
-                        }
-                    }
-                }
-            }
-            .navigationTitle(model.folderURL.lastPathComponent)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("完成", action: onClose)
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    // 安装审计 #18 / App #18：刷新按钮，与
-                    // “换文件夹”并排；扫描中置灰防重复点。
-                    Button(action: { model.scan() }) {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .accessibilityLabel("刷新")
-                    .disabled(model.scanning)
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button("换文件夹", action: onChangeFolder)
-                }
-            }
-            .onAppear { model.scan() }
-            .onDisappear { model.cancelDetailTasks() }
-        }
-    }
-}
-
 // App 页下方内嵌文件夹 IPA 区（3.8.436，用户 11:15 令，红框处）：
 // 选过的文件夹的 IPA 直接显示在已装 App 下方，不用再点
 // 文件夹按钮弹 sheet（sheet 426/429/430/435 四版都没稳住）。
@@ -591,11 +533,24 @@ struct CZFLocalIpaGridCell: View {
         item.detailLoaded && item.icon == nil && item.version == nil
     }
 
+    // 3.8.454：图标跟已装 App 网格同一套大小设置（大/中/小 =
+    // 单元宽度的 1.0 / 0.85 / 0.7）——原来写死满宽 1.0，不读
+    // 设置，用户在网格设置里选“小”时上面变小、下面还是满宽，
+    // 看着文件夹图标比上面大一圈（用户 20:32 报）。
+    @AppStorage("CZFAppGridIconSize") private var czfGridIconSize = 0
+    private var czfIconFactor: CGFloat {
+        switch czfGridIconSize {
+        case 1: return 0.85
+        case 2: return 0.7
+        default: return 1.0
+        }
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             ZStack(alignment: .topTrailing) {
                 GeometryReader { geo in
-                    let side = max(geo.size.width, 44)
+                    let side = min(max(geo.size.width * czfIconFactor, 44), geo.size.width)
                     Group {
                         if let icon = item.icon {
                             IconImageView(icon: icon)

@@ -108,24 +108,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var didAppear = false
     // ipa choosing stuff
     @State var choosingIPA = false
-    // 本地 IPA 文件夹（3.8.423）：+ 号旁的文件夹按钮，选一个
-    // 文件夹，列里面的 IPA 点一下安装；文件夹用 bookmark 记住。
-    @State var czfIpaFolderPickerShow = false
-    @State var czfIpaFolderURL: URL? = nil
-    @State var czfIpaFolderSheetShow = false
-    // 3.8.428 安装#4：换文件夹标记——点“换文件夹”时只关 sheet
-    // 并置这个标记，等 sheet 的 onDismiss 回调里再弹选择器；
-    // 同一代码块里 sheet=false + picker=true 时选择器可能弹不出。
-    @State private var czfIpaFolderChangeRequested = false
-    // 3.8.429 文件夹选完没反应标记：选完文件夹后等 picker 关完
-    // 再弹 IPA 网格 sheet（见下面 betterFolderImporter 的
-    // onDismiss）；回调里直接 sheet=true 时 picker 还在上面，
-    // sheet 会被 UIKit 静默吞掉、选完什么都不出。
-    @State private var czfIpaFolderPicked = false
-    // 长按标记（3.8.426）：文件夹按钮长按=选文件夹、点按=
-    // 显示 IPA 网格。长按松手时 Button 的 action 也会触发，
-    // 用这个标记拦住，不让长按后又弹一次网格。
-    @State var czfIpaFolderLongPressed = false
+    // 本地 IPA 文件夹已移到源页（3.8.454）：保存/恢复见
+    // CZFLocalIpaFolderStore；安装时取权（3.8.428 安装#3）
+    // 仍调它。App 页不再有文件夹按钮/内嵌区/sheet。
     @State var errorShow = false
     @State var errorInfo = ""
     // 新装 App 后自动恢复备份的结果提示
@@ -546,30 +531,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         ProgressView().progressViewStyle(.circular).padding(.horizontal, 8)
                     }
                 }
-                // 本地 IPA 文件夹（3.8.423，用户 21:49 令；3.8.426
-                // 改成长按选文件夹、点按显示 IPA 网格，用户 23:00
-                // 令）：点按=记过的文件夹直接打开 IPA 网格，没记
-                // 过弹选择器；长按=重新选文件夹（换文件夹）。长
-                // 按松手时 Button 的 action 也会触发，靠
-                // czfIpaFolderLongPressed 拦住，不弹两次。
-                Button {
-                    if czfIpaFolderLongPressed {
-                        czfIpaFolderLongPressed = false
-                        return
-                    }
-                    if let saved = czfRestoreIpaFolder() {
-                        czfIpaFolderURL = saved
-                        czfIpaFolderSheetShow = true
-                    } else {
-                        czfIpaFolderPickerShow = true
-                    }
-                } label: {
-                    Label("本地 IPA 文件夹", systemImage: "folder")
-                }
-                .onLongPressGesture(minimumDuration: 0.5) {
-                    czfIpaFolderLongPressed = true
-                    czfIpaFolderPickerShow = true
-                }
+                // 文件夹按钮已去掉（3.8.454）：文件夹移到源页，
+                // App 页顶栏不再放文件夹入口。
                 if(UserDefaults.sideStoreExist()) {
                     Button {
                         LCUtils.openSideStore(delegate: self)
@@ -1285,17 +1248,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if sharedModel.multiLCStatus == 2 {
                 Text("lc.appList.manageInPrimaryTip".loc).foregroundStyle(.secondary).padding()
             }
-            // 3.8.449（用户 16:44 报“列表没显示文件夹APP”）：
-            // 文件夹 IPA 区只接在网格内容里，列表模式切过来
-            // 就没了。列表底部也接一份（与网格同款位置：已装
-            // App 下方），两边共用同一份状态与恢复逻辑。
-            CZFInlineIpaFolderSection(
-                folderURL: czfIpaFolderURL,
-                onPickFolder: { czfIpaFolderPickerShow = true },
-                onInstall: { url in enqueueInstall(url: url, autoReplace: false) }
-            )
-            .padding(.top, 8)
-            .padding(.horizontal)
+            // 文件夹区已移到源页（3.8.454），列表底部不再接。
     }
 
     // 网格模式计数行文案已删（3.8.419，建议第 6 条）：“共 n 个 App”
@@ -1355,14 +1308,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
-            // App 页下方内嵌文件夹 IPA 区（3.8.436，用户 11:15 令）：
-            // 选过的文件夹的 IPA 显示在已装 App 下方，点格子直接安装。
-            CZFInlineIpaFolderSection(
-                folderURL: czfIpaFolderURL,
-                onPickFolder: { czfIpaFolderPickerShow = true },
-                onInstall: { url in enqueueInstall(url: url, autoReplace: false) }
-            )
-            .padding(.top, 8)
+            // 文件夹区已移到源页（3.8.454），App 页不再内嵌。
         }
         .padding()
     }
@@ -1564,12 +1510,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfBackgroundImage = CZFAppBackground.loadImage()
             if !didAppear {
                 onAppear()
-            }
-            // 3.8.436：App 页下方内嵌文件夹区要直接显示，出现时
-            // 把记过的文件夹 URL 恢复出来（没记过保持 nil，
-            // 内嵌区显示“选择文件夹”按钮）。
-            if czfIpaFolderURL == nil {
-                czfIpaFolderURL = czfRestoreIpaFolder()
             }
             // 3.8.404：每次回到本页都扫分享收件箱（切回 App
             // 页时 onAppear 也触发，didAppear 守卫只拦 onAppear()）。
@@ -1852,54 +1792,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }, onDismiss: {
             choosingIPA = false
         })
-        // 本地 IPA 文件夹（3.8.423）：选文件夹（asCopy false，
-        // 原位读），存 bookmark、打开 IPA 列表；列表里点一个
-        // 就进安装队列（enqueueInstall，不删用户文件夹里的原文件）。
-        .betterFolderImporter(isPresented: $czfIpaFolderPickerShow, callback: { folderURL in
-            czfSaveIpaFolder(folderURL)
-            czfIpaFolderURL = folderURL
-            // 3.8.429 选完没反应：回调里直接 czfIpaFolderSheetShow
-            // = true 时 picker 还没关，sheet 会被 UIKit 静默吞掉
-            //（present 时已有控制器在上面）。只记 URL + 置标记，
-            // 等下面的 onDismiss（picker 关完）再弹 sheet。
-            czfIpaFolderPicked = true
-        }, onDismiss: {
-            czfIpaFolderPickerShow = false
-            // 3.8.429：picker 关完再弹 sheet；再往下一帧推，
-            // 等 picker 的 dismiss 走完，sheet 才不会被吞。
-            if czfIpaFolderPicked {
-                czfIpaFolderPicked = false
-                DispatchQueue.main.async {
-                    czfIpaFolderSheetShow = true
-                }
-            }
-        })
-        .sheet(isPresented: $czfIpaFolderSheetShow, onDismiss: {
-            // 3.8.428 安装#4：换文件夹——等 sheet 关完再弹选择器；
-            // 同一代码块里 sheet=false + picker=true 时选择器可能
-            // 弹不出（ViewExtensions 的修饰符不改，另一位同事在改它）。
-            if czfIpaFolderChangeRequested {
-                czfIpaFolderChangeRequested = false
-                czfIpaFolderPickerShow = true
-            }
-        }) {
-            if let folderURL = czfIpaFolderURL {
-                CZFLocalIpaFolderView(
-                    folderURL: folderURL,
-                    onInstall: { ipaURL in
-                        czfIpaFolderSheetShow = false
-                        enqueueInstall(url: ipaURL, autoReplace: false)
-                    },
-                    onChangeFolder: {
-                        czfIpaFolderChangeRequested = true
-                        czfIpaFolderSheetShow = false
-                    },
-                    onClose: {
-                        czfIpaFolderSheetShow = false
-                    }
-                )
-            }
-        }
+        // 文件夹选择器与文件夹 sheet 已随文件夹移到源页
+        // （3.8.454），App 页不再挂 betterFolderImporter。
         .alert("lc.appList.installation".loc, isPresented: $installReplaceAlert.show) {
             ForEach(installOptions, id: \.self) { installOption in
                 Button(role: installOption.isReplace ? .destructive : nil, action: {
@@ -2243,84 +2137,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 只有 picker 当场给的 URL 自带 scope，存进 UserDefaults
     // 再取出来就没了。iOS 上具名常量标了 unavailable（429
     // 实证编不过），只能用 rawValue。注意创建与解析的
-    // withSecurityScope 不是同一个数：创建 = 1 << 11，
-    // 解析 = 1 << 10（Foundation 的 NS_OPTIONS 定义：
-    // 创建侧 1 << 10 是 suitableForBookmarkFile，1 << 11
-    // 才是 withSecurityScope；解析侧 1 << 10 才是
-    // withSecurityScope）。439 用 1 << 10 建书签，建出来的
-    // 根本不带 scope——重启后 startAccessing 返回 false、
-    // 读不到文件夹（用户 13:46 报“关闭重开又要重选”）。
-    // 老书签（无 scope）解析出来仍没权，读失败时文件夹页
-    // 会报“没有权限…请重新选择”，点“换文件夹”重选一次
-    // 即生成带 scope 的新书签，之后点按直接开。
-    // 文件夹书签持久化（3.8.439 加固）：先试带 security scope
-    // 的书签（创建 1 << 11，iOS 上具名常量标 unavailable，
-    // 只能用 rawValue，429 实证），不行回落到普通书签
-    //（options: []）。原来只试一种，失败就静默丢、什么都
-    // 没存，下次打开还是“选择文件夹”按钮（用户 12:37 报
-    // 437 仍不显示）。回落的普通书签至少把 URL 记下来，
-    // 恢复时能拼出路径再试访问。
-    // 返回是否存下了点什么（任一方式成功即 true）。
-    @discardableResult
-    private func czfSaveIpaFolder(_ url: URL) -> Bool {
-        // 创建侧 withSecurityScope = 1 << 11（不是 1 << 10，
-        // 那是 suitableForBookmarkFile）。
-        let czfWithSecurityScope: UInt = 1 << 11
-        // 路径每次都存一份（书签丢了/解不出来时按路径回落）。
-        UserDefaults.standard.set(url.path, forKey: "CZFLocalIpaFolderPath")
-        // 3.8.447 文件夹真因（440 用户实测“还是一样”）：
-        // 建 security-scoped 书签前必须先 startAccessing，
-        // 否则 bookmarkData(withSecurityScope:) 校验不到访问
-        // 权限、静默失败，代码回落到无 scope 书签——存下来
-        // 也打不开（439 的 1<<10 错值 + 440 的缺 startAccessing
-        // 都是同一结果：重开要重选）。先 startAccessing 再建，
-        // 建完当场解出来验 startAccessing 能过，才算真有 scope、
-        // 才存；验不过就不存，别拿无 scope 书签冒充。
-        let started = url.startAccessingSecurityScopedResource()
-        defer { if started { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) else {
-            return false
-        }
-        var isStale = false
-        guard let resolved = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), relativeTo: nil, bookmarkDataIsStale: &isStale),
-              resolved.startAccessingSecurityScopedResource() else {
-            return false
-        }
-        resolved.stopAccessingSecurityScopedResource()
-        UserDefaults.standard.set(data, forKey: "CZFLocalIpaFolderBookmark")
-        return true
-    }
-
-    private func czfRestoreIpaFolder() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: "CZFLocalIpaFolderBookmark") else {
-            // 没书签时试路径回落（保存时两种书签都失败才走这里）。
-            if let path = UserDefaults.standard.string(forKey: "CZFLocalIpaFolderPath"), !path.isEmpty {
-                return URL(fileURLWithPath: path)
-            }
-            return nil
-        }
-        var isStale = false
-        let czfWithSecurityScope: UInt = 1 << 10
-        // 先按 security scope 解析，不行再按普通方式解析（与
-        // 保存的回落对应：存的是哪种，这里就按哪种解）。
-        if let url = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: czfWithSecurityScope), relativeTo: nil, bookmarkDataIsStale: &isStale) {
-            if isStale {
-                czfSaveIpaFolder(url)
-            }
-            return url
-        }
-        if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &isStale) {
-            if isStale {
-                czfSaveIpaFolder(url)
-            }
-            return url
-        }
-        // 书签彻底解不出来，试路径回落。
-        if let path = UserDefaults.standard.string(forKey: "CZFLocalIpaFolderPath"), !path.isEmpty {
-            return URL(fileURLWithPath: path)
-        }
-        return nil
-    }
+    // 文件夹保存/恢复已移到 CZFLocalIpaFolderStore（3.8.454，
+    // App 页与源页共用同一份；书签值与 startAccessing 顺序
+    // 与 443/447 的教训一致，别改）。安装取权仍调它。
 
     func startInstallApp(_ fileUrl:URL) async {
         do {
@@ -2347,8 +2166,36 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         extract(path, destination, progress)
     }
     
+    // iCloud 占位文件（3.8.454，用户 20:38 报“好多 IPA 安装的
+    // 损坏”“不完整”）：文件夹里的 IPA 若在 iCloud 云盘且还没
+    // 下载到本机，读出来是不完整的，解包直接报“已损坏”。
+    // 先触发下载并等它下完（最多 60 秒）；下不完就明确告诉
+    // 用户去“文件”里点一下它、等下载完成再装。非 iCloud
+    // 文件、或已下完的直接过。
+    private func czfEnsureFileDownloaded(_ url: URL) async throws {
+        let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        guard let values = try? url.resourceValues(forKeys: keys),
+              values.isUbiquitousItem == true,
+              values.ubiquitousItemDownloadingStatus == .notDownloaded else {
+            return
+        }
+        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        for _ in 0..<120 {
+            try await Task.sleep(nanoseconds: 500_000_000)
+            if let v = try? url.resourceValues(forKeys: keys),
+               v.ubiquitousItemDownloadingStatus != .notDownloaded {
+                return
+            }
+        }
+        throw "这个 IPA 还没下载完（iCloud 文件），请先在“文件”里点一下它、等下载完成再安装"
+    }
+
     func installIpaFile(_ url:URL, autoReplace: Bool = false, forceAsNew: Bool = false) async throws {
         let fm = FileManager()
+
+        // iCloud 占位先确保下完（见 czfEnsureFileDownloaded），
+        // 再算空间、再解包——占位文件的大小读出来不准。
+        try await czfEnsureFileDownloaded(url)
 
         // 装之前先看空间：解包 + 落盘 + 签名大约要 IPA 体积
         // 的 3 倍，空间不够时原来是装到一半才失败、报错还看
@@ -3265,7 +3112,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 编不过），只能用 rawValue；抽成具名量，
                     // 不再裸写魔数。书签旧了也别直接丢：解析出的
                     // URL 多半还能用，先返回再重存一份新书签
-                    // （与 czfRestoreIpaFolder 同款处理）。注意
+                    // （与 CZFLocalIpaFolderStore.restore 同款处理）。注意
                     // 重存是创建侧，withSecurityScope = 1 << 11，
                     // 不是解析侧的 1 << 10（1 << 10 在创建侧是
                     // suitableForBookmarkFile，建出来不带 scope，
@@ -3313,12 +3160,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.428 安装#3：文件夹弹窗点安装就关 sheet，模型
             // deinit 会 stopAccessing，大包解包中途可能丢访问权；
             // 文件若在 CZFLocalIpaFolderBookmark 记住的文件夹里，
-            // 这里用文件夹书签重新取权再解包（与 426 的
-            // czfRestoreIpaFolder 同款取法），用完释放；文件夹
-            // 模型本身的 deinit 不动。
+            // 这里用文件夹书签重新取权再解包（与
+            // CZFLocalIpaFolderStore.restore 同款取法），用完释放；
+            // 文件夹模型本身的 deinit 不动。
             var czfFolderURL: URL? = nil
             var czfFolderAccessHeld = false
-            if let folderURL = czfRestoreIpaFolder(),
+            if let folderURL = CZFLocalIpaFolderStore.restore(),
                installUrl.standardizedFileURL.path.hasPrefix(folderURL.standardizedFileURL.path + "/") {
                 czfFolderURL = folderURL
                 czfFolderAccessHeld = folderURL.startAccessingSecurityScopedResource()

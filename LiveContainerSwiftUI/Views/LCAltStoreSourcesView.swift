@@ -651,6 +651,13 @@ struct LCSourcesView: View {
     // 全部可更新 App（图标 + 名字 + 已装版本 → 新版本），每行
     // 可单独更新，底部再放“全部更新”。
     @State private var showUpdatableList = false
+    // 本地 IPA 文件夹（3.8.454，用户 20:34 令“把文件夹移到源
+    // 这里”+“一边源一边文件夹可以选择显示”）：源页顶部加
+    // “源 / 文件夹”分段切换，文件夹区从 App 页移到这里；
+    // 保存/恢复走共用 CZFLocalIpaFolderStore。
+    @State private var czfSourcesTab = 0
+    @State private var czfIpaFolderPickerShow = false
+    @State private var czfIpaFolderURL: URL? = nil
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
 
@@ -681,8 +688,35 @@ struct LCSourcesView: View {
     // 算不过来（unable to type-check in reasonable time）。
     // 把最大的块——整个 Group（空态 + 列表）抽出来，body
     // 只剩 NavigationView + 修饰符。只拆不改逻辑。
+    // 3.8.454：源/文件夹分段切换——czfSourcesContent 只放
+    // Picker + 分支，源列表本身再抽一层 czfSourcesListContent。
     @ViewBuilder
     private var czfSourcesContent: some View {
+        VStack(spacing: 0) {
+            Picker("显示", selection: $czfSourcesTab) {
+                Text("源").tag(0)
+                Text("文件夹").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.top, 8)
+            if czfSourcesTab == 1 {
+                ScrollView {
+                    CZFInlineIpaFolderSection(
+                        folderURL: czfIpaFolderURL,
+                        onPickFolder: { czfIpaFolderPickerShow = true },
+                        onInstall: { url in czfInstallFolderIpa(url) }
+                    )
+                    .padding()
+                }
+            } else {
+                czfSourcesListContent
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var czfSourcesListContent: some View {
         Group {
             if viewModel.sources.isEmpty {
                 VStack(spacing: 12) {
@@ -958,6 +992,15 @@ struct LCSourcesView: View {
                 )
             }
         }
+        // 本地 IPA 文件夹选择器（3.8.454）：文件夹区移到源页，
+        // 选文件夹存在共用 CZFLocalIpaFolderStore；内嵌区直接
+        // 显示，不弹 sheet，不用 429 那套 onDismiss 绕法。
+        .betterFolderImporter(isPresented: $czfIpaFolderPickerShow, callback: { folderURL in
+            CZFLocalIpaFolderStore.save(folderURL)
+            czfIpaFolderURL = folderURL
+        }, onDismiss: {
+            czfIpaFolderPickerShow = false
+        })
     }
 
     var body: some View {
@@ -967,6 +1010,11 @@ struct LCSourcesView: View {
         .onAppear {
             refreshUpdatableCache()
             autoRefreshSourcesIfNeeded()
+            // 3.8.454：文件夹区移到源页，出现时把记过的文件夹
+            // URL 恢复出来（没记过保持 nil，内嵌区显示“选择文件夹”按钮）。
+            if czfIpaFolderURL == nil {
+                czfIpaFolderURL = CZFLocalIpaFolderStore.restore()
+            }
             // 设置 #22：只在首次出现时全展开，之后切 Tab 回源页
             // 保留 expandedSources，不再无条件全展开。原来这行
             // 写在 isViewAppeared 守卫之外，每次出现都全展开；
@@ -1156,6 +1204,19 @@ struct LCSourcesView: View {
         CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: false, preview: true, forceAsNew: false))
 
 
+    }
+
+    // 文件夹 IPA 安装（3.8.454）：文件夹区移到源页后，点格子
+    // 切回 App 页装——与源里 install(app:) 同款：先切 Tab，
+    // 再写共享待装队列，App 页 onAppear 时排空进安装队列。
+    // autoReplace=false、preview=false，与原来 App 页文件夹
+    // 点格子直接 enqueueInstall 同款（不弹预览、不删原文件）。
+    @MainActor
+    private func czfInstallFolderIpa(_ url: URL) {
+        withAnimation {
+            DataManager.shared.model.selectedTab = .apps
+        }
+        CZFSourcePendingInstall.items.append(CZFSourcePendingInstallItem(url: url, autoReplace: false, preview: false, forceAsNew: false))
     }
 
     // 源页已装 App 的「新建」：不弹替换/新建选择框，直接按
