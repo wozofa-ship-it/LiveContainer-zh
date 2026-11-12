@@ -346,6 +346,17 @@ struct CZFSourceAppGridCell: View {
 
     @State private var showDetail = false
 
+    // 已安装标记（用户 12:03 令）：源里已装的 App，图标右上角打
+    // 绿勾，免得重复装。判据与 LCSourceAppBanner.isInstalled
+    // 同款：已装 + 隐藏 App 里按 bundleIdentifier 匹配。
+    // sharedModel 来自 LCAltStoreSourcesView 同层环境（该页
+    // 已用 @EnvironmentObject，格子是它的后代，环境里有）。
+    @EnvironmentObject private var sharedModel: SharedModel
+
+    private var isInstalled: Bool {
+        (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+    }
+
     // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、
     // 深色黑晕影；原来写死白晕影，深色模式下白字 + 白晕影
     // 配浅色背景看不清。
@@ -414,6 +425,15 @@ struct CZFSourceAppGridCell: View {
                     .foregroundColor(isSelected ? .accentColor : .secondary)
                     .background(Color(.systemBackground).opacity(0.85), in: Circle())
                     // 低 #55：勾选圈向外偏移，别压在图标一角。
+                    .offset(x: 6, y: -6)
+            } else if isInstalled {
+                // 已安装标记（用户 12:03 令）：绿勾打在图标右上角，
+                // 与批量勾选圈同位置同偏移；批量模式下勾选圈优先，
+                // 已安装标记不抢位置。
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.green)
+                    .background(Color(.systemBackground).opacity(0.85), in: Circle())
                     .offset(x: 6, y: -6)
             }
         }
