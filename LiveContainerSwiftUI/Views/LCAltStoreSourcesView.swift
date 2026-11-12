@@ -1524,7 +1524,10 @@ private struct AltStoreSourceSectionView: View {
 //（红点名单）用 .numeric compare，LCSourceAppBanner.hasUpdate
 // 用手动分段比（isVersion），两处可能打架；抽共用函数，
 // 手动分段比（1.10 > 1.9，非数字段按 0 算），两处都调它。
-private func czfIsVersion(_ a: String, newerThan b: String) -> Bool {
+// 版本数字段比较（1.10 > 1.9）。不 private：网格格子
+// CZFSourceAppGridCell.hasUpdate 与 LCSourceAppBanner.hasUpdate
+// 共用同一份比较（见 CZFSourceGridView.swift）。
+func czfIsVersion(_ a: String, newerThan b: String) -> Bool {
     let aParts = a.split(separator: ".").map { Int($0) ?? 0 }
     let bParts = b.split(separator: ".").map { Int($0) ?? 0 }
     let count = max(aParts.count, bParts.count)

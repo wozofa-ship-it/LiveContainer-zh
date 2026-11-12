@@ -374,6 +374,19 @@ struct CZFSourceAppGridCell: View {
         return FileManager.default.fileExists(atPath: oldURL.path)
     }
 
+    // 有更新角标（用户 17:49 令“源有更新也显示下角标”）：
+    // 源里版本比已装新 → 图标右上角打更新角标。判据与
+    // LCSourceAppBanner.hasUpdate 同款（已装版本比较 +
+    // 忽略的版本不算）。列表行早就有橙色“更新”按钮，网格
+    // 格子一直只有绿勾、看不出哪个有更新。有更新就说明
+    // 已装，角标代替绿勾（不叠两层）；批量模式下勾选圈优先。
+    private var hasUpdate: Bool {
+        guard let sourceVersion = app.latestVersion?.version,
+              let installed = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) else { return false }
+        if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
+        return czfIsVersion(sourceVersion, newerThan: installed.appInfo.version())
+    }
+
     // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、
     // 深色黑晕影；原来写死白晕影，深色模式下白字 + 白晕影
     // 配浅色背景看不清。
@@ -442,6 +455,14 @@ struct CZFSourceAppGridCell: View {
                     .foregroundColor(isSelected ? .accentColor : .secondary)
                     .background(Color(.systemBackground).opacity(0.85), in: Circle())
                     // 低 #55：勾选圈向外偏移，别压在图标一角。
+                    .offset(x: 6, y: -6)
+            } else if hasUpdate {
+                // 有更新角标（用户 17:49 令）：红色下箭头圆标，
+                // 与绿勾同位置同偏移；有更新就说明已装，代替绿勾。
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.red)
+                    .background(Color(.systemBackground).opacity(0.85), in: Circle())
                     .offset(x: 6, y: -6)
             } else if isInstalled {
                 // 已安装标记（用户 12:03 令）：绿勾打在图标右上角，
