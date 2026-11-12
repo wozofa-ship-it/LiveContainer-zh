@@ -2231,21 +2231,30 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 之前注释里“普通 bookmark 就够”是错的——
     // 只有 picker 当场给的 URL 自带 scope，存进 UserDefaults
     // 再取出来就没了。iOS 上具名常量标了 unavailable（429
-    // 实证编不过），只能用 rawValue 1 << 10（与下面
-    // LCLaunchExtensionFileBookmark 同款写法，431 已证能编）。
+    // 实证编不过），只能用 rawValue。注意创建与解析的
+    // withSecurityScope 不是同一个数：创建 = 1 << 11，
+    // 解析 = 1 << 10（Foundation 的 NS_OPTIONS 定义：
+    // 创建侧 1 << 10 是 suitableForBookmarkFile，1 << 11
+    // 才是 withSecurityScope；解析侧 1 << 10 才是
+    // withSecurityScope）。439 用 1 << 10 建书签，建出来的
+    // 根本不带 scope——重启后 startAccessing 返回 false、
+    // 读不到文件夹（用户 13:46 报“关闭重开又要重选”）。
     // 老书签（无 scope）解析出来仍没权，读失败时文件夹页
     // 会报“没有权限…请重新选择”，点“换文件夹”重选一次
     // 即生成带 scope 的新书签，之后点按直接开。
     // 文件夹书签持久化（3.8.439 加固）：先试带 security scope
-    // 的书签（1 << 10，iOS 上具名常量标 unavailable，只能用
-    // rawValue，429 实证），不行回落到普通书签（options: []）。
-    // 原来只试一种，失败就静默丢、什么都没存，下次打开还是
-    // “选择文件夹”按钮（用户 12:37 报 437 仍不显示）。回落的
-    // 普通书签至少把 URL 记下来，恢复时能拼出路径再试访问。
+    // 的书签（创建 1 << 11，iOS 上具名常量标 unavailable，
+    // 只能用 rawValue，429 实证），不行回落到普通书签
+    //（options: []）。原来只试一种，失败就静默丢、什么都
+    // 没存，下次打开还是“选择文件夹”按钮（用户 12:37 报
+    // 437 仍不显示）。回落的普通书签至少把 URL 记下来，
+    // 恢复时能拼出路径再试访问。
     // 返回是否存下了点什么（任一方式成功即 true）。
     @discardableResult
     private func czfSaveIpaFolder(_ url: URL) -> Bool {
-        let czfWithSecurityScope: UInt = 1 << 10
+        // 创建侧 withSecurityScope = 1 << 11（不是 1 << 10，
+        // 那是 suitableForBookmarkFile）。
+        let czfWithSecurityScope: UInt = 1 << 11
         // 路径每次都存一份（书签丢了/解不出来时按路径回落）。
         UserDefaults.standard.set(url.path, forKey: "CZFLocalIpaFolderPath")
         if let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) {
@@ -3229,12 +3238,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if !fm.isReadableFile(atPath: installUrl.path),
                let bookmarkData = LCUtils.appGroupUserDefault.data(forKey: "LCLaunchExtensionFileBookmark") {
                 do {
-                    // 安装低 #20：1 << 10 就是 .withSecurityScope——
+                    // 安装低 #20：解析侧 withSecurityScope = 1 << 10——
                     // iOS 上该具名常量标了 unavailable（429 实证
                     // 编不过），只能用 rawValue；抽成具名量，
                     // 不再裸写魔数。书签旧了也别直接丢：解析出的
                     // URL 多半还能用，先返回再重存一份新书签
-                    // （与 czfRestoreIpaFolder 同款处理）。
+                    // （与 czfRestoreIpaFolder 同款处理）。注意
+                    // 重存是创建侧，withSecurityScope = 1 << 11，
+                    // 不是解析侧的 1 << 10（1 << 10 在创建侧是
+                    // suitableForBookmarkFile，建出来不带 scope，
+                    // 重启后又没权——文件夹 443 同款教训）。
                     let czfWithSecurityScope: UInt = 1 << 10
                     var isStale = false
                     let resolvedURL = try URL(
@@ -3244,7 +3257,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         bookmarkDataIsStale: &isStale
                     )
                     if isStale, let newData = try? resolvedURL.bookmarkData(
-                        options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope),
+                        options: URL.BookmarkCreationOptions(rawValue: 1 << 11),
                         includingResourceValuesForKeys: nil, relativeTo: nil) {
                         LCUtils.appGroupUserDefault.set(newData, forKey: "LCLaunchExtensionFileBookmark")
                     }

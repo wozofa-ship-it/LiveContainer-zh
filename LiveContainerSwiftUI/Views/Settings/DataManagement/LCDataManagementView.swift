@@ -1776,6 +1776,14 @@ struct LCDataManagementView : View {
     private static var settingsBackupWorkItem: DispatchWorkItem?
     private static let settingsBackupQueue = DispatchQueue(label: "com.livecontainer.settingsBackup", qos: .utility)
 
+    // B-5：备份串行队列——backupOneAppSync 的临时目录名只由
+    // folderName 定（.czf-backup-tmp-<名>），四路备份（手动/
+    // 批量/定时/覆盖前自动）并发会撞同一个临时目录、互相删/
+    // 覆盖。backupOneAppSync 的入口只过这个队列，保证同一时
+    // 刻只有一个备份在写临时目录。四路都在后台队列调它，串行
+    // 队列只排队、不堵主线程。
+    private static let czfBackupSerialQueue = DispatchQueue(label: "com.livecontainer.backup.serial", qos: .userInitiated)
+
     static func writeCZFSettingsBackupDebounced() {
         DispatchQueue.main.async {
             LCDataManagementView.settingsBackupWorkItem?.cancel()
@@ -2585,7 +2593,17 @@ struct LCDataManagementView : View {
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
     @discardableResult
+    // B-5：四路备份互斥入口（手动/批量/定时/覆盖前自动都走这里）：
+    // 真身在 backupOneAppSyncLocked，这里只过串行队列，保证同一
+    // 时刻只有一个备份在写临时目录。队列只在本函数里用，不存在
+    // 重入（backupOneAppSyncLocked 不调自己、不回头调本函数）。
     static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
+        try czfBackupSerialQueue.sync {
+            try Self.backupOneAppSyncLocked(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
+        }
+    }
+
+    private static func backupOneAppSyncLocked(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
         let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
         // v216：同款多开各写各的文件夹（见 backupFolderName：
         // 同实例沿用旧名、新实例加实例后缀；老文件夹不改名）。
@@ -2659,6 +2677,9 @@ struct LCDataManagementView : View {
             if (try? fm.copyItem(at: bundleURL, to: destAppURL)) == nil {
                 loginFailed += 1
                 if loginFailedPaths.count < 50 { loginFailedPaths.append(bundleURL.lastPathComponent) }
+                // B-4：拷失败的残留 `.app` 删掉，否则下面校验的
+                // fileExists 会把半截 `.app` 当成已拷上。
+                try? fm.removeItem(at: destAppURL)
             }
         }
         for container in app.uiContainers {
@@ -2673,6 +2694,15 @@ struct LCDataManagementView : View {
                 // 13：容器拷失败记失败清单，别静默丢。
                 loginFailed += 1
                 if loginFailedPaths.count < 50 { loginFailedPaths.append(srcURL.lastPathComponent) }
+                // B-3：copyItem 不是原子的，中途失败（磁盘满/
+                // I/O 错）可能在目标留下一个不完整目录；不清掉
+                // 的话，下面的容器数校验会数到这个残留目录、误报
+                // “容器数对不上”、整个备份被删，而 #13 记下的
+                // 具体失败文件随抛错一起丢了。拷失败就把目标目录
+                // 删掉，校验只数成功拷完的容器，失败走失败清单
+                // （部分成功）。（前提：copyItem 中途失败留残留
+                // 目录是 Foundation 已知非原子行为，本机未实测。）
+                try? fm.removeItem(at: destURL)
             }
         }
         // 组容器数据（App 与它的扩展/小组件共用的那份）：不在
@@ -2791,7 +2821,26 @@ struct LCDataManagementView : View {
                 let n = $0.lastPathComponent
                 return n != "manifest.json" && !n.hasSuffix(".app") && n != "AppGroup" && n != "Keychain" && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             }.count ?? -1
-            if diskContainers != containerCount { verifyFailure = "容器数对不上（备了 \(containerCount) 个、盘上有 \(diskContainers) 个）" }
+            if diskContainers != containerCount {
+                // B-3：数对不上、且前面有容器拷失败时，点名拷失败
+                // 的容器（残留目录清不掉也会落到这里），别只报
+                // “数对不上”——用户从报错看不出真正原因。
+                if loginFailed > 0 {
+                    verifyFailure = "容器拷贝失败 \(loginFailed) 个（\(loginFailedPaths.prefix(3).joined(separator: "、"))）"
+                } else {
+                    verifyFailure = "容器数对不上（备了 \(containerCount) 个、盘上有 \(diskContainers) 个）"
+                }
+            }
+        }
+        if verifyFailure == nil && !loginOnly, let bundlePath = app.appInfo.bundlePath() {
+            // B-4：完整档核 `.app` 在不在——`.app` 只是供恢复时
+            // 参考（恢复安装走源下载链接/用户自选 IPA，不靠它），
+            // 缺了不直接导致恢复失败；但“完整”备份缺 `.app`
+            // 名不副实，校验加这一项。文案只陈述事实。
+            let appName = URL(fileURLWithPath: bundlePath).lastPathComponent
+            if !fm.fileExists(atPath: appBackupURL.appendingPathComponent(appName).path) {
+                verifyFailure = ".app 未拷上"
+            }
         }
         if verifyFailure == nil && keychainHasSnapshot && !fm.fileExists(atPath: appBackupURL.appendingPathComponent("Keychain").path) {
             verifyFailure = "钥匙串快照缺失"
@@ -3711,6 +3760,10 @@ struct LCDataManagementView : View {
             // 3.8.286：组容器恢复失败的 App（旧数据已保留，只
             // 是该组没恢复回来；与整 App 失败分开列）
             var groupFailedApps: [String] = []
+            // B-6：会话文件合并失败总数与路径（前 10 条，带 App
+            // 名前缀；与备份侧 #13 的回执同款写法）。
+            var mergeFailedTotal = 0
+            var mergeFailedPathsTotal: [String] = []
             // 3.8.294（P0-4）：iCloud 未下完、恢复可能不完整的
             // App（仍算恢复成功计入 restoredCount，单列提示，
             // 不进 noDataApps——数据确实部分恢复了）
@@ -3861,6 +3914,16 @@ struct LCDataManagementView : View {
                     if !outcome.groupRestoreFailed.isEmpty {
                         groupFailedApps.append("\(app.appInfo.displayName() ?? folderName)（组容器 \(outcome.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
                     }
+                    // B-6：会话文件合并失败进报告（原文件未动，
+                    // 可再恢复一次；路径带 App 名前缀，跨 App
+                    // 同名路径不混淆）。
+                    if outcome.mergedLoginFailed > 0 {
+                        mergeFailedTotal += outcome.mergedLoginFailed
+                        let mergeDisplayName = app.appInfo.displayName() ?? folderName
+                        if mergeFailedPathsTotal.count < 10 {
+                            mergeFailedPathsTotal.append(contentsOf: outcome.mergedLoginFailedPaths.prefix(10 - mergeFailedPathsTotal.count).map { "\(mergeDisplayName)/\($0)" })
+                        }
+                    }
                     // 3.8.294（P0-4）：下载未完成仍算恢复成功（部分
                     // 数据已拷回），单列进报告，不进 noDataApps。
                     if outcome.downloadIncomplete {
@@ -3885,7 +3948,7 @@ struct LCDataManagementView : View {
                         // 还是快照空——14:45 弹窗只写裸名，定不了。
                         let displayName = app.appInfo.displayName() ?? folderName
                         if loginOnly {
-                            noDataApps.append("\(displayName)（备份里容器 \(outcome.containerFolderCount) 个，会话文件合并 \(outcome.mergedLoginFiles) 个，钥匙串快照 \(outcome.keychainFound) 条）")
+                            noDataApps.append("\(displayName)（备份里容器 \(outcome.containerFolderCount) 个，会话文件合并 \(outcome.mergedLoginFiles) 个，合并失败 \(outcome.mergedLoginFailed) 个，钥匙串快照 \(outcome.keychainFound) 条）")
                         } else {
                             noDataApps.append("\(displayName)（备份里容器 \(outcome.containerFolderCount) 个）")
                         }
@@ -3979,6 +4042,13 @@ struct LCDataManagementView : View {
                     // 3.8.286：组容器失败进报告（旧数据已保留）
                     if !outcome2.groupRestoreFailed.isEmpty {
                         groupFailedApps.append("\(item.name)（组容器 \(outcome2.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
+                    }
+                    // B-6：会话文件合并失败进报告（同主循环）。
+                    if outcome2.mergedLoginFailed > 0 {
+                        mergeFailedTotal += outcome2.mergedLoginFailed
+                        if mergeFailedPathsTotal.count < 10 {
+                            mergeFailedPathsTotal.append(contentsOf: outcome2.mergedLoginFailedPaths.prefix(10 - mergeFailedPathsTotal.count).map { "\(item.name)/\($0)" })
+                        }
                     }
                     // 3.8.294（P0-4）：下载未完成仍算恢复成功，单列进报告。
                     if outcome2.downloadIncomplete {
@@ -4083,6 +4153,18 @@ struct LCDataManagementView : View {
             if !groupFailedApps.isEmpty {
                 msg += "\n\n组容器恢复失败的 App（旧数据已保留，未丢失）：\n" + groupFailedApps.joined(separator: "\n")
             }
+            // B-6：会话文件合并失败单列（与备份侧 #13 的“⚠️ 拷贝
+            // 失败”回执同款写法：总数 + 前 10 条路径 + 另有 N 个）。
+            // 合并失败不抛错、原文件未动，可再恢复一次。
+            if mergeFailedTotal > 0 {
+                msg += "\n\n⚠️ 会话文件合并失败 \(mergeFailedTotal) 个（原文件未动，可再恢复一次）"
+                if !mergeFailedPathsTotal.isEmpty {
+                    msg += "（前 \(mergeFailedPathsTotal.count) 条：\n" + mergeFailedPathsTotal.joined(separator: "\n") + "）"
+                    if mergeFailedTotal > mergeFailedPathsTotal.count {
+                        msg += "\n另有 \(mergeFailedTotal - mergeFailedPathsTotal.count) 个未列出"
+                    }
+                }
+            }
             if !downloadIncompleteApps.isEmpty {
                 msg += "\n\niCloud 未下完，恢复可能不完整的 App（已恢复的部分数据可用；等 iCloud 同步完再恢复一次可补全）：\n" + downloadIncompleteApps.joined(separator: "\n")
             }
@@ -4118,6 +4200,7 @@ struct LCDataManagementView : View {
             if !ambiguousApps.isEmpty { issues.append("多候选对不上 \(ambiguousApps.count) 个") }
             if !restoreFailedApps.isEmpty { issues.append("恢复失败 \(restoreFailedApps.count) 个") }
             if !groupFailedApps.isEmpty { issues.append("组容器失败 \(groupFailedApps.count) 个") }
+            if mergeFailedTotal > 0 { issues.append("会话合并失败 \(mergeFailedTotal) 个") }
             if !downloadIncompleteApps.isEmpty { issues.append("iCloud 未下完 \(downloadIncompleteApps.count) 个") }
             if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
             if !issues.isEmpty {
@@ -4183,6 +4266,12 @@ struct LCDataManagementView : View {
         // 合并 + 完整备份会话合并之和）：登录态恢复报 0 时，
         // 凭它区分“备份里没东西”与“东西在但没合进来”。
         var mergedLoginFiles = 0
+        // B-6：登录态合并失败数与路径（与备份侧 #13 对称）：
+        // 合并失败不抛错、容器照常记恢复，但失败要进报告，
+        // 否则“合并 0 个”分不出是备份里没东西还是东西在但
+        // 没合进来；镜像份失败也记在这里。
+        var mergedLoginFailed = 0
+        var mergedLoginFailedPaths: [String] = []
         // 3.8.286：组容器整替失败的组名（原子替换后旧数据
         // 保留，失败要进报告，不能静默丢掉）。
         var groupRestoreFailed: [String] = []
@@ -4345,7 +4434,7 @@ struct LCDataManagementView : View {
         }.value
     }
 
-    static func mergeLoginStateOffMain(from src: URL, to dest: URL, mirrorGroupToHost: URL? = nil) async -> Int {
+    static func mergeLoginStateOffMain(from src: URL, to dest: URL, mirrorGroupToHost: URL? = nil) async -> (merged: Int, failed: Int, failedPaths: [String]) {
         await Task.detached {
             Self.mergeLoginStateFiles(from: src, to: dest, fm: FileManager.default, mirrorGroupToHost: mirrorGroupToHost)
         }.value
@@ -4418,6 +4507,10 @@ struct LCDataManagementView : View {
         // 备份登录态恢复的顶层文件夹数（容器数修正用，见
         // outcome 赋值处）：只记数，不改合并语义。
         var mergedLoginFiles = 0
+        // B-6：登录态合并失败数与路径（三种合并之和，与
+        // mergedLoginFiles 同款累计；路径前 50 条）。
+        var mergedLoginFailed = 0
+        var mergedLoginFailedPaths: [String] = []
         var loginMergeFolderCount = 0
         var newDefaultContainer: LCContainer?
         // 本次恢复动过的容器文件夹名（原地覆盖/登录合并/新恢复
@@ -4462,9 +4555,12 @@ struct LCDataManagementView : View {
                     // copyItem 累计也是主线程长堵。
                     let mergeDest = live.containerURL
                     let mergeMirror: URL? = live.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
-                    let merged = await Self.mergeLoginStateOffMain(from: containerFolder, to: mergeDest, mirrorGroupToHost: mergeMirror)
-                    mergedLoginFiles += merged
-                    if merged > 0 {
+                    let mergeResult = await Self.mergeLoginStateOffMain(from: containerFolder, to: mergeDest, mirrorGroupToHost: mergeMirror)
+                    mergedLoginFiles += mergeResult.merged
+                    // B-6：合并失败累上来，进 outcome 与报告。
+                    mergedLoginFailed += mergeResult.failed
+                    if mergedLoginFailedPaths.count < 50 { mergedLoginFailedPaths.append(contentsOf: mergeResult.failedPaths.prefix(50 - mergedLoginFailedPaths.count)) }
+                    if mergeResult.merged > 0 {
                         restoredContainers += 1
                         restoredFolderNames.insert(folderName)
                     }
@@ -4544,9 +4640,12 @@ struct LCDataManagementView : View {
                 if isLoginBackup && fm.fileExists(atPath: dest.path) {
                     // 登录态档的组容器同样是半套：合并，不整替。
                     // 合并拷盘挪后台（见三件套注释）。
-                    let merged = await Self.mergeLoginStateOffMain(from: groupFolder, to: dest)
-                    mergedLoginFiles += merged
-                    if merged > 0 {
+                    let mergeResult = await Self.mergeLoginStateOffMain(from: groupFolder, to: dest)
+                    mergedLoginFiles += mergeResult.merged
+                    // B-6：合并失败累上来，进 outcome 与报告。
+                    mergedLoginFailed += mergeResult.failed
+                    if mergedLoginFailedPaths.count < 50 { mergedLoginFailedPaths.append(contentsOf: mergeResult.failedPaths.prefix(50 - mergedLoginFailedPaths.count)) }
+                    if mergeResult.merged > 0 {
                         restoredExtras = true
                     }
                     continue
@@ -4600,9 +4699,12 @@ struct LCDataManagementView : View {
                 // 调用方线程取出，只把纯 URL 传进 detached。
                 let mergeDest = target.containerURL
                 let mergeMirror: URL? = target.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
-                let merged = await Self.mergeLoginStateOffMain(from: folder, to: mergeDest, mirrorGroupToHost: mergeMirror)
-                mergedLoginFiles += merged
-                if merged > 0 {
+                let mergeResult = await Self.mergeLoginStateOffMain(from: folder, to: mergeDest, mirrorGroupToHost: mergeMirror)
+                mergedLoginFiles += mergeResult.merged
+                // B-6：合并失败累上来，进 outcome 与报告。
+                mergedLoginFailed += mergeResult.failed
+                if mergedLoginFailedPaths.count < 50 { mergedLoginFailedPaths.append(contentsOf: mergeResult.failedPaths.prefix(50 - mergedLoginFailedPaths.count)) }
+                if mergeResult.merged > 0 {
                     restoredExtras = true
                     restoredFolderNames.insert(target.containerURL.lastPathComponent)
                 }
@@ -4617,6 +4719,9 @@ struct LCDataManagementView : View {
         // 其余两路 loginMergeFolderCount=0，结果不变。
         outcome.containerFolderCount = containerFolders.count + loginMergeFolderCount
         outcome.mergedLoginFiles = mergedLoginFiles
+        // B-6：合并失败数与路径进 outcome，供报告单列。
+        outcome.mergedLoginFailed = mergedLoginFailed
+        outcome.mergedLoginFailedPaths = mergedLoginFailedPaths
         outcome.groupRestoreFailed = failedGroupNames
         outcome.downloadIncomplete = downloadIncomplete
         let keychainBackup = appFolder.appendingPathComponent("Keychain")
@@ -4993,7 +5098,10 @@ struct LCDataManagementView : View {
 
     /// 把登录态文件合并进现有容器（恢复用：同名文件逐个覆盖，
     /// 容器里其他文件不动；LCContainerInfo.plist 是活容器自己
-    /// 的身份文件，永不覆盖）。返回合并了几个文件。
+    /// 的身份文件，永不覆盖）。返回（合并成功数，合并失败数，
+    /// 失败路径前 50 条）——与备份侧 #13 的 failed/failedPaths
+    /// 对称：合并失败不抛错，但失败要进报告，否则“合并 0 个”
+    /// 分不出“备份里没东西”还是“东西在但没合进来”。
     /// mirrorGroupToHost：目标容器没开隔离组时，备份里的
     /// LCAppGroup/<组ID>/ 同步镜像一份到宿主组容器目录——
     /// 游客读组数据走哪边取决于容器当时的隔离开关，两边都
@@ -5026,8 +5134,11 @@ struct LCDataManagementView : View {
         return true
     }
 
-    static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager, mirrorGroupToHost: URL? = nil) -> Int {
+    static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager, mirrorGroupToHost: URL? = nil) -> (merged: Int, failed: Int, failedPaths: [String]) {
         var count = 0
+        // B-6：合并失败数与路径（与备份侧 #13 对称）。
+        var failed = 0
+        var failedPaths: [String] = []
         for e in loginStateEntries(in: src, fm: fm) {
             let rel = e.rel
             if rel == "LCContainerInfo.plist" { continue }
@@ -5037,6 +5148,10 @@ struct LCDataManagementView : View {
             // 11：先拷临时文件再原子替换，拷失败时 live 文件不动。
             if czfReplaceFileAtomic(from: s, to: d, fm: fm) {
                 count += 1
+            } else {
+                // B-6：主份合并失败记数+列路径，别静默丢。
+                failed += 1
+                if failedPaths.count < 50 { failedPaths.append(rel) }
             }
             if let host = mirrorGroupToHost {
                 let parts = rel.split(separator: "/")
@@ -5045,11 +5160,17 @@ struct LCDataManagementView : View {
                     let hd = host.appendingPathComponent(String(parts[1])).appendingPathComponent(rest)
                     try? fm.createDirectory(at: hd.deletingLastPathComponent(), withIntermediateDirectories: true)
                     // 11：镜像份同款原子替换。
-                    _ = czfReplaceFileAtomic(from: s, to: hd, fm: fm)
+                    // B-6：镜像份失败也记一份（路径前挂“镜像：”，
+                    // 与主份区分开——主份成功、镜像失败时报告照写
+                    // “已恢复”，但隔离组开关切到另一边时 App 可能读空。
+                    if !czfReplaceFileAtomic(from: s, to: hd, fm: fm) {
+                        failed += 1
+                        if failedPaths.count < 50 { failedPaths.append("镜像：" + rel) }
+                    }
                 }
             }
         }
-        return count
+        return (count, failed, failedPaths)
     }
 
     /// 备份的版本号与当前已装版本是否不同（版本更新后恢复
