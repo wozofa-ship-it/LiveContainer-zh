@@ -136,6 +136,13 @@ struct LCSettingsView: View {
                                 text += " · \(formatter.string(from: date))"
                             }
                             updateStatusText = text
+                            // 3.8.445（用户 13:53 令“点击检查更新
+                            // 自动更新”）：查到新版直接跳 SideInstaller
+                            // 安装，不用再点“去 SideInstaller 更新”。
+                            // SideInstaller 没装时 open 回调报失败、
+                            // 弹提示，下面两行跳转按钮还在，可手动点
+                            // Seal。
+                            openSideInstallerInstall()
                         }
                     } else {
                         updateInfo = nil
@@ -709,46 +716,12 @@ struct LCSettingsView: View {
 
     @ViewBuilder private var aboutSection: some View {
         Section {
-            // 3.8.322 液体化繁为简：品牌图统一 30 圆角框，与
-            // LCSettingsIcon 同尺寸同圆角，行高不再随图大小抖。
-            // 第三批低 #45：整行包成一个 Button，图标也能点
-            //（之前只有文字是 Button，图标点不到）。
-            Button {
-                openGitHub()
-            } label: {
-                HStack {
-                    Image("GitHub")
-                        .resizable()
-                        .frame(width: 30, height: 30)
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                    Text("LiveContainer/LiveContainer")
-                }
-            }
-            Button {
-                openTwitter()
-            } label: {
-                HStack {
-                    Image("Twitter")
-                        .resizable()
-                        .frame(width: 30, height: 30)
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                    Text("khanhduytran0")
-                }
-            }
-            Button {
-                openGitHub2()
-            } label: {
-                HStack {
-                    Image("GitHub")
-                        .resizable()
-                        .frame(width: 30, height: 30)
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                    Text("Huge_Black")
-                }
-            }
-            // 设置页整齐化（3.8.440）：更新原来单独占一段（就
-            // “检查更新”一行），并进关于段当一行；有新版时
-            // 下面两行跳转按钮照旧出现。
+            // 3.8.445（用户 13:53 令“关于折叠起来就显示一个
+            // 检查更新”，13:55 纠正“不拆掉、只是隐藏、留着”）：
+            // 关于段平时只显示“检查更新”一行，三条作者链接
+            // （LiveContainer、khanhduytran0、Huge_Black）折
+            // 进“关于作者”里，默认收起、点开才看，不删代码。
+            // 点检查更新后有新版时，下面两行跳转按钮照旧出现。
             Button {
                 startUpdateCheck()
             } label: {
@@ -782,6 +755,46 @@ struct LCSettingsView: View {
                 Text("点更新会跳到 SideInstaller 🅥 下载安装，安装时会关闭 LiveContainer，装好后重新打开；更新前建议先在数据管理里备份一次。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+            // 三条作者链接折在这里，默认收起。
+            DisclosureGroup("关于作者") {
+                // 3.8.322 液体化繁为简：品牌图统一 30 圆角框，与
+                // LCSettingsIcon 同尺寸同圆角，行高不再随图大小抖。
+                // 第三批低 #45：整行包成一个 Button，图标也能点
+                //（之前只有文字是 Button，图标点不到）。
+                Button {
+                    openGitHub()
+                } label: {
+                    HStack {
+                        Image("GitHub")
+                            .resizable()
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        Text("LiveContainer/LiveContainer")
+                    }
+                }
+                Button {
+                    openTwitter()
+                } label: {
+                    HStack {
+                        Image("Twitter")
+                            .resizable()
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        Text("khanhduytran0")
+                    }
+                }
+                Button {
+                    openGitHub2()
+                } label: {
+                    HStack {
+                        Image("GitHub")
+                            .resizable()
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        Text("Huge_Black")
+                    }
+                }
             }
         } header: {
             Text("lc.settings.about".loc)
@@ -973,11 +986,11 @@ struct LCSettingsView: View {
     func openGitHub() {
         UIApplication.shared.open(URL(string: "https://github.com/LiveContainer/LiveContainer")!)
     }
-    
+
     func openGitHub2() {
         UIApplication.shared.open(URL(string: "https://github.com/hugeBlack")!)
     }
-    
+
     func openTwitter() {
         UIApplication.shared.open(URL(string: "https://twitter.com/khanhduytran0")!)
     }
