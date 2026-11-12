@@ -1548,7 +1548,7 @@ public final class CZFVPNManager {
         var pending: [(index: Int, xrayJson: String)] = []
         var singBoxPending: [(index: Int, link: String)] = []
         for (i, link) in links.enumerated() {
-            // tuic 节点：只做配置解析校验，不启动服务。
+            // sing-box 节点（tuic / hysteria2）：只做配置解析校验，不启动服务。
             if CZFSingBoxRouting.coreKind(for: link) == .singBox {
                 if (try? CZFSingBoxConfig.configJSON(for: link, socksPort: 10927, httpPort: nil)) != nil {
                     singBoxPending.append((i, link))

@@ -2,20 +2,20 @@ import Foundation
 
 // CZFSingBoxConfig.swift
 //
-// 职责：sing-box 分流判定 + TUIC 配置 JSON 生成（TUIC-only：
-// 245 + 仅 TUIC，sing-box 只跑 TUIC 出站，其余协议一律走
-// 245 原有的 Xray 路径）。
+// 职责：sing-box 分流判定 + TUIC / Hysteria2 配置 JSON 生成
+// （TUIC 245 起，Hysteria2 3.8.434 起；sing-box 只跑这两
+// 种出站，其余协议一律走 245 原有的 Xray 路径）。
 // 只含纯函数与静态方法：不调用任何 Libbox/CGo 函数，不碰 UserDefaults，
 // 不读写文件、不联网。配置一律用 JSONSerialization 拼（不许字符串插值），
 // 密码/密钥里含引号、反斜杠也不会打断 JSON。
 //
 // 与 CZFVPNManager 的衔接：
 // CZFVPNManager.nodeScheme / isSupportedNodeScheme 是协议清单
-// （Xray 转换器清单 + TUIC）。
-// 本文件的 coreKind 是在其之上的第二层分流：tuic 走 sing-box，
-// 其余一律走 Xray（245 原有路径）。调用顺序：先查 coreKind，
-// tuic 时生成 sing-box 配置并起 sing-box 核心；非 tuic 时走
-// 245 的 Xray 转换与启动，原样不动。
+// （Xray 转换器清单 + TUIC + Hysteria2）。
+// 本文件的 coreKind 是在其之上的第二层分流：tuic / hysteria2 /
+// hy2 走 sing-box，其余一律走 Xray（245 原有路径）。调用顺序：
+// 先查 coreKind，sing-box 时生成 sing-box 配置并起 sing-box
+// 核心；非 sing-box 时走 245 的 Xray 转换与启动，原样不动。
 // 本地无 Swift 工具链：括号平衡 ≠ 编译通过，需 CI 验证。
 
 /// 核心分流结果。xray = 走 Xray（含“不走 sing-box”的一切情况）。
@@ -112,20 +112,32 @@ public enum CZFSingBoxRouting {
 
     // MARK: 对外接口
 
-    /// 分流主入口（TUIC-only）：tuic 走 sing-box，其余一律
-    /// 走 Xray（245 原有路径；Xray 转换器认不认由转换器
-    /// 自己决定，这里不替它背书，也不替它拒收）。
+    /// 分流主入口：tuic / hysteria2 / hy2 走 sing-box，其余一律
+    /// 走 Xray。hysteria2 本来也在 Xray 转换器清单里，但实测
+    /// 转换器转不动（用户 2026-11-12 报全部 hysteria2 节点
+    /// “不支持”）；sing-box v1.14.4 内置 hysteria2 出站，改走
+    /// sing-box 才能连上。Xray 转换器认不认由转换器自己决定，
+    /// 这里不替它背书，也不替它拒收。
     public static func coreKind(for link: String) -> CZFCoreKind {
-        if scheme(of: link) == "tuic" { return .singBox }
-        return .xray
+        switch scheme(of: link) {
+        case "tuic", "hysteria2", "hy2": return .singBox
+        default: return .xray
+        }
     }
 
-    /// 行内“不验证书”标记判定：tuic 且含 allowInsecure 时标
-    /// （tuic 出站一定写 tls 块，insecure 参数真实生效）。
+    /// 行内“不验证书”标记判定：tuic / hysteria2 且跳过证书验证
+    /// 时标。hysteria2 带 pinSHA256 时也标（sing-box 无法钉扎，
+    /// 见 hysteria2Outbound，只能跳过验证，同样是不验证书）。
     /// 调用方是 CZFVPNManager.nodeDisplay（行内 scheme 显示处）。
     public static func showsInsecureMark(for link: String) -> Bool {
-        guard scheme(of: link) == "tuic" else { return false }
-        return isInsecureNode(link)
+        let s = scheme(of: link)
+        guard s == "tuic" || s == "hysteria2" || s == "hy2" else { return false }
+        if isInsecureNode(link) { return true }
+        if s != "tuic" {
+            let map = queryMap(of: link)
+            if firstQuery(map, "pinSHA256", "pinsha256") != nil { return true }
+        }
+        return false
     }
 }
 
@@ -227,6 +239,80 @@ public enum CZFSingBoxConfig {
         return out
     }
 
+    // MARK: Hysteria2 出站（字段名后都注了文档依据）
+
+    /// hysteria2：sing-box outbound/hysteria2（v1.14.4 内置）：
+    /// server / server_port / password 必填，tls 必填（Hysteria2
+    /// 强制 TLS，enabled 恒 true）；server_ports 端口跳跃（1.11+
+    /// 才认，本工程 1.14.4）；obfs 只有 salamander 一种。
+    /// 链接格式 hysteria2://PASSWORD@host:port?sni=&insecure=&
+    /// pinSHA256=&mport=61000-62000#名，hy2 是同协议别名。
+    /// password 在 userinfo：user 即密码，含冒号时整串
+    /// user:password 都是密码（照抄 tuic 的“不二次解码”）。
+    /// pinSHA256：sing-box 出站 TLS 没有证书钉扎字段（转换器
+    /// 圈子公认：钉扎无等价字段，丢了等于降级）；链接带钉扎说
+    /// 明服务端证书不是公开可验的，留 insecure=false 会握手
+    /// 失败，只能跳过验证才能连上——宁可连上也不让节点继续
+    /// 显示“不支持”。mport=61000-62000 → server_ports=
+    /// ["61000:62000"]（分隔符 hyphen 变 colon）；格式不对就
+    /// 跳过，只用主端口。
+    /// tag 默认 node-out；多出站测速时调用方传 node-out-<i>。
+    static func hysteria2Outbound(link: String, tag: String = CZFSingBoxRouting.nodeTag) throws -> [String: Any] {
+        guard let comps = components(of: link), ["hysteria2", "hy2"].contains(comps.scheme?.lowercased() ?? "") else {
+            throw CZFSingBoxConfigError.unsupportedScheme("hysteria2")
+        }
+        var passwordParts: [String] = []
+        if let user = comps.user, !user.isEmpty { passwordParts.append(user) }
+        if let pwd = comps.password, !pwd.isEmpty { passwordParts.append(pwd) }
+        let password = passwordParts.joined(separator: ":")
+        guard !password.isEmpty else {
+            throw CZFSingBoxConfigError.missingField("password")
+        }
+        let server = try requireHost(comps)
+        let port = try requirePort(comps)
+        let map = CZFSingBoxRouting.queryMap(of: link)
+        let tlsP = tlsParams(map)
+        let hasPin = CZFSingBoxRouting.firstQuery(map, "pinSHA256", "pinsha256") != nil
+        let insecure = tlsP.insecure || hasPin
+        var out: [String: Any] = [
+            "type": "hysteria2",
+            "tag": tag,
+            "server": server,
+            "server_port": port,
+            "password": password,
+        ]
+        if let mport = CZFSingBoxRouting.firstQuery(map, "mport"), !mport.isEmpty {
+            let parts = mport.split(separator: "-").map { $0.trimmingCharacters(in: .whitespaces) }
+            if parts.count == 2, let lo = Int(parts[0]), let hi = Int(parts[1]),
+               (1...65535).contains(lo), (1...65535).contains(hi), lo <= hi {
+                out["server_ports"] = ["\(lo):\(hi)"]
+            }
+        }
+        if let obfs = CZFSingBoxRouting.firstQuery(map, "obfs"), obfs.lowercased() == "salamander",
+           let obfsPwd = CZFSingBoxRouting.firstQuery(map, "obfs-password", "obfs_password"), !obfsPwd.isEmpty {
+            out["obfs"] = ["type": "salamander", "password": obfsPwd] as [String: Any]
+        }
+        if let up = CZFSingBoxRouting.firstQuery(map, "up_mbps", "up"), let upInt = Int(up) {
+            out["up_mbps"] = upInt
+        }
+        if let down = CZFSingBoxRouting.firstQuery(map, "down_mbps", "down"), let downInt = Int(down) {
+            out["down_mbps"] = downInt
+        }
+        out["tls"] = tlsBlock(serverName: tlsP.serverName, alpn: tlsP.alpn, insecure: insecure)
+        return out
+    }
+
+    /// 按 scheme 分发到对应的出站生成器（tuic / hysteria2 / hy2）。
+    /// 其余 scheme 一律 throw notSingBoxNode（调用方先按 coreKind
+    /// 分流，只把 sing-box 链接传进来）。
+    static func outbound(for link: String, tag: String = CZFSingBoxRouting.nodeTag) throws -> [String: Any] {
+        switch CZFSingBoxRouting.scheme(of: link) {
+        case "tuic": return try tuicOutbound(link: link, tag: tag)
+        case "hysteria2", "hy2": return try hysteria2Outbound(link: link, tag: tag)
+        default: throw CZFSingBoxConfigError.notSingBoxNode
+        }
+    }
+
     // MARK: 对外接口
 
     /// 生成完整 sing-box 配置 JSON（JSONSerialization，sortedKeys）。
@@ -234,9 +320,9 @@ public enum CZFSingBoxConfig {
     /// dns.servers=[{tag:local,type:local}] + final=local；
     /// inbounds：mixed（listen 127.0.0.1，listen_port=socksPort），
     /// httpPort 非 nil 时再加一个 http 入站（listen_port=httpPort）；
-    /// route.final=node-out；outbounds=[tuic 出站]。
-    /// 非 tuic 节点一律 throw notSingBoxNode（调用方先按
-    /// coreKind 分流，只在 tuic 时调用）。
+    /// route.final=node-out；outbounds=[tuic / hysteria2 出站]。
+    /// 非 sing-box 节点一律 throw notSingBoxNode（调用方先按
+    /// coreKind 分流，只在 sing-box 时调用）。
     /// 主用例：socksPort=10827、httpPort=10828；测速临时实例：
     /// socksPort=10927、httpPort=nil（不建 http 入站）。
     public static func configJSON(for link: String, socksPort: Int, httpPort: Int?) throws -> String {
@@ -248,11 +334,7 @@ public enum CZFSingBoxConfig {
                 throw CZFSingBoxConfigError.invalidValue("httpPort")
             }
         }
-        let scheme = CZFSingBoxRouting.scheme(of: link)
-        guard scheme == "tuic" else {
-            throw CZFSingBoxConfigError.notSingBoxNode
-        }
-        let outbound = try tuicOutbound(link: link)
+        let outbound = try outbound(for: link)
 
         var inbounds: [[String: Any]] = [[
             "type": "mixed",
@@ -289,15 +371,15 @@ public enum CZFSingBoxConfig {
         return json
     }
 
-    /// 生成多 TUIC 出站的 sing-box 配置 JSON（测速用，3.8.306）：
-    /// 一个临时实例带 N 个 TUIC 出站（tag node-out-<i>）+ N 个
+    /// 生成多 sing-box 出站的 sing-box 配置 JSON（测速用，3.8.306）：
+    /// 一个临时实例带 N 个出站（tag node-out-<i>）+ N 个
     /// mixed 入站（端口 basePort...basePort+N-1），路由规则把每个
     /// 入站钉到对应的出站，N 个探针并行跑，总耗时 ≈ 最慢的一个
     /// （原来是每节点起一个实例串行测，N 个节点要 N 倍时间）。
     /// 与单节点版同款骨架（log/dns），只是出站/入站/路由按节点数
     /// 展开。links 为空或 basePort + 数量越界时 throw。
-    /// 非 tuic 链接一律 throw notSingBoxNode（调用方先按 coreKind
-    /// 分流，只把 tuic 链接传进来）。
+    /// 非 sing-box 链接一律 throw notSingBoxNode（调用方先按 coreKind
+    /// 分流，只把 sing-box 链接传进来）。
     public static func configJSON(for links: [String], basePort: Int) throws -> String {
         guard !links.isEmpty else {
             throw CZFSingBoxConfigError.missingField("links")
@@ -309,12 +391,9 @@ public enum CZFSingBoxConfig {
         var inbounds: [[String: Any]] = []
         var rules: [[String: Any]] = []
         for (i, link) in links.enumerated() {
-            guard CZFSingBoxRouting.scheme(of: link) == "tuic" else {
-                throw CZFSingBoxConfigError.notSingBoxNode
-            }
             let tag = "node-out-\(i)"
             let inboundTag = "mixed-in-\(i)"
-            outbounds.append(try tuicOutbound(link: link, tag: tag))
+            outbounds.append(try outbound(for: link, tag: tag))
             inbounds.append([
                 "type": "mixed",
                 "tag": inboundTag,
