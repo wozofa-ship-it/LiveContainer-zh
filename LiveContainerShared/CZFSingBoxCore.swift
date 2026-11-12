@@ -53,11 +53,23 @@ public enum CZFSingBoxCore {
     /// 先初始化，再校验配置，最后启动核心；三步全过才置
     /// isServiceRunning = true。任何一步失败都原样抛错，
     /// 不把配置内容写进错误信息。
+    /// 原签名保留（调用方/探针走它，默认全量校验）。
     public static func start(configJSON: String) throws {
+        try start(configJSON: configJSON, skipCheck: false)
+    }
+
+    /// B-3：skipCheck=true 时跳过 LibboxCheckConfig，只调
+    /// LibboxStartService。调用方（CZFVPNManager.startSingBox）
+    /// 只对字节相同的已校验配置传 true：同一份 JSON 的校验
+    /// 结果是确定的，之前成功启动过即已通过 CheckConfig，
+    /// 重复校验是纯浪费。skipCheck 绝不对没校验过的新配置用。
+    public static func start(configJSON: String, skipCheck: Bool) throws {
         try setupIfNeeded()
         var error: NSError?
-        guard LibboxCheckConfig(configJSON, &error) else {
-            throw error ?? NSError(domain: "CZFSingBoxCore", code: -1, userInfo: [NSLocalizedDescriptionKey: "config check failed"])
+        if !skipCheck {
+            guard LibboxCheckConfig(configJSON, &error) else {
+                throw error ?? NSError(domain: "CZFSingBoxCore", code: -1, userInfo: [NSLocalizedDescriptionKey: "config check failed"])
+            }
         }
         guard LibboxStartService(configJSON, &error) else {
             throw error ?? NSError(domain: "CZFSingBoxCore", code: -1, userInfo: [NSLocalizedDescriptionKey: "service start failed"])

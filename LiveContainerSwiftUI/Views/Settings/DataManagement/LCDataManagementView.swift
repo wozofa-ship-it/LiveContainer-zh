@@ -3835,11 +3835,23 @@ struct LCDataManagementView : View {
                     app = allApps.first(where: { ($0.appInfo.dataUUID ?? "") == du })
                 }
                 // 再按显示名匹配，再按 Bundle ID 匹配
+                // 多开同名不猜首个：同款多开未改名时两个实例显示名
+                // 相同，first(where:) 按数组顺序取，顺序一变就串
+                // 到另一个实例（间歇串号）。多候选时先按文件夹名
+                // 里的实例后缀“（xxxxxxxx）”（dataUUID 前 8 位）
+                // 精确认，认不出就不猜、留给后面阶段处理。
                 if app == nil {
-                    app = allApps.first(where: {
+                    let nameCandidates = allApps.filter {
                         ($0.appInfo.displayName() ?? "") == folderName ||
                         ($0.appInfo.bundleIdentifier() ?? "") == folderName
-                    })
+                    }
+                    if nameCandidates.count == 1 {
+                        app = nameCandidates[0]
+                    } else if nameCandidates.count > 1,
+                              let suffix = Self.czfInstanceSuffix(fromFolderName: folderName) {
+                        app = nameCandidates.first(where: { ($0.appInfo.dataUUID ?? "").hasPrefix(suffix) })
+                            ?? nameCandidates.first(where: { ($0.uiContainers.first?.folderName ?? "").hasPrefix(suffix) })
+                    }
                 }
                 // 改名后旧备份兜底：显示名对不上了，看 manifest 的
                 // Bundle ID；同款只装了一个时才能唯一认出，多开装
@@ -3885,8 +3897,18 @@ struct LCDataManagementView : View {
                    let bid = json["bundleIdentifier"], !bid.isEmpty {
                     let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
                     if matches.count == 1 {
-                        app = matches[0]
-                        fallbackNote = "按 Bundle ID 兜底"
+                        // 名字对不上不配：多开兄弟的备份不能盖进现存
+                        // 实例（间歇串号的主路——只剩 muse 时恢复
+                        // muse8 的备份，4a 按 Bundle ID 单候选就配
+                        // 给 muse）。与第 3 段同款要求：manifest 有
+                        // 显示名时必须与候选一致，否则走下面“未安
+                        // 装”流程自动新建该名字的实例再恢复。
+                        let manifestName = json["displayName"] ?? ""
+                        let candidateName = matches[0].appInfo.displayName() ?? ""
+                        if manifestName.isEmpty || manifestName == candidateName {
+                            app = matches[0]
+                            fallbackNote = "按 Bundle ID 兜底"
+                        }
                     } else if matches.count > 1 {
                         ambiguousNote = "同款多开 \(matches.count) 个，无法唯一确定"
                     }
@@ -4056,8 +4078,17 @@ struct LCDataManagementView : View {
             let czfMissingWaits = await withTaskGroup(of: CZFMissingWaitResult.self) { group in
                 for plan in missingPlan {
                     group.addTask {
+                        // 多开缺失实例自动新建：forceAsNew 让安装直接
+                        // 走“安装为新 App”（有同款在装时不弹替换/
+                        // 新建选择框），customDisplayName 把备份里
+                        // 的实例名（muse8）当预设名带进去，装出来
+                        // 就是 muse8，不用用户再输名；单实例缺失时
+                        // 这两项无害（无同款不走新建分支，预设名与
+                        // 包内原名相同即不设）。预设名先剥掉文件夹
+                        // 名尾巴可能带的实例后缀“（xxxxxxxx）”。
+                        let czfPresetName = Self.czfStripInstanceSuffix(from: plan.name)
                         await MainActor.run {
-                            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": plan.url])
+                            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": plan.url, "forceAsNew": true, "customDisplayName": czfPresetName])
                         }
                         // 装好后 App 会进 sharedModel 的列表；2 秒一查，
                         // 最多等 5 分钟。B-13：循环里判 Task.isCancelled，
@@ -4071,7 +4102,8 @@ struct LCDataManagementView : View {
                             let currentApps = sharedModel.apps + sharedModel.hiddenApps
                             installedApp = currentApps.first(where: {
                                 !czfMissingBeforeApps.contains(ObjectIdentifier($0)) &&
-                                ($0.appInfo.displayName() ?? "") == plan.name
+                                ($0.appInfo.displayName() ?? "") == plan.name &&
+                                (plan.bundleID.isEmpty || ($0.appInfo.bundleIdentifier() ?? "") == plan.bundleID)
                             })
                             if installedApp != nil { break }
                         }
@@ -5854,6 +5886,25 @@ struct LCDataManagementView : View {
             return "uuid:" + uuid
         }
         return "bid:" + (app.appInfo.bundleIdentifier() ?? "") + "#" + (app.appInfo.displayName() ?? "")
+    }
+
+    /// 备份文件夹名里的实例后缀“（xxxxxxxx）”：backupFolderName 规则 3
+    /// 拼的是 dataUUID 前 8 位（无 dataUUID 时退到容器文件夹名前 8 位）。
+    /// 文件夹名形如“muse（a1b2c3d4）”时返回 a1b2c3d4，没有后缀返回 nil。
+    static func czfInstanceSuffix(fromFolderName name: String) -> String? {
+        guard name.hasSuffix("）"),
+              let openRange = name.range(of: "（", options: .backwards) else { return nil }
+        let suffix = String(name[openRange.upperBound..<name.index(before: name.endIndex)])
+        return suffix.isEmpty ? nil : suffix
+    }
+
+    /// 去掉文件夹名尾巴的实例后缀“（xxxxxxxx）”，剩显示名本身。
+    /// 恢复缺失实例时预设自定义名用：传“muse8（a1b2c3d4）”会把
+    /// 实例建歪成带后缀的名字，须先剥掉。
+    static func czfStripInstanceSuffix(from name: String) -> String {
+        guard name.hasSuffix("）"),
+              let openRange = name.range(of: "（", options: .backwards) else { return name }
+        return String(name[..<openRange.lowerBound])
     }
 
     /// 定时备份旧存 bid 升实例键：老版本存的是 bid，新键是

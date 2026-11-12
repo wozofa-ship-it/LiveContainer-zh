@@ -294,51 +294,69 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
     }
 
+    // 第 4 条（硬核优化 A 组）事件驱动拉满：窗口进 dock 即由
+    // czfOnWindowAppeared 回调触发尝试，不再 0.1 秒×60 次轮询
+    // 等它出现（上限仍为原来的 6 秒）。回调里 vc 未就绪、或拉
+    // 满被动画重入守卫吞掉（isMaximized 没翻）时，才用 0.1 秒
+    // 延迟链重试到 deadline。归属按路径验，别人的窗口占着
+    // uuid 就停表不碰。启动失败已有 launch 侧 showError，
+    // 这里到期不重复报错。
+    // 返回 true = 已处理完（已拉满，或归属不对停表不再碰）。
+    @available(iOS 16.0, *)
+    private func czfTryMaximizeFreshWindow(uuid: String, expectedPath: String?) -> Bool {
+        guard let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else { return false }
+        let owned: Bool
+        if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+            owned = runningPath == expectedPath
+        } else {
+            owned = false
+        }
+        if !owned { return true }
+        guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
+        if !vc.isMaximized {
+            vc.maximizeWindow()
+        }
+        return vc.isMaximized
+    }
+
+    @available(iOS 16.0, *)
+    private func czfRetryMaximizeFreshWindow(uuid: String, expectedPath: String?, deadline: Date) {
+        guard !czfTryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath) else { return }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
+        }
+    }
+
+    // 容器还没建出来（uuid 为空）时等容器出现再注册窗口回调，
+    // 上限 6 秒（原轮询同款预算）；等不到就停，不报错。
+    @available(iOS 16.0, *)
+    private func czfWaitUUIDThenMaximizeFreshWindow(deadline: Date, expectedPath: String?) {
+        if let uuid = self.bannerInstanceUUID() {
+            MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: max(0, deadline.timeIntervalSinceNow)) { [weak self] in
+                self?.czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
+            }
+            return
+        }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.czfWaitUUIDThenMaximizeFreshWindow(deadline: deadline, expectedPath: expectedPath)
+        }
+    }
+
     // 启动新开路拉满（3.8.240）：runApp 起完新窗可能还没进
-    // dock（签名耗时），0.1 秒×60 次轮询等它出现；归属按路径
-    // 验，别人的窗口占着 uuid 就停表不碰；vc 没就绪继续等；
-    // 拉满动画重入守卫吞掉的那次下个 tick 重试（isMaximized
-    // 没翻就说明没拉上），60 次后停。启动失败已有 launch 侧
-    // showError，这里到期不重复报错。
+    // dock（签名耗时），窗口出现由 czfOnWindowAppeared 回调
+    // 触发拉满（见上）；uuid 为空（容器未建）时先等容器出现。
     @available(iOS 16.0, *)
     private func pollAndMaximizeFreshWindow() {
         let expectedPath = configuration.model.appInfo.relativeBundlePath
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
-            attempts += 1
-            guard let self = self else {
-                timer.invalidate()
-                return
-            }
-            guard let uuid = self.bannerInstanceUUID(),
-                  let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
-                if attempts >= 60 {
-                    timer.invalidate()
-                }
-                return
-            }
-            let owned: Bool
-            if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                owned = runningPath == expectedPath
-            } else {
-                owned = false
-            }
-            if !owned {
-                timer.invalidate()
-                return
-            }
-            guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
-                if attempts >= 60 {
-                    timer.invalidate()
-                }
-                return
-            }
-            if !vc.isMaximized {
-                vc.maximizeWindow()
-            }
-            if vc.isMaximized || attempts >= 60 {
-                timer.invalidate()
-            }
+        let deadline = Date().addingTimeInterval(6)
+        guard let uuid = self.bannerInstanceUUID() else {
+            czfWaitUUIDThenMaximizeFreshWindow(deadline: deadline, expectedPath: expectedPath)
+            return
+        }
+        MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: 6) { [weak self] in
+            self?.czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
         }
     }
 
@@ -453,28 +471,22 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 return
             }
         }
-        // 未运行：先启动，面板同款 0.1 秒×60 次轮询等窗口出现
-        // 再最小化；轮询只认归属对得上的条目，别人的窗口占着
-        // uuid 时直接停表、不碰它（自己的新窗若拆容器会换 uuid，
-        // 等这个 uuid 也等不来）。启动失败只走 showError，
-        // 轮询 60 次后自停——到期分不清失败还是拆容器换号，
-        // 不在这里误报错。
-        Task { [weak self] in
-            await self?.launchForAux(multitask: nil, containerFolderName: uuid)
-        }
+        // 未运行：第 4 条——先注册窗口出现回调、再启动（小窗口路
+        // C6 同款顺序），窗口出现即最小化；轮询只认归属对得上
+        // 的条目，别人的窗口占着 uuid 时不碰它（自己的新窗若
+        // 拆容器会换 uuid，等这个 uuid 也等不来）。上限 6 秒
+        // （原轮询同款预算），超时未出现直接放弃、不报错。
         let expectedPath = configuration.model.appInfo.relativeBundlePath
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            attempts += 1
+        dockManager.czfOnWindowAppeared(uuid: uuid, timeout: 6) {
             if let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) {
                 let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == expectedPath } ?? false
                 if owned {
                     MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
                 }
-                timer.invalidate()
-            } else if attempts >= 60 {
-                timer.invalidate()
             }
+        }
+        Task { [weak self] in
+            await self?.launchForAux(multitask: nil, containerFolderName: uuid)
         }
     }
 

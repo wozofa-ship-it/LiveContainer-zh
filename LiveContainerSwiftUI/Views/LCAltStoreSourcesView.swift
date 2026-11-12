@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import ImageIO
 import SwiftUI
 import UIKit
 import CryptoKit
@@ -2403,9 +2404,17 @@ private final class CZFSourceIconCache {
     static let shared = CZFSourceIconCache()
     private static let diskTTL: TimeInterval = 30 * 24 * 3600
     private static let diskMaxCount = 200
+    // C-5：源图标来自任意 URL、尺寸不可控，全分辨率解码进内存
+    // 会爆内存。降采样目标：最大显示 64pt（详情页）/网格格子
+    // 约 110pt，@3x ≈ 330px，384 留余量；内存上限 50MB。
+    private static let thumbnailMaxPixelSize = 384
+    private static let memoryTotalCostLimit = 50 * 1024 * 1024
     private let memory = NSCache<NSString, UIImage>()
     private let ioQueue = DispatchQueue(label: "czf.sourceicon.cache", qos: .utility)
-    private init() { memory.countLimit = 200 }
+    private init() {
+        memory.countLimit = 200
+        memory.totalCostLimit = Self.memoryTotalCostLimit
+    }
     private func diskURL(for url: URL) -> URL? {
         let name = Data(url.absoluteString.utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
@@ -2420,19 +2429,42 @@ private final class CZFSourceIconCache {
             ioQueue.async { cont.resume(returning: try? Data(contentsOf: dest)) }
         }
     }
+    // C-5：按显示尺寸降采样后再缓存，不把原图全分辨率解进内存。
+    // 降采样失败（非图片数据/缩略图建不出）时回落到原 UIImage(data:)，
+    // 图标不直接消失。cost 按像素数计（RGBA 每像素 4 字节）。
+    private static func decodedImage(from data: Data) -> UIImage? {
+        if let source = CGImageSourceCreateWithData(data as CFData, nil) {
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: thumbnailMaxPixelSize
+            ]
+            if let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                return UIImage(cgImage: thumb, scale: UIScreen.main.scale, orientation: .up)
+            }
+        }
+        return UIImage(data: data)
+    }
+    private static func pixelCost(of image: UIImage) -> Int {
+        guard let cg = image.cgImage else { return 0 }
+        return cg.width * cg.height * 4
+    }
+    private func store(_ image: UIImage, forKey key: NSString) {
+        memory.setObject(image, forKey: key, cost: Self.pixelCost(of: image))
+    }
     func load(url: URL) async -> UIImage? {
         let key = url.absoluteString as NSString
         if let hit = memory.object(forKey: key) { return hit }
         // 磁盘命中先验 TTL：过期当未命中，重新下载覆盖旧文件；
         // 文件不存在也算过期（直接走下载）。
         if !(await diskIsExpired(for: url)),
-           let data = await diskData(for: url), let img = UIImage(data: data) {
-            memory.setObject(img, forKey: key)
+           let data = await diskData(for: url), let img = decodedImage(from: data) {
+            store(img, forKey: key)
             return img
         }
         guard let (data, _) = try? await URLSession.shared.data(from: url),
-              let img = UIImage(data: data) else { return nil }
-        memory.setObject(img, forKey: key)
+              let img = decodedImage(from: data) else { return nil }
+        store(img, forKey: key)
         if let dest = diskURL(for: url) {
             ioQueue.async {
                 try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)

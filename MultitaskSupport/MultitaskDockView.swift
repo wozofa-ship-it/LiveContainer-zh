@@ -1179,22 +1179,14 @@ extension Notification.Name {
         }
         // 跳错修复：不再走只带包名的 URL（按包名取首个模型，
         // 定时打开多开实例会拉起首个实例），改走模型直启。
+        // 第 4 条：先注册窗口出现回调、再启动，窗口出现即最小化，
+        // 不再 0.1 秒轮询等窗口（上限 12 秒，原轮询同款预算）；
+        // 超时未出现直接放弃（原轮询到期同款，无提示）。
+        czfOnWindowAppeared(uuid: dataUUID, timeout: 12) { [weak self] in
+            self?.minimizeWindow(uuid: dataUUID)
+        }
         Task {
             try? await app.runApp(containerFolderName: dataUUID)
-        }
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
-            attempts += 1
-            guard let self else {
-                timer.invalidate()
-                return
-            }
-            if self.apps.contains(where: { $0.appUUID == dataUUID }) {
-                self.minimizeWindow(uuid: dataUUID)
-                timer.invalidate()
-            } else if attempts >= 120 {
-                timer.invalidate()
-            }
         }
     }
 
@@ -3637,43 +3629,48 @@ struct AllAppsListView: View {
         }
     }
 
-    // 启动新开路拉满（3.8.240，面板版）：与卡片同款逻辑，
-    // 0.1 秒×60 次轮询等新窗进 dock，归属按路径验。
+    // 启动新开路拉满（3.8.240，面板版）：第 4 条——窗口出现由
+    // czfOnWindowAppeared 回调触发拉满，不再 0.1 秒×60 次轮询
+    // 等新窗进 dock（上限仍为原来的 6 秒）；回调里 vc 未就绪、
+    // 或拉满被动画重入守卫吞掉时，才用 0.1 秒延迟链重试，上限
+    // 2 秒（原 vc 分支 20 次同款预算）。归属按路径验。
     private func pollAndMaximizeFreshWindow(app: LCAppModel) {
+        guard let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID else { return }
+        dockManager.czfOnWindowAppeared(uuid: uuid, timeout: 6) {
+            self.czfRetryMaximizeFreshWindow(app: app)
+        }
+    }
+
+    // 返回 true = 已处理完（已拉满，或归属不对停表不再碰）。
+    // uuid 每次重取：容器中途换了就跟新值，原轮询同款语义。
+    private func czfTryMaximizeFreshWindow(app: LCAppModel) -> Bool {
         let expectedPath = app.appInfo.relativeBundlePath
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            attempts += 1
-            let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID
-            guard let uuid = uuid,
-                  let entry = self.dockManager.apps.first(where: { $0.appUUID == uuid }) else {
-                if attempts >= 60 {
-                    timer.invalidate()
-                }
-                return
-            }
-            let owned: Bool
-            if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                owned = runningPath == expectedPath
-            } else {
-                owned = false
-            }
-            if !owned {
-                timer.invalidate()
-                return
-            }
-            guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
-                if attempts >= 20 {
-                    timer.invalidate()
-                }
-                return
-            }
-            if !vc.isMaximized {
-                vc.maximizeWindow()
-            }
-            if vc.isMaximized || attempts >= 20 {
-                timer.invalidate()
-            }
+        guard let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID,
+              let entry = self.dockManager.apps.first(where: { $0.appUUID == uuid }) else { return false }
+        let owned: Bool
+        if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+            owned = runningPath == expectedPath
+        } else {
+            owned = false
+        }
+        if !owned { return true }
+        guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
+        if !vc.isMaximized {
+            vc.maximizeWindow()
+        }
+        return vc.isMaximized
+    }
+
+    private func czfRetryMaximizeFreshWindow(app: LCAppModel) {
+        let deadline = Date().addingTimeInterval(2)
+        czfRetryMaximizeFreshWindow(app: app, deadline: deadline)
+    }
+
+    private func czfRetryMaximizeFreshWindow(app: LCAppModel, deadline: Date) {
+        guard !czfTryMaximizeFreshWindow(app: app) else { return }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.czfRetryMaximizeFreshWindow(app: app, deadline: deadline)
         }
     }
     
@@ -3692,33 +3689,34 @@ struct AllAppsListView: View {
         closePanel()
         // 跳错修复：未运行实例不再走只带包名的 URL（按包名取
         // 首个模型，点的实例若非首个会被开错），改走模型直启；
-        // 下面按 dataUUID 轮询最小化的逻辑一字不动；上面运行
+        // 下面按 dataUUID 等窗口出现的逻辑一字不动；上面运行
         // 分支的归属守卫一字不动。
+        // 主线程等窗口出现后最小化：第 4 条——先注册窗口出现回调、
+        // 再启动（小窗口路 C6 同款顺序），窗口出现即最小化；只认
+        // 归属对得上的条目，别人的窗口占着 uuid 时不碰它（自己
+        // 的新窗若拆容器会换 uuid，等这个 uuid 也等不来）。
+        // 轮询到期给提示（原轮询同款）：6 秒内没等到窗口才报
+        // “最小化超时”，文案只说没等到窗口、不定性为启动失败。
+        var czfMinimizeDone = false
+        dockManager.czfOnWindowAppeared(uuid: dataUUID, timeout: 6) {
+            if let entry = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
+                let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == app.appInfo.relativeBundlePath } ?? false
+                if owned {
+                    dockManager.minimizeWindow(uuid: dataUUID)
+                }
+            }
+            czfMinimizeDone = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            if !czfMinimizeDone {
+                self.reportLaunchError("最小化超时：6 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试")
+            }
+        }
         Task {
             do {
                 try await app.runApp(containerFolderName: dataUUID)
             } catch {
                 await MainActor.run { reportLaunchError(error.localizedDescription) }
-            }
-        }
-        // 主线程轮询等待窗口出现，找到后最小化；只认归属对得上
-        // 的条目，别人的窗口占着 uuid 时直接停表、不碰它（自己
-        // 的新窗若拆容器会换 uuid，等这个 uuid 也等不来）。
-        // 轮询到期给提示：以前到期只停表、界面上什么都没发生，
-        // 用户以为点了没反应；到期分不清失败还是拆容器换号，
-        // 文案只说没等到窗口、不定性为启动失败。
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            attempts += 1
-            if let entry = self.dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-                let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == app.appInfo.relativeBundlePath } ?? false
-                if owned {
-                    self.dockManager.minimizeWindow(uuid: dataUUID)
-                }
-                timer.invalidate()
-            } else if attempts >= 60 {
-                timer.invalidate()
-                self.reportLaunchError("最小化超时：6 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试")
             }
         }
     }

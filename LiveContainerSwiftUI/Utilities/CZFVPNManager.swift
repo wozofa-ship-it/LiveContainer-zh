@@ -32,6 +32,16 @@ public final class CZFVPNManager {
 
     public private(set) var isRunning = false
     private var runningLink: String?
+    // B-3 sing-box 配置缓存：上次成功启动的（链接，配置 JSON）。
+    // configJSON 只由链接 + 固定端口（10827/10828）+ 固定日志
+    // 路径（singBoxLogPath，进程内不变）决定，同一链接生成的
+    // JSON 字节相同；只存内存不落盘（进程重启即丢，容器路径
+    // 变了旧 JSON 里的日志路径也会过期）。只在 vpnCoreLock 下
+    // 读写：startSingBox 的调用方 start(withLink:) 已持锁，
+    // 不另加锁。stop() 不清它——测速停/启、自动停、手动开关
+    // 的停→启正是要复用的场景；链接变了 key 对不上自然重建。
+    private var cachedSingBoxLink: String?
+    private var cachedSingBoxConfig: String?
     // 当前在跑的是哪个核心（nil = 没在跑）：TUIC-only 单活切换
     // 的唯一事实来源——start 成功时记、stop 时清；测速分流
     // 与停核心都读它，绝不凭 isRunning 猜核心种类。
@@ -1025,19 +1035,32 @@ public final class CZFVPNManager {
     // 跟随全局的 App 维持既有 fail-open——失败本身绝不
     // 偷偷改成直连或改标记。
     private func startSingBox(withLink link: String) -> Bool {
+        // B-3：链接与上次成功启动的相同，直接复用已校验过的
+        // 配置 JSON 并跳过 CheckConfig（同一份 JSON 校验结果
+        // 确定，重复生成 + 全量校验是纯浪费）；链接变了或无
+        // 缓存才重新生成并全量校验。失败不写缓存。
         let config: String
-        do {
-            config = try CZFSingBoxConfig.configJSON(for: link, socksPort: Self.socksPort, httpPort: 10828)
-        } catch {
-            lastError = "节点配置生成失败：\(error.localizedDescription)"
-            return false
+        let skipCheck: Bool
+        if link == cachedSingBoxLink, let cached = cachedSingBoxConfig {
+            config = cached
+            skipCheck = true
+        } else {
+            do {
+                config = try CZFSingBoxConfig.configJSON(for: link, socksPort: Self.socksPort, httpPort: 10828)
+            } catch {
+                lastError = "节点配置生成失败：\(error.localizedDescription)"
+                return false
+            }
+            skipCheck = false
         }
         do {
-            try CZFSingBoxCore.start(configJSON: config)
+            try CZFSingBoxCore.start(configJSON: config, skipCheck: skipCheck)
         } catch {
             lastError = "sing-box 启动失败：\(error.localizedDescription)"
             return false
         }
+        cachedSingBoxLink = link
+        cachedSingBoxConfig = config
         isRunning = true
         runningLink = link
         runningCore = .singBox

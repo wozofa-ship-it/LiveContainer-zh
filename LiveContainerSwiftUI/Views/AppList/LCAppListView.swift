@@ -86,11 +86,13 @@ final class CZFOnceFlag: @unchecked Sendable {
 // 新建丢 preview + forceAsNew），已移到下面的
 // CZFSourcePendingInstall（四字段齐全），urls 已删。
 private enum CZFPendingInstall {
-    case url(String, Bool, Bool, Bool)
+    // url：地址、autoReplace、preview、forceAsNew、预设自定义名
+    //（恢复缺失的多开实例时带，nil = 不预设）。
+    case url(String, Bool, Bool, Bool, String?)
     case plist(String)
     var urlStr: String {
         switch self {
-        case .url(let s, _, _, _): return s
+        case .url(let s, _, _, _, _): return s
         case .plist(let s): return s
         }
     }
@@ -130,7 +132,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 安装请求队列（源页批量安装用）：串行下+装，已装的直接覆盖
     // App #8：队列项带稳定 id——原来是无 id 元组，删行按
     // url + autoReplace 找第一个匹配，有重复项时删的是另一行。
-    @State var installQueue: [(id: UUID, url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool)] = []
+    @State var installQueue: [(id: UUID, url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool, customDisplayName: String?)] = []
     // 安装前预览（源里单个安装时，下完先弹信息卡确认再装）
     @State var installPreviewShow = false
     @State var installPreviewText = ""
@@ -138,9 +140,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var installQueueRunning = false
     // O-9：正在装的那一项（已出队、不在 installQueue 里）：去重键与
     // installQueue / pendingInstalls 共用 (url, autoReplace, preview,
-    // forceAsNew)，enqueueInstall 入队时三处一起查——只查队里会漏掉
+    // forceAsNew, customDisplayName)，enqueueInstall 入队时三处一起查——只查队里会漏掉
     // 已出队正在装的项，同一请求正在装时再点会重复进队。
-    @State private var czfInFlightInstall: (url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool)?
+    @State private var czfInFlightInstall: (url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool, customDisplayName: String?)?
     // 3.8.428 安装#6：进度条旁取消按钮置的取消标志——队列轮询
     // 到它时跳过当前项、继续下一项；installFromUrl 入口与解包
     // 前检查点也会取走它（见 czfTakeInstallCancel）。
@@ -1469,46 +1471,46 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
 
     // 启动新开路拉满（banner pollAndMaximizeFreshWindow 同款）：
-    // runApp 起完新窗可能还没进 dock（签名耗时），0.1 秒×60 次
-    // 轮询等它出现；归属按路径验，别人的窗口占着 uuid 就停表
-    // 不碰；vc 没就绪继续等；拉满或 60 次后停表。
+    // 第 4 条——窗口出现由 czfOnWindowAppeared 回调触发拉满，不
+    // 再 0.1 秒×60 次轮询等它出现；回调里 vc 未就绪、或拉满被
+    // 动画重入守卫吞掉（isMaximized 没翻）时，才用 0.1 秒延迟
+    // 链重试，上限 6 秒（原轮询同款预算）。
     // 静态方法：不捕获 struct 的 self——Timer 闭包是逃逸闭包，
     // 但 LCAppListView 是 struct，[weak self] 编不过（weak 只
     // 能用于 class，见 3.8.277 构建 #42013239934）；静态方法只
-    // 捕获 uuid/expectedPath/attempts 三个值，无循环引用。
+    // 捕获 uuid/expectedPath/deadline 三个值，无循环引用。
     @available(iOS 16.0, *)
     private static func czfPollAndMaximizeFreshWindow(uuid: String, expectedPath: String?) {
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            attempts += 1
-            guard let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
-                if attempts >= 60 {
-                    timer.invalidate()
-                }
-                return
-            }
-            let owned: Bool
-            if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                owned = runningPath == expectedPath
-            } else {
-                owned = false
-            }
-            if !owned {
-                timer.invalidate()
-                return
-            }
-            guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
-                if attempts >= 60 {
-                    timer.invalidate()
-                }
-                return
-            }
-            if !vc.isMaximized {
-                vc.maximizeWindow()
-            }
-            if vc.isMaximized || attempts >= 60 {
-                timer.invalidate()
-            }
+        let deadline = Date().addingTimeInterval(6)
+        MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: 6) {
+            czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
+        }
+    }
+
+    // 返回 true = 已处理完（已拉满，或归属不对停表不再碰）。
+    @available(iOS 16.0, *)
+    private static func czfTryMaximizeFreshWindow(uuid: String, expectedPath: String?) -> Bool {
+        guard let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else { return false }
+        let owned: Bool
+        if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+            owned = runningPath == expectedPath
+        } else {
+            owned = false
+        }
+        if !owned { return true }
+        guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
+        if !vc.isMaximized {
+            vc.maximizeWindow()
+        }
+        return vc.isMaximized
+    }
+
+    @available(iOS 16.0, *)
+    private static func czfRetryMaximizeFreshWindow(uuid: String, expectedPath: String?, deadline: Date) {
+        guard !czfTryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath) else { return }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
         }
     }
 
@@ -2017,7 +2019,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if let obj2 = obj.object as? [String: Any], let installUrl = obj2["url"] as? URL {
                 // 全部走队列串行执行：以前忙着装别的时新请求会被
                 // 直接丢掉，批量安装实际只装得上第一个
-                enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false, preview: (obj2["preview"] as? Bool) ?? false, forceAsNew: (obj2["forceAsNew"] as? Bool) ?? false)
+                enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false, preview: (obj2["preview"] as? Bool) ?? false, forceAsNew: (obj2["forceAsNew"] as? Bool) ?? false, customDisplayName: obj2["customDisplayName"] as? String)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.LaunchAppNotification)) { obj in
@@ -2242,7 +2244,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         throw "这个 IPA 还没下载完（iCloud 文件），请先在“文件”里点一下它、等下载完成再安装"
     }
 
-    func installIpaFile(_ url:URL, autoReplace: Bool = false, forceAsNew: Bool = false) async throws {
+    func installIpaFile(_ url:URL, autoReplace: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil) async throws {
         let fm = FileManager()
 
         // iCloud 占位先确保下完（见 czfEnsureFileDownloaded），
@@ -2267,9 +2269,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
         let installProgress = Progress.discreteProgress(totalUnitCount: 100)
         self.installProgressPercentage = 0.0
+        // 第 2 条：解包每读一块就推一次 KVO，原来每次都 main.async 写
+        // @State，全程无节流。只在变化 ≥0.5% 或距上次发布 ≥100ms
+        // 时才发布；到 100% 时一定发布一次，不让进度条卡在 99.x%。
+        var czfLastPublishedInstallFraction = 0.0
+        var czfLastInstallPublishAt = Date.distantPast
         self.installObserver = installProgress.observe(\.fractionCompleted) { p, v in
-            DispatchQueue.main.async {
-                self.installProgressPercentage = Float(p.fractionCompleted)
+            let fraction = p.fractionCompleted
+            let now = Date()
+            if abs(fraction - czfLastPublishedInstallFraction) >= 0.005
+                || now.timeIntervalSince(czfLastInstallPublishAt) >= 0.1
+                || fraction >= 1.0 {
+                czfLastPublishedInstallFraction = fraction
+                czfLastInstallPublishAt = now
+                DispatchQueue.main.async {
+                    self.installProgressPercentage = Float(fraction)
+                }
             }
         }
         let decompressProgress = Progress.discreteProgress(totalUnitCount: 100)
@@ -2363,6 +2378,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 多开自定义名必须在 if 块外声明：签名之前那处在块外用它，
         // 块内 var 会出不了作用域（构建 #209 唯一红字就是这个）。
         var czfCustomDisplayName: String? = nil
+        // 预设名（恢复缺失的多开实例时传）：有预设就直接用，不弹
+        // 输入框；与包内原名相同 = 不自定义（与输入框同款规则）。
+        // 放这里：有同款在装走下面输入框分支、无同款全新装也
+        // 能把改过的名带回来，两路都覆盖。
+        if let preset = customDisplayName {
+            let trimmed = preset.trimmingCharacters(in: .whitespacesAndNewlines)
+            let originalName = newAppInfo.displayName() ?? ""
+            if !trimmed.isEmpty && trimmed != originalName {
+                czfCustomDisplayName = trimmed
+            }
+        }
         if fm.fileExists(atPath: outputFolder.path) || sameBundleIdApp.count > 0 {
             // 安装低 #24：秒级时间戳同秒装两次会撞名，改毫秒。
             appRelativePath = "\(newBundleId)_\(Int(CFAbsoluteTimeGetCurrent() * 1000)).app"
@@ -2402,7 +2428,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 多开（安装为新 App）：先让用户输个新名字，再往下装。
             // 空着或跟原名一样 = 不自定义；取消 = 放弃这次安装。
             // 批量自动覆盖不走这里，不弹框挡队列。
-            if !installOptionChosen.isReplace && !sameBundleIdApp.isEmpty {
+            // 预设名已落好时不弹框（恢复缺失实例自动新建用）。
+            if !installOptionChosen.isReplace && !sameBundleIdApp.isEmpty && czfCustomDisplayName == nil {
                 let originalName = newAppInfo.displayName() ?? ""
                 let inputName = await installAsNewNameInput.open(initVal: originalName)
                 guard let inputName else {
@@ -2808,24 +2835,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// 别的时新请求会被直接丢掉、批量只装得上第一个。单个
     /// 安装请求也走这里（队列空闲时立即执行，和以前一样）；
     /// autoReplace 的请求遇到已装同款直接覆盖、不弹选择框
-    func enqueueInstall(url: URL, autoReplace: Bool, preview: Bool = false, forceAsNew: Bool = false) {
+    func enqueueInstall(url: URL, autoReplace: Bool, preview: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil) {
         // App #8：同一 IPA 点两次会进队两次（文件夹网格双击 /
         // 源页批量重复勾选）；入队前判重，同一请求已在队里
         // 就不再加。
-        guard !installQueue.contains(where: { $0.url == url && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew }) else {
+        guard !installQueue.contains(where: { $0.url == url && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName }) else {
             return
         }
         // O-9：去重覆盖在途项（已出队正在装）与 pendingInstalls（忙时排队的），
-        // 三处共用同一四字段键；只查队里会漏掉这两处，同一请求正在装时
+        // 三处共用同一五字段键；只查队里会漏掉这两处，同一请求正在装时
         // 再点会重复进队、第二遍走替换选择框或 autoReplace 覆盖。
         if let inFlight = czfInFlightInstall,
-           inFlight.url == url && inFlight.autoReplace == autoReplace && inFlight.preview == preview && inFlight.forceAsNew == forceAsNew {
+           inFlight.url == url && inFlight.autoReplace == autoReplace && inFlight.preview == preview && inFlight.forceAsNew == forceAsNew && inFlight.customDisplayName == customDisplayName {
             return
         }
-        if pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: url.absoluteString, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew, as: $0) }) {
+        if pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: url.absoluteString, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew, customDisplayName: customDisplayName, as: $0) }) {
             return
         }
-        installQueue.append((id: UUID(), url: url, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew))
+        installQueue.append((id: UUID(), url: url, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew, customDisplayName: customDisplayName))
         guard !installQueueRunning else {
             return
         }
@@ -2909,8 +2936,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 czfLastInstallWasCancelled = false
                 // O-9：在途项记下来供入队去重查（已出队、不在 installQueue 里）；
                 // 键用原始 item.url，不用预下载改写后的本地文件地址。
-                czfInFlightInstall = (url: item.url, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew)
-                let installOK = await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew)
+                czfInFlightInstall = (url: item.url, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew, customDisplayName: item.customDisplayName)
+                let installOK = await installFromUrl(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew, customDisplayName: item.customDisplayName)
                 czfInFlightInstall = nil
                 if czfLastInstallWasCancelled {
                     cancelledNames.append(item.url.lastPathComponent)
@@ -2979,26 +3006,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
-    /// 安装前预览文案：把刚下载的 IPA 解开读 Info.plist，
-    /// 拼出名称/版本/Bundle ID/大小/声明的权限。解不开或
-    /// 读不到就返回 nil（不拦，照常安装）
+    /// 安装前预览文案：第 1 条——单条目流式抽取
+    /// Payload/*.app/Info.plist 直接解析，不全量解压、不建
+    /// 临时目录。读不到就返回 nil（不拦，照常安装）
     func makeInstallPreviewText(forIpa url: URL) async -> String? {
         let fm = FileManager.default
-        let previewDir = fm.temporaryDirectory.appendingPathComponent("CZFInstallPreview")
-        try? fm.removeItem(at: previewDir)
-        try? fm.createDirectory(at: previewDir, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: previewDir) }
-        let progress = Progress.discreteProgress(totalUnitCount: 100)
-        guard await decompress(url.path, previewDir.path, progress) == 0 else { return nil }
-        let payloadPath = previewDir.appendingPathComponent("Payload")
-        guard let contents = try? fm.contentsOfDirectory(atPath: payloadPath.path),
-              let appName = contents.first(where: { $0.hasSuffix(".app") }) else { return nil }
-        let infoURL = payloadPath.appendingPathComponent(appName).appendingPathComponent("Info.plist")
-        guard let data = try? Data(contentsOf: infoURL),
+        guard let data = czfExtractIpaInfoPlist(url.path),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
-        let name = (plist["CFBundleDisplayName"] as? String) ?? (plist["CFBundleName"] as? String) ?? appName
-        let version = (plist["CFBundleShortVersionString"] as? String) ?? "?"
         let bundleId = (plist["CFBundleIdentifier"] as? String) ?? "?"
+        let name = (plist["CFBundleDisplayName"] as? String) ?? (plist["CFBundleName"] as? String) ?? bundleId
+        let version = (plist["CFBundleShortVersionString"] as? String) ?? "?"
         let fmt = ByteCountFormatter()
         fmt.countStyle = .file
         let sizeText = ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber).map { fmt.string(fromByteCount: $0.int64Value) } ?? "?"
@@ -3034,8 +3051,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let next = pendingInstalls.removeFirst()
         Task {
             switch next {
-            case .url(let s, let r, let p, let f):
-                await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f)
+            case .url(let s, let r, let p, let f, let n):
+                await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f, customDisplayName: n)
             case .plist(let s):
                 await installFromPlist(urlStr: s)
             }
@@ -3170,9 +3187,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // O-9：安装去重键——四字段全等才算同一请求（url, autoReplace,
     // preview, forceAsNew）：只比 urlStr 会把同地址不同 autoReplace /
     // forceAsNew 的请求误丢；.plist 项没有这三个字段，不参与本比对。
-    private func czfIsSameInstallRequest(urlStr: String, autoReplace: Bool, preview: Bool, forceAsNew: Bool, as pending: CZFPendingInstall) -> Bool {
-        guard case .url(let s, let r, let p, let f) = pending else { return false }
-        return s == urlStr && r == autoReplace && p == preview && f == forceAsNew
+    private func czfIsSameInstallRequest(urlStr: String, autoReplace: Bool, preview: Bool, forceAsNew: Bool, customDisplayName: String?, as pending: CZFPendingInstall) -> Bool {
+        guard case .url(let s, let r, let p, let f, let n) = pending else { return false }
+        return s == urlStr && r == autoReplace && p == preview && f == forceAsNew && n == customDisplayName
     }
 
     // O-9：安装入口共用校验（installFromUrl 与 installFromPlist 共用）：
@@ -3211,7 +3228,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         return true
     }
 
-    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false, forceAsNew: Bool = false) async -> Bool {
+    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil) async -> Bool {
         // 3.8.428 App#4：粘贴的安装链接带首尾空格/换行就报“链接
         // 无效”，先 trim（与 installFromPlist 同款处理）。
         let urlStr = urlStr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3220,17 +3237,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 上一次的取消标记冲掉；由 enqueueInstall 在每次调用前
         // 清、调用后读（见 enqueueInstall），这里只在取消路径置 true。
         // 进行中再点安装：排进队、当前装完接着装，不再静默丢掉
-        // O-9：排队去重与 enqueueInstall 同款四字段键，且已在安装队列
+        // O-9：排队去重与 enqueueInstall 同款五字段键，且已在安装队列
         // 里或正在装的同一请求不再往 pendingInstalls 里加（原来只比
         // urlStr，同地址不同 autoReplace/forceAsNew 的请求会被误丢、
         // 已在队里/在途的又会重复排一份）。
         if self.installprogressVisible {
-            let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew)
+            let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew, customDisplayName)
             let alreadyQueued = URL(string: urlStr).map { queuedURL in
-                installQueue.contains(where: { $0.url == queuedURL && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew })
+                installQueue.contains(where: { $0.url == queuedURL && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName })
             } ?? false
-            let alreadyInFlight = czfInFlightInstall.map { $0.url.absoluteString == urlStr && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew } ?? false
-            let alreadyPending = pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: urlStr, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew, as: $0) })
+            let alreadyInFlight = czfInFlightInstall.map { $0.url.absoluteString == urlStr && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName } ?? false
+            let alreadyPending = pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: urlStr, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew, customDisplayName: customDisplayName, as: $0) })
             if !alreadyQueued && !alreadyInFlight && !alreadyPending {
                 pendingInstalls.append(item)
             }
@@ -3352,7 +3369,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
             var installOK = true
             do {
-                try await installIpaFile(installUrl, autoReplace: autoReplace, forceAsNew: forceAsNew)
+                try await installIpaFile(installUrl, autoReplace: autoReplace, forceAsNew: forceAsNew, customDisplayName: customDisplayName)
             } catch is CZFInstallCancelled {
                 // 3.8.428 安装#2：取消不弹错、不计失败，记取消。
                 czfLastInstallWasCancelled = true
