@@ -34,14 +34,13 @@ struct AltStoreSourceApp: Identifiable, Hashable {
     let latestVersion: AltStoreSourceAppVersion?
     let isBeta: Bool
 
-    // 2/3 行身份稳定：id 是每次解码重新生成的 UUID，刷新一
-    // 次全部行换身份、详情 sheet 被关掉；网格用 bundleIdentifier
-    // 作 id，源里同包名重复条目会丢格子。用包名 + 最新版本
-    // 号作稳定唯一身份：刷新前后不变（2），同包名不同版本
-    // 是两条记录、版本号能区分（3）；同包名同版本是重复
-    // 条目，渲染一条即去重。
+    // B-9：身份只用包名，不再带版本号——源刷新时版本号一变
+    // （1.0 → 1.1），行身份变、cell 重建、详情 sheet 被关掉。
+    // 同包名在两个源里是两条记录也不怕：身份按 ForEach 作用
+    // 域算，两个源是两个 ForEach；同源内同包名重复条目由
+    // B-10 渲染前显式去重（只留一条），不再靠版本号区分。
     var czfStableID: String {
-        bundleIdentifier + "|" + (latestVersion?.version ?? "")
+        bundleIdentifier
     }
 }
 
@@ -383,6 +382,10 @@ enum AltStoreSourceLoader {
         let apps = (response.apps ?? []).compactMap { appResponse in
             buildApp(from: appResponse, baseURL: baseURL, fallbackTint: response.tintColor, isoFormatter: isoFormatter, shortFormatter: shortFormatter)
         }
+        // B-10：解码处按 czfStableID 显式去重（留第一条）——
+        // 源 JSON 里同包名出现两次时，ForEach 撞 id 的行为是
+        // 未定义的，不能把去重寄托在 SwiftUI 上。这里一次去
+        // 重，网格/列表/批量三路都干净。
         return AltStoreSource(
             name: name,
             identifier: response.identifier,
@@ -392,7 +395,7 @@ enum AltStoreSourceLoader {
             headerURL: url(for: response.headerURL, baseURL: baseURL),
             tintColor: color(from: response.tintColor),
             website: url(for: response.website, baseURL: baseURL),
-            apps: apps
+            apps: czfDedupSourceApps(apps)
         )
     }
     
@@ -541,6 +544,12 @@ enum CZFUpdateIgnore {
 // 新 UUID，不稳定）。
 func czfSourceSelectionKey(sourceURL: URL, bundleIdentifier: String) -> String {
     "\(sourceURL.absoluteString):\(bundleIdentifier)"
+}
+
+// B-10：按 czfStableID 显式去重（留第一条）。
+func czfDedupSourceApps(_ apps: [AltStoreSourceApp]) -> [AltStoreSourceApp] {
+    var seen = Set<String>()
+    return apps.filter { seen.insert($0.czfStableID).inserted }
 }
 
 struct LCSourcesView: View {
@@ -1181,14 +1190,31 @@ struct LCSourcesView: View {
                     // 这里重复写已删。
                     // 1：深链添加失败走父级 errorMessage（此时没
                     // sheet 盖着，父级 alert 能正常弹）。
+                    // B-11：管理源 sheet 正开着时，父级 alert 盖
+                    // 在 sheet 下面会被 UIKit 静默丢弃（#1 在
+                    // sheet 内修掉的那类问题，换了个入口又出现）。
+                    // 先关 sheet，等它关完再弹错误。
                     Task {
                         if let error = await handleAddSource(sourceUrl) {
+                            if isManagingSources {
+                                isManagingSources = false
+                                try? await Task.sleep(nanoseconds: 400_000_000)
+                            }
                             errorMessage = error
                         }
                     }
                 } else {
                     // 低 #52：无 url 参数时弹提示，别静默无事。
-                    errorMessage = "lc.sources.error.invalidUrl".loc
+                    // B-11 同款：sheet 开着时先关再弹。
+                    if isManagingSources {
+                        isManagingSources = false
+                        let msg = "lc.sources.error.invalidUrl".loc
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            errorMessage = msg
+                        }
+                    } else {
+                        errorMessage = "lc.sources.error.invalidUrl".loc
+                    }
                 }
             }
         }

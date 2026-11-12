@@ -233,6 +233,15 @@ struct LCSettingsView: View {
                 developerSection
             }
             .navigationBarTitle("lc.tabView.settings".loc)
+            // B-12：32 位 App 全删光、段隐藏时，残留的
+            // selected32BitEmulator 选值在 UI 上没处清。
+            // arm32EmuApps 变空就清掉，日后装回 32 位 App
+            // 时段重现、Picker 从“无”开始，不读旧值报错。
+            .onChange(of: sharedModel.arm32EmuApps.isEmpty) { isEmpty in
+                if isEmpty {
+                    selected32BitEmulator = ""
+                }
+            }
             .alert("lc.common.error".loc, isPresented: $errorShow){
             } message: {
                 Text(errorInfo)

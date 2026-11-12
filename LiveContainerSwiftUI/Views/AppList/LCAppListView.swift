@@ -1285,6 +1285,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if sharedModel.multiLCStatus == 2 {
                 Text("lc.appList.manageInPrimaryTip".loc).foregroundStyle(.secondary).padding()
             }
+            // 3.8.449（用户 16:44 报“列表没显示文件夹APP”）：
+            // 文件夹 IPA 区只接在网格内容里，列表模式切过来
+            // 就没了。列表底部也接一份（与网格同款位置：已装
+            // App 下方），两边共用同一份状态与恢复逻辑。
+            CZFInlineIpaFolderSection(
+                folderURL: czfIpaFolderURL,
+                onPickFolder: { czfIpaFolderPickerShow = true },
+                onInstall: { url in enqueueInstall(url: url, autoReplace: false) }
+            )
+            .padding(.top, 8)
+            .padding(.horizontal)
     }
 
     // 网格模式计数行文案已删（3.8.419，建议第 6 条）：“共 n 个 App”

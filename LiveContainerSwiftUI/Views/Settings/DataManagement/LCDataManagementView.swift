@@ -2603,11 +2603,6 @@ struct LCDataManagementView : View {
         return merged
     }
 
-    func backupAllApps() async {
-        let allApps = sharedModel.apps + sharedModel.hiddenApps
-        await backupApps(allApps)
-    }
-
     /// 把一个 App 的整套数据备份到 Backups/<显示名>（先写
     /// 临时目录、写完换名覆盖，防丢）：manifest + .app + 各
     /// 数据容器 + 组容器 + 钥匙串快照。backupApps 的批量循环
@@ -2917,7 +2912,10 @@ struct LCDataManagementView : View {
     /// 里看）。完整档看容器 + 钥匙串，登录态档看会话文件 +
     /// 钥匙串（登录态档不含整容器，不列容器项）；失败的 App
     /// 已在失败清单里，不重复进健康节。
-    static func backupHealthLine(name: String, loginOnly: Bool, containerCount: Int, keychainCount: Int, keychainHasSnapshot: Bool, loginFileCount: Int, containerNames: [String] = []) -> String {
+    // B-16：健康行加拷贝失败数——原来只认容器数/钥匙串，
+    // 完整备份丢一个容器，健康行只显示“容器 ✅ 2 个”
+    // （而不是 3 个），没有 ❌ 标记，不数数就发现不了。
+    static func backupHealthLine(name: String, loginOnly: Bool, containerCount: Int, keychainCount: Int, keychainHasSnapshot: Bool, loginFileCount: Int, containerNames: [String] = [], loginFailed: Int = 0) -> String {
         var parts: [String] = []
         if loginOnly {
             parts.append(loginFileCount > 0 ? "会话文件 ✅ \(loginFileCount) 个" : "会话文件 ❌ 0 个")
@@ -2937,6 +2935,9 @@ struct LCDataManagementView : View {
             parts.append("钥匙串 ⚠️ 快照为空")
         } else {
             parts.append("钥匙串 ❌ 无快照")
+        }
+        if loginFailed > 0 {
+            parts.append("拷贝失败 ❌ \(loginFailed) 个")
         }
         return "\(name)：\(parts.joined(separator: " · "))"
     }
@@ -2989,6 +2990,11 @@ struct LCDataManagementView : View {
         let czfBackupStart = Date()
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            // B-15：早退前清备份进度——不然进度文案卡在“正在
+            // 备份…”，且 czfDismissIfDirectEntryDone 的 guard
+            // 永远拦住、直进页关不掉。几乎不可达（iOS 文稿目录
+            // 恒在），记为防御性缺口。
+            backupRestoreProgress = nil
             errorInfo = "lc.settings.backupFail".loc
             errorShow = true
             return
@@ -3081,7 +3087,7 @@ struct LCDataManagementView : View {
                             // v216：同步按实际文件夹名（多开后缀名 ≠
                             // 显示名），健康行跟成功数一起回主线程
                             backedUpFolderNames.append(one.folderName)
-                            healthLines.append(Self.backupHealthLine(name: name, loginOnly: loginOnly, containerCount: one.containerCount, keychainCount: one.keychainCount, keychainHasSnapshot: one.keychainHasSnapshot, loginFileCount: one.loginFileCount, containerNames: one.containerNames))
+                            healthLines.append(Self.backupHealthLine(name: name, loginOnly: loginOnly, containerCount: one.containerCount, keychainCount: one.keychainCount, keychainHasSnapshot: one.keychainHasSnapshot, loginFileCount: one.loginFileCount, containerNames: one.containerNames, loginFailed: one.loginFailed))
                         } catch {
                             failedNames.append("\(name)：\(LCUtils.czfFriendlyError(error))")
                         }
@@ -3101,11 +3107,13 @@ struct LCDataManagementView : View {
         }
         backupRestoreProgress = nil
         if let failure {
-            errorInfo = LCUtils.czfFriendlyError(failure)
+            // B-7：失败路径也拼用时（原来只有成功回执里有），
+            // 定位“备份跑了多久才失败”才有数据。
+            errorInfo = LCUtils.czfFriendlyError(failure) + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
             errorShow = true
         } else if count == 0, !failedNames.isEmpty {
             // 一个都没成：别报“成功 0 个”，直接报失败清单
-            errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
+            errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n") + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
             errorShow = true
         } else {
             // 钥匙串导了几条必须报出来：以前恒为 0 也照报"备份
@@ -3176,18 +3184,31 @@ struct LCDataManagementView : View {
                 successInfo += "\n—— 备份健康（缺项标 ❌）——\n" + healthLines.joined(separator: "\n")
             }
             // 6 计时：整批总耗时（从 backupApps 开始到回执）。
-            // 不到 1 分钟只显示秒，超过显示分+秒。
-            let czfElapsed = Date().timeIntervalSince(czfBackupStart)
-            if czfElapsed < 60 {
-                successInfo += "\n用时 \(String(format: "%.0f", czfElapsed)) 秒"
-            } else {
-                let czfMinutes = Int(czfElapsed) / 60
-                let czfSeconds = Int(czfElapsed) % 60
-                successInfo += "\n用时 \(czfMinutes) 分 \(czfSeconds) 秒"
-            }
+            // B-8：秒数用 Int 截断（59.9 秒显示“59 秒”，不再
+            // 四舍五入成“60 秒”）；≥ 60 分钟加小时段（“2 小时
+            // 0 分”而不是“120 分 0 秒”）。三处回执共用同一
+            // 个格式化函数（见 czfFormatElapsed）。
+            successInfo += "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
             successInfo += "\n" + backupRoot.path
             successShow = true
         }
+    }
+
+    // B-7/B-8：用时格式化（成功/失败三处回执共用）。
+    // 秒数 Int 截断，与分钟分支一致；≥ 60 分钟加小时段。
+    private static func czfFormatElapsed(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        if total < 60 {
+            return "用时 \(total) 秒"
+        }
+        let minutes = total / 60
+        let secs = total % 60
+        if minutes < 60 {
+            return "用时 \(minutes) 分 \(secs) 秒"
+        }
+        let hours = minutes / 60
+        let mins = minutes % 60
+        return "用时 \(hours) 小时 \(mins) 分"
     }
 
 
@@ -3992,6 +4013,16 @@ struct LCDataManagementView : View {
             // 重新拉一遍（N 个缺 App = N × 全源请求），现在先
             // 一次拉全表、后面只查表；没缺 App 时不拉
             let sourceApps = missing.isEmpty ? [] : await fetchAllSourceApps()
+            // B-14：缺 App 的安装+等待并行化——原来串行：装一个
+            // → 等 5 分钟 → 恢复 → 下一个；3 个都装失败要空等
+            // 15 分钟。现在分三步：① 串行把每个缺 App 的下载
+            // 地址定下来（源里找或请用户选 IPA，文件选择器不
+            // 能并发）；② 把安装请求全发进队列（enqueueInstall
+            // 本身串行排队，不会冲掉），各路并行等自己的 App
+            // 出现，总等待取最长 5 分钟而不是叠加；③ 装好的
+            // 逐个串行恢复（restoreOneApp 涉钥匙串/容器，不并
+            // 行）。每路结果先收数组，合并时再碰共享计数。
+            var missingPlan: [(folder: URL, name: String, bundleID: String, url: URL)] = []
             for item in missing {
                 if presentResult {
                     backupRestoreProgress = "正在安装并恢复 \(item.name)（等安装完成）…"
@@ -4001,51 +4032,70 @@ struct LCDataManagementView : View {
                 // 好再回来恢复——这条路当初就没想通）。当场请用户选它
                 // 的 IPA 文件，选好就走下面同一条安装通道、装好就恢复，
                 // 整条链不出恢复流程；取消才记未找到。
-                let downloadURL: URL
                 if let fromSource = downloadURLForApp(bundleID: item.bundleID, name: item.name, in: sourceApps) {
-                    downloadURL = fromSource
+                    missingPlan.append((item.folder, item.name, item.bundleID, fromSource))
                 } else if let picked = await pickIPAForRestore(appName: item.name) {
-                    downloadURL = picked
+                    missingPlan.append((item.folder, item.name, item.bundleID, picked))
                 } else {
                     installNotFound.append(item.name)
+                }
+            }
+            // 等安装前先快照已装集合（所有路共用同一份快照）：
+            // 原来按 Bundle ID 或显示名首匹配，装 Muse5 时列表
+            // 里已有的 Muse（同款同 Bundle ID）会先被认成“装好
+            // 了”，Muse5 的数据就盖进 Muse。只等新出现（快照里
+            // 没有）且显示名对上的那一个；显示名对不上宁可超时
+            // 报安装失败，也不错位恢复。
+            let czfMissingBeforeApps = Set((sharedModel.apps + sharedModel.hiddenApps).map { ObjectIdentifier($0) })
+            struct CZFMissingWaitResult {
+                let name: String
+                let folder: URL
+                let installedApp: LCAppModel?
+                let cancelled: Bool
+            }
+            let czfMissingWaits = await withTaskGroup(of: CZFMissingWaitResult.self) { group in
+                for plan in missingPlan {
+                    group.addTask {
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": plan.url])
+                        }
+                        // 装好后 App 会进 sharedModel 的列表；2 秒一查，
+                        // 最多等 5 分钟。B-13：循环里判 Task.isCancelled，
+                        // 取消就立即退出，不再空转 150 次。
+                        var installedApp: LCAppModel?
+                        var waitCancelled = false
+                        for _ in 0..<150 {
+                            if Task.isCancelled { waitCancelled = true; break }
+                            try? await Task.sleep(nanoseconds: 2_000_000_000)
+                            if Task.isCancelled { waitCancelled = true; break }
+                            let currentApps = sharedModel.apps + sharedModel.hiddenApps
+                            installedApp = currentApps.first(where: {
+                                !czfMissingBeforeApps.contains(ObjectIdentifier($0)) &&
+                                ($0.appInfo.displayName() ?? "") == plan.name
+                            })
+                            if installedApp != nil { break }
+                        }
+                        return CZFMissingWaitResult(name: plan.name, folder: plan.folder, installedApp: installedApp, cancelled: waitCancelled)
+                    }
+                }
+                var collected: [CZFMissingWaitResult] = []
+                for await r in group { collected.append(r) }
+                return collected
+            }
+            for wait in czfMissingWaits {
+                if wait.cancelled {
+                    installFailed.append("\(wait.name)（已取消）")
                     continue
                 }
-                // 等安装前先快照已装集合：原来按 Bundle ID 或显示名
-                // 首匹配，装 Muse5 时列表里已有的 Muse（同款同
-                // Bundle ID）会先被认成“装好了”，Muse5 的数据就
-                // 盖进 Muse。只等新出现（快照里没有）且显示名对
-                // 上的那一个；显示名对不上宁可超时报安装失败，也
-                // 不错位恢复。
-                let beforeApps = Set((sharedModel.apps + sharedModel.hiddenApps).map { ObjectIdentifier($0) })
-                await MainActor.run {
-                    NotificationCenter.default.post(name: NSNotification.InstallAppNotification, object: ["url": downloadURL])
-                }
-                // 装好后 App 会进 sharedModel 的列表；2 秒一查，最多等 5 分钟。
-                // 14：原来等 10 分钟（300 × 2 秒）——安装失败（坏链接/
-                // 签名错）没有任何失败回传，循环只能跑满才报失败，
-                // 一个坏 App 就空等 10 分钟。改成 5 分钟（150 × 2 秒）：
-                // 正常下载+安装多在 1–2 分钟内，5 分钟够慢网大包，
-                // 失败时最多空等一半。彻底修要安装队列在失败时发
-                // 通知、这里接信号提前退出，那是下一步。
-                var installedApp: LCAppModel?
-                for _ in 0..<150 {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    let currentApps = sharedModel.apps + sharedModel.hiddenApps
-                    installedApp = currentApps.first(where: {
-                        !beforeApps.contains(ObjectIdentifier($0)) &&
-                        ($0.appInfo.displayName() ?? "") == item.name
-                    })
-                    if installedApp != nil { break }
-                }
-                guard let installedApp else {
-                    installFailed.append(item.name)
+                guard let installedApp = wait.installedApp else {
+                    installFailed.append(wait.name)
                     continue
                 }
                 // 再缓 2 秒等安装收尾落稳，然后恢复这个 App 的数据
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 do {
                     // v216：同主循环（iCloud 进度 + 排队提醒 + 无数据定位）
-                    let outcome2 = try await Self.restoreOneApp(appFolder: item.folder, app: installedApp, loginOnly: loginOnly, downloadProgress: { downloaded, total in
+                    let outcome2 = try await Self.restoreOneApp(appFolder: wait.folder, app: installedApp, loginOnly: loginOnly, downloadProgress: { downloaded, total in
                         DispatchQueue.main.async {
                             self.backupRestoreProgress = "正在从 iCloud 下载：已下 \(downloaded) / 共 \(total) 个…"
                         }
@@ -4055,41 +4105,41 @@ struct LCDataManagementView : View {
                     keychainImportedTotal += outcome2.keychainImported
                     keychainUnwritableTotal += outcome2.keychainUnwritable
                     if keychainStatusFirst == nil && outcome2.keychainStatus != errSecSuccess {
-                        keychainStatusFirst = (item.name, outcome2.keychainStatus)
+                        keychainStatusFirst = (wait.name, outcome2.keychainStatus)
                     }
                     if outcome2.keychainQueued > 0 {
-                        keychainQueuedApps.append(item.name)
+                        keychainQueuedApps.append(wait.name)
                     }
                     // 3.8.286：组容器失败进报告（旧数据已保留）
                     if !outcome2.groupRestoreFailed.isEmpty {
-                        groupFailedApps.append("\(item.name)（组容器 \(outcome2.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
+                        groupFailedApps.append("\(wait.name)（组容器 \(outcome2.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
                     }
                     // B-6：会话文件合并失败进报告（同主循环）。
                     if outcome2.mergedLoginFailed > 0 {
                         mergeFailedTotal += outcome2.mergedLoginFailed
                         if mergeFailedPathsTotal.count < 10 {
-                            mergeFailedPathsTotal.append(contentsOf: outcome2.mergedLoginFailedPaths.prefix(10 - mergeFailedPathsTotal.count).map { "\(item.name)/\($0)" })
+                            mergeFailedPathsTotal.append(contentsOf: outcome2.mergedLoginFailedPaths.prefix(10 - mergeFailedPathsTotal.count).map { "\(wait.name)/\($0)" })
                         }
                     }
                     // 3.8.294（P0-4）：下载未完成仍算恢复成功，单列进报告。
                     if outcome2.downloadIncomplete {
-                        downloadIncompleteApps.append(item.name)
+                        downloadIncompleteApps.append(wait.name)
                     }
                     if outcome2.ok {
                         installRestoredCount += 1
-                        if await Self.backupVersionDiffers(appFolder: item.folder, app: installedApp) {
-                            versionMismatchApps.append(item.name)
+                        if await Self.backupVersionDiffers(appFolder: wait.folder, app: installedApp) {
+                            versionMismatchApps.append(wait.name)
                         }
                     } else {
                         if loginOnly {
-                            noDataApps.append(item.name)
+                            noDataApps.append(wait.name)
                         } else {
-                            noDataApps.append("\(item.name)（备份里容器 \(outcome2.containerFolderCount) 个）")
+                            noDataApps.append("\(wait.name)（备份里容器 \(outcome2.containerFolderCount) 个）")
                         }
-                        noDataFolders.append(NoDataFolderEntry(name: item.name, folder: item.folder))
+                        noDataFolders.append(NoDataFolderEntry(name: wait.name, folder: wait.folder))
                     }
                 } catch {
-                    restoreFailedApps.append("\(item.name)：\(LCUtils.czfFriendlyError(error))")
+                    restoreFailedApps.append("\(wait.name)：\(LCUtils.czfFriendlyError(error))")
                 }
             }
             var msg = String(format: "lc.settings.restoreComplete".loc, restoredCount + installRestoredCount)
