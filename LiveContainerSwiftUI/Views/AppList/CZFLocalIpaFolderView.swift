@@ -3,6 +3,7 @@
 // 和图标，点一下就安装。文件夹用 security-scoped bookmark
 // 记住，下次点按钮直接打开，不用重新选。
 import SwiftUI
+import CryptoKit
 
 struct CZFLocalIpaItem: Identifiable {
     let id = UUID()
@@ -170,8 +171,73 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // 解包是同步重活，不许占主线程：nonisolated，在后台
     // 跑完再回主线程刷那一行。直接在 @MainActor 里调 extract
     // 会卡住列表滚动。
+    // 详情磁盘缓存（3.8.446，用户 14:53 令“切换过来每次，
+    // 加载图标”）：切到 App 页 onAppear 就重扫重解包，图标
+    // 每次现解。把解出的名字/版本/包名/图标缩略图存到
+    // Caches/CZFIpaFolderCache，键 = 路径|修改时间|大小 的
+    // SHA256，文件一换键就变、自动失效；再切回来先读缓存，
+    // 命中直接显示，只有缓存没有才解包。每个 IPA 各存一份
+    // <key>.json + <key>.png，并发写不撞同一个文件。
+    nonisolated private static var czfCacheDir: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("CZFIpaFolderCache", isDirectory: true)
+    }
+
+    nonisolated private static func czfCacheKey(for url: URL) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970,
+              let size = (attrs[.size] as? NSNumber)?.int64Value else { return nil }
+        let raw = "\(url.path)|\(mtime)|\(size)"
+        let digest = SHA256.hash(data: Data(raw.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    // 读缓存：名字/版本/图标/包名缺任何一项都算未命中（图标
+    // 没存下来时不认缓存，下次再解一次）。
+    nonisolated private static func czfLoadCachedDetail(for url: URL) -> (name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?)? {
+        guard let dir = czfCacheDir,
+              let key = czfCacheKey(for: url),
+              let metaData = try? Data(contentsOf: dir.appendingPathComponent(key + ".json")),
+              let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+              let iconData = try? Data(contentsOf: dir.appendingPathComponent(key + ".png")),
+              let icon = UIImage(data: iconData) else { return nil }
+        return (meta["name"] as? String, meta["version"] as? String, icon, meta["bundleIdentifier"] as? String)
+    }
+
+    nonisolated private static func czfSaveCachedDetail(for url: URL, name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?) {
+        guard let dir = czfCacheDir,
+              let key = czfCacheKey(for: url),
+              let icon = icon,
+              let png = icon.pngData() else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var meta: [String: Any] = [:]
+        if let name { meta["name"] = name }
+        if let version { meta["version"] = version }
+        if let bundleIdentifier { meta["bundleIdentifier"] = bundleIdentifier }
+        if let data = try? JSONSerialization.data(withJSONObject: meta) {
+            try? data.write(to: dir.appendingPathComponent(key + ".json"))
+            try? png.write(to: dir.appendingPathComponent(key + ".png"))
+        }
+    }
+
     nonisolated private func loadDetails(for item: CZFLocalIpaItem) async {
+        // 先读磁盘缓存：命中直接用，不解包。
+        if let cached = Self.czfLoadCachedDetail(for: item.url) {
+            await MainActor.run {
+                guard !self.detailsCancelled else { return }
+                if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
+                    if let name = cached.name { self.items[idx].displayName = name }
+                    if let version = cached.version { self.items[idx].version = version }
+                    if let icon = cached.icon { self.items[idx].icon = icon }
+                    if let bundleIdentifier = cached.bundleIdentifier { self.items[idx].bundleIdentifier = bundleIdentifier }
+                    self.items[idx].detailLoaded = true
+                }
+            }
+            return
+        }
         let info = Self.extractIpaInfo(url: item.url)
+        // 解出来了就存缓存，下次切回来直接读。
+        Self.czfSaveCachedDetail(for: item.url, name: info.name, version: info.version, icon: info.icon, bundleIdentifier: info.bundleIdentifier)
         await MainActor.run {
             guard !self.detailsCancelled else { return }
             if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
