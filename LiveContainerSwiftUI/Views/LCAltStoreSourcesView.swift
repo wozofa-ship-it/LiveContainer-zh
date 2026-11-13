@@ -687,6 +687,12 @@ struct LCSourcesView: View {
     // 遍版本、还逐个读忽略记录；改成算一次存起来，只在源/已装/
     // 忽略变时重算（见 refreshUpdatableCache 调用点）
     @State private var cachedUpdatableApps: [AltStoreSourceApp] = []
+    // 跳过集合（3.8.455，修跳过后红标不消）：跳过的 App 只从
+    // 本次更新名单剔除，下次刷新源再出现。不用持久化——
+    // refreshUpdatableCache 每次重算都先滤掉它，源数据一变
+    // （onChange sources）就清空，图标上的更新角标（hasUpdate，
+    // 按已装版本单独比）不受影响、照常显示。
+    @State private var czfSkippedUpdatableIDs: Set<String> = []
     // 全部更新点开先列清单（用户 18:46 令）：原来点“全部更新”
     // 直接全装，用户看不到是哪几个要更新。改成先弹 sheet 列出
     // 全部可更新 App（图标 + 名字 + 已装版本 → 新版本），每行
@@ -1021,6 +1027,9 @@ struct LCSourcesView: View {
                     }
                     install(app: app)
                     cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                    // 单行更新也同步红点：不写这里 Tab 红标就一直挂着，
+                    // 跟跳过同款毛病（只删名单不改 CZFUpdatableAppCount）。
+                    updatableCountBadge = cachedUpdatableApps.count
                     return true
                 },
                 onUpdateAll: {
@@ -1030,10 +1039,14 @@ struct LCSourcesView: View {
                         czfShowBatchResult(result)
                     }
                 },
-                // 跳过（3.8.454）：只从本次更新名单剔除，不装、
-                // 不进批量队列；下次刷新源还会再出现。
+                // 跳过（3.8.455 修红标不消）：记进跳过集合（重算
+                // 时滤掉、切页重进也不回来），再从名单剔除并同步
+                // 红点；只跳过这一次，下次刷新源还会再出现。
+                // 图标上的更新角标（hasUpdate）不受影响。
                 onSkip: { app in
+                    czfSkippedUpdatableIDs.insert(app.czfStableID)
                     cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                    updatableCountBadge = cachedUpdatableApps.count
                 }
             )
         }
@@ -1096,6 +1109,9 @@ struct LCSourcesView: View {
             }
         }
         .onChange(of: viewModel.sources) { newSources in
+            // 跳过只到下次刷新源为止：源数据一变就清空跳过集合，
+            // 下面 refreshUpdatableCache 重算时被跳过的 App 重新出现。
+            czfSkippedUpdatableIDs.removeAll()
             refreshUpdatableCache()
             let newSet = Set(newSources.map { $0.id })
             // 源中 #3：只把真正新加入的源加进展开集——新加入 =
@@ -1302,7 +1318,9 @@ struct LCSourcesView: View {
     // 可更新名单缓存刷新：算一次、同时写红点。调用点=全部输入
     // 变化处：进页、源变、已装/隐藏变、忽略与 App 打开刷新请求
     private func refreshUpdatableCache() {
-        let list = computeUpdatableApps()
+        // 跳过滤掉：跳过的 App 不回名单、不计红点；源数据一变
+        // onChange sources 已清空跳过集合，它就重新出现。
+        let list = computeUpdatableApps().filter { !czfSkippedUpdatableIDs.contains($0.czfStableID) }
         cachedUpdatableApps = list
         updatableCountBadge = list.count
     }
