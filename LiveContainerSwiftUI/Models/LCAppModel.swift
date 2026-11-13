@@ -54,6 +54,302 @@ class LCAppModel: ObservableObject, Hashable {
     func czfAuthenticateIfLocked() async -> Bool {
         await Self.czfAuthenticateIfLocked(appInfo: appInfo)
     }
+
+    // MARK: - F-4/F-10：带回 / 拉满 / 最小化 / 小窗口共用助手
+    // banner / 网格 / 面板三处原来各写一遍“dock 里找条目 → 带回并
+    // 拉满/还原小窗/最小化”与“起完等窗进 dock 再拉满”，行为已分叉
+    // （面板只用 dataUUID 查 dock、拉满重试只等 2 秒；banner/网格
+    // 用选中容器优先、等 6 秒）。抽到这里，三处共用同一份。
+    // 调用约定：主线程调（调用方原来就是按钮动作 / MainActor.run，
+    // 与被替换的代码一致）；认证不在这里做，调用方带回/启动前
+    // 先过守卫（面板 F-1、banner O-3）。
+    // runApp 内的 bringExistingMultitaskWindowIfNeeded 不走这里：
+    // 它只带回不改尺寸、还管 launchAppUrlScheme，语义不同。
+
+    /// 实例 UUID：选中容器的 folderName 优先，dataUUID 回落。
+    /// banner 的 bannerInstanceUUID 与面板的 dataUUID 原来各取各的，
+    /// 选中容器与 dataUUID 不一致时行为分叉；统一到这一处。
+    var czfInstanceUUID: String? {
+        uiSelectedContainer?.folderName ?? appInfo.dataUUID
+    }
+
+    /// dock 里找归属对得上的条目：没有条目、条目归属对不上、
+    /// 或归属验不出（appInfo 缺失/路径为空）都返回 nil，调用方
+    /// 走新起；宁可多起一个窗口，不顶错别人的。
+    private static func czfOwnedDockEntry(app: LCAppModel, uuid: String) -> DockAppModel? {
+        guard let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
+              let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty,
+              runningPath == app.appInfo.relativeBundlePath else { return nil }
+        return entry
+    }
+
+    /// F-4：带回共用——banner / 网格 / 面板三处原来各写一遍。
+    /// dock 里归属对得上的条目 → 带回；maximize=true 时顺手拉满，
+    /// false 时顺手还原成小窗（maximizeWindow 是切换式）。
+    /// 返回 true = 已处理（调用方直接 return，不再新起）；
+    /// false = 没带回（调用方走新起）。
+    /// 死窗兜底：bring 没抬动、条目还在、不是本次 C4 清掉的死窗时，
+    /// 窗已在前台——拉满路按旧行为返回 brought（拿不到 VC 时走新起），
+    /// 小窗路返回 true（旧行为：只还原不重起）。
+    /// 没有 dock 条目时：拉满路保留旧行为，只带回不拉满（没 decorated
+    /// VC 可拉）；小窗路不试带回（旧行为：直接走未运行分支起新窗）。
+    static func czfBringRunningAppToFront(_ app: LCAppModel, maximize: Bool) -> Bool {
+        guard #available(iOS 16.0, *) else { return false }
+        guard let uuid = app.czfInstanceUUID else { return false }
+        let dockManager = MultitaskDockManager.shared
+        if let runningApp = czfOwnedDockEntry(app: app, uuid: uuid) {
+            var brought = false
+            if #available(iOS 16.1, *) {
+                brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
+            }
+            if !brought {
+                brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
+            }
+            // 带回成功拉满；带回失败但条目还在且不是本次 C4 清掉的
+            // 死窗（窗已在前台、只是 bring 没抬动）同样拉满，别再
+            // 静默空转回小窗。
+            let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == uuid
+            let entryGone = !dockManager.apps.contains(where: { $0.appUUID == uuid })
+            if brought || (!cleanedByC4 && !entryGone) {
+                // maximizeWindow 是切换式：拉满先判 !isMaximized，
+                // 否则已是最大窗会被反切回小窗；还原先判 isMaximized。
+                // 死窗兜底：bring 没抬动、条目还在、但拿不到 VC 时
+                // 不是“窗已在前台”，是死窗——拉满路返回 brought
+                // （false 即走新起），小窗路返回 true（只还原不重起）。
+                if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController {
+                    if maximize {
+                        if !vc.isMaximized {
+                            vc.maximizeWindow()
+                        }
+                    } else if vc.isMaximized {
+                        vc.maximizeWindow()
+                    }
+                    return true
+                }
+                return maximize ? brought : true
+            }
+        } else if dockManager.apps.contains(where: { $0.appUUID == uuid }) {
+            // 条目在但归属对不上，不碰，返回 false 走新起。
+            return false
+        } else {
+            // 没有 dock 条目（原生窗口模式等）：拉满路保留旧行为，
+            // 只带回不拉满，带回失败再落到新起；小窗路不试带回。
+            guard maximize else { return false }
+            var brought = false
+            if #available(iOS 16.1, *) {
+                brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
+            }
+            if !brought {
+                brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
+            }
+            if brought {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// F-10：还原小窗共用——banner 静态版与面板实例版原来各写一遍，
+    /// 一字相同。窗口已最大化时点一下（maximizeWindow 是切换式）
+    /// 还原成小窗。
+    @available(iOS 16.0, *)
+    static func czfUnmaximizeWindow(uuid: String) {
+        guard let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
+              let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
+              vc.isMaximized else { return }
+        vc.maximizeWindow()
+    }
+
+    /// 小窗口回落路专用（3.8.239）：czfOnWindowAppeared 是“同 uuid
+    /// 条目已存在就立即回调”、不验归属——同容器被别的条目占着时，
+    /// 回调会把别人的窗口还原成小窗。动作前再按路径复验一次，
+    /// 对不上/验不出就什么都不做，别动别人的窗口。
+    @available(iOS 16.0, *)
+    static func czfUnmaximizeWindowIfOwned(uuid: String, expectedPath: String?) {
+        guard let expectedPath,
+              let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
+              let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty,
+              runningPath == expectedPath else { return }
+        czfUnmaximizeWindow(uuid: uuid)
+    }
+
+    /// F-10：最小化已在运行分支共用——banner 与面板原来各写一遍：
+    /// dock 里归属对得上的条目 → 直接最小化。返回 true = 已处理。
+    /// 最小化不露内容，不要认证；未运行分支的启动才要认证（调用方做）。
+    static func czfMinimizeRunningWindow(_ app: LCAppModel) -> Bool {
+        guard #available(iOS 16.0, *) else { return false }
+        guard let uuid = app.czfInstanceUUID,
+              czfOwnedDockEntry(app: app, uuid: uuid) != nil else { return false }
+        MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
+        return true
+    }
+
+    /// F-4：起完拉满共用——banner / 网格 / 面板三处原来各写一遍
+    /// “等窗进 dock → 按路径验归属 → 拉满”，重试上限统一 6 秒
+    /// （面板原来 2 秒，签名慢的包拉不满）。uuid 每轮重取：容器
+    /// 中途换了就跟新值（面板同款语义，F-3 同款保护）。
+    @available(iOS 16.0, *)
+    static func czfPollAndMaximizeFreshWindow(app: LCAppModel) {
+        let expectedPath = app.appInfo.relativeBundlePath
+        let deadline = Date().addingTimeInterval(6)
+        czfWaitUUIDThenMaximizeFreshWindow(app: app, expectedPath: expectedPath, deadline: deadline)
+    }
+
+    /// 容器还没建出来（uuid 为空）时等容器出现再注册窗口回调，
+    /// 上限 6 秒（原轮询同款预算）；等不到就停，不报错。
+    @available(iOS 16.0, *)
+    private static func czfWaitUUIDThenMaximizeFreshWindow(app: LCAppModel, expectedPath: String?, deadline: Date) {
+        if let uuid = app.czfInstanceUUID {
+            MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: max(0, deadline.timeIntervalSinceNow)) {
+                czfRetryMaximizeFreshWindow(app: app, deadline: deadline)
+            }
+            return
+        }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            czfWaitUUIDThenMaximizeFreshWindow(app: app, expectedPath: expectedPath, deadline: deadline)
+        }
+    }
+
+    /// 返回 true = 已处理完（已拉满，或归属不对停表不再碰）。
+    /// uuid 每轮重取：容器中途换了就跟新值。
+    @available(iOS 16.0, *)
+    private static func czfTryMaximizeFreshWindow(app: LCAppModel) -> Bool {
+        let expectedPath = app.appInfo.relativeBundlePath
+        guard let uuid = app.czfInstanceUUID,
+              let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else { return false }
+        let owned: Bool
+        if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+            owned = runningPath == expectedPath
+        } else {
+            owned = false
+        }
+        if !owned { return true }
+        guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
+        if !vc.isMaximized {
+            vc.maximizeWindow()
+        }
+        return vc.isMaximized
+    }
+
+    @available(iOS 16.0, *)
+    private static func czfRetryMaximizeFreshWindow(app: LCAppModel, deadline: Date) {
+        guard !czfTryMaximizeFreshWindow(app: app) else { return }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            czfRetryMaximizeFreshWindow(app: app, deadline: deadline)
+        }
+    }
+
+    /// F-10：最小化共用助手——banner 与面板共用（带回 + 归属校验 +
+    /// 未运行启动 + 超时反馈四段里的后三段由骨架做，运行中分支
+    /// 在这里）。调用方负责认证（banner 在按钮里先过守卫，面板
+    /// 在外层先认证）与关面板/记偏好。onError 是失败反馈出口
+    /// （banner 传 showError，面板传 reportLaunchError）；
+    /// onProceed 在 uuid 验过后立刻调一次（面板用它关面板，
+    /// banner 不用，默认空）——运行中分支与未运行分支都只关这一次，
+    /// 助手返回后调用方不用再关。
+    static func czfMinimizeApp(
+        _ app: LCAppModel,
+        onError: @escaping (String) -> Void,
+        onProceed: @escaping () -> Void = {}
+    ) async {
+        guard #available(iOS 16.0, *) else { return }
+        guard app.czfInstanceUUID != nil else { return }
+        onProceed()
+        if czfMinimizeRunningWindow(app) { return }
+        let expectedPath = app.appInfo.relativeBundlePath
+        let dockManager = MultitaskDockManager.shared
+        await czfLaunchThenActOnWindow(
+            app: app,
+            multitask: nil,
+            timeout: 6,
+            timeoutMessage: "最小化超时：6 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试",
+            action: { waitUUID in
+                if let entry = dockManager.apps.first(where: { $0.appUUID == waitUUID }) {
+                    let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == expectedPath } ?? false
+                    if owned {
+                        dockManager.minimizeWindow(uuid: waitUUID)
+                    }
+                }
+            },
+            onError: onError
+        )
+    }
+
+    /// F-10：小窗口共用助手——banner 与面板共用。未运行分支：
+    /// 窗出来 0.35 秒后还原为小窗；30 秒未出现放弃等，到期报一次
+    /// 超时（F-3：原来静默放弃）。其余约定与 czfMinimizeApp 同款。
+    static func czfSmallWindowApp(
+        _ app: LCAppModel,
+        onError: @escaping (String) -> Void,
+        onProceed: @escaping () -> Void = {}
+    ) async {
+        guard #available(iOS 16.0, *) else { return }
+        guard app.czfInstanceUUID != nil else { return }
+        onProceed()
+        if czfBringRunningAppToFront(app, maximize: false) { return }
+        let expectedPath = app.appInfo.relativeBundlePath
+        await czfLaunchThenActOnWindow(
+            app: app,
+            multitask: true,
+            timeout: 30,
+            timeoutMessage: "小窗口超时：30 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试",
+            action: { waitUUID in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    czfUnmaximizeWindowIfOwned(uuid: waitUUID, expectedPath: expectedPath)
+                }
+            },
+            onError: onError
+        )
+    }
+
+    /// F-10：未运行分支的共用骨架——最小化/小窗口共用：
+    /// ① 在旧 uuid 上注册“窗出现即动作”回调；② 调 launch 启动；
+    /// ③ 启动完重读 uuid，换了就在新 uuid 上再注册一次（F-3：
+    /// 拆容器换号后旧 uuid 等不来新窗）；④ 到期动作没跑就经
+    /// onError 报一次超时。action 在窗口出现时调；timeout 是
+    /// 等窗预算（秒）；launch 抛错时经 onError 报启动错、不再报超时。
+    private static func czfLaunchThenActOnWindow(
+        app: LCAppModel,
+        multitask: Bool?,
+        timeout: TimeInterval,
+        timeoutMessage: String,
+        action: @escaping (String) -> Void,
+        onError: @escaping (String) -> Void
+    ) async {
+        guard let uuid = app.czfInstanceUUID else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        var done = false
+        let act: (String) -> Void = { waitUUID in
+            action(waitUUID)
+            done = true
+        }
+        MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: timeout) {
+            act(uuid)
+        }
+        do {
+            try await app.runApp(multitask: multitask, containerFolderName: uuid)
+        } catch {
+            onError(error.localizedDescription)
+            return
+        }
+        if let freshUUID = app.czfInstanceUUID, freshUUID != uuid, Date() < deadline {
+            MultitaskDockManager.shared.czfOnWindowAppeared(uuid: freshUUID, timeout: max(0, deadline.timeIntervalSinceNow)) {
+                act(freshUUID)
+            }
+        }
+        Task { @MainActor in
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            }
+            if !done {
+                onError(timeoutMessage)
+            }
+        }
+    }
+
     @Published var isSigningInProgress = false
     @Published var signProgress = 0.0
     private var observer : NSKeyValueObservation?

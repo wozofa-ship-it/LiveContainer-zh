@@ -200,71 +200,6 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
     }
 
-    // O-3：列表带回已在运行的 App（原 runButtonTapped 前半段原样抽出）：
-    // dock 里有本条目、路径对得上就带回并拉满，返回 true，调用方直接 return；
-    // 归属对不上不碰，返回 false 走 runApp 拆容器起新窗。认证不在这里做，
-    // 调用方带回前先过 czfAuthenticateIfLocked。启动 = 大窗口（3.8.238
-    // 重修：3.8.237 只在 isUsing 门内的带回路上拉满，门一关（isUsing 不同步、
-    // 或归属不明）就落到 runApp 空转、窗还是小的；现改走面板同款 dock+
-    // 路径归属路，isUsing 门不再拦——dock 条目本身就是窗口在跑的证据）。
-    private func czfBringRunningAppToFront() -> Bool {
-        if #available(iOS 16.0, *),
-           let uuid = bannerInstanceUUID() {
-            let dockManager = MultitaskDockManager.shared
-            if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
-                let belongsToOther: Bool
-                if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                    belongsToOther = runningPath != configuration.model.appInfo.relativeBundlePath
-                } else {
-                    belongsToOther = true
-                }
-                if !belongsToOther {
-                    var brought = false
-                    if #available(iOS 16.1, *) {
-                        brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
-                    }
-                    if !brought {
-                        brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
-                    }
-                    // 带回成功拉满；带回失败但条目还在且不是本次
-                    // C4 清掉的死窗（窗已在前台、只是 bring 没抬动）
-                    // 同样拉满，别再静默空转回小窗。
-                    let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == uuid
-                    let entryGone = !dockManager.apps.contains(where: { $0.appUUID == uuid })
-                    if brought || (!cleanedByC4 && !entryGone) {
-                        // maximizeWindow 是切换式，先判 !isMaximized，
-                        // 否则已是最大窗会被反切回小窗。
-                        // 死窗兜底：bring 没抬动、条目还在、但拿不到 VC
-                        // 时不是“窗已在前台”，是死窗——返回 false 走新起，
-                        // 别静默吞掉启动；bring 成功时直接回真。
-                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController {
-                            if !vc.isMaximized {
-                                vc.maximizeWindow()
-                            }
-                            return true
-                        }
-                        return brought
-                    }
-                }
-            } else {
-                // 没有 dock 条目（原生窗口模式等）：保留旧行为，
-                // 只带回不拉满（没 decorated VC 可拉），带回失败
-                // 再落到 runApp。
-                var brought = false
-                if #available(iOS 16.1, *) {
-                    brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
-                }
-                if !brought {
-                    brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
-                }
-                if brought {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
     @objc private func runButtonTapped() {
         if let pressedAt = runControlLongPressAt, Date().timeIntervalSince(pressedAt) < 1.5 {
             runControlLongPressAt = nil
@@ -277,7 +212,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             // 看到内容，人脸一次都不弹。
             guard await self.czfAuthenticateIfLocked() else { return }
             // 带回是 UIKit 活，主线程上做；带回成功直接 return，不再新起。
-            if await MainActor.run(body: { self.czfBringRunningAppToFront() }) { return }
+            // F-4：带回走共用助手（LCAppModel，banner/网格/面板三处共用）。
+            if await MainActor.run(body: { LCAppModel.czfBringRunningAppToFront(self.configuration.model, maximize: true) }) { return }
             // 启动一律大窗口（用户亲定：启动=大窗，小窗口按钮=
             // 小窗，两按钮不得都开小窗）。3.8.277 新3 让启动按
             // 记忆开——上次点过小窗口/最小化，记忆就是 small/
@@ -293,75 +229,10 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             // 不管上次关时大小；小窗/最小化按钮不走这里。
             await MainActor.run {
                 if #available(iOS 16.0, *) {
-                    self.pollAndMaximizeFreshWindow()
+                    // F-4：起完拉满走共用助手（LCAppModel，banner/网格/面板三处共用）。
+                    LCAppModel.czfPollAndMaximizeFreshWindow(app: self.configuration.model)
                 }
             }
-        }
-    }
-
-    // 第 4 条（硬核优化 A 组）事件驱动拉满：窗口进 dock 即由
-    // czfOnWindowAppeared 回调触发尝试，不再 0.1 秒×60 次轮询
-    // 等它出现（上限仍为原来的 6 秒）。回调里 vc 未就绪、或拉
-    // 满被动画重入守卫吞掉（isMaximized 没翻）时，才用 0.1 秒
-    // 延迟链重试到 deadline。归属按路径验，别人的窗口占着
-    // uuid 就停表不碰。启动失败已有 launch 侧 showError，
-    // 这里到期不重复报错。
-    // 返回 true = 已处理完（已拉满，或归属不对停表不再碰）。
-    @available(iOS 16.0, *)
-    private func czfTryMaximizeFreshWindow(uuid: String, expectedPath: String?) -> Bool {
-        guard let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else { return false }
-        let owned: Bool
-        if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-            owned = runningPath == expectedPath
-        } else {
-            owned = false
-        }
-        if !owned { return true }
-        guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
-        if !vc.isMaximized {
-            vc.maximizeWindow()
-        }
-        return vc.isMaximized
-    }
-
-    @available(iOS 16.0, *)
-    private func czfRetryMaximizeFreshWindow(uuid: String, expectedPath: String?, deadline: Date) {
-        guard !czfTryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath) else { return }
-        guard Date() < deadline else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
-        }
-    }
-
-    // 容器还没建出来（uuid 为空）时等容器出现再注册窗口回调，
-    // 上限 6 秒（原轮询同款预算）；等不到就停，不报错。
-    @available(iOS 16.0, *)
-    private func czfWaitUUIDThenMaximizeFreshWindow(deadline: Date, expectedPath: String?) {
-        if let uuid = self.bannerInstanceUUID() {
-            MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: max(0, deadline.timeIntervalSinceNow)) { [weak self] in
-                self?.czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
-            }
-            return
-        }
-        guard Date() < deadline else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.czfWaitUUIDThenMaximizeFreshWindow(deadline: deadline, expectedPath: expectedPath)
-        }
-    }
-
-    // 启动新开路拉满（3.8.240）：runApp 起完新窗可能还没进
-    // dock（签名耗时），窗口出现由 czfOnWindowAppeared 回调
-    // 触发拉满（见上）；uuid 为空（容器未建）时先等容器出现。
-    @available(iOS 16.0, *)
-    private func pollAndMaximizeFreshWindow() {
-        let expectedPath = configuration.model.appInfo.relativeBundlePath
-        let deadline = Date().addingTimeInterval(6)
-        guard let uuid = self.bannerInstanceUUID() else {
-            czfWaitUUIDThenMaximizeFreshWindow(deadline: deadline, expectedPath: expectedPath)
-            return
-        }
-        MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: 6) { [weak self] in
-            self?.czfRetryMaximizeFreshWindow(uuid: uuid, expectedPath: expectedPath, deadline: deadline)
         }
     }
 
@@ -389,36 +260,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // banner，入口不同但语义照抄面板的 minimizeOpenApp /
     // smallWindowOpenApp：已在运行按实例 UUID 找 dock 条目、
     // 验相对路径归属；未运行先启动再最小化/还原小窗。
-    // 实例 UUID 取选中容器的 folderName（与 runButtonTapped 的
-    // currentDataFolder 同款），dataUUID 作回落。
-
-    private func bannerInstanceUUID() -> String? {
-        configuration.model.uiSelectedContainer?.folderName ?? configuration.model.appInfo.dataUUID
-    }
-
-    // 面板 private 的 unmaximizeWindow 同款（那边是 AllAppsListView
-    // 私有方法，本卡调不到，照抄三行）：窗口已最大化时点一下
-    // 还原成小窗；静态方法，不捕获 self，回调里可直接调。
-    @available(iOS 16.0, *)
-    private static func unmaximizeWindow(uuid: String) {
-        guard let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
-              let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
-              vc.isMaximized else { return }
-        vc.maximizeWindow()
-    }
-
-    // 小窗口回落路专用（3.8.239）：czfOnWindowAppeared 是“同 uuid
-    // 条目已存在就立即回调”、不验归属——同容器被别的条目占着时，
-    // 回调会把别人的窗口还原成小窗。动作前再按路径复验一次，
-    // 对不上/验不出就什么都不做，别动别人的窗口。
-    @available(iOS 16.0, *)
-    private static func unmaximizeWindowIfOwned(uuid: String, expectedPath: String?) {
-        guard let expectedPath,
-              let runningApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
-              let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty,
-              runningPath == expectedPath else { return }
-        unmaximizeWindow(uuid: uuid)
-    }
+    // F-4/F-10：实例 UUID、带回、拉满、还原小窗、最小化/小窗口
+    // 全走 LCAppModel 的共用助手（banner/网格/面板三处共用），
+    // 本卡只留按钮接线与认证、记偏好、容器删光重进三件本卡事。
+    // 实例 UUID = 选中容器 folderName 优先、dataUUID 回落
+    // （LCAppModel.czfInstanceUUID）。
 
     // 未运行分支的启动（含锁屏认证，与本卡 runApp 同款逻辑，
     // 只多一个 containerFolderName 参数，面板两路都带它；
@@ -449,14 +295,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；60 次内没出现就停（启动失败已由
         // launch 侧 showError，不在这里重复报错）。
-        guard let uuid = bannerInstanceUUID() else {
+        guard configuration.model.czfInstanceUUID != nil else {
             Task { [weak self] in
                 await self?.launchForAux(multitask: nil, containerFolderName: nil)
             }
             var attempts = 0
             Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
                 attempts += 1
-                if self?.bannerInstanceUUID() != nil {
+                if self?.configuration.model.czfInstanceUUID != nil {
                     timer.invalidate()
                     self?.minimizeButtonTapped()
                 } else if attempts >= 60 {
@@ -465,33 +311,26 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             }
             return
         }
-        let dockManager = MultitaskDockManager.shared
-        // 已在运行：归属对不上（共用容器的别的条目）不碰它，
-        // 落到下面启动分支起自己的窗口；归属不明按启动/小窗口
-        // 路同款视为别的条目（?? true），不再直接最小化。
-        if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
-            let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != configuration.model.appInfo.relativeBundlePath } ?? true
-            if !belongsToOther {
-                dockManager.minimizeWindow(uuid: uuid)
-                return
-            }
-        }
-        // 未运行：第 4 条——先注册窗口出现回调、再启动（小窗口路
-        // C6 同款顺序），窗口出现即最小化；轮询只认归属对得上
-        // 的条目，别人的窗口占着 uuid 时不碰它（自己的新窗若
-        // 拆容器会换 uuid，等这个 uuid 也等不来）。上限 6 秒
-        // （原轮询同款预算），超时未出现直接放弃、不报错。
-        let expectedPath = configuration.model.appInfo.relativeBundlePath
-        dockManager.czfOnWindowAppeared(uuid: uuid, timeout: 6) {
-            if let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) {
-                let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == expectedPath } ?? false
-                if owned {
-                    MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
+        // F-10：运行中分支不要认证（最小化不露内容）：先试，成了
+        // 直接回；未运行才要认证（小窗口路同款重进，过了重进本函数，
+        // 此时 isHiddenAppUnlocked 已置，不重复弹）。
+        if LCAppModel.czfMinimizeRunningWindow(configuration.model) { return }
+        if configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked {
+            Task { [weak self] in
+                guard let self else { return }
+                if await self.czfAuthenticateIfLocked() {
+                    await MainActor.run { self.minimizeButtonTapped() }
                 }
             }
+            return
         }
+        // F-10：最小化走共用助手（LCAppModel，banner/面板共用）；
+        // 未运行分支启动完重读 uuid、换号重等（F-3），6 秒超时报一次。
         Task { [weak self] in
-            await self?.launchForAux(multitask: nil, containerFolderName: uuid)
+            guard let self else { return }
+            await LCAppModel.czfMinimizeApp(self.configuration.model, onError: { [weak self] msg in
+                self?.showError(msg)
+            })
         }
     }
 
@@ -516,14 +355,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；60 次内没出现就停（启动失败已由
         // launch 侧 showError）。
-        guard let uuid = bannerInstanceUUID() else {
+        guard configuration.model.czfInstanceUUID != nil else {
             Task { [weak self] in
                 await self?.launchForAux(multitask: true, containerFolderName: nil)
             }
             var attempts = 0
             Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
                 attempts += 1
-                if self?.bannerInstanceUUID() != nil {
+                if self?.configuration.model.czfInstanceUUID != nil {
                     timer.invalidate()
                     self?.smallWindowButtonTapped()
                 } else if attempts >= 60 {
@@ -532,44 +371,13 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             }
             return
         }
-        let dockManager = MultitaskDockManager.shared
-        // 已在运行：归属不明一律视为别的条目（面板同款），不顶
-        // 窗口、直接落到启动分支；带回成功还原小窗，带回失败
-        // 且条目不是本次清掉的死窗、也没消失时同样只还原不重起。
-        if let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }) {
-            let belongsToOther: Bool
-            if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                belongsToOther = runningPath != configuration.model.appInfo.relativeBundlePath
-            } else {
-                belongsToOther = true
-            }
-            if !belongsToOther {
-                let brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
-                if brought {
-                    Self.unmaximizeWindow(uuid: uuid)
-                    return
-                }
-                let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == uuid
-                let entryGone = !dockManager.apps.contains(where: { $0.appUUID == uuid })
-                if !cleanedByC4 && !entryGone {
-                    Self.unmaximizeWindow(uuid: uuid)
-                    return
-                }
-            }
-        }
-        // 未运行：先注册窗口出现回调、再启动（面板 C6 同款顺序），
-        // 窗出来 0.35 秒后还原为小窗；30 秒未出现放弃，不留野观察者。
-        // 回调动作前按路径复验归属（L5）：同 uuid 条目已存在时回调
-        // 立即触发、不验归属——占着 uuid 的若是别人的窗口，复验
-        // 拦住，别把别人的窗口还原成小窗。
-        let expectedPath = configuration.model.appInfo.relativeBundlePath
-        dockManager.czfOnWindowAppeared(uuid: uuid, timeout: 30) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                Self.unmaximizeWindowIfOwned(uuid: uuid, expectedPath: expectedPath)
-            }
-        }
+        // F-10：小窗口走共用助手（LCAppModel，banner/面板共用）；
+        // 未运行分支启动完重读 uuid、换号重等（F-3），30 秒超时报一次。
         Task { [weak self] in
-            await self?.launchForAux(multitask: true, containerFolderName: uuid)
+            guard let self else { return }
+            await LCAppModel.czfSmallWindowApp(self.configuration.model, onError: { [weak self] msg in
+                self?.showError(msg)
+            })
         }
     }
 

@@ -3623,31 +3623,15 @@ struct AllAppsListView: View {
                 await MainActor.run { reportLaunchError("认证未通过，未打开「\(app.appInfo.displayName() ?? "App")」") }
                 return
             }
-            if let runningApp = dockManager.apps.first(where: { $0.appUUID == app.appInfo.dataUUID }) {
-                // 窗口必须属于本条目：同包名别的条目若共用容器，
-                // 按 dataUUID 找会把别人的窗口顶回来；归属对不上
-                // 就不顶，走下面 URL 启动，runApp 里会拆共享容器。
-                // runningApp 存在却无法证明归属（appInfo 缺失或路径
-                // 为空）时同样视为未知，一律不顶；宁可多起一个窗口，
-                // 不顶错别人的。
-                let belongsToOther: Bool
-                if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                    belongsToOther = runningPath != app.appInfo.relativeBundlePath
-                } else {
-                    belongsToOther = true
-                }
-                if !belongsToOther {
-                    let brought = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                    // 面板带回也拉满（卡片 3.8.238 同款语义，启动=
-                    // 大窗口）：带回成功且窗口未最大化时拉满；带回
-                    // 失败照原样关面板返回，不改落空路径；新开路
-                    // 在 3.8.240 已拉满，这里不动。
-                    if brought, let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController, !vc.isMaximized {
-                        vc.maximizeWindow()
-                    }
-                    closePanel()
-                    return
-                }
+            // F-4：带回走共用助手（LCAppModel，banner/网格/面板三处共用：
+            // 选中容器优先、死窗兜底同样拉满）。带回成功关面板返回；
+            // 失败落到下面新起。旧行为差异：原来带回失败也关面板返回
+            // （不新起）；现与 banner/网格一致，带回失败走 runApp 新起——
+            // 带回失败时窗口顶不回来，静默关面板等于“点了没反应”，
+            // 新起至少能把 App 打开。
+            if LCAppModel.czfBringRunningAppToFront(app, maximize: true) {
+                closePanel()
+                return
             }
             // 跳错修复：非运行实例不再走只带包名的 URL（那边按包名
             // 取首个模型，点第 2 个实例必开第 1 个），改走模型直启，
@@ -3655,12 +3639,15 @@ struct AllAppsListView: View {
             // 前台路径一字不动。
             closePanel()
             do {
-                try await app.runApp(containerFolderName: app.appInfo.dataUUID)
+                // F-4：runApp 的容器与带回查 dock 用同一 uuid（选中
+                // 容器优先），与 banner 的 launchForAux 一致。
+                try await app.runApp(containerFolderName: app.czfInstanceUUID)
                 // 新开路拉满（3.8.240）：面板启动同款，起完等窗进
                 // dock 再拉满一次，不管上次关时大小；在跑的顶回
                 // 前台那条路（上面）不动，不改面板点按聚焦行为。
+                // F-4：拉满走共用助手（重试上限统一 6 秒，原来 2 秒）。
                 await MainActor.run {
-                    self.pollAndMaximizeFreshWindow(app: app)
+                    LCAppModel.czfPollAndMaximizeFreshWindow(app: app)
                 }
             } catch {
                 await MainActor.run { reportLaunchError(error.localizedDescription) }
@@ -3668,186 +3655,48 @@ struct AllAppsListView: View {
         }
     }
 
-    // 启动新开路拉满（3.8.240，面板版）：第 4 条——窗口出现由
-    // czfOnWindowAppeared 回调触发拉满，不再 0.1 秒×60 次轮询
-    // 等新窗进 dock（上限仍为原来的 6 秒）；回调里 vc 未就绪、
-    // 或拉满被动画重入守卫吞掉时，才用 0.1 秒延迟链重试，上限
-    // 2 秒（原 vc 分支 20 次同款预算）。归属按路径验。
-    private func pollAndMaximizeFreshWindow(app: LCAppModel) {
-        guard let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID else { return }
-        dockManager.czfOnWindowAppeared(uuid: uuid, timeout: 6) {
-            self.czfRetryMaximizeFreshWindow(app: app)
-        }
-    }
-
-    // 返回 true = 已处理完（已拉满，或归属不对停表不再碰）。
-    // uuid 每次重取：容器中途换了就跟新值，原轮询同款语义。
-    private func czfTryMaximizeFreshWindow(app: LCAppModel) -> Bool {
-        let expectedPath = app.appInfo.relativeBundlePath
-        guard let uuid = app.uiSelectedContainer?.folderName ?? app.appInfo.dataUUID,
-              let entry = self.dockManager.apps.first(where: { $0.appUUID == uuid }) else { return false }
-        let owned: Bool
-        if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-            owned = runningPath == expectedPath
-        } else {
-            owned = false
-        }
-        if !owned { return true }
-        guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
-        if !vc.isMaximized {
-            vc.maximizeWindow()
-        }
-        return vc.isMaximized
-    }
-
-    private func czfRetryMaximizeFreshWindow(app: LCAppModel) {
-        let deadline = Date().addingTimeInterval(2)
-        czfRetryMaximizeFreshWindow(app: app, deadline: deadline)
-    }
-
-    private func czfRetryMaximizeFreshWindow(app: LCAppModel, deadline: Date) {
-        guard !czfTryMaximizeFreshWindow(app: app) else { return }
-        guard Date() < deadline else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.czfRetryMaximizeFreshWindow(app: app, deadline: deadline)
-        }
-    }
-    
     private func minimizeOpenApp(_ app: LCAppModel) {
-        guard let dataUUID = app.appInfo.dataUUID else { return }
+        // 实例 UUID 为空（容器删光且未重建）直接返回，面板不关；
+        // 助手内也会再判一次，这里先拦住，免得先弹人脸再发现没 uuid。
+        guard app.czfInstanceUUID != nil else { return }
         // F-1：先认证、通过再往下走；认证失败经 reportLaunchError 回显、面板不关。
         Task {
             guard await app.czfAuthenticateIfLocked() else {
                 await MainActor.run { reportLaunchError("认证未通过，未打开「\(app.appInfo.displayName() ?? "App")」") }
                 return
             }
-            // 如果已在运行，直接最小化它的窗口；归属不明按启动/
-            // 小窗口路同款视为别的条目（?? true），不再直接最小化。
-            if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-                let belongsToOther = runningApp.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 != app.appInfo.relativeBundlePath } ?? true
-                if !belongsToOther {
-                    dockManager.minimizeWindow(uuid: runningApp.appUUID)
-                    closePanel()
-                    return
-                }
-            }        // 未运行：先启动，延迟后最小化窗口
-            closePanel()
-            // 跳错修复：未运行实例不再走只带包名的 URL（按包名取
-            // 首个模型，点的实例若非首个会被开错），改走模型直启；
-            // 下面按 dataUUID 等窗口出现的逻辑一字不动；上面运行
-            // 分支的归属守卫一字不动。
-            // 主线程等窗口出现后最小化：第 4 条——先注册窗口出现回调、
-            // 再启动（小窗口路 C6 同款顺序），窗口出现即最小化；只认
-            // 归属对得上的条目，别人的窗口占着 uuid 时不碰它（自己
-            // 的新窗若拆容器会换 uuid，等这个 uuid 也等不来）。
-            // 轮询到期给提示（原轮询同款）：6 秒内没等到窗口才报
-            // “最小化超时”，文案只说没等到窗口、不定性为启动失败。
-            var czfMinimizeDone = false
-            dockManager.czfOnWindowAppeared(uuid: dataUUID, timeout: 6) {
-                if let entry = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-                    let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == app.appInfo.relativeBundlePath } ?? false
-                    if owned {
-                        dockManager.minimizeWindow(uuid: dataUUID)
-                    }
-                }
-                czfMinimizeDone = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-                if !czfMinimizeDone {
-                    self.reportLaunchError("最小化超时：6 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试")
-                }
-            }
-            do {
-                try await app.runApp(containerFolderName: dataUUID)
-            } catch {
-                // 启动已报错就别让 6 秒后的超时再报一次“最小化
-                // 超时”盖掉真错：先把完成旗置了，超时闭包不再报。
-                await MainActor.run {
-                    czfMinimizeDone = true
-                    reportLaunchError(error.localizedDescription)
-                }
-            }
+            // F-10：最小化走共用助手（LCAppModel，banner/面板共用）；
+            // 关面板由助手内的 onProceed 在 uuid 验过后立刻调一次
+            // （与原来“先关面板再启动”一致，运行中分支同样只关这一次）。
+            await LCAppModel.czfMinimizeApp(app, onError: { msg in
+                reportLaunchError(msg)
+            }, onProceed: {
+                closePanel()
+            })
         }
     }
 
     // 直接以小窗口（多任务）打开：窗口若被设置成最大化打开，还原成小窗口尺寸
     private func smallWindowOpenApp(_ app: LCAppModel) {
-        guard let dataUUID = app.appInfo.dataUUID else { return }
+        // 实例 UUID 为空（容器删光且未重建）直接返回，面板不关；
+        // 助手内也会再判一次，这里先拦住，免得先弹人脸再发现没 uuid。
+        guard app.czfInstanceUUID != nil else { return }
         // F-1：先认证、通过再往下走；认证失败经 reportLaunchError 回显、面板不关。
         Task {
             guard await app.czfAuthenticateIfLocked() else {
                 await MainActor.run { reportLaunchError("认证未通过，未打开「\(app.appInfo.displayName() ?? "App")」") }
                 return
             }
-            // 已在运行：把它的窗口带到前面，并还原为小窗口
-            if let runningApp = dockManager.apps.first(where: { $0.appUUID == dataUUID }) {
-                // runningApp 存在却无法证明归属（appInfo 缺失或路径
-                // 为空）时视为未知，一律不顶窗口，交给 runApp 起新
-                // 窗口；宁可多起一个窗口，不顶错别人的。
-                let belongsToOther: Bool
-                if let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty {
-                    belongsToOther = runningPath != app.appInfo.relativeBundlePath
-                } else {
-                    belongsToOther = true
-                }
-                if !belongsToOther {
-                    let brought = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                    if brought {
-                        unmaximizeWindow(uuid: dataUUID)
-                        closePanel()
-                        return
-                    }
-                    // 带回失败：条目还在且不是本次 C4 清掉的（窗口
-                    // 不在任何窗口里等）→ 保持旧行为，不重复起新窗；
-                    // 本次 C4 清掉了死窗，或 prune 同步剪掉了无窗残
-                    // 留（条目已不在）→ 落到下面 runApp 起新窗（即
-                    // 重启入口）。注意不能只查条目在不在：C4 的
-                    // removeRunningApp 是异步的，刚调完时条目还在。
-                    let cleanedByC4 = dockManager.czfLastBringCleanedDeadWindowUUID == dataUUID
-                    let entryGone = !dockManager.apps.contains(where: { $0.appUUID == dataUUID })
-                    if !cleanedByC4 && !entryGone {
-                        unmaximizeWindow(uuid: dataUUID)
-                        closePanel()
-                        return
-                    }
-                }
-            }
-            closePanel()
-            // C6 回调驱动：先注册、再启动——窗口出现（dock 条目
-            // 追加）才还原为小窗，不再 0.3 秒×30 次轮询、9 秒过期；
-            // 启动慢（签名/VPN/JIT）时窗出来仍能还原。30 秒未出现
-            // 则放弃等，不留野观察者；还原前仍留 0.35 秒让窗落稳。
-            // 还原前按路径复验归属（L5）：同 uuid 条目已存在时回调
-            // 立即触发、不验归属——占着 uuid 的若是别人的窗口，复验
-            // 拦住，别把别人的窗口还原成小窗。
-            let expectedPath = app.appInfo.relativeBundlePath
-            dockManager.czfOnWindowAppeared(uuid: dataUUID, timeout: 30) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    self.unmaximizeWindowIfOwned(uuid: dataUUID, expectedPath: expectedPath)
-                }
-            }
-            do {
-                try await app.runApp(multitask: true, containerFolderName: dataUUID)
-            } catch {
-                await MainActor.run { reportLaunchError(error.localizedDescription) }
-            }
+            // F-10：小窗口走共用助手（LCAppModel，banner/面板共用）；
+            // 关面板由助手内的 onProceed 在 uuid 验过后立刻调一次
+            // （与原来“先关面板再启动”一致，运行中分支同样只关这一次）。
+            // 原来 30 秒未出现静默放弃，现到期报一次小窗口超时（F-3）。
+            await LCAppModel.czfSmallWindowApp(app, onError: { msg in
+                reportLaunchError(msg)
+            }, onProceed: {
+                closePanel()
+            })
         }
-    }
-
-    private func unmaximizeWindow(uuid: String) {
-        guard let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }),
-              let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
-              vc.isMaximized else { return }
-        vc.maximizeWindow()
-    }
-
-    // 小窗口回落路专用（3.8.239）：见卡片同款 helper 注释。
-    private func unmaximizeWindowIfOwned(uuid: String, expectedPath: String?) {
-        guard let expectedPath,
-              let runningApp = dockManager.apps.first(where: { $0.appUUID == uuid }),
-              let runningPath = runningApp.appInfo?.relativeBundlePath, !runningPath.isEmpty,
-              runningPath == expectedPath else { return }
-        unmaximizeWindow(uuid: uuid)
     }
 }
 
