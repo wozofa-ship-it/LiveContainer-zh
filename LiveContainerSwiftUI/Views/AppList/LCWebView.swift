@@ -39,8 +39,13 @@ struct LCWebView: View {
     
     var itmsServicesHandler: ((String) async -> Void)?
     
-    init(url: Binding<URL>, isPresent: Binding<Bool>, itmsServicesHandler: ((String) async -> Void)? = nil) {
-        self._webView = State(initialValue: WebView())
+    // 恢复打开的网页：复用最小化时存下的 WebView，不重建、
+    // 不重载（页面、滚动位置、登录态都在）。新开网页时为 false。
+    private let isRestoredWebView: Bool
+
+    init(url: Binding<URL>, isPresent: Binding<Bool>, itmsServicesHandler: ((String) async -> Void)? = nil, existingWebView: WebView? = nil) {
+        self._webView = State(initialValue: existingWebView ?? WebView())
+        self.isRestoredWebView = existingWebView != nil
         self._url = url
         self._isPresent = isPresent
         self.itmsServicesHandler = itmsServicesHandler
@@ -78,7 +83,13 @@ struct LCWebView: View {
             if !didAppear {
                 onViewAppear()
                 didAppear = true
-                webView.loadURL(url: url)
+                // 恢复的网页不重载：WKWebView 里页面还在，重载会丢滚动位置。
+                if !isRestoredWebView {
+                    webView.loadURL(url: url)
+                }
+                // 恢复打开后，共享处的不再算“已最小化”，浮动按钮收掉。
+                sharedModel.czfMinimizedWebView = nil
+                sharedModel.czfMinimizedWebURL = nil
             }
         }
         .sheet(isPresented: $showShareSheet) {
@@ -126,7 +137,21 @@ struct LCWebView: View {
     // 也可能解析不到呈现。第三条直接走 UIKit：找前台 scene 里
     // 有已呈现控制器的窗口，沿 presentedViewController 走到最上层
     // 关掉。三条同指一个呈现，后面的都是空操作，不会重复关。
+    // 关掉并丢弃：最小化存着的页面也清掉（不再恢复）。
     private func close() {
+        sharedModel.czfMinimizedWebView = nil
+        sharedModel.czfMinimizedWebURL = nil
+        isPresent = false
+        dismiss()
+        czfDismissTopmostPresented()
+    }
+
+    // 最小化：把当前 WebView 与 URL 存到共享处（页面不销毁，
+    // 滚动位置、登录态都在），再关弹窗。App 页上出现浮动按钮，
+    // 点它即最大化（带着原页面回来）。只留一个最小化网页。
+    private func minimize() {
+        sharedModel.czfMinimizedWebView = webView
+        sharedModel.czfMinimizedWebURL = currentURL
         isPresent = false
         dismiss()
         czfDismissTopmostPresented()
@@ -155,6 +180,15 @@ struct LCWebView: View {
                 close()
             } label: {
                 Image(systemName: "xmark")
+                    .font(.system(size: 17, weight: .medium))
+                    .frame(width: 44, height: 44)
+                    .modifier(LCWebViewGlassBackground(shape: Circle(), isInteractive: true))
+            }
+            // 最小化：收起网页、页面不销毁，App 页浮动按钮点回即最大化。
+            Button {
+                minimize()
+            } label: {
+                Image(systemName: "minus")
                     .font(.system(size: 17, weight: .medium))
                     .frame(width: 44, height: 44)
                     .modifier(LCWebViewGlassBackground(shape: Circle(), isInteractive: true))

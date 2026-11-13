@@ -54,6 +54,11 @@ struct LCPath {
 
 class SharedModel: ObservableObject {
     @Published var selectedTab: LCTabIdentifier = .apps
+    // 最小化的网页：WKWebView 存在这里，弹窗关了页面也不销毁，
+    // 点浮动按钮再打开时直接复用（滚动位置、登录态都在）。
+    // 只有一个网页能最小化（再开新网页时旧的被顶掉）。
+    @Published var czfMinimizedWebView: WebView? = nil
+    @Published var czfMinimizedWebURL: URL? = nil
     // R-1：App 页盾牌菜单“前往 VPN 设置”的切分段触发器——
     // VPN 已搬到模块页（LCTweaksView 的 .vpn 分段），光切
     // .tweaks 还落在默认的“本机”分段。按钮置 .tweaks 的同时

@@ -1993,7 +1993,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .fullScreenCover(isPresented: $webViewOpened) {
             LCWebView(url: $webViewURL, isPresent: $webViewOpened, itmsServicesHandler: { urlStr in
                 await installFromPlist(urlStr: urlStr)
-            })
+            }, existingWebView: sharedModel.czfMinimizedWebView)
         }
         .fullScreenCover(isPresented: $safariViewOpened) {
             SafariView(url: $safariViewURL)
@@ -2006,6 +2006,40 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .sheet(isPresented: $sortSchemesViewPresent) {
             LCAppSortSchemesView()
+        }
+        // 最小化的网页浮动按钮：点它即最大化（带着原页面回来）；
+        // 小 X 直接丢弃最小化的页面，不打开。网页打开时不显示。
+        .overlay(alignment: .bottomTrailing) {
+            if let minimizedURL = sharedModel.czfMinimizedWebURL, sharedModel.czfMinimizedWebView != nil, !webViewOpened {
+                HStack(spacing: 0) {
+                    Button {
+                        webViewURL = minimizedURL
+                        webViewOpened = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "globe")
+                            Text(minimizedURL.host ?? minimizedURL.absoluteString)
+                                .lineLimit(1)
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                    }
+                    Button {
+                        sharedModel.czfMinimizedWebView = nil
+                        sharedModel.czfMinimizedWebURL = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(width: 28, height: 28)
+                    }
+                    .padding(.trailing, 6)
+                }
+                .background(.regularMaterial, in: Capsule())
+                .shadow(radius: 4)
+                .padding(.trailing, 16)
+                .padding(.bottom, 12)
+            }
         }
     }
 
@@ -2215,6 +2249,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             
             return
         }
+        // 新开网页时，之前最小化的网页被顶掉（只留一个最小化网页）。
+        sharedModel.czfMinimizedWebView = nil
+        sharedModel.czfMinimizedWebURL = nil
         webViewURL = urlToOpen.url!
         if webViewOpened {
             webViewOpened = false
