@@ -1518,7 +1518,14 @@ struct LCSourcesView: View {
             if !fm.fileExists(atPath: folderURL.path) {
                 try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
             }
-            let destURL = folderURL.appendingPathComponent(url.lastPathComponent)
+            // 裸域名链接 lastPathComponent 为空，destURL 会是文件夹本身，
+            // 前面 removeItem 会删整个插件文件夹；照 downloadVersion 同款
+            // 兜底，空名用 tweak.dylib。
+            var fileName = url.lastPathComponent
+            if fileName.isEmpty {
+                fileName = "tweak.dylib"
+            }
+            let destURL = folderURL.appendingPathComponent(fileName)
             if fm.fileExists(atPath: destURL.path) {
                 try fm.removeItem(at: destURL)
             }
@@ -2046,7 +2053,9 @@ struct LCSourceAppBanner: View {
     
     private var isPluginInstalled: Bool {
         guard let downloadURL = app.latestVersion?.downloadURL,
-              downloadURL.pathExtension.lowercased() == "dylib" else { return false }
+              downloadURL.pathExtension.lowercased() == "dylib",
+              // 空文件名时拼接出的就是文件夹本身，文件夹在就误报“已装”。
+              !downloadURL.lastPathComponent.isEmpty else { return false }
         // 低 #10：文件夹名与 installTweak 同款“名-包名”；老版只
         // 有 app.name 的文件夹也认（已装的插件不用重装）。
         let newURL = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(downloadURL.lastPathComponent)
@@ -2663,6 +2672,11 @@ private final class CZFSourceIconCache {
     private func store(_ image: UIImage, forKey key: NSString) {
         memory.setObject(image, forKey: key, cost: Self.pixelCost(of: image))
     }
+    // O-32：在途合并——同一 URL 已在下载时不再另起一个下载，
+    // 等同一个任务的结果回来。ioQueue（串行）顺带 guard 这张表，
+    // 与磁盘读写共用一把锁；下载任务里只调 ioQueue.async 写盘，
+    // 不嵌套 sync，不会死锁。
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
     func load(url: URL) async -> UIImage? {
         let key = url.absoluteString as NSString
         if let hit = memory.object(forKey: key) { return hit }
@@ -2676,18 +2690,30 @@ private final class CZFSourceIconCache {
         // 图标走 hostSession：代理开时经节点取（URLSession.shared
         // 绕开代理、图标一直灰占位）；代理关时 hostSession() 回落
         // .shared，行为不变。
-        guard let (data, _) = try? await CZFVPNManager.hostSession().data(from: url),
-              let img = Self.decodedImage(from: data) else { return nil }
-        store(img, forKey: key)
-        if let dest = diskURL(for: url) {
-            ioQueue.async {
-                try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try? data.write(to: dest, options: .atomic)
-                // 写完顺手剪掉最旧的，磁盘文件数不超过上限。
-                Self.pruneDisk(base: dest.deletingLastPathComponent(), maxCount: Self.diskMaxCount)
+        let task: Task<UIImage?, Never> = ioQueue.sync {
+            if let existing = inFlight[url.absoluteString] {
+                return existing
             }
+            let newTask = Task<UIImage?, Never> {
+                guard let (data, _) = try? await CZFVPNManager.hostSession().data(from: url),
+                      let img = Self.decodedImage(from: data) else { return nil }
+                self.store(img, forKey: key)
+                if let dest = self.diskURL(for: url) {
+                    self.ioQueue.async {
+                        try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try? data.write(to: dest, options: .atomic)
+                        // 写完顺手剪掉最旧的，磁盘文件数不超过上限。
+                        Self.pruneDisk(base: dest.deletingLastPathComponent(), maxCount: Self.diskMaxCount)
+                    }
+                }
+                return img
+            }
+            inFlight[url.absoluteString] = newTask
+            return newTask
         }
-        return img
+        let result = await task.value
+        ioQueue.sync { inFlight.removeValue(forKey: url.absoluteString) }
+        return result
     }
 
     // 磁盘文件按修改时间验 30 天 TTL（见 load）。

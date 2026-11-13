@@ -2892,7 +2892,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         do {
-            let (data, _) = try await CZFVPNManager.hostSession().data(from: plistUrl)
+            let (data, response) = try await CZFVPNManager.hostSession().data(from: plistUrl)
+            // URLSession.data 只在传输错误时抛，HTTP 4xx/5xx 也会落盘
+            // 成“plist”再解析；先验状态，非 2xx 按 DownloadDelegate
+            // 同款文案抛错，别把 404 错误页报成“plist 解析失败”误导排查。
+            if let httpResponse = response as? HTTPURLResponse,
+               !(200...299).contains(httpResponse.statusCode) {
+                throw NSError(domain: "", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回 \(httpResponse.statusCode)"])
+            }
             
             guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
                   let items = plist["items"] as? [[String: Any]],

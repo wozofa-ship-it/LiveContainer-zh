@@ -106,9 +106,12 @@ final class CZFLocalIpaFolderModel: ObservableObject {
 
     let folderURL: URL
     private var didStartAccessing = false
-    // 详情解包任务（安装审计 #5 / App #15）：分块任务组限流
-    // 3 个并发；弹窗关闭时 cancelDetailTasks() 取消它。
+    // O-30 文件夹懒加载：详情解包任务——单任务按想要详情的
+    // 项 3 个一组并行解包；弹窗关闭时 cancelDetailTasks() 取消它。
     private var detailTask: Task<Void, Never>?
+    // O-30：想要详情的项 id 队列（格子滚到眼前时 onAppear
+    // 推进来），按推进顺序解包；不在队里的不解，不浪费 CPU。
+    private var wantedDetailIDs: [UUID] = []
     // 弹窗已关/已取消刷新时为真：在后台解包跑完回主线程前
     // 再拦一道，拦住已失效的旧解包刷进新列表。
     private var detailsCancelled = false
@@ -131,24 +134,24 @@ final class CZFLocalIpaFolderModel: ObservableObject {
 
     // 弹窗关闭时取消未完成的解包（安装审计 #5 / App #15）：
     // 组内未开始的解包不再启动；在途的解包跑完后被
-    // detailsCancelled 拦住，不再刷进列表。
+    // detailsCancelled 拦住，不再刷进列表。O-30：想要详情的
+    // 队列也清掉，下次出现格子 onAppear 重新推进。
     func cancelDetailTasks() {
         detailsCancelled = true
+        wantedDetailIDs.removeAll()
         detailTask?.cancel()
         detailTask = nil
     }
 
     func scan() {
         // O-5 扫前短路（模型上移与扫前短路二选一，选这个）：
-        // 文件夹未变且已有列表，直接返回，不重扫。但切走时
-        // onDisappear 取消过详情任务，没读完的详情要续上，
-        // 否则没详情的行永远没名字没图标；正在扫时不续，
-        // 等这次扫完统一刷。
+        // 文件夹未变且已有列表，直接返回，不重扫。O-30：切走
+        // 时 onDisappear 取消过详情任务，没读完的详情不用续上
+        // 全量解包——格子再出现时 onAppear 按需推进，没读完
+        // 的行自己会补上。这里必须把 detailsCancelled 清掉，
+        // 不然 onAppear 推进来的详情全被 guard 拦住、永远不读。
         if folderURL == lastScannedFolderURL, !items.isEmpty {
-            if !scanning, detailTask == nil, items.contains(where: { !$0.detailLoaded }) {
-                detailsCancelled = false
-                detailTask = Task { await loadAllDetails() }
-            }
+            detailsCancelled = false
             return
         }
         lastScannedFolderURL = folderURL
@@ -206,9 +209,9 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                 )
             }
             scanning = false
-            // 名字和图标逐个在后台解包读，读好一行刷一行；
-            // 文件名先顶着，不用等全部解完才显示列表。
-            detailTask = Task { await loadAllDetails() }
+            // O-30：扫完不再全量解包所有 IPA（100 个包就要解
+            // 100 次，打开文件夹卡半天）。文件名先顶着，详情
+            // 由格子滚到眼前时 onAppear 按需推进。
         }
     }
 
@@ -239,41 +242,51 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         }
     }
 
+    // O-30 文件夹懒加载：格子滚到眼前时 onAppear 调这里，
+    // 把想要详情的项推进队里；已读过、已在队里、已取消的
+    // 不再推进。单任务按 3 个一组并行解包（安装审计 #5 /
+    // App #15 同款限流），不在队里的不解。
+    // 顺序按文件名定（扫完已按文件名排好），详情读回来只
+    // 改显示名/版本/图标，不重排——滚动中重排会跳格；
+    // App #28 的“读完按显示名重排”随全量解包一起去掉。
+    func loadDetailIfNeeded(for item: CZFLocalIpaItem) {
+        guard !detailsCancelled,
+              items.contains(where: { $0.id == item.id && !$0.detailLoaded }),
+              !wantedDetailIDs.contains(item.id) else { return }
+        wantedDetailIDs.append(item.id)
+        if detailTask == nil {
+            detailTask = Task { await processWantedDetails() }
+        }
+    }
+
     // 详情解包限流 3 个并发（安装审计 #5 / App #15）：
     // 抄 LCAltStoreSourcesView.refreshAllSources 的分块任务组
     // 写法，每 3 个一组并行解包，组间顺序等；100 个 IPA
     // 不再是 100 个并发解压。取消时组内未开始的解包不再
     // 启动（Task.isCancelled 守卫），在途的解包由
     // loadDetails 里的 detailsCancelled 拦住不刷表。
-    // 全部读完后按显示名重排一次（App #28）。
-    private func loadAllDetails() async {
+    // 队空了就停，下次格子出现再推进。
+    private func processWantedDetails() async {
         // O-16：缓存键用相对文件夹根的相对路径，根传给
         // loadDetails（后台解包任务里直接用，不回主线程取）。
         let root = folderURL
-        var start = 0
-        while start < items.count {
+        while !wantedDetailIDs.isEmpty {
             if Task.isCancelled { return }
-            let chunk = Array(items[start..<min(start + 3, items.count)])
+            let chunk = Array(wantedDetailIDs.prefix(3))
+            wantedDetailIDs.removeFirst(min(3, wantedDetailIDs.count))
+            // 只处理还在列表里、还没读过详情的项（重扫重建后
+            // 旧 id 可能已不在列表里）。
+            let targets = chunk.compactMap { id in items.first(where: { $0.id == id && !$0.detailLoaded }) }
+            if targets.isEmpty { continue }
             await withTaskGroup(of: Void.self) { group in
-                for item in chunk {
+                for item in targets {
                     group.addTask {
                         await Task.detached { await self.loadDetails(for: item, folderRoot: root) }.value
                     }
                 }
             }
-            start += 3
         }
-        if Task.isCancelled { return }
-        sortItemsByDisplayName()
-    }
-
-    // 详情读完后按显示名重排一次（App #28）：格子里显示的
-    // 是 Info.plist 真名，按文件名排看着乱。显示名缺失时
-    // 回落文件名（建 items 时 displayName 已预填文件名）。
-    // 本函数跑在主线程（detailTask 继承 MainActor），直接
-    // 改 items，不在解包任务里改数组。
-    private func sortItemsByDisplayName() {
-        items.sort { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        detailTask = nil
     }
 
     // 解包是同步重活，不许占主线程：nonisolated，在后台
@@ -595,22 +608,17 @@ struct CZFInlineIpaFolderGrid: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
             } else {
-                let rows = stride(from: 0, to: model.items.count, by: czfColCount).map { start in
-                    Array(model.items[start..<min(start + czfColCount, model.items.count)])
-                }
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(rows.indices, id: \.self) { rowIndex in
-                        HStack(spacing: 16) {
-                            ForEach(rows[rowIndex]) { item in
-                                CZFLocalIpaGridCell(item: item) {
-                                    onInstall(item.url)
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
-                            ForEach(0..<(czfColCount - rows[rowIndex].count), id: \.self) { _ in
-                                Color.clear.frame(maxWidth: .infinity)
-                            }
+                // O-30：行式 VStack 改 LazyVGrid——格子只在滚到
+                // 眼前时才创建，onAppear 按需推进详情解包；没滚
+                // 到的 IPA 不解包。列数/间距与原来一致（列数读
+                // 同一份网格设置，横向间距 16、纵向 12），末行
+                // 不用再手填 Color.clear 占位。
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: czfColCount), spacing: 12) {
+                    ForEach(model.items) { item in
+                        CZFLocalIpaGridCell(item: item) {
+                            onInstall(item.url)
                         }
+                        .onAppear { model.loadDetailIfNeeded(for: item) }
                     }
                 }
             }

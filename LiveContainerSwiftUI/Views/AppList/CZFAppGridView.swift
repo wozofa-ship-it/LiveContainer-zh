@@ -655,8 +655,21 @@ enum CZFAppBackground {
     static let versionKey = "CZFAppBackgroundVersion"
     static let fileName = "CZFAppBackground.jpg"
     static var fileURL: URL { LCPath.docPath.appendingPathComponent(fileName) }
+    // O-31 壁纸缓存：解码后的图放内存里，版本号没变就直接
+    // 用，不再每次进页都从磁盘重读重解一张 1600px 的 JPEG
+    //（切 Tab 一次就解一次）。版本键是选图/清除时 +1 的
+    // 唯一失效信号；save()/clear() 里也清缓存，双保险。
+    private static var cachedImage: UIImage?
+    private static var cachedVersion: Int = -1
     static func loadImage() -> UIImage? {
-        UIImage(contentsOfFile: fileURL.path)
+        let version = UserDefaults.standard.integer(forKey: versionKey)
+        if let cached = cachedImage, cachedVersion == version {
+            return cached
+        }
+        let image = UIImage(contentsOfFile: fileURL.path)
+        cachedImage = image
+        cachedVersion = version
+        return image
     }
     static func save(_ image: UIImage) {
         let maxSide: CGFloat = 1600
@@ -669,9 +682,11 @@ enum CZFAppBackground {
         UIGraphicsEndImageContext()
         guard let data = (scaled ?? image).jpegData(compressionQuality: 0.85) else { return }
         try? data.write(to: fileURL, options: .atomic)
+        cachedImage = nil
     }
     static func clear() {
         try? FileManager.default.removeItem(at: fileURL)
+        cachedImage = nil
     }
     static var hasImage: Bool {
         FileManager.default.fileExists(atPath: fileURL.path)
@@ -687,8 +702,19 @@ enum CZFSourceBackground {
     static let versionKey = "CZFSourceBackgroundVersion"
     static let fileName = "CZFSourceBackground.jpg"
     static var fileURL: URL { LCPath.docPath.appendingPathComponent(fileName) }
+    // O-31 壁纸缓存：与 CZFAppBackground 同款——版本号没变
+    // 就用内存里的解码图，不再每次进页重读重解。
+    private static var cachedImage: UIImage?
+    private static var cachedVersion: Int = -1
     static func loadImage() -> UIImage? {
-        UIImage(contentsOfFile: fileURL.path)
+        let version = UserDefaults.standard.integer(forKey: versionKey)
+        if let cached = cachedImage, cachedVersion == version {
+            return cached
+        }
+        let image = UIImage(contentsOfFile: fileURL.path)
+        cachedImage = image
+        cachedVersion = version
+        return image
     }
     static func save(_ image: UIImage) {
         let maxSide: CGFloat = 1600
@@ -701,9 +727,11 @@ enum CZFSourceBackground {
         UIGraphicsEndImageContext()
         guard let data = (scaled ?? image).jpegData(compressionQuality: 0.85) else { return }
         try? data.write(to: fileURL, options: .atomic)
+        cachedImage = nil
     }
     static func clear() {
         try? FileManager.default.removeItem(at: fileURL)
+        cachedImage = nil
     }
     static var hasImage: Bool {
         FileManager.default.fileExists(atPath: fileURL.path)

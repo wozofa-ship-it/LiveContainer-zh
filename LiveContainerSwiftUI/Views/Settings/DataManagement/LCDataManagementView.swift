@@ -5504,7 +5504,11 @@ struct LCDataManagementView : View {
         for urlString in stored {
             guard let sourceURL = URL(string: urlString) else { continue }
             do {
-                let (data, _) = try await CZFVPNManager.hostSession().data(from: sourceURL)
+                let (data, response) = try await CZFVPNManager.hostSession().data(from: sourceURL)
+                // 404 等错误页也可能落盘成“源表”再解析；先验状态，
+                // 非 2xx 直接跳过这个源，别把错误页当源表解析。
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200...299).contains(httpResponse.statusCode) else { continue }
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let apps = json["apps"] as? [[String: Any]] else { continue }
                 all += apps
