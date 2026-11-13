@@ -571,8 +571,16 @@ extension LCUtils {
                     return false
                 }
                 onServerMessage?("JIT acquisition will continue in StosDebug.")
-                
-                await UIApplication.shared.open(directURL)
+                // open 返回 false = StosDebug 没装/打不开：旧代码直接丢掉，
+                // 静默无事。发一句人话并返回 false，上层弹提示。
+                // 注：不用 canOpenURL——stosdebug 不在 Info.plist 的
+                // LSApplicationQueriesSchemes 里，canOpenURL 永远 false，
+                // 会把成功路也判成失败；open 的返回值直接说明开没开成。
+                let opened = await UIApplication.shared.open(directURL)
+                if !opened {
+                    onServerMessage?("StosDebug 未安装/打不开，请先安装 StosDebug")
+                }
+                return opened
             }
             
         } else if jitEnabler == .StikJIT || jitEnabler == .StikJITLC {
@@ -637,7 +645,17 @@ extension LCUtils {
                 launchURL = directURL
                 onServerMessage?("JIT acquisition will continue in StikDebug.")
             }
-            await UIApplication.shared.open(launchURL)
+            // open 返回 false = StikDebug 没装/打不开：旧代码直接丢掉，
+            // 静默无事。发一句人话并返回 false，上层弹提示（只给非 LC
+            // 分支发，LC 分支走另一个容器、失败原因不一样）。
+            // 注：不用 canOpenURL——stikjit 不在 Info.plist 的
+            // LSApplicationQueriesSchemes 里，canOpenURL 永远 false，
+            // 会把成功路也判成失败；open 的返回值直接说明开没开成。
+            let opened = await UIApplication.shared.open(launchURL)
+            if !opened, jitEnabler == .StikJIT {
+                onServerMessage?("StikDebug 未安装/打不开，请先安装 StikDebug 2.3.0+")
+            }
+            return opened
         } else if jitEnabler == .SideStore {
             onServerMessage?("JIT acquisition will continue in SideStore.")
             let launchURL = URL(string: "sidestore://enable-jit?bundle-id=\(Bundle.main.bundleIdentifier!)")!

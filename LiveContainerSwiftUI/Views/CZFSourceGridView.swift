@@ -350,8 +350,9 @@ struct CZFSourceAppGridCell: View {
     @State private var showDetail = false
 
     // 已安装标记（用户 12:03 令）：源里已装的 App，图标右上角打
-    // 绿勾，免得重复装。判据与 LCSourceAppBanner.isInstalled
-    // 同款：已装 + 隐藏 App 里按 bundleIdentifier 匹配。
+    // 绿勾，免得重复装。App 部分判据与 LCSourceAppBanner.isInstalled
+    // 同款：已装 + 隐藏 App 里按 bundleIdentifier 匹配；插件
+    // 再加 isPluginInstalled 磁盘检查（见下面）。
     // sharedModel 来自 LCAltStoreSourcesView 同层环境（该页
     // 已用 @EnvironmentObject，格子是它的后代，环境里有）。
     @EnvironmentObject private var sharedModel: SharedModel
@@ -360,9 +361,13 @@ struct CZFSourceAppGridCell: View {
         if (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier } {
             return true
         }
-        // 4 已安装绿勾不认插件：dylib 插件已装也不打勾，而
-        // 详情页 LCSourceAppBanner 有 isPluginInstalled 会
-        // 显示“已安装”。同款判据：tweak 文件夹里有该插件文件。
+        // 已装插件也打绿勾：格子没有列表行那种“已安装”绿字
+        // 牌（LCSourceAppBanner 的 dylib 分支），绿勾就是格
+        // 子里唯一的已装标记，不认插件会让已装插件看着像没
+        // 装。判据与 installTweak 同款：tweak 文件夹里有该
+        // 插件文件（“名-包名”新文件夹，老版只有名的也认）。
+        // 注：旧注释写反了（写着“不打勾”却返回 isPluginInstalled），
+        // 以代码为准，注释按代码改过来。
         return isPluginInstalled
     }
 

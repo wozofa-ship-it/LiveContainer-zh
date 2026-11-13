@@ -10,7 +10,7 @@ struct ShareExtensionRootView: View {
     ]
 
     var body: some View {
-        NavigationStack {
+        CZFShareNavStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // 3.8.404：收件箱提示横幅。写进收件箱成功后显示
@@ -112,6 +112,29 @@ struct ShareExtensionRootView: View {
                     ShareHiddenUnlockGridEntry(viewModel: viewModel)
                 }
             }
+        }
+    }
+}
+
+// 3.8.459 兼容审计：NavigationStack 是 iOS 16+，部署目标 15.0 下
+// 直接用编不过（'NavigationStack' is only available in iOS 16.0 or
+// newer）。ActionExtension 不进主 scheme、不嵌进 App，CI 没红过，
+// 但直接编该 target 就挂，是潜伏问题。16+ 走 NavigationStack，
+// 15 走 NavigationView；内层 NavigationLink 是老写法，两边都通。
+// 与仓内 pattern 同款（ViewExtensions 的 czfSolidToolbarBackground）。
+private struct CZFShareNavStack<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    @ViewBuilder
+    var body: some View {
+        if #available(iOS 16.0, *) {
+            NavigationStack { content }
+        } else {
+            NavigationView { content }
         }
     }
 }

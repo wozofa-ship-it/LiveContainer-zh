@@ -14,6 +14,25 @@ class LCAppModel: ObservableObject, Hashable {
     @Published var appInfo : LCAppInfo
     
     @Published var isAppRunning = false
+    // 同步启动互斥（3.8.459 审计）：isAppRunning 的置位在
+    // runApp 内多个 await 之后，连点两次会双双越过首行守卫、
+    // 双签双起（同容器还会在启动门里挂两个同 uuid 等待者）。
+    // 这把锁在首行同步抢占、中间无 await 间隙；全程持有，
+    // 退出即放。isAppRunning 仍是 UI 侧的运行指示，不动它。
+    private let czfLaunchLock = NSLock()
+    private var czfLaunchInFlight = false
+    private func czfClaimLaunch() -> Bool {
+        czfLaunchLock.lock()
+        defer { czfLaunchLock.unlock() }
+        guard !czfLaunchInFlight else { return false }
+        czfLaunchInFlight = true
+        return true
+    }
+    private func czfReleaseLaunch() {
+        czfLaunchLock.lock()
+        czfLaunchInFlight = false
+        czfLaunchLock.unlock()
+    }
     @Published var isSigningInProgress = false
     @Published var signProgress = 0.0
     private var observer : NSKeyValueObservation?
@@ -394,6 +413,12 @@ class LCAppModel: ObservableObject, Hashable {
 
     // You should let LCAppModel.runApp to decide whether to run in multitask mode, but you may override the multitask parameter if necessary
     func runApp(multitask: Bool? = nil, containerFolderName : String? = nil, bundleIdOverride : String? = nil, urlStr : String? = nil, forceJIT: Bool? = nil) async throws{
+        // 先抢同步锁再读 isAppRunning：forceResign 也置
+        // isAppRunning（不走这把锁），两重守卫各拦一侧。
+        guard czfClaimLaunch() else {
+            return
+        }
+        defer { czfReleaseLaunch() }
         if isAppRunning {
             return
         }

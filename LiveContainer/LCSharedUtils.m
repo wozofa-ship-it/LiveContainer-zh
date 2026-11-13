@@ -149,7 +149,13 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 }
 
 + (BOOL)launchToGuestAppWithClassicMode:(NSUInteger)classicMode {
-    void (^completionHandler)(BOOL) = ^(BOOL success) {
+    // 宿主交接：只有客真正起起来才自杀。原来 completion 不看
+    // success，失败也 SIGKILL——客没起、宿主也死了，启动静默
+    // 丢掉、没有任何报错。失败时宿主活着，失败原因写进 "error"
+    //（LCTabView.checkLastLaunchError 现成通道，下次进页即弹）；
+    // 成功时先清掉它，别让一次失败的旧文案在后来成功启动后冒出来。
+    void (^killHost)(void) = ^{
+        [lcUserDefaults removeObjectForKey:@"error"];
         // syscall(SYS_ptrace, PT_DENY_ATTACH, 0, 0, 0);
         __asm__ __volatile__ (
                               "mov x0, #31\n"
@@ -158,23 +164,33 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
                               );
         raise(SIGKILL);
     };
-    
+    void (^reportFailure)(NSError *) = ^(NSError *error) {
+        NSString *detail = error.localizedDescription ?: @"未知错误";
+        NSLog(@"[LC] launchToGuestApp failed: %@", error);
+        [lcUserDefaults setObject:[NSString stringWithFormat:@"启动客 App 失败：%@", detail] forKey:@"error"];
+    };
+
     if (!self.certificatePassword) {
         NSString *urlScheme = nil;
         NSString *tsPath = [NSString stringWithFormat:@"%@/../_TrollStore", NSBundle.mainBundle.bundlePath];
         if (!access(tsPath.UTF8String, F_OK)) {
             urlScheme = @"apple-magnifier://enable-jit?bundle-id=%@";
         }
-        
+
         if(urlScheme) {
             NSURL *launchURL = [NSURL URLWithString:[NSString stringWithFormat:urlScheme, NSBundle.mainBundle.bundleIdentifier]];
             UIApplication *application = [NSClassFromString(@"UIApplication") sharedApplication];
-            [application openURL:launchURL options:@{} completionHandler:completionHandler];
+            [application openURL:launchURL options:@{} completionHandler:^(BOOL success) {
+                if (success) {
+                    killHost();
+                } else {
+                    reportFailure(nil);
+                }
+            }];
             return YES;
         }
     }
 
-    int tries = 2;
     _LSOpenConfiguration *configuration = [[PrivClass(_LSOpenConfiguration) alloc] init];
     if(classicMode) {
         NSMutableDictionary* dict = [NSMutableDictionary new];
@@ -182,15 +198,27 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
         configuration.frontBoardOptions = dict;
     }
     LSApplicationWorkspace* workspace = [PrivClass(LSApplicationWorkspace) defaultWorkspace];
-    
-    for (int i = 0; i < tries; i++) {
+
+    // 两次是串行重试（原来 for 循环两次并行齐发，第二发根本
+    // 不是重试）：第一发失败才发第二发，两发都失败才报失败。
+    __block NSInteger attemptsLeft = 1;
+    __block void (^tryOpen)(void);
+    tryOpen = ^{
         [workspace openApplicationWithBundleIdentifier:NSUserDefaults.lcMainBundle.bundleIdentifier
                                          configuration:configuration
                                      completionHandler:^(BOOL success, NSError* error) {
             NSLog(@"success=%d error=%@", success, error);
-            completionHandler(success);
+            if (success) {
+                killHost();
+            } else if (attemptsLeft > 0) {
+                attemptsLeft--;
+                tryOpen();
+            } else {
+                reportFailure(error);
+            }
         }];
-    }
+    };
+    tryOpen();
     return YES;
 }
 

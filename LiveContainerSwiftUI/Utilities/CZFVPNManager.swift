@@ -486,6 +486,13 @@ public final class CZFVPNManager {
             UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
         }
         refreshSettingsBackup()
+        // 改的正是在用节点：核心还在跑旧链接，界面却已把新链接标成
+        // 在用——与 setActiveNode（改完即重启生效）/ replaceAllNodes
+        // 同款，立刻跟过去；测速窗口内 applyActiveNodeChange 会推
+        // 迟到测速收尾跟随，核心停着时是空操作。
+        if wasActive {
+            applyActiveNodeChange()
+        }
         return true
     }
 
@@ -755,11 +762,7 @@ public final class CZFVPNManager {
         let link = effectiveLink(for: appInfo).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !link.isEmpty else { return }
         if isRunning && runningLink == link {
-            if let bid = appInfo?.bundleIdentifier() {
-                coreOwnerBundleId = bid
-            }
-            coreOwnerAppInfo = appInfo
-            scheduleRotateCheck()
+            claimCoreOwnershipIfRunning(link: link, for: appInfo)
             return
         }
         // 养号保护（2）：核心已经归另一个 App 所有（那个 App
@@ -775,11 +778,7 @@ public final class CZFVPNManager {
             return
         }
         if start(withLink: link) {
-            if let bid = appInfo?.bundleIdentifier() {
-                coreOwnerBundleId = bid
-            }
-            coreOwnerAppInfo = appInfo
-            scheduleRotateCheck()
+            claimCoreOwnershipIfRunning(link: link, for: appInfo)
         } else {
             // 启动时节点起不来就地往下一个切：之前是起不来
             // 就停在死节点上，App 一直不通；轮换要等 3 次
@@ -787,6 +786,27 @@ public final class CZFVPNManager {
             // 测速从快到慢，没测速排最后），钉死的改 override，
             // 跟随全局的改全局活动节点；一圈都不通就停。
             startFallback(from: link, for: appInfo)
+        }
+    }
+
+    /// 起核心后认领归属（ensureRunning / startFallback /
+    /// waitUntilNodeReady 三路共用）：只有在同一把锁下看到
+    /// runningLink 仍是刚起的那条才认领。两个 VPN App 同时启动
+    /// 时，后起的会把核心换成自己的节点；先起的不能在事后把
+    /// 归属写成自己——归属与在跑链接对不上，轮换巡检会按错
+    /// App 读统计。没认领时不排轮换，归属方自己的那路会排。
+    private func claimCoreOwnershipIfRunning(link: String, for appInfo: LCAppInfo?) {
+        vpnCoreLock.lock()
+        let claimed = isRunning && runningLink == link
+        if claimed {
+            if let bid = appInfo?.bundleIdentifier() {
+                coreOwnerBundleId = bid
+            }
+            coreOwnerAppInfo = appInfo
+        }
+        vpnCoreLock.unlock()
+        if claimed {
+            scheduleRotateCheck()
         }
     }
 
@@ -819,6 +839,14 @@ public final class CZFVPNManager {
         guard links.count >= 2 else { return false }
         let cands = Self.sortedSupportedCandidates(links: links, excluding: [link])
         for cand in cands.prefix(2) {
+            // 测速窗口内不切节点起核心：这轮探针是 runApp 派的，
+            // 用户此时点“测延迟”会先停核心再测；这里中途起核心
+            // 会让 pingBatch 被拒、整轮测速作废。直接返回 false，
+            // 调用方按 fail-open 放行，绝不无限等。
+            vpnCoreLock.lock()
+            let pinging = isPinging
+            vpnCoreLock.unlock()
+            guard !pinging else { return false }
             // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，
             // 不冻调用方的协作线程（runApp 侧同款做法）。
             let started = await Task.detached(priority: .userInitiated) { CZFVPNManager.shared.start(withLink: cand.link) }.value
@@ -828,11 +856,7 @@ public final class CZFVPNManager {
             } else {
                 UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
             }
-            if let bid = appInfo.bundleIdentifier() {
-                coreOwnerBundleId = bid
-            }
-            coreOwnerAppInfo = appInfo
-            scheduleRotateCheck()
+            claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
             if await probeNodeThroughCore(timeout: timeout) { return true }
         }
         return false
@@ -876,20 +900,35 @@ public final class CZFVPNManager {
         // asyncAfter 拿 .infinity 排期行为未定义，绝不能排。
         guard !Self.autoStopDelay.isInfinite else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.isRunning else { return }
-            if Self.isHostProxyEnabled { return }
-            if Date().timeIntervalSince(self.lastFlaggedLaunchAt) < Self.autoStopDelay { return }
-            // 测速窗口内不自动停：到点停核心、下一按钮刷新
-            // 翻出已变状态，看起来就是“点测速/排序切了核心”；
-            // 测速中到点就跳过这次自动停，下次 App 变化再排。
-            self.vpnCoreLock.lock()
-            let pinging = self.isPinging
-            self.vpnCoreLock.unlock()
-            if pinging { return }
-            self.stop()
+            self?.checkPendingStop()
         }
         pendingStopWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoStopDelay, execute: work)
+    }
+
+    /// 到点的自动停检查（noteRunningAppsChanged 排的任务与测速中
+    /// 的重试共用）：逐项重查——核心还在跑、宿主开关关着、闲置
+    /// 够分钟数、测速窗口外，四项全过才停。测速窗口内不算数：
+    /// 30 秒后重查一次（测速有界、一定会结束），而不是丢掉这次
+    /// 自动停、等下一次 App 变化（可能永远不来，核心就一直跑）。
+    /// 重试同样逐项重查：期间有 App 启动/宿主开关打开，重查会
+    /// 拦下，不会误停。
+    private func checkPendingStop() {
+        guard isRunning else { return }
+        if Self.isHostProxyEnabled { return }
+        if Date().timeIntervalSince(lastFlaggedLaunchAt) < Self.autoStopDelay { return }
+        vpnCoreLock.lock()
+        let pinging = isPinging
+        vpnCoreLock.unlock()
+        if pinging {
+            let retry = DispatchWorkItem { [weak self] in
+                self?.checkPendingStop()
+            }
+            pendingStopWork = retry
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: retry)
+            return
+        }
+        stop()
     }
 
     @discardableResult
@@ -918,6 +957,10 @@ public final class CZFVPNManager {
             return false
         }
         if isRunning && runningLink == link { return true }
+        // B1（重启不丢恢复意图）：下面的 stop() 会把 coreWasRunning
+        // 写成 false，但这只是换节点的中间态，不是用户关核心——
+        // 成功后按停之前的原值恢复；失败则保持 false（核心确实停了）。
+        let wasRunningFlag = coreWasRunning
         if isRunning { stop() }
 
         // 临时探针在跑时拒绝起主核心（Xray 与 sing-box 两路都挡）：
@@ -934,7 +977,9 @@ public final class CZFVPNManager {
         // Xray 转换与启动（原样不动）。分流前已停掉旧核心
         // （先停后起，同一时刻只活一个核心，端口复用）。
         if CZFSingBoxRouting.coreKind(for: link) == .singBox {
-            return startSingBox(withLink: link)
+            let ok = startSingBox(withLink: link)
+            if ok { coreWasRunning = wasRunningFlag }
+            return ok
         }
 
         let conv = invoke(method: "convertShareLinksToXrayJson", payload: ["text": Self.normalizedShareLink(link)])
@@ -1018,6 +1063,7 @@ public final class CZFVPNManager {
         runningLink = link
         runningCore = .xray
         lastError = nil
+        coreWasRunning = wasRunningFlag
         return true
     }
 
@@ -1181,11 +1227,7 @@ public final class CZFVPNManager {
                 } else {
                     UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
                 }
-                if let bid = appInfo?.bundleIdentifier() {
-                    coreOwnerBundleId = bid
-                }
-                coreOwnerAppInfo = appInfo
-                scheduleRotateCheck()
+                claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
                 return
             }
         }
@@ -1314,7 +1356,12 @@ public final class CZFVPNManager {
         }
         pingStoppedLink = link
         pingStoppedOwner = coreOwnerAppInfo
+        // B1（测速暂停不是关核心）：stop() 会把 coreWasRunning 写成
+        // false；测速只是暂停，恢复意图按停之前原样保留，否则一次
+        // 测速就把 3.8.457 的重启恢复悄悄丢了（重启后核心不再回来）。
+        let wasRunningFlag = coreWasRunning
         stop()
+        coreWasRunning = wasRunningFlag
         return true
     }
 

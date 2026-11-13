@@ -3697,12 +3697,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         UserDefaults.standard.set(selectedContainerFolder, forKey: "selectedContainer")
         Task {
-            let _ = await LCUtils.askForJIT(withScript: script, appName: appName, classicMode: classicMode) { newMsg in
+            // askForJIT 失败时只往 jitLog 写一句话，但 modal 已关、用户看不到；
+            // 直接开 URL 的工具（StikJIT/StosDebug）返回 false 即没打开，
+            // 在主列表弹一次错误提示。其它工具（经别的 App/服务器继续）
+            // 本来就返回 false，不当失败处理。
+            var lastMsg = ""
+            let ok = await LCUtils.askForJIT(withScript: script, appName: appName, classicMode: classicMode) { newMsg in
+                lastMsg = newMsg
                 Task { await MainActor.run {
                     self.jitLog += "\(newMsg)\n"
                 }}
             }
-            guard let _ = JITEnablerType(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCJITEnablerType")) else {
+            let enabler = JITEnablerType(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCJITEnablerType"))
+            if !ok, enabler == .StikJIT || enabler == .StosDebug {
+                await MainActor.run {
+                    if !lastMsg.isEmpty {
+                        self.errorInfo = lastMsg
+                        self.errorShow = true
+                    }
+                }
+                return
+            }
+            guard let _ = enabler else {
                 return
             }
         }
@@ -3739,7 +3755,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         }
                     } else {
                         if var url = URL(string: "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(encodedAppName)&pid=\(pid)&forcePID=true\(encoded)") {
-                            UIApplication.shared.open(url)
+                            // StosDebug 没装时旧代码直接开、返回值丢掉，静默无事；
+                            // open 返回 false 就弹提示。注：不用 canOpenURL，
+                            // stosdebug 不在 LSApplicationQueriesSchemes 里。
+                            let opened = UIApplication.shared.open(url)
+                            if !opened {
+                                errorInfo = "StosDebug 未安装/打不开，请先安装 StosDebug"
+                                errorShow = true
+                            }
                         } else {
                             errorInfo = "Failed to build JIT URL."
                             errorShow = true
@@ -3762,8 +3785,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             return
                         }
                     } else {
-                        UIApplication.shared.open(url)
+                        // StikDebug 没装时旧代码直接开、返回值丢掉，静默无事；
+                        // open 返回 false 就弹提示。注：不用 canOpenURL，
+                        // stikjit 不在 LSApplicationQueriesSchemes 里。
+                        let opened = UIApplication.shared.open(url)
+                        if !opened {
+                            errorInfo = "StikDebug 未安装/打不开，请先安装 StikDebug 2.3.0+"
+                            errorShow = true
+                        }
                     }
+                } else {
+                    errorInfo = "Failed to build JIT URL."
+                    errorShow = true
                 }
             }
         }

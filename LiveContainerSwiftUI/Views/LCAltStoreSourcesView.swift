@@ -1263,15 +1263,16 @@ struct LCSourcesView: View {
         var failed: [(name: String, reason: String)] = []
     }
 
-    // O-4：批量汇总的就地反馈——installBatch 只负责数数，显示
-    // 在这里。errorMessage 的 alert 挂在源页上：只有没切走
-    // （一个都没入队）时用户才看得见；一旦有 IPA 入队就切到
-    // App 页，跳过/失败的汇总目前没有可见通道（见 installBatch
-    // 注释里 dylib 那一段），只能等 App 页接线。
+    // O-4：批量汇总的反馈——installBatch 只负责数数，显示
+    // 在这里。errorMessage 的 alert 挂在源页上：没切走时当场
+    // 弹；有 IPA 入队已切到 App 页时，errorMessage 照样写
+    // （alert 的 isPresented 直接绑 errorMessage != nil），
+    // 用户切回源页时再弹出来——原来这里 guard queued 为空
+    // 才写，混装一批里 dylib 失败/无链接的跳过全被静默丢掉。
+    // 仍不如 App 页批量收尾的汇总及时，但不再丢。
     @MainActor
     private func czfShowBatchResult(_ result: CZFInstallBatchResult) {
         guard !result.skipped.isEmpty || !result.failed.isEmpty else { return }
-        guard result.queued.isEmpty else { return }
         var lines: [String] = []
         if !result.skipped.isEmpty {
             lines.append("跳过 \(result.skipped.count) 个（无下载链接）：\(result.skipped.joined(separator: "、"))")
@@ -1290,14 +1291,14 @@ struct LCSourcesView: View {
     /// 装队列的汇总报（LCAppListView 的批量收尾）；这里的
     /// failed 只是批量前置失败（无下载链接、dylib 下载/签
     /// 名失败）。
-    /// dylib 失败的可见反馈目前接不上：失败写源页
-    /// errorMessage 时用户已被切到 App 页、源页 alert 看不
-    /// 见。要让 App 页在安装队列收尾处报这笔失败，得改
-    /// LCAppListView.swift——在 drainPendingInstalls /
-    /// notifyBatchDone 处接一份“源页批量前置失败”名单（例
-    /// 如 CZFSourcePendingInstall 同款共享数组，App 页排空
-    /// 时读出来拼进批量汇总/通知）。本次只把汇总返回出来，
-    /// 调用方在没切走时就地提示（见 czfShowBatchResult）。
+    /// dylib 失败的可见反馈：czfShowBatchResult 现在无论是
+    /// 否切走都写 errorMessage，没切走当场弹、切走了切回源
+    /// 页时再弹，不再静默丢掉。要让它进 App 页安装队列收尾
+    /// 的汇总里，得改 LCAppListView.swift——在
+    /// drainPendingInstalls / notifyBatchDone 处接一份“源页
+    /// 批量前置失败”名单（例如 CZFSourcePendingInstall 同款
+    /// 共享数组，App 页排空时读出来拼进批量汇总/通知）。那
+    /// 是更及时的通道，本次不动（在我的文件之外）。
     @MainActor
     private func installBatch(_ apps: [AltStoreSourceApp]) async -> CZFInstallBatchResult {
         var result = CZFInstallBatchResult()
@@ -1332,27 +1333,38 @@ struct LCSourcesView: View {
     }
 
     /// 已装且源里有更高版本的 App（「全部更新」的名单）：
-    /// 版本号按数字段比较（1.10 > 1.9），同名只算一次
+    /// 版本号按数字段比较（1.10 > 1.9），同包名只算一次。
+    /// 同包名多个变体（汉化版/原版，czfStableID 不同）时留
+    /// 版本号最新的那一个，不留先遇到的那一个——原来 seen
+    /// 按包名先到先得，源里原版 1.0 排在汉化版 1.2 前面时，
+    /// 名单里就是 1.0，点更新装完 1.0、1.2 又冒出来，得更新
+    /// 两次。顺序仍按首次出现的包名排，不改名单顺序。
     private func computeUpdatableApps() -> [AltStoreSourceApp] {
         let installed = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
             ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.version() ?? "")
         }, uniquingKeysWith: { first, _ in first })
-        var result: [AltStoreSourceApp] = []
-        var seen = Set<String>()
+        var bestByBundle: [String: AltStoreSourceApp] = [:]
+        var order: [String] = []
         for item in viewModel.sources {
             guard let source = item.source else { continue }
             for app in source.apps {
                 guard let latest = app.latestVersion,
                       let installedVersion = installed[app.bundleIdentifier],
                       czfIsVersion(latest.version, newerThan: installedVersion),
-                      CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) != latest.version,
-                      seen.insert(app.bundleIdentifier).inserted else {
+                      CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) != latest.version else {
                     continue
                 }
-                result.append(app)
+                if let existing = bestByBundle[app.bundleIdentifier] {
+                    if czfIsVersion(latest.version, newerThan: existing.latestVersion?.version ?? "") {
+                        bestByBundle[app.bundleIdentifier] = app
+                    }
+                } else {
+                    bestByBundle[app.bundleIdentifier] = app
+                    order.append(app.bundleIdentifier)
+                }
             }
         }
-        return result
+        return order.compactMap { bestByBundle[$0] }
     }
 
     // 可更新名单缓存刷新：算一次、同时写红点。调用点=全部输入
@@ -1790,6 +1802,15 @@ private struct AltStoreSourceSectionView: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
+                // 收起时刷新失败无处显示：有缓存 + 收起时，错误行
+                // 藏在未展开的内容里（S1 只在展开/过滤时渲染），
+                // 无缓存时大错误块本来就一直显示。组头补一个小黄
+                // 三角，点开组看原因；展开/过滤/加载中不重复显示。
+                if item.error != nil && !isExpanded && !isFiltering && !item.isLoading {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundColor(.orange)
+                }
                 if item.isLoading {
                     ProgressView()
                 } else {

@@ -1710,6 +1710,19 @@ struct LCDataManagementView : View {
         // App Group（同上），不进这张表导入时按 CZF 前缀误写标准库，
         // 面板读不到等于没恢复。
         "CZFPanelCustomShortcuts",
+        // 新6（3.8.459 审计）：固定区旧键迁移完成标记
+        // CZFPinnedPanelAppsMigratedV2 也在 App Group 里
+        //（CZFPinnedAppsStore.migrateLegacyPins 读 App Group）。
+        // 它带 CZF 前缀，导出时 App Group 全量扫会带上它，
+        // 不进这张表导入时按 CZF 前缀误写标准库，读它的地方
+        // 永远读不到，恢复/导入后迁移每回重跑一次（现迁移
+        // 只转换不删，重跑无害，但往返本就该对得上）。
+        "CZFPinnedPanelAppsMigratedV2",
+        // 新7（3.8.459 审计）：多开启动优先级 LCMultiLaunchPriority
+        // 也在 App Group 里（LCMultiLCManagementView 读写 App
+        // Group），是用户排过的设置；LC 前缀既不进 CZF 全量扫、
+        // 也不在这张表里，恢复后启动顺序全丢。补进来。
+        "LCMultiLaunchPriority",
     ]
 
     // 注意：@discardableResult 必须紧贴 func 写，中间不能插

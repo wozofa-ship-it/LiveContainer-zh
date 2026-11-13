@@ -631,6 +631,10 @@ struct CZFLocalIpaGridCell: View {
     // 哪个没安装”）——按包名比对已装 App（含隐藏 App），与源
     // 页绿勾（CZFSourceGridView）同款判据、同款绿勾位置。
     @EnvironmentObject private var sharedModel: SharedModel
+    // 3.8.459 兼容审计：名字晕影按 colorScheme 换色（与 App 网格
+    // CZFAppGridView:463、源格子 CZFSourceGridView:427 同款）——
+    // 原来写死白晕影，深色模式下白字压在亮壁纸上没对比、读不清。
+    @Environment(\.colorScheme) private var colorScheme
     private var czfIsInstalled: Bool {
         guard let bid = item.bundleIdentifier, !bid.isEmpty else { return false }
         return (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == bid }
@@ -693,7 +697,7 @@ struct CZFLocalIpaGridCell: View {
                 .minimumScaleFactor(0.7)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
-                .shadow(color: .white.opacity(0.95), radius: 4, x: 0, y: 0)
+                .shadow(color: colorScheme == .dark ? .black.opacity(0.95) : .white.opacity(0.95), radius: 4, x: 0, y: 0)
             Text(czfDetailFailed ? "无法读取".loc : [item.version.map { "版本 \($0)" }, item.sizeText.isEmpty ? nil : item.sizeText].compactMap { $0 }.joined(separator: " · "))
                 .font(.caption)
                 .foregroundStyle(.secondary)

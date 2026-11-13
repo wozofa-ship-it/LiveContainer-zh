@@ -955,7 +955,22 @@ extension Notification.Name {
     /// 调 handler；超时（默认 30 秒）未出现则放弃等、不留野
     /// 观察者。调用方须在启动前注册——窗口出现先于注册的竞
     /// 态由开头的已存在检查兜底（已在就地调 handler）。
+    /// 注册必须在主队列上做：条目追加与通知发送同在主队列的
+    /// 同一个 block 里，非主线程调进来时，“检查→注册”之间
+    /// 窗口可能已出现，通知先于观察者发出就永远等不到回调
+    /// （启动门的 Task.detached 正是非主线程调的，门会被多
+    /// 占满 15 秒）；主线程调的保持同步原样，不改时序。
     func czfOnWindowAppeared(uuid: String, timeout: TimeInterval = 30, handler: @escaping () -> Void) {
+        if Thread.isMainThread {
+            czfOnWindowAppearedOnMain(uuid: uuid, timeout: timeout, handler: handler)
+        } else {
+            DispatchQueue.main.async {
+                self.czfOnWindowAppearedOnMain(uuid: uuid, timeout: timeout, handler: handler)
+            }
+        }
+    }
+
+    private func czfOnWindowAppearedOnMain(uuid: String, timeout: TimeInterval = 30, handler: @escaping () -> Void) {
         if apps.contains(where: { $0.appUUID == uuid }) {
             handler()
             return
@@ -3716,7 +3731,12 @@ struct AllAppsListView: View {
             do {
                 try await app.runApp(containerFolderName: dataUUID)
             } catch {
-                await MainActor.run { reportLaunchError(error.localizedDescription) }
+                // 启动已报错就别让 6 秒后的超时再报一次“最小化
+                // 超时”盖掉真错：先把完成旗置了，超时闭包不再报。
+                await MainActor.run {
+                    czfMinimizeDone = true
+                    reportLaunchError(error.localizedDescription)
+                }
             }
         }
     }
