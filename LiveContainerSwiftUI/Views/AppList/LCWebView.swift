@@ -88,8 +88,7 @@ struct LCWebView: View {
                     webView.loadURL(url: url)
                 }
                 // 恢复打开后，共享处的不再算“已最小化”，浮动按钮收掉。
-                sharedModel.czfMinimizedWebView = nil
-                sharedModel.czfMinimizedWebURL = nil
+                sharedModel.clearMinimizedWeb()
             }
         }
         .sheet(isPresented: $showShareSheet) {
@@ -139,8 +138,7 @@ struct LCWebView: View {
     // 关掉。三条同指一个呈现，后面的都是空操作，不会重复关。
     // 关掉并丢弃：最小化存着的页面也清掉（不再恢复）。
     private func close() {
-        sharedModel.czfMinimizedWebView = nil
-        sharedModel.czfMinimizedWebURL = nil
+        sharedModel.clearMinimizedWeb()
         isPresent = false
         dismiss()
         czfDismissTopmostPresented()

@@ -41,6 +41,8 @@
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import "litehook.h"
+// D9：代理字典键名走 Tweaks.h 的 CZF_PROXY_KEY_*（与 DeviceFingerprint.m 共用）。
+#import "../LiveContainer/Tweaks/Tweaks.h"
 
 #define CZF_SOCKS_PORT 10827
 #define CZF_HTTP_PORT 10828
@@ -1102,12 +1104,12 @@ static NSURLSession *(*orig_sessionWithConfig)(id, SEL, NSURLSessionConfiguratio
 
 static NSDictionary *CZFProxyDict(void) {
     return @{
-        @"HTTPEnable": @YES,
-        @"HTTPProxy": @"127.0.0.1",
-        @"HTTPPort": @(CZF_HTTP_PORT),
-        @"HTTPSEnable": @YES,
-        @"HTTPSProxy": @"127.0.0.1",
-        @"HTTPSPort": @(CZF_HTTP_PORT),
+        CZF_PROXY_KEY_HTTP_ENABLE: @YES,
+        CZF_PROXY_KEY_HTTP_PROXY: @"127.0.0.1",
+        CZF_PROXY_KEY_HTTP_PORT: @(CZF_HTTP_PORT),
+        CZF_PROXY_KEY_HTTPS_ENABLE: @YES,
+        CZF_PROXY_KEY_HTTPS_PROXY: @"127.0.0.1",
+        CZF_PROXY_KEY_HTTPS_PORT: @(CZF_HTTP_PORT),
         @"SOCKSEnable": @YES,
         @"SOCKSProxy": @"127.0.0.1",
         @"SOCKSPort": @(CZF_SOCKS_PORT),

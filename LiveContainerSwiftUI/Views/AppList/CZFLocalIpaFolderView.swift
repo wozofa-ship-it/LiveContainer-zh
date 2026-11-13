@@ -100,7 +100,17 @@ struct CZFLocalIpaItem: Identifiable {
 
 @MainActor
 final class CZFLocalIpaFolderModel: ObservableObject {
-    @Published var items: [CZFLocalIpaItem] = []
+    @Published var items: [CZFLocalIpaItem] = [] {
+        didSet {
+            // D11：id→item 查表与 items 同步——didSet 覆盖全量
+            // 替换（scan）与单行字段改写（loadDetails）两路，
+            // loadDetailIfNeeded 与 processWantedDetails 的 id
+            // 查找走它，不再线性扫 items。
+            itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        }
+    }
+    // D11：id→item 查表（与 items 同步，见 items 的 didSet）。
+    private var itemsByID: [UUID: CZFLocalIpaItem] = [:]
     @Published var scanning = true
     @Published var errorText: String?
 
@@ -109,9 +119,13 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // O-30 文件夹懒加载：详情解包任务——单任务按想要详情的
     // 项 3 个一组并行解包；弹窗关闭时 cancelDetailTasks() 取消它。
     private var detailTask: Task<Void, Never>?
-    // O-30：想要详情的项 id 队列（格子滚到眼前时 onAppear
-    // 推进来），按推进顺序解包；不在队里的不解，不浪费 CPU。
-    private var wantedDetailIDs: [UUID] = []
+    // O-30：想要详情的项 id 集合（格子滚到眼前时 onAppear
+    // 推进来），不在队里的不解，不浪费 CPU。
+    // D11：由 [UUID] 改 Set，contains/insert/remove 全是
+    // O(1)；取 chunk 时顺序不再是推进顺序（Set 无序），但
+    // 只影响先解哪 3 个，列表仍按文件名序、读回不重排，
+    // 显示不受影响。
+    private var wantedDetailIDs: Set<UUID> = []
     // 弹窗已关/已取消刷新时为真：在后台解包跑完回主线程前
     // 再拦一道，拦住已失效的旧解包刷进新列表。
     private var detailsCancelled = false
@@ -251,9 +265,9 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // App #28 的“读完按显示名重排”随全量解包一起去掉。
     func loadDetailIfNeeded(for item: CZFLocalIpaItem) {
         guard !detailsCancelled,
-              items.contains(where: { $0.id == item.id && !$0.detailLoaded }),
+              let current = itemsByID[item.id], !current.detailLoaded,
               !wantedDetailIDs.contains(item.id) else { return }
-        wantedDetailIDs.append(item.id)
+        wantedDetailIDs.insert(item.id)
         if detailTask == nil {
             detailTask = Task { await processWantedDetails() }
         }
@@ -273,10 +287,13 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         while !wantedDetailIDs.isEmpty {
             if Task.isCancelled { return }
             let chunk = Array(wantedDetailIDs.prefix(3))
-            wantedDetailIDs.removeFirst(min(3, wantedDetailIDs.count))
+            for id in chunk { wantedDetailIDs.remove(id) }
             // 只处理还在列表里、还没读过详情的项（重扫重建后
             // 旧 id 可能已不在列表里）。
-            let targets = chunk.compactMap { id in items.first(where: { $0.id == id && !$0.detailLoaded }) }
+            let targets = chunk.compactMap { id -> CZFLocalIpaItem? in
+                guard let item = itemsByID[id], !item.detailLoaded else { return nil }
+                return item
+            }
             if targets.isEmpty { continue }
             await withTaskGroup(of: Void.self) { group in
                 for item in targets {

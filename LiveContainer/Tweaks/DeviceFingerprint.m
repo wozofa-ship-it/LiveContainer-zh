@@ -15,6 +15,7 @@
 @import Foundation;
 @import ObjectiveC;
 @import UIKit;
+#import "Tweaks.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <string.h>
@@ -46,7 +47,10 @@ static BOOL getATTEnabled_hook(NSObject *self, SEL _cmd) {
 }
 
 // --- 屏幕（与伪装机型一致） ---
-// 机型 -> 屏幕 native 像素 + scale，与 czfRandomMachine 的五款一致。
+// 机型 -> 屏幕 native 像素 + scale。D1 之后唯一事实源在 Swift
+//（LCContainer.czfScreenForMachine），派生值随 plist 传过来；
+// 下面这张表是冻结回落——只给 466/467 建的老容器用（它们 plist
+// 里没有派生值），不要往里加新机型，新机型走 Swift 那边。
 // bounds（点）= native / scale；nativeBounds（像素）= native。
 // 文件级 static 默认零初始化（即 CGRectZero），不能拿
 // CGRectZero 当初始化器——它不是编译期常量，编不过。
@@ -80,7 +84,10 @@ static CGFloat getScreenNativeScale_hook(UIScreen *self, SEL _cmd) {
 }
 
 // --- 地区（语言 + 时区 + 地区） ---
-// 地区码 -> locale + 语言 + 时区，与 czfRandomRegion 的八个码一致。
+// 地区码 -> locale + 语言 + 时区。D1 之后唯一事实源在 Swift
+//（LCContainer.czfRegionInfo），派生值随 plist 传过来；
+// 下面这张表是冻结回落——只给 466/467 建的老容器用，不要
+// 往里加新地区，新地区走 Swift 那边。
 static NSLocale *spoofedLocale = nil;
 static NSArray *spoofedLanguages = nil;
 static NSTimeZone *spoofedTimeZone = nil;
@@ -138,16 +145,16 @@ static void czfApplyProxy(NSURLSessionConfiguration *config) {
     if (config == nil || spoofedProxyHostStr == nil || spoofedProxyHostStr.length == 0 || spoofedProxyPortNum <= 0) {
         return;
     }
-    // 键名用字符串字面量（与 CZFProxy.m 同款）：kCFNetworkProxies*
-    // 常量要链 CFNetwork 框架，仓内没链，用字面量不新增链接依赖。
+    // 键名走 Tweaks.h 的 CZF_PROXY_KEY_*（与 CZFProxy.m 共用）：
+    // kCFNetworkProxies* 常量要链 CFNetwork 框架，仓内没链。
     NSMutableDictionary *proxy = [config.connectionProxyDictionary mutableCopy];
     if (proxy == nil) proxy = [NSMutableDictionary dictionary];
-    proxy[@"HTTPEnable"] = @YES;
-    proxy[@"HTTPProxy"] = spoofedProxyHostStr;
-    proxy[@"HTTPPort"] = @(spoofedProxyPortNum);
-    proxy[@"HTTPSEnable"] = @YES;
-    proxy[@"HTTPSProxy"] = spoofedProxyHostStr;
-    proxy[@"HTTPSPort"] = @(spoofedProxyPortNum);
+    proxy[CZF_PROXY_KEY_HTTP_ENABLE] = @YES;
+    proxy[CZF_PROXY_KEY_HTTP_PROXY] = spoofedProxyHostStr;
+    proxy[CZF_PROXY_KEY_HTTP_PORT] = @(spoofedProxyPortNum);
+    proxy[CZF_PROXY_KEY_HTTPS_ENABLE] = @YES;
+    proxy[CZF_PROXY_KEY_HTTPS_PROXY] = spoofedProxyHostStr;
+    proxy[CZF_PROXY_KEY_HTTPS_PORT] = @(spoofedProxyPortNum);
     config.connectionProxyDictionary = proxy;
 }
 
@@ -231,7 +238,17 @@ static int hook_uname(struct utsname *buf) {
     return ret;
 }
 
-void DeviceFingerprintHookInit(NSString *advertisingIdentifier, NSString *deviceName, NSString *systemVersion, NSString *machine, NSString *region, NSString *proxyHost, NSInteger proxyPort) {
+// D8：method hook 样板抽共用——查方法、换实现，返回旧实现
+// （没有方法时返 NULL，调用方不用再判 Method）。isClass
+// 为 YES 查类方法，否则查实例方法。
+static IMP czfHookMethod(Class cls, SEL sel, IMP newIMP, BOOL isClass) {
+    if (cls == Nil || sel == NULL || newIMP == NULL) return NULL;
+    Method m = isClass ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
+    if (m == NULL) return NULL;
+    return method_setImplementation(m, newIMP);
+}
+
+void DeviceFingerprintHookInit(NSString *advertisingIdentifier, NSString *deviceName, NSString *systemVersion, NSString *machine, NSString *region, NSString *proxyHost, NSInteger proxyPort, NSNumber *screenWidth, NSNumber *screenHeight, NSNumber *screenScale, NSString *localeIdentifier, NSString *language, NSString *timeZoneName) {
     static BOOL installed = NO;
     if (installed) return;
     installed = YES;
@@ -245,33 +262,21 @@ void DeviceFingerprintHookInit(NSString *advertisingIdentifier, NSString *device
                 asClass = objc_getClass("ASIdentifierManager");
             }
             if (asClass != Nil) {
-                Method m = class_getInstanceMethod(asClass, @selector(advertisingIdentifier));
-                if (m != NULL) {
-                    method_setImplementation(m, (IMP)getIDFA_hook);
-                }
+                czfHookMethod(asClass, @selector(advertisingIdentifier), (IMP)getIDFA_hook, NO);
                 // ATT 状态与 IDFA 一致：给了真 UUID，ATT 就是已授权。
-                Method att = class_getInstanceMethod(asClass, @selector(isAdvertisingTrackingEnabled));
-                if (att != NULL) {
-                    method_setImplementation(att, (IMP)getATTEnabled_hook);
-                }
+                czfHookMethod(asClass, @selector(isAdvertisingTrackingEnabled), (IMP)getATTEnabled_hook, NO);
             }
         }
     }
 
     if (deviceName != nil) {
         spoofedDeviceNameStr = deviceName;
-        Method m = class_getInstanceMethod(objc_getClass("UIDevice"), @selector(name));
-        if (m != NULL) {
-            method_setImplementation(m, (IMP)getDeviceName_hook);
-        }
+        czfHookMethod(objc_getClass("UIDevice"), @selector(name), (IMP)getDeviceName_hook, NO);
     }
 
     if (systemVersion != nil) {
         spoofedSystemVersionStr = systemVersion;
-        Method m = class_getInstanceMethod(objc_getClass("UIDevice"), @selector(systemVersion));
-        if (m != NULL) {
-            method_setImplementation(m, (IMP)getSystemVersion_hook);
-        }
+        czfHookMethod(objc_getClass("UIDevice"), @selector(systemVersion), (IMP)getSystemVersion_hook, NO);
     }
 
     if (machine != nil) {
@@ -283,55 +288,66 @@ void DeviceFingerprintHookInit(NSString *advertisingIdentifier, NSString *device
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, sysctlbyname, hook_sysctlbyname, nil);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, uname, hook_uname, nil);
         // 屏幕与机型一致：指纹读到的机型与屏幕对得上。
-        // 注意：UIScreen.bounds 也参与布局，伪装成比真机小的屏
-        // 时个别直接拿它排版的 App 可能留白；真机验到就关指纹。
+        // 派生值优先走 Swift 传过来的 plist 值（D1 单一事实源，
+        // Swift 的 czfScreenForMachine 是唯一出处）；读不到时
+        // 回落到冻结表（只给老容器用）。注意：UIScreen.bounds
+        // 也参与布局，伪装成比真机小的屏时个别直接拿它排版的
+        // App 可能留白；真机验到就关指纹。
         CGFloat w = 0, h = 0, s = 0;
-        if (czfScreenForMachine(machine, &w, &h, &s)) {
+        BOOL hasScreen = NO;
+        if (screenWidth != nil && screenHeight != nil && screenScale != nil) {
+            w = screenWidth.doubleValue;
+            h = screenHeight.doubleValue;
+            s = screenScale.doubleValue;
+            hasScreen = (w > 0 && h > 0 && s > 0);
+        }
+        if (!hasScreen) {
+            hasScreen = czfScreenForMachine(machine, &w, &h, &s);
+        }
+        if (hasScreen) {
             spoofedNativeBounds = CGRectMake(0, 0, w, h);
             spoofedBounds = CGRectMake(0, 0, w / s, h / s);
             spoofedScale = s;
             Class screenClass = objc_getClass("UIScreen");
             if (screenClass != Nil) {
-                Method b = class_getInstanceMethod(screenClass, @selector(bounds));
-                if (b != NULL) method_setImplementation(b, (IMP)getScreenBounds_hook);
-                Method nb = class_getInstanceMethod(screenClass, @selector(nativeBounds));
-                if (nb != NULL) method_setImplementation(nb, (IMP)getScreenNativeBounds_hook);
-                Method sc = class_getInstanceMethod(screenClass, @selector(scale));
-                if (sc != NULL) method_setImplementation(sc, (IMP)getScreenScale_hook);
-                Method ns = class_getInstanceMethod(screenClass, @selector(nativeScale));
-                if (ns != NULL) method_setImplementation(ns, (IMP)getScreenNativeScale_hook);
+                czfHookMethod(screenClass, @selector(bounds), (IMP)getScreenBounds_hook, NO);
+                czfHookMethod(screenClass, @selector(nativeBounds), (IMP)getScreenNativeBounds_hook, NO);
+                czfHookMethod(screenClass, @selector(scale), (IMP)getScreenScale_hook, NO);
+                czfHookMethod(screenClass, @selector(nativeScale), (IMP)getScreenNativeScale_hook, NO);
             }
         }
     }
 
     // 地区（语言 + 时区 + 地区）：客端以为自己在另一个国家/地区。
-    // 注意：preferredLanguages 会影响 App 的本地化语言（有该语言
-    // 包时界面语言跟着变），时区影响时间显示；这就是地区伪装
-    // 本身，不是 bug。
+    // 派生值优先走 Swift 传过来的 plist 值（D1 单一事实源，
+    // Swift 的 czfRegionInfo 是唯一出处）；读不到时回落到
+    // 冻结表（只给老容器用）。注意：preferredLanguages 会影响
+    // App 的本地化语言（有该语言包时界面语言跟着变），时区
+    // 影响时间显示；这就是地区伪装本身，不是 bug。
     if (region != nil) {
-        NSString *localeID = nil, *language = nil, *tzName = nil;
-        if (czfRegionInfo(region, &localeID, &language, &tzName)) {
+        NSString *localeID = localeIdentifier, *lang = language, *tzName = timeZoneName;
+        if (localeID == nil || lang == nil || tzName == nil) {
+            if (!czfRegionInfo(region, &localeID, &lang, &tzName)) {
+                localeID = nil; lang = nil; tzName = nil;
+            }
+        }
+        if (localeID != nil) {
             spoofedLocale = [NSLocale localeWithLocaleIdentifier:localeID];
-            spoofedLanguages = @[language];
+            spoofedLanguages = @[lang];
             spoofedTimeZone = [NSTimeZone timeZoneWithName:tzName];
             if (spoofedLocale != nil) {
                 Class localeClass = objc_getClass("NSLocale");
                 if (localeClass != Nil) {
-                    Method m = class_getClassMethod(localeClass, @selector(currentLocale));
-                    if (m != NULL) method_setImplementation(m, (IMP)getCurrentLocale_hook);
-                    Method pl = class_getClassMethod(localeClass, @selector(preferredLanguages));
-                    if (pl != NULL) method_setImplementation(pl, (IMP)getPreferredLanguages_hook);
+                    czfHookMethod(localeClass, @selector(currentLocale), (IMP)getCurrentLocale_hook, YES);
+                    czfHookMethod(localeClass, @selector(preferredLanguages), (IMP)getPreferredLanguages_hook, YES);
                 }
             }
             if (spoofedTimeZone != nil) {
                 Class tzClass = objc_getClass("NSTimeZone");
                 if (tzClass != Nil) {
-                    Method lt = class_getClassMethod(tzClass, @selector(localTimeZone));
-                    if (lt != NULL) method_setImplementation(lt, (IMP)getLocalTimeZone_hook);
-                    Method st = class_getClassMethod(tzClass, @selector(systemTimeZone));
-                    if (st != NULL) method_setImplementation(st, (IMP)getSystemTimeZone_hook);
-                    Method dt = class_getClassMethod(tzClass, @selector(defaultTimeZone));
-                    if (dt != NULL) method_setImplementation(dt, (IMP)getDefaultTimeZone_hook);
+                    czfHookMethod(tzClass, @selector(localTimeZone), (IMP)getLocalTimeZone_hook, YES);
+                    czfHookMethod(tzClass, @selector(systemTimeZone), (IMP)getSystemTimeZone_hook, YES);
+                    czfHookMethod(tzClass, @selector(defaultTimeZone), (IMP)getDefaultTimeZone_hook, YES);
                 }
             }
         }
@@ -344,21 +360,11 @@ void DeviceFingerprintHookInit(NSString *advertisingIdentifier, NSString *device
         spoofedProxyPortNum = proxyPort;
         Class cfgClass = objc_getClass("NSURLSessionConfiguration");
         if (cfgClass != Nil) {
-            Method dm = class_getClassMethod(cfgClass, @selector(defaultSessionConfiguration));
-            if (dm != NULL) {
-                orig_defaultSessionConfiguration = (NSURLSessionConfiguration *(*)(Class, SEL))method_getImplementation(dm);
-                method_setImplementation(dm, (IMP)getDefaultSessionConfig_hook);
-            }
-            Method em = class_getClassMethod(cfgClass, @selector(ephemeralSessionConfiguration));
-            if (em != NULL) {
-                orig_ephemeralSessionConfiguration = (NSURLSessionConfiguration *(*)(Class, SEL))method_getImplementation(em);
-                method_setImplementation(em, (IMP)getEphemeralSessionConfig_hook);
-            }
-            Method bm = class_getClassMethod(cfgClass, @selector(backgroundSessionConfigurationWithIdentifier:));
-            if (bm != NULL) {
-                orig_backgroundSessionConfiguration = (NSURLSessionConfiguration *(*)(Class, SEL, NSString *))method_getImplementation(bm);
-                method_setImplementation(bm, (IMP)getBackgroundSessionConfig_hook);
-            }
+            // method_setImplementation 返旧实现，与先取 method_getImplementation
+            // 再换等价；方法不存在时返 NULL，orig 保持 NULL，hook 侧判空不调。
+            orig_defaultSessionConfiguration = (NSURLSessionConfiguration *(*)(Class, SEL))czfHookMethod(cfgClass, @selector(defaultSessionConfiguration), (IMP)getDefaultSessionConfig_hook, YES);
+            orig_ephemeralSessionConfiguration = (NSURLSessionConfiguration *(*)(Class, SEL))czfHookMethod(cfgClass, @selector(ephemeralSessionConfiguration), (IMP)getEphemeralSessionConfig_hook, YES);
+            orig_backgroundSessionConfiguration = (NSURLSessionConfiguration *(*)(Class, SEL, NSString *))czfHookMethod(cfgClass, @selector(backgroundSessionConfigurationWithIdentifier:), (IMP)getBackgroundSessionConfig_hook, YES);
         }
     }
 }

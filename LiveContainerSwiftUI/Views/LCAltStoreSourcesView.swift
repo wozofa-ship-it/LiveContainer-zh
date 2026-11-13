@@ -2234,7 +2234,11 @@ struct LCSourceAppBanner: View {
                         Button {
                             let matches = installedAppModels
                             if matches.count == 1, let only = matches.first {
-                                Task { try? await only.runApp() }
+                                Task {
+                                    // S-1：源页「打开」先过锁守卫，认证未通过直接 return。
+                                    guard await only.czfAuthenticateIfLocked() else { return }
+                                    try? await only.runApp()
+                                }
                             } else if matches.count > 1 {
                                 showInstancePicker = true
                             }
@@ -2337,7 +2341,11 @@ struct LCSourceAppBanner: View {
                 List(installedAppModels, id: \.self) { model in
                     Button {
                         showInstancePicker = false
-                        Task { try? await model.runApp() }
+                        Task {
+                            // S-1：实例选择器「打开」先过锁守卫，认证未通过直接 return。
+                            guard await model.czfAuthenticateIfLocked() else { return }
+                            try? await model.runApp()
+                        }
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.appInfo.displayName())
@@ -2695,7 +2703,11 @@ private final class CZFSourceIconCache {
                 return existing
             }
             let newTask = Task<UIImage?, Never> {
-                guard let (data, _) = try? await CZFVPNManager.hostSession().data(from: url),
+                // D4：先验 HTTP 状态，非 2xx（404 错误页等）直接返 nil，
+                // 不缓存坏数据（N2/N3 同款）。失败不缓存，成功才缓存。
+                guard let (data, response) = try? await CZFVPNManager.hostSession().data(from: url),
+                      let httpResponse = response as? HTTPURLResponse,
+                      (200...299).contains(httpResponse.statusCode),
                       let img = Self.decodedImage(from: data) else { return nil }
                 self.store(img, forKey: key)
                 if let dest = self.diskURL(for: url) {

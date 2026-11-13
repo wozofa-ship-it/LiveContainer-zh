@@ -651,17 +651,25 @@ struct CZFAppGridCell: View {
 // 原图几 MB 不直接落盘）；版本号放 @AppStorage，选图/清除时 +1，
 // LCAppListView 监听版本号重读图片。部署目标 iOS 15 没有 PhotosPicker，
 // 用 UIImagePickerController（iOS 15 可用）包一层。
-enum CZFAppBackground {
-    static let versionKey = "CZFAppBackgroundVersion"
-    static let fileName = "CZFAppBackground.jpg"
-    static var fileURL: URL { LCPath.docPath.appendingPathComponent(fileName) }
+// 壁纸存储共享实现（D2）：App 页与源页壁纸只有 versionKey/fileName
+// 不同，load/save/clear/hasImage + O-31 缓存逐字相同。
+// 两 enum 各持一个实例，缓存分开（App 图与源图是两张），
+// 对外 API（versionKey/loadImage/save/clear/hasImage）不变。
+final class CZFBackgroundStore {
+    let versionKey: String
+    let fileName: String
+    var fileURL: URL { LCPath.docPath.appendingPathComponent(fileName) }
     // O-31 壁纸缓存：解码后的图放内存里，版本号没变就直接
     // 用，不再每次进页都从磁盘重读重解一张 1600px 的 JPEG
     //（切 Tab 一次就解一次）。版本键是选图/清除时 +1 的
     // 唯一失效信号；save()/clear() 里也清缓存，双保险。
-    private static var cachedImage: UIImage?
-    private static var cachedVersion: Int = -1
-    static func loadImage() -> UIImage? {
+    private var cachedImage: UIImage?
+    private var cachedVersion: Int = -1
+    init(versionKey: String, fileName: String) {
+        self.versionKey = versionKey
+        self.fileName = fileName
+    }
+    func loadImage() -> UIImage? {
         let version = UserDefaults.standard.integer(forKey: versionKey)
         if let cached = cachedImage, cachedVersion == version {
             return cached
@@ -671,7 +679,7 @@ enum CZFAppBackground {
         cachedVersion = version
         return image
     }
-    static func save(_ image: UIImage) {
+    func save(_ image: UIImage) {
         let maxSide: CGFloat = 1600
         let size = image.size
         let scale = min(1, maxSide / max(size.width, size.height))
@@ -684,13 +692,24 @@ enum CZFAppBackground {
         try? data.write(to: fileURL, options: .atomic)
         cachedImage = nil
     }
-    static func clear() {
+    func clear() {
         try? FileManager.default.removeItem(at: fileURL)
         cachedImage = nil
     }
-    static var hasImage: Bool {
+    var hasImage: Bool {
         FileManager.default.fileExists(atPath: fileURL.path)
     }
+}
+
+enum CZFAppBackground {
+    private static let store = CZFBackgroundStore(versionKey: "CZFAppBackgroundVersion", fileName: "CZFAppBackground.jpg")
+    static var versionKey: String { store.versionKey }
+    static var fileName: String { store.fileName }
+    static var fileURL: URL { store.fileURL }
+    static func loadImage() -> UIImage? { store.loadImage() }
+    static func save(_ image: UIImage) { store.save(image) }
+    static func clear() { store.clear() }
+    static var hasImage: Bool { store.hasImage }
 }
 
 // MARK: - 源页自定义背景（3.8.453）：与 App 页分开存。
@@ -699,43 +718,14 @@ enum CZFAppBackground {
 // 各以为是自己的。分开：源页存 CZFSourceBackground.jpg，
 // 版本键 CZFSourceBackgroundVersion；App 页不动。
 enum CZFSourceBackground {
-    static let versionKey = "CZFSourceBackgroundVersion"
-    static let fileName = "CZFSourceBackground.jpg"
-    static var fileURL: URL { LCPath.docPath.appendingPathComponent(fileName) }
-    // O-31 壁纸缓存：与 CZFAppBackground 同款——版本号没变
-    // 就用内存里的解码图，不再每次进页重读重解。
-    private static var cachedImage: UIImage?
-    private static var cachedVersion: Int = -1
-    static func loadImage() -> UIImage? {
-        let version = UserDefaults.standard.integer(forKey: versionKey)
-        if let cached = cachedImage, cachedVersion == version {
-            return cached
-        }
-        let image = UIImage(contentsOfFile: fileURL.path)
-        cachedImage = image
-        cachedVersion = version
-        return image
-    }
-    static func save(_ image: UIImage) {
-        let maxSide: CGFloat = 1600
-        let size = image.size
-        let scale = min(1, maxSide / max(size.width, size.height))
-        let target = CGSize(width: size.width * scale, height: size.height * scale)
-        UIGraphicsBeginImageContextWithOptions(target, true, 1)
-        image.draw(in: CGRect(origin: .zero, size: target))
-        let scaled = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        guard let data = (scaled ?? image).jpegData(compressionQuality: 0.85) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-        cachedImage = nil
-    }
-    static func clear() {
-        try? FileManager.default.removeItem(at: fileURL)
-        cachedImage = nil
-    }
-    static var hasImage: Bool {
-        FileManager.default.fileExists(atPath: fileURL.path)
-    }
+    private static let store = CZFBackgroundStore(versionKey: "CZFSourceBackgroundVersion", fileName: "CZFSourceBackground.jpg")
+    static var versionKey: String { store.versionKey }
+    static var fileName: String { store.fileName }
+    static var fileURL: URL { store.fileURL }
+    static func loadImage() -> UIImage? { store.loadImage() }
+    static func save(_ image: UIImage) { store.save(image) }
+    static func clear() { store.clear() }
+    static var hasImage: Bool { store.hasImage }
 }
 
 struct CZFAppBackgroundPicker: UIViewControllerRepresentable {

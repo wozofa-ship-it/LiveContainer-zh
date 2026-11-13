@@ -59,6 +59,13 @@ class SharedModel: ObservableObject {
     // 只有一个网页能最小化（再开新网页时旧的被顶掉）。
     @Published var czfMinimizedWebView: WebView? = nil
     @Published var czfMinimizedWebURL: URL? = nil
+
+    // D6：最小化网页清状态（四处共用）：恢复打开、关闭丢弃、
+    // 浮动胶囊丢弃、新开网页顶掉旧的，都是同一对置 nil。
+    func clearMinimizedWeb() {
+        czfMinimizedWebView = nil
+        czfMinimizedWebURL = nil
+    }
     // R-1：App 页盾牌菜单“前往 VPN 设置”的切分段触发器——
     // VPN 已搬到模块页（LCTweaksView 的 .vpn 分段），光切
     // .tweaks 还落在默认的“本机”分段。按钮置 .tweaks 的同时

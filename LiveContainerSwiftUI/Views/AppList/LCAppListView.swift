@@ -2026,8 +2026,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         .padding(.vertical, 10)
                     }
                     Button {
-                        sharedModel.czfMinimizedWebView = nil
-                        sharedModel.czfMinimizedWebURL = nil
+                        sharedModel.clearMinimizedWeb()
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))
@@ -2250,8 +2249,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         // 新开网页时，之前最小化的网页被顶掉（只留一个最小化网页）。
-        sharedModel.czfMinimizedWebView = nil
-        sharedModel.czfMinimizedWebURL = nil
+        sharedModel.clearMinimizedWeb()
         webViewURL = urlToOpen.url!
         if webViewOpened {
             webViewOpened = false

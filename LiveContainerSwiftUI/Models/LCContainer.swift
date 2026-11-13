@@ -53,6 +53,20 @@ class LCContainer : ObservableObject, Hashable {
                 if spoofedRegion == nil {
                     spoofedRegion = LCContainer.czfRandomRegion()
                 }
+                // 派生值与机型/地区同源（D1 单一事实源）：屏幕尺寸与
+                // locale/语言/时区由机型/地区码推导，随 plist 传给客端，
+                // 客端不再另维护对照表。老容器缺这几键时就地补齐，
+                // 下次保存时写入 plist；客端读不到时回落到内置表。
+                if spoofedScreenWidth == nil, let m = spoofedMachine, let s = LCContainer.czfScreenForMachine(m) {
+                    spoofedScreenWidth = s.width
+                    spoofedScreenHeight = s.height
+                    spoofedScreenScale = s.scale
+                }
+                if spoofedLocaleIdentifier == nil, let r = spoofedRegion, let info = LCContainer.czfRegionInfo(r) {
+                    spoofedLocaleIdentifier = info.localeID
+                    spoofedLanguage = info.language
+                    spoofedTimeZoneName = info.timeZoneName
+                }
             }
         }
     }
@@ -64,6 +78,24 @@ class LCContainer : ObservableObject, Hashable {
     // 客端 hook NSLocale/NSTimeZone 注入。每个分身随机一个，
     // 固定不变。
     public var spoofedRegion: String?
+    // 屏幕与地区派生值（D1 单一事实源）：由机型/地区码推导，
+    // 随 plist 传给客端，客端不再另维护对照表。老容器没有
+    // 这几键，读时由 didSet 就地补齐，下次保存时写入 plist。
+    public var spoofedScreenWidth: Double?
+    public var spoofedScreenHeight: Double?
+    public var spoofedScreenScale: Double?
+    public var spoofedLocaleIdentifier: String?
+    public var spoofedLanguage: String?
+    public var spoofedTimeZoneName: String?
+
+    // D5：多开隔离开关三元组（App Group 隔离 + IDFV 伪装 + 设备指纹），
+    // 三处自动开隔离共用。三个 didSet 都是 nil 守卫（已有值不重生成），
+    // 逐个赋 true 与原来逐行写语义相同。
+    func enableMultiOpenIsolation() {
+        isolateAppGroup = true
+        spoofIdentifierForVendor = true
+        spoofDeviceFingerprint = true
+    }
 
     // 每分身单独代理：用户自己填（host + 端口），空 = 不走代理。
     // 不是自动生成的——代理服务器得用户自己有，填错/填了不可用
@@ -118,6 +150,37 @@ class LCContainer : ObservableObject, Hashable {
 
     static func czfRandomMachine() -> String {
         ["iPhone17,1", "iPhone16,2", "iPhone16,1", "iPhone15,3", "iPhone15,2"].randomElement() ?? "iPhone17,1"
+    }
+
+    // 屏幕对照表（D1 单一事实源）：机型 -> 屏幕 native 像素 + scale，
+    // 与 czfRandomMachine 的五款一致。客端（DeviceFingerprint.m）
+    // 不再另维护一份，只读 plist 传过去的派生值；这里是唯一出处。
+    static func czfScreenForMachine(_ machine: String) -> (width: Double, height: Double, scale: Double)? {
+        switch machine {
+        case "iPhone17,1": return (1206, 2622, 3) // iPhone 16 Pro
+        case "iPhone16,2": return (1290, 2796, 3) // iPhone 15 Pro Max
+        case "iPhone16,1": return (1179, 2556, 3) // iPhone 15 Pro
+        case "iPhone15,3": return (1290, 2796, 3) // iPhone 14 Pro Max
+        case "iPhone15,2": return (1179, 2556, 3) // iPhone 14 Pro
+        default: return nil
+        }
+    }
+
+    // 地区对照表（D1 单一事实源）：地区码 -> locale + 语言 + 时区，
+    // 与 czfRandomRegion 的八个码一致。客端只读 plist 传过去的
+    // 派生值；这里是唯一出处。
+    static func czfRegionInfo(_ region: String) -> (localeID: String, language: String, timeZoneName: String)? {
+        switch region {
+        case "US": return ("en_US", "en", "America/New_York")
+        case "JP": return ("ja_JP", "ja", "Asia/Tokyo")
+        case "GB": return ("en_GB", "en", "Europe/London")
+        case "DE": return ("de_DE", "de", "Europe/Berlin")
+        case "FR": return ("fr_FR", "fr", "Europe/Paris")
+        case "KR": return ("ko_KR", "ko", "Asia/Seoul")
+        case "AU": return ("en_AU", "en", "Australia/Sydney")
+        case "CA": return ("en_CA", "en", "America/Toronto")
+        default: return nil
+        }
     }
     private var infoDict : [String:Any]?
     public var containerURL : URL {
@@ -204,23 +267,36 @@ class LCContainer : ObservableObject, Hashable {
             
             let plistInfo = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoDictUrl), format: nil)
             if let plistInfo = plistInfo as? [String : Any] {
-                isolateAppGroup = plistInfo["isolateAppGroup"] as? Bool ?? false
-                spoofIdentifierForVendor = plistInfo["spoofIdentifierForVendor"] as? Bool ?? false
-                spoofedIdentifier = plistInfo["spoofedIdentifierForVendor"] as? String
-                // 先读值再开开关：didSet 在开时会补没生成的值，
-                // 顺序反了会把刚生成的值又用 nil 盖掉。
-                spoofedAdvertisingIdentifier = plistInfo["spoofedAdvertisingIdentifier"] as? String
-                spoofedDeviceName = plistInfo["spoofedDeviceName"] as? String
-                spoofedSystemVersion = plistInfo["spoofedSystemVersion"] as? String
-                spoofedMachine = plistInfo["spoofedMachine"] as? String
-                spoofedRegion = plistInfo["spoofedRegion"] as? String
-                spoofedProxyHost = plistInfo["spoofedProxyHost"] as? String
-                spoofedProxyPort = plistInfo["spoofedProxyPort"] as? Int ?? 0
-                spoofDeviceFingerprint = plistInfo["spoofDeviceFingerprint"] as? Bool ?? false
+                applyPlistInfo(plistInfo)
             }
         } catch {
             
         }
+    }
+
+    // plist 读共用（D3）：convenience init 与 loadName 两处
+    // 原来各写一份（14 个键 +“先读值再开开关”顺序注释），
+    // 新键只改这里一处。先读值再开开关：didSet 在开时会补
+    // 没生成的值（D1 派生值也在 didSet 里补），顺序反了会
+    // 把刚生成的值又用 nil 盖掉。
+    private func applyPlistInfo(_ plistInfo: [String: Any]) {
+        isolateAppGroup = plistInfo["isolateAppGroup"] as? Bool ?? false
+        spoofIdentifierForVendor = plistInfo["spoofIdentifierForVendor"] as? Bool ?? false
+        spoofedIdentifier = plistInfo["spoofedIdentifierForVendor"] as? String
+        spoofedAdvertisingIdentifier = plistInfo["spoofedAdvertisingIdentifier"] as? String
+        spoofedDeviceName = plistInfo["spoofedDeviceName"] as? String
+        spoofedSystemVersion = plistInfo["spoofedSystemVersion"] as? String
+        spoofedMachine = plistInfo["spoofedMachine"] as? String
+        spoofedRegion = plistInfo["spoofedRegion"] as? String
+        spoofedScreenWidth = plistInfo["spoofedScreenWidth"] as? Double
+        spoofedScreenHeight = plistInfo["spoofedScreenHeight"] as? Double
+        spoofedScreenScale = plistInfo["spoofedScreenScale"] as? Double
+        spoofedLocaleIdentifier = plistInfo["spoofedLocaleIdentifier"] as? String
+        spoofedLanguage = plistInfo["spoofedLanguage"] as? String
+        spoofedTimeZoneName = plistInfo["spoofedTimeZoneName"] as? String
+        spoofedProxyHost = plistInfo["spoofedProxyHost"] as? String
+        spoofedProxyPort = plistInfo["spoofedProxyPort"] as? Int ?? 0
+        spoofDeviceFingerprint = plistInfo["spoofDeviceFingerprint"] as? Bool ?? false
     }
     
     func toDict() -> [String : Any] {
@@ -261,6 +337,24 @@ class LCContainer : ObservableObject, Hashable {
         if let spoofedRegion {
             infoDict!["spoofedRegion"] = spoofedRegion
         }
+        if let spoofedScreenWidth {
+            infoDict!["spoofedScreenWidth"] = spoofedScreenWidth
+        }
+        if let spoofedScreenHeight {
+            infoDict!["spoofedScreenHeight"] = spoofedScreenHeight
+        }
+        if let spoofedScreenScale {
+            infoDict!["spoofedScreenScale"] = spoofedScreenScale
+        }
+        if let spoofedLocaleIdentifier {
+            infoDict!["spoofedLocaleIdentifier"] = spoofedLocaleIdentifier
+        }
+        if let spoofedLanguage {
+            infoDict!["spoofedLanguage"] = spoofedLanguage
+        }
+        if let spoofedTimeZoneName {
+            infoDict!["spoofedTimeZoneName"] = spoofedTimeZoneName
+        }
         if let spoofedProxyHost, !spoofedProxyHost.isEmpty {
             infoDict!["spoofedProxyHost"] = spoofedProxyHost
         }
@@ -291,19 +385,7 @@ class LCContainer : ObservableObject, Hashable {
             return
         }
         name = infoDict["name"] as? String ?? "ERROR"
-        isolateAppGroup = infoDict["isolateAppGroup"] as? Bool ?? false
-        spoofIdentifierForVendor = infoDict["spoofIdentifierForVendor"] as? Bool ?? false
-        spoofedIdentifier = infoDict["spoofedIdentifierForVendor"] as? String
-        // 先读值再开开关：didSet 在开时会补没生成的值，
-        // 顺序反了会把刚生成的值又用 nil 盖掉。
-        spoofedAdvertisingIdentifier = infoDict["spoofedAdvertisingIdentifier"] as? String
-        spoofedDeviceName = infoDict["spoofedDeviceName"] as? String
-        spoofedSystemVersion = infoDict["spoofedSystemVersion"] as? String
-        spoofedMachine = infoDict["spoofedMachine"] as? String
-        spoofedRegion = infoDict["spoofedRegion"] as? String
-        spoofedProxyHost = infoDict["spoofedProxyHost"] as? String
-        spoofedProxyPort = infoDict["spoofedProxyPort"] as? Int ?? 0
-        spoofDeviceFingerprint = infoDict["spoofDeviceFingerprint"] as? Bool ?? false
+        applyPlistInfo(infoDict)
     }
     
     static func == (lhs: LCContainer, rhs: LCContainer) -> Bool {

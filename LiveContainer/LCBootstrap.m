@@ -106,6 +106,12 @@ static uint64_t rnd64(uint64_t v, uint64_t r) {
     return (v + r) & ~r;
 }
 
+// D10：plist 取值类型校验抽共用——类型不对置 nil（非 NSString/NSNumber
+// 的值不要进 hook）。调用方逐项传值与期望类型。
+static id czfValidatedPlistValue(id value, Class cls) {
+    return [value isKindOfClass:cls] ? value : nil;
+}
+
 void overwriteMainCFBundle(void) {
     // Overwrite CFBundleGetMainBundle
     uint32_t *pc = (uint32_t *)CFBundleGetMainBundle;
@@ -637,13 +643,27 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         NSString *spoofedRegion = guestContainerInfo[@"spoofedRegion"];
         NSString *spoofedProxyHost = guestContainerInfo[@"spoofedProxyHost"];
         NSInteger spoofedProxyPort = [guestContainerInfo[@"spoofedProxyPort"] integerValue];
-        if(![spoofedIDFA isKindOfClass:NSString.class]) spoofedIDFA = nil;
-        if(![spoofedName isKindOfClass:NSString.class]) spoofedName = nil;
-        if(![spoofedVersion isKindOfClass:NSString.class]) spoofedVersion = nil;
-        if(![spoofedMachine isKindOfClass:NSString.class]) spoofedMachine = nil;
-        if(![spoofedRegion isKindOfClass:NSString.class]) spoofedRegion = nil;
-        if(![spoofedProxyHost isKindOfClass:NSString.class]) spoofedProxyHost = nil;
-        DeviceFingerprintHookInit(spoofedIDFA, spoofedName, spoofedVersion, spoofedMachine, spoofedRegion, spoofedProxyHost, spoofedProxyPort);
+        // D1 派生值（屏幕尺寸、locale/语言/时区）：Swift 侧随 plist
+        // 传过来，客端直接用；老容器没有这几键，传 nil 走内置表回落。
+        NSNumber *spoofedScreenWidth = guestContainerInfo[@"spoofedScreenWidth"];
+        NSNumber *spoofedScreenHeight = guestContainerInfo[@"spoofedScreenHeight"];
+        NSNumber *spoofedScreenScale = guestContainerInfo[@"spoofedScreenScale"];
+        NSString *spoofedLocaleID = guestContainerInfo[@"spoofedLocaleIdentifier"];
+        NSString *spoofedLanguage = guestContainerInfo[@"spoofedLanguage"];
+        NSString *spoofedTimeZoneName = guestContainerInfo[@"spoofedTimeZoneName"];
+        spoofedIDFA = czfValidatedPlistValue(spoofedIDFA, NSString.class);
+        spoofedName = czfValidatedPlistValue(spoofedName, NSString.class);
+        spoofedVersion = czfValidatedPlistValue(spoofedVersion, NSString.class);
+        spoofedMachine = czfValidatedPlistValue(spoofedMachine, NSString.class);
+        spoofedRegion = czfValidatedPlistValue(spoofedRegion, NSString.class);
+        spoofedProxyHost = czfValidatedPlistValue(spoofedProxyHost, NSString.class);
+        spoofedScreenWidth = czfValidatedPlistValue(spoofedScreenWidth, NSNumber.class);
+        spoofedScreenHeight = czfValidatedPlistValue(spoofedScreenHeight, NSNumber.class);
+        spoofedScreenScale = czfValidatedPlistValue(spoofedScreenScale, NSNumber.class);
+        spoofedLocaleID = czfValidatedPlistValue(spoofedLocaleID, NSString.class);
+        spoofedLanguage = czfValidatedPlistValue(spoofedLanguage, NSString.class);
+        spoofedTimeZoneName = czfValidatedPlistValue(spoofedTimeZoneName, NSString.class);
+        DeviceFingerprintHookInit(spoofedIDFA, spoofedName, spoofedVersion, spoofedMachine, spoofedRegion, spoofedProxyHost, spoofedProxyPort, spoofedScreenWidth, spoofedScreenHeight, spoofedScreenScale, spoofedLocaleID, spoofedLanguage, spoofedTimeZoneName);
     }
     
     bool is32bit = [guestAppInfo[@"is32bit"] boolValue];

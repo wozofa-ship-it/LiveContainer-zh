@@ -33,6 +33,27 @@ class LCAppModel: ObservableObject, Hashable {
         czfLaunchInFlight = false
         czfLaunchLock.unlock()
     }
+
+    // S-1/F-1/F-2：共享锁守卫（全仓唯一一份新入口共用；banner、
+    // 列表、launchAppWithBundleId 的现有守卫不动，不改它们的认证
+    // 流程与报错出口）。锁了且没解锁过就先弹人脸，通过返回 true；
+    // 取消或抛错返回 false，调用方直接 return。
+    // LCUtils.authenticateUser 成功后置 isHiddenAppUnlocked，后面
+    // 同款检查直接短路，不弹第二次人脸。静态版供只有 LCAppInfo
+    // 的入口（坞图标/运行条/右缘轮切）用；实例版供有 LCAppModel
+    // 的入口用，谓词只写在静态版这一处。
+    static func czfAuthenticateIfLocked(appInfo: LCAppInfo) async -> Bool {
+        guard appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked else { return true }
+        do {
+            return try await LCUtils.authenticateUser()
+        } catch {
+            return false
+        }
+    }
+
+    func czfAuthenticateIfLocked() async -> Bool {
+        Self.czfAuthenticateIfLocked(appInfo: appInfo)
+    }
     @Published var isSigningInProgress = false
     @Published var signProgress = 0.0
     private var observer : NSKeyValueObservation?
@@ -366,9 +387,7 @@ class LCAppModel: ObservableObject, Hashable {
         }
         let newName = NSUUID().uuidString
         let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
-        newContainer.isolateAppGroup = true
-        newContainer.spoofIdentifierForVendor = true
-        newContainer.spoofDeviceFingerprint = true
+        newContainer.enableMultiOpenIsolation()
         let group = czfFreeKeychainGroup(excluding: newContainer)
         uiContainers.append(newContainer)
         uiSelectedContainer = newContainer
@@ -404,9 +423,7 @@ class LCAppModel: ObservableObject, Hashable {
                 newGroup = czfFreeKeychainGroup(excluding: container)
             }
             if !container.isolateAppGroup || !container.spoofIdentifierForVendor || !container.spoofDeviceFingerprint || container.keychainGroupId != newGroup {
-                container.isolateAppGroup = true
-                container.spoofIdentifierForVendor = true
-                container.spoofDeviceFingerprint = true
+                container.enableMultiOpenIsolation()
                 container.makeLCContainerInfoPlist(appIdentifier: bundleIdentifier, keychainGroupId: newGroup)
             }
             if newGroup >= 0 { otherGroups.insert(newGroup) }
@@ -434,9 +451,7 @@ class LCAppModel: ObservableObject, Hashable {
             let isMultiOpen = !czfOtherSameBundleApps().isEmpty
             let group: Int
             if isMultiOpen {
-                newContainer.isolateAppGroup = true
-                newContainer.spoofIdentifierForVendor = true
-                newContainer.spoofDeviceFingerprint = true
+                newContainer.enableMultiOpenIsolation()
                 group = czfFreeKeychainGroup(excluding: newContainer)
             } else {
                 group = Int.random(in: 0..<SharedModel.keychainAccessGroupCount)

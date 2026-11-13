@@ -131,6 +131,20 @@ extension View {
     }
 }
 
+// 三个 Modifier（DocModifier / CZFFolderPickerModifier /
+// TextFieldAlertModifier）的 handlePresentationChange 共用骨架：
+// root 未 presenting 时才能 present，否则 UIKit 静默丢弃。
+// 返 rootViewController = 空闲可 present；nil = 正 presenting，
+// 本次跳过并留日志（调用方决定是否复位 isPresented：文件夹
+// 那个要置 false 才能下次再弹，另两个不置、留待下次 onChange 重试）。
+private func czfIdleRootViewController(from sceneDelegate: SceneDelegate, logTag: String) -> UIViewController? {
+    guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
+        print("[\(logTag)] present skipped: rootViewController already presenting")
+        return nil
+    }
+    return rootViewController
+}
+
 public struct DocModifier: ViewModifier {
     @EnvironmentObject var sceneDelegate: SceneDelegate
     @State private var docController: UIDocumentPickerViewController?
@@ -178,11 +192,10 @@ public struct DocModifier: ViewModifier {
             let controller = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
             controller.allowsMultipleSelection = multiple
             controller.delegate = delegate
-            guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
-                // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-                // 不把 isPresented 置 false、不占 docController，
-                // 下次 onChange 再触发时重试，并留日志。
-                print("[DocModifier] present skipped: rootViewController already presenting")
+            // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+            // 不把 isPresented 置 false、不占 docController，
+            // 下次 onChange 再触发时重试，并留日志。
+            guard let rootViewController = czfIdleRootViewController(from: sceneDelegate, logTag: "DocModifier") else {
                 return
             }
             self.docController = controller
@@ -261,13 +274,12 @@ public struct CZFFolderPickerModifier: ViewModifier {
             // 3.8.442：用 @State 持有的 delegate，不再内联创建
             //（内联的当场释放，回调永不触发）。
             controller.delegate = delegate
-            guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
-                // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-                // 3.8.439：原来只打日志、不把 isPresented 置 false，
-                // 下次点按钮时值已是 true、onChange 不触发，选择器
-                // 再也弹不出来（用户点“选择文件夹”没反应）。这里
-                // 置回 false，下次点按钮 onChange 能再触发。
-                print("[CZFFolderPickerModifier] present skipped: rootViewController already presenting")
+            // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+            // 3.8.439：原来只打日志、不把 isPresented 置 false，
+            // 下次点按钮时值已是 true、onChange 不触发，选择器
+            // 再也弹不出来（用户点“选择文件夹”没反应）。这里
+            // 置回 false，下次点按钮 onChange 能再触发。
+            guard let rootViewController = czfIdleRootViewController(from: sceneDelegate, logTag: "CZFFolderPickerModifier") else {
                 isPresented = false
                 return
             }
@@ -327,11 +339,10 @@ public struct TextFieldAlertModifier: ViewModifier {
     private func handlePresentationChange(_ presented: Bool) {
         if presented, alertController == nil {
             let alertController = makeAlertController()
-            guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
-                // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-                // 不把 isPresented 置 false、不占 alertController，
-                // 下次 onChange 再触发时重试，并留日志。
-                print("[TextFieldAlertModifier] present skipped: rootViewController already presenting")
+            // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
+            // 不把 isPresented 置 false、不占 alertController，
+            // 下次 onChange 再触发时重试，并留日志。
+            guard let rootViewController = czfIdleRootViewController(from: sceneDelegate, logTag: "TextFieldAlertModifier") else {
                 return
             }
             self.alertController = alertController
