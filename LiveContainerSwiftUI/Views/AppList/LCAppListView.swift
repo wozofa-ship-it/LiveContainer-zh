@@ -1411,11 +1411,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     if brought || (!cleanedByC4 && !entryGone) {
                         // maximizeWindow 是切换式，先判 !isMaximized，
                         // 否则已是最大窗会被反切回小窗。
-                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
-                           !vc.isMaximized {
-                            vc.maximizeWindow()
+                        // 死窗兜底：bring 没抬动、条目还在、但拿不到 VC
+                        // 时不是“窗已在前台”，是死窗——返回 false 走新起，
+                        // 别静默吞掉启动；bring 成功时直接回真。
+                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController {
+                            if !vc.isMaximized {
+                                vc.maximizeWindow()
+                            }
+                            return true
                         }
-                        return true
+                        return brought
                     }
                 }
             } else {
@@ -1569,6 +1574,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfBackgroundImage = CZFAppBackground.loadImage()
             // O-18：进页刷一次过滤缓存（输入=排序列表+搜索词）。
             czfRefreshFilteredApps()
+            // 每次进页都重赋 delegate（见 czfAssignAppDelegates 注释）：
+            // 冷启动扫描可能在 onAppear() 跑完后才换上新模型。
+            czfAssignAppDelegates()
             if !didAppear {
                 onAppear()
             }
@@ -1586,6 +1594,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .onChange(of: sortedApps) { _ in
             czfRefreshFilteredApps()
+            // 列表变了（冷启动扫描换模型/新装 App 追加），新模型补 delegate。
+            czfAssignAppDelegates()
         }
         .onChange(of: scenePhase) { newPhase in
             // 3.8.404：从后台切回前台时扫分享收件箱（本页已在
@@ -2110,13 +2120,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         await openWebView(urlString: urlToOpen)
         
     }
-    func onAppear() {
+    // delegate 重赋（JIT 启动根因修法）：冷启动扫描是后台异步的
+    // （LiveContainerSwiftUIApp:40，Task.detached 扫完整个替换
+    // model.apps）；onAppear() 只跑一次（didAppear 守卫），扫完
+    // 换上的新模型拿不到 delegate，JIT/多任务确认全走
+    // delegate?. 链就静默空转——点启动没反应、没确认框、没报错。
+    // 新装 App 追加进 apps 时同样没 delegate。重赋只是写引用，
+    // 便宜；进页与列表变时都刷一次。
+    private func czfAssignAppDelegates() {
         for app in sharedModel.apps {
             app.delegate = self
         }
         for app in sharedModel.hiddenApps {
             app.delegate = self
         }
+    }
+
+    func onAppear() {
+        czfAssignAppDelegates()
         didAppear = true
     }
     

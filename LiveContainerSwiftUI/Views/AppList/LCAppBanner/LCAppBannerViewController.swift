@@ -234,11 +234,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                     if brought || (!cleanedByC4 && !entryGone) {
                         // maximizeWindow 是切换式，先判 !isMaximized，
                         // 否则已是最大窗会被反切回小窗。
-                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController,
-                           !vc.isMaximized {
-                            vc.maximizeWindow()
+                        // 死窗兜底：bring 没抬动、条目还在、但拿不到 VC
+                        // 时不是“窗已在前台”，是死窗——返回 false 走新起，
+                        // 别静默吞掉启动；bring 成功时直接回真。
+                        if let vc = runningApp.view?._viewDelegate() as? DecoratedAppSceneViewController {
+                            if !vc.isMaximized {
+                                vc.maximizeWindow()
+                            }
+                            return true
                         }
-                        return true
+                        return brought
                     }
                 }
             } else {
