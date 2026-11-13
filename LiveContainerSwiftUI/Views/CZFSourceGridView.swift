@@ -643,9 +643,12 @@ struct CZFSourceDetailView: View {
         .toolbar {
             // S-13：批量模式下详情页内也能执行批量安装（与主页面板
             // 同一个 batchInstallSelected，装全部已勾、去重、清勾选）；
-            // n 是本源已勾数，0 个时禁用。
-            if isBatchMode {
-                ToolbarItem(placement: .topBarTrailing) {
+            // n 是本源已勾数，0 个时禁用。ToolbarContentBuilder 在
+            // iOS 15 上只认 buildBlock，if 要 iOS 16+——if 下沉到
+            // ToolbarItem 内容里（@ViewBuilder，iOS 13+ 就有；3.8.334
+            // 同款修法），内容为空时 ToolbarItem 不占位。
+            ToolbarItem(placement: .topBarTrailing) {
+                if isBatchMode {
                     Button("安装（\(czfSelectedCountInDetail)）") {
                         onBatchInstall()
                     }
