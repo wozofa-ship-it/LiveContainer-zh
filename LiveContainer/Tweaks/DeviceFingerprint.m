@@ -14,6 +14,7 @@
 //
 @import Foundation;
 @import ObjectiveC;
+@import UIKit;
 #include <dlfcn.h>
 #include <errno.h>
 #include <string.h>
