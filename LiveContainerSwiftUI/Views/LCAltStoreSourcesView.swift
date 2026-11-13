@@ -725,10 +725,12 @@ struct LCSourcesView: View {
     @State private var isBatchMode = false
     @State private var selectedIDs = Set<String>()
     // 源页网格模式（3.8.407）：默认 false=原来列表；列数/图标
-    // 大小复用 App 页同一套 @AppStorage 键，两处同改同生效。
+    // 大小源页自己一套键（3.8.461 分键：CZFSourceGridColumns/
+    // CZFSourceGridIconSize），与 App 页互不影响；老用户首次
+    // 进源页从旧键拷一份过来（见 czfMigrateSourceGridKeys）。
     @AppStorage("CZFSourceListGridMode") private var czfSourceGridMode = false
-    @AppStorage("CZFAppGridColumns") private var czfSourceGridColumns = 5
-    @AppStorage("CZFAppGridIconSize") private var czfSourceGridIconSize = 0
+    @AppStorage("CZFSourceGridColumns") private var czfSourceGridColumns = 5
+    @AppStorage("CZFSourceGridIconSize") private var czfSourceGridIconSize = 0
     @State private var czfSourceGridSettingsShow = false
     // 可更新数量写到这里，底部「源」标签上显示红点数字
     @AppStorage("CZFUpdatableAppCount") private var updatableCountBadge = 0
@@ -751,6 +753,26 @@ struct LCSourcesView: View {
     @State private var czfIpaFolderURL: URL? = nil
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
+
+    /// 源页网格列数/图标大小分键迁移（3.8.461）：旧版与 App 页
+    /// 共用 CZFAppGridColumns/CZFAppGridIconSize，首次进源页把
+    /// 旧键值拷到新键 CZFSourceGridColumns/CZFSourceGridIconSize，
+    /// 只拷一次（CZFSourceGridKeysMigratedV1 标记，照抄
+    /// CZFPinnedPanelAppsMigratedV2 同款做法）；新键已有值时不
+    /// 覆盖（用户已在新键上改过）。旧键无值时不写，新键走默认。
+    private func czfMigrateSourceGridKeys() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "CZFSourceGridKeysMigratedV1") else { return }
+        if defaults.object(forKey: "CZFSourceGridColumns") == nil,
+           let old = defaults.object(forKey: "CZFAppGridColumns") {
+            defaults.set(old, forKey: "CZFSourceGridColumns")
+        }
+        if defaults.object(forKey: "CZFSourceGridIconSize") == nil,
+           let old = defaults.object(forKey: "CZFAppGridIconSize") {
+            defaults.set(old, forKey: "CZFSourceGridIconSize")
+        }
+        defaults.set(true, forKey: "CZFSourceGridKeysMigratedV1")
+    }
 
     /// 自动刷新源：打开 App / 切到源页时后台刷一次，更新红点
     /// 才是准的；5 分钟内重复触发直接跳过，不浪费流量
@@ -1129,6 +1151,7 @@ struct LCSourcesView: View {
         .searchable(text: $searchContext.query)
 
         .onAppear {
+            czfMigrateSourceGridKeys()
             refreshUpdatableCache()
             autoRefreshSourcesIfNeeded()
             // 3.8.454：文件夹区移到源页，出现时把记过的文件夹

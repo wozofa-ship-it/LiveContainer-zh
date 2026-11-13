@@ -582,7 +582,7 @@ struct LCAppSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                    if #available(iOS 26.0, *), model.uiIsJITNeeded {
+                    if #available(iOS 26.0, *), model.uiIsJITNeeded, !model.uiIs32bit {
                         Text("lc.appSettings.launchWithJitDesc".loc + "\n" + "lc.appSettings.jit26.scriptDesc".loc)
 
                     } else {
