@@ -48,8 +48,10 @@ static BOOL getATTEnabled_hook(NSObject *self, SEL _cmd) {
 // --- 屏幕（与伪装机型一致） ---
 // 机型 -> 屏幕 native 像素 + scale，与 czfRandomMachine 的五款一致。
 // bounds（点）= native / scale；nativeBounds（像素）= native。
-static CGRect spoofedBounds = CGRectZero;
-static CGRect spoofedNativeBounds = CGRectZero;
+// 文件级 static 默认零初始化（即 CGRectZero），不能拿
+// CGRectZero 当初始化器——它不是编译期常量，编不过。
+static CGRect spoofedBounds;
+static CGRect spoofedNativeBounds;
 static CGFloat spoofedScale = 0;
 
 static BOOL czfScreenForMachine(NSString *machine, CGFloat *outW, CGFloat *outH, CGFloat *outScale) {
