@@ -13,6 +13,9 @@ import UIKit
 
 struct CZFSourceGridView: View {
     var items: [AltStoreSourcesViewModel.SourceItem]
+    // S-4：详情页删源后自动 pop——详情页要活的 sources 判 item
+    // 还在不在，viewModel 从源页一路递进来（只传引用、不新造）。
+    var viewModel: AltStoreSourcesViewModel
     var columns: Int
     var iconSize: Int
     var filteredApps: (AltStoreSourcesViewModel.SourceItem) -> [AltStoreSourceApp]
@@ -72,6 +75,7 @@ struct CZFSourceGridView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     CZFSourceGridGroupHeaderView(
                         item: item,
+                        viewModel: viewModel,
                         apps: apps,
                         isFiltering: isFiltering,
                         onRefresh: { onRefresh(item) },
@@ -114,6 +118,8 @@ struct CZFSourceGridView: View {
 // （组头 + 内容）用。样式照抄 AltStoreSourceSectionView。
 struct CZFSourceGridGroupHeaderView: View {
     let item: AltStoreSourcesViewModel.SourceItem
+    // S-4：只往详情页传，不在组头用。
+    let viewModel: AltStoreSourcesViewModel
     let apps: [AltStoreSourceApp]
     let isFiltering: Bool
     let onRefresh: () -> Void
@@ -131,6 +137,7 @@ struct CZFSourceGridGroupHeaderView: View {
             NavigationLink {
                 CZFSourceDetailView(
                     item: item,
+                    viewModel: viewModel,
                     filteredApps: apps,
                     isFiltering: isFiltering,
                     onRefresh: onRefresh,
@@ -512,6 +519,10 @@ struct CZFSourceAppGridCell: View {
 // 复用 CZFSourceAppListView，与列表 section 展开后同一份。
 struct CZFSourceDetailView: View {
     let item: AltStoreSourcesViewModel.SourceItem
+    // S-4：源被删后详情页自动 pop——observe 活的 sources，
+    // item.id 不在即 dismiss（刷新只改字段不删 id，不会误 pop）。
+    @ObservedObject var viewModel: AltStoreSourcesViewModel
+    @Environment(\.dismiss) private var dismiss
     let filteredApps: [AltStoreSourceApp]
     let isFiltering: Bool
     let onRefresh: () -> Void
@@ -616,5 +627,12 @@ struct CZFSourceDetailView: View {
         }
         .navigationTitle(item.source?.name ?? item.displayName)
         .navigationBarTitleDisplayMode(.inline)
+        // S-4：源被删后详情页自动 pop，不留孤儿页（刷新/安装按钮
+        // 全是已删源的快照，刷新静默无反应、安装还能按 URL 装）。
+        .onChange(of: viewModel.sources) { sources in
+            if !sources.contains(where: { $0.id == item.id }) {
+                dismiss()
+            }
+        }
     }
 }

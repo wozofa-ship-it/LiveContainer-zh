@@ -4233,9 +4233,8 @@ struct SourcesPanelView: View {
                                 if page == .keepalive {
                                     // 3.8.367：保活快捷方式改成开关形式——
                                     // 点按直接切换，不开页；图标绿=开、灰=关。
-                                    keepAliveEnabled.toggle()
-                                    LCSettingsView.syncKeepAliveTweak(enabled: keepAliveEnabled, forceSign: false)
-                                    CZFHostKeepAlive.shared.refresh()
+                                    // R-10：写键 + 同步 + 刷新走共用 setKeepAlive。
+                                    LCSettingsView.setKeepAlive(!keepAliveEnabled)
                                 } else {
                                     openSettingsPage(page.rawValue)
                                 }
@@ -5576,12 +5575,12 @@ private struct CZFKeepAliveShortcutView: View {
                     }
                 }
                 .onChange(of: keepAliveEnabled) { newValue in
-                    LCSettingsView.syncKeepAliveTweak(enabled: newValue, forceSign: false)
-                    CZFHostKeepAlive.shared.refresh()
+                    // R-10：写键 + 同步 + 刷新走共用 setKeepAlive。
+                    LCSettingsView.setKeepAlive(newValue)
                 }
                 .onAppear {
-                    LCSettingsView.syncKeepAliveTweak(enabled: keepAliveEnabled, forceSign: false)
-                    CZFHostKeepAlive.shared.refresh()
+                    // R-10：同款（进页补齐/更新一次）。
+                    LCSettingsView.setKeepAlive(keepAliveEnabled)
                 }
             }
         }

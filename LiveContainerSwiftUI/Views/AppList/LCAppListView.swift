@@ -1506,6 +1506,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 前台时分享的场景，onAppear 不触发）。
             if newPhase == .active {
                 czfClaimShareInbox()
+                // R-4：切回前台也刷新盾牌核心状态（核心可能在
+                // VPN 页被起停或自动停，本地 @State 不自己猜；
+                // 测速中不翻，与 VPN 页 refreshVPNState 同款守卫——
+                // 测速期间核心是停着测的，翻了就错）。
+                if !vpnPinging {
+                    vpnCoreRunning = CZFVPNManager.shared.isRunning
+                }
             }
         }
     }

@@ -705,12 +705,12 @@ struct LCSettingsView: View {
                 }
             }
             .onChange(of: keepAliveEnabled) { newValue in
-                syncKeepAliveTweak(enabled: newValue)
-                CZFHostKeepAlive.shared.refresh()
+                // R-10：写键 + 同步 + 刷新走共用 setKeepAlive。
+                Self.setKeepAlive(newValue)
             }
             .onAppear {
-                syncKeepAliveTweak(enabled: keepAliveEnabled)
-                CZFHostKeepAlive.shared.refresh()
+                // R-10：同款（进页补齐/更新一次）。
+                Self.setKeepAlive(keepAliveEnabled)
             }
         }
     }
@@ -965,6 +965,16 @@ struct LCSettingsView: View {
     // 指纹表（见静态版注释），已验且队没换就跳过。
     func syncKeepAliveTweak(enabled: Bool) {
         Self.syncKeepAliveTweak(enabled: enabled, forceSign: false)
+    }
+
+    // R-10：保活总开关三处共用——写键 + 同步 dylib + 刷新保活。
+    // 设置页 Toggle、Dock 快捷行按钮、保活快捷页 Toggle 三处只调
+    // 它，不再各写一遍（开关本身仍是各处的 @AppStorage，同一把
+    // 键，写 UserDefaults 即同步到三处）。
+    static func setKeepAlive(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "LCKeepAliveEnabled")
+        syncKeepAliveTweak(enabled: enabled, forceSign: false)
+        CZFHostKeepAlive.shared.refresh()
     }
 
     static func syncKeepAliveTweak(enabled: Bool, forceSign: Bool) {

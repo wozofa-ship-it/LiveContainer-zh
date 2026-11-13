@@ -924,6 +924,7 @@ struct LCSourcesView: View {
                         if czfSourceGridMode {
                             CZFSourceGridView(
                                 items: viewModel.sources,
+                                viewModel: viewModel,
                                 columns: czfSourceGridColumns,
                                 iconSize: czfSourceGridIconSize,
                                 filteredApps: { item in filteredApps(for: item) },
