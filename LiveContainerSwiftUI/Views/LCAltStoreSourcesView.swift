@@ -548,6 +548,56 @@ enum CZFUpdateIgnore {
     }
 }
 
+/// 「跳过更新」的持久存储：键 CZFSkippedUpdates 存 [stableID: 版本号]。
+/// 跳过只藏更新清单与红点，图标更新角标（hasUpdate）不受影响——
+/// 与 CZFUpdateIgnore（忽略此版本，连角标一起藏）不同，别混用。
+/// 跳过当且仅当源里最新版本号等于记的版本；源出了新版本就重新提醒。
+enum CZFSkippedUpdate {
+    private static let key = "CZFSkippedUpdates"
+
+    static func skippedVersions() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:]
+    }
+
+    static func skippedVersion(for stableID: String) -> String? {
+        skippedVersions()[stableID]
+    }
+
+    static func setSkipped(_ version: String?, for stableID: String) {
+        var dict = skippedVersions()
+        if let version {
+            dict[stableID] = version
+        } else {
+            dict.removeValue(forKey: stableID)
+        }
+        UserDefaults.standard.set(dict, forKey: key)
+    }
+
+    static func isSkipped(_ app: AltStoreSourceApp) -> Bool {
+        guard let latest = app.latestVersion?.version else { return false }
+        return skippedVersion(for: app.czfStableID) == latest
+    }
+
+    /// 清过期条目：已装版本已 ≥ 跳过记的版本（已更新过了），
+    /// 该条目永不再命中，读时顺手删掉，别让 UserDefaults 无限长。
+    /// 未装的 App 保守保留（重装旧版回来时跳过仍有效）。
+    static func pruneStale(installed apps: [LCAppModel]) {
+        let installedVersions = Dictionary(apps.map {
+            ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.version() ?? "")
+        }, uniquingKeysWith: { first, _ in first })
+        var dict = skippedVersions()
+        let before = dict.count
+        dict = dict.filter { stableID, skippedVersion in
+            let bundleId = String(stableID.split(separator: "|", maxSplits: 1).first ?? Substring(stableID))
+            guard let installed = installedVersions[bundleId], !installed.isEmpty else { return true }
+            return czfIsVersion(skippedVersion, newerThan: installed)
+        }
+        if dict.count != before {
+            UserDefaults.standard.set(dict, forKey: key)
+        }
+    }
+}
+
 // U10 批量勾选键：源 feed URL + bundleIdentifier。同一 App 在
 // 两个源里是两条记录，只用 bundleIdentifier 会两边同打勾；
 // 源标识用 SourceItem 的 feed URL（item.url / item.id，
@@ -571,7 +621,7 @@ func czfDedupSourceApps(_ apps: [AltStoreSourceApp]) -> [AltStoreSourceApp] {
 // 返回是否已接单（无下载链接返回 false，行保留）。
 // 跳过（3.8.454，用户 03:16 令“更新这里也可以选择不更新”）：
 // 每行左滑出“跳过”，点了把该 App 从本次更新名单剔除（不装、
-// 不进批量队列），下次刷新源还会再出现——只跳过这一次，
+// 不进批量队列）；跳过记版本持久化，源出新版本才重新出现，
 // 不是永久不更新。onSkip 只删名单，不动已装 App。
 struct CZFUpdatableAppsSheet: View {
     let apps: [AltStoreSourceApp]
@@ -627,8 +677,8 @@ struct CZFUpdatableAppsSheet: View {
                         }
                     }
                     // 跳过（3.8.454）：左滑出“跳过”，从本次更新名单
-                    // 剔除该 App（不装、不进批量队列），下次刷新源
-                    // 还会再出现。已入队的行不挂跳过（已在装了）。
+                    // 剔除该 App（不装、不进批量队列），记版本持久化、
+                    // 源出新版本才重新出现。已入队的行不挂跳过（已在装了）。
                     .swipeActions(edge: .trailing) {
                         if !updatingIDs.contains(app.czfStableID) {
                             Button("跳过", role: .destructive) {
@@ -687,12 +737,6 @@ struct LCSourcesView: View {
     // 遍版本、还逐个读忽略记录；改成算一次存起来，只在源/已装/
     // 忽略变时重算（见 refreshUpdatableCache 调用点）
     @State private var cachedUpdatableApps: [AltStoreSourceApp] = []
-    // 跳过集合（3.8.455，修跳过后红标不消）：跳过的 App 只从
-    // 本次更新名单剔除，下次刷新源再出现。不用持久化——
-    // refreshUpdatableCache 每次重算都先滤掉它，源数据一变
-    // （onChange sources）就清空，图标上的更新角标（hasUpdate，
-    // 按已装版本单独比）不受影响、照常显示。
-    @State private var czfSkippedUpdatableIDs: Set<String> = []
     // 全部更新点开先列清单（用户 18:46 令）：原来点“全部更新”
     // 直接全装，用户看不到是哪几个要更新。改成先弹 sheet 列出
     // 全部可更新 App（图标 + 名字 + 已装版本 → 新版本），每行
@@ -1039,12 +1083,11 @@ struct LCSourcesView: View {
                         czfShowBatchResult(result)
                     }
                 },
-                // 跳过（3.8.455 修红标不消）：记进跳过集合（重算
-                // 时滤掉、切页重进也不回来），再从名单剔除并同步
-                // 红点；只跳过这一次，下次刷新源还会再出现。
-                // 图标上的更新角标（hasUpdate）不受影响。
+                // 跳过（持久 + 带版本）：记进 CZFSkippedUpdate（源出
+                // 新版本才重新出现），再从名单剔除并同步红点；图标
+                // 上的更新角标（hasUpdate）不受影响。
                 onSkip: { app in
-                    czfSkippedUpdatableIDs.insert(app.czfStableID)
+                    CZFSkippedUpdate.setSkipped(app.latestVersion?.version, for: app.czfStableID)
                     cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
                     updatableCountBadge = cachedUpdatableApps.count
                 }
@@ -1109,9 +1152,6 @@ struct LCSourcesView: View {
             }
         }
         .onChange(of: viewModel.sources) { newSources in
-            // 跳过只到下次刷新源为止：源数据一变就清空跳过集合，
-            // 下面 refreshUpdatableCache 重算时被跳过的 App 重新出现。
-            czfSkippedUpdatableIDs.removeAll()
             refreshUpdatableCache()
             let newSet = Set(newSources.map { $0.id })
             // 源中 #3：只把真正新加入的源加进展开集——新加入 =
@@ -1318,9 +1358,10 @@ struct LCSourcesView: View {
     // 可更新名单缓存刷新：算一次、同时写红点。调用点=全部输入
     // 变化处：进页、源变、已装/隐藏变、忽略与 App 打开刷新请求
     private func refreshUpdatableCache() {
-        // 跳过滤掉：跳过的 App 不回名单、不计红点；源数据一变
-        // onChange sources 已清空跳过集合，它就重新出现。
-        let list = computeUpdatableApps().filter { !czfSkippedUpdatableIDs.contains($0.czfStableID) }
+        // 跳过滤掉：跳过的版本不回名单、不计红点；源出了新版本
+        // （版本号对不上记的）就重新出现。先清过期条目。
+        CZFSkippedUpdate.pruneStale(installed: sharedModel.apps + sharedModel.hiddenApps)
+        let list = computeUpdatableApps().filter { !CZFSkippedUpdate.isSkipped($0) }
         cachedUpdatableApps = list
         updatableCountBadge = list.count
     }
