@@ -2973,9 +2973,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     prefetched = nil
                 }
                 // 后台预下载队列里的下一个（用独立的下载器，
-                // 不占界面上那个；下失败了轮到时走正常下载）
+                // 不占界面上那个；下失败了轮到时走正常下载）。
+                // 要弹预览确认的不预取——预取会把远程 URL 换成本地
+                // 文件，文件分支不跑预览，第 2 个起直接装、没确认。
                 var prefetchTask: Task<(URL, URL)?, Never>? = nil
-                if let next = installQueue.first, !next.url.isFileURL {
+                if let next = installQueue.first, !next.url.isFileURL, !next.preview {
                     let nextURL = next.url
                     prefetchTask = Task {
                         let helper = DownloadHelper()

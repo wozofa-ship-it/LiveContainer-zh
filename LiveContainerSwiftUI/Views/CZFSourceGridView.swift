@@ -389,10 +389,14 @@ struct CZFSourceAppGridCell: View {
     // 格子一直只有绿勾、看不出哪个有更新。有更新就说明
     // 已装，角标代替绿勾（不叠两层）；批量模式下勾选圈优先。
     private var hasUpdate: Bool {
-        guard let sourceVersion = app.latestVersion?.version,
+        // latest 先解包：latestVersion?.buildVersion 是 String??（双层
+        // 可选），直接传给 String? 参数编不过；解包后 buildVersion
+        // 是 String?，单层。
+        guard let latest = app.latestVersion,
               let installed = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) else { return false }
+        let sourceVersion = latest.version
         if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
-        return czfIsVersion(sourceVersion, newerThan: installed.appInfo.version())
+        return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
     }
 
     // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、

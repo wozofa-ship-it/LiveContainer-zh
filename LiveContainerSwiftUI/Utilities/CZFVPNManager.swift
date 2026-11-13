@@ -311,9 +311,16 @@ public final class CZFVPNManager {
         // 不少机场按客户端 UA 返回不同格式，给个常见客户端的
         // UA 拿到原始分享链接列表
         request.setValue("Shadowrocket/2.2.50", forHTTPHeaderField: "User-Agent")
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let error {
                 completion(.failure(error))
+                return
+            }
+            // 过期订阅返回的 HTML 错误页也能过下面三关（无传输错、
+            // 是 UTF-8、含 "://"），先验 HTTP 状态，非 200 直接失败。
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                completion(.failure(NSError(domain: "CZFVPN", code: -4, userInfo: [NSLocalizedDescriptionKey: "订阅拉取失败，服务器返回 \(code)"])))
                 return
             }
             guard let data, let raw = String(data: data, encoding: .utf8) else {

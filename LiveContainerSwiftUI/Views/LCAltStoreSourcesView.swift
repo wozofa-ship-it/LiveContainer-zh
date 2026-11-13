@@ -1392,6 +1392,9 @@ struct LCSourcesView: View {
         let installed = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
             ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.version() ?? "")
         }, uniquingKeysWith: { first, _ in first })
+        let installedBuilds = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
+            ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.buildVersion() ?? "0")
+        }, uniquingKeysWith: { first, _ in first })
         var bestByBundle: [String: AltStoreSourceApp] = [:]
         var order: [String] = []
         for item in viewModel.sources {
@@ -1399,12 +1402,15 @@ struct LCSourcesView: View {
             for app in source.apps {
                 guard let latest = app.latestVersion,
                       let installedVersion = installed[app.bundleIdentifier],
-                      czfIsVersion(latest.version, newerThan: installedVersion),
+                      czfIsNewerVersion(latest.version, build: latest.buildVersion, newerThan: installedVersion, installedBuild: installedBuilds[app.bundleIdentifier]),
                       CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) != latest.version else {
                     continue
                 }
                 if let existing = bestByBundle[app.bundleIdentifier] {
-                    if czfIsVersion(latest.version, newerThan: existing.latestVersion?.version ?? "") {
+                    // existing.latestVersion?.buildVersion 是 String??，
+                    // 直接传给 String? 参数编不过；先解包再比。
+                    if let existingLatest = existing.latestVersion,
+                       czfIsNewerVersion(latest.version, build: latest.buildVersion, newerThan: existingLatest.version, installedBuild: existingLatest.buildVersion) {
                         bestByBundle[app.bundleIdentifier] = app
                     }
                 } else {
@@ -1498,7 +1504,14 @@ struct LCSourcesView: View {
     @MainActor
     private func installTweak(from url: URL, name: String, bundleIdentifier: String) async -> Error? {
         do {
-            let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: url)
+            let (tempURL, response) = try await CZFVPNManager.hostSession().download(from: url)
+            // URLSession.download 只在传输错误时抛，HTTP 4xx/5xx 也会
+            // 落盘成“插件文件”再签名；先验状态，非 2xx 按 DownloadDelegate
+            // 同款文案抛错。
+            if let httpResponse = response as? HTTPURLResponse,
+               !(200...299).contains(httpResponse.statusCode) {
+                throw NSError(domain: "", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回 \(httpResponse.statusCode)"])
+            }
             let fm = FileManager.default
             // 按“插件名-包名”建文件夹，不全塞一个。
             let folderURL = LCPath.tweakPath.appendingPathComponent("\(name)-\(bundleIdentifier)")
@@ -1534,7 +1547,14 @@ struct LCSourcesView: View {
     private func downloadVersion(url downloadURL: URL) {
         Task {
             do {
-                let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: downloadURL)
+                let (tempURL, response) = try await CZFVPNManager.hostSession().download(from: downloadURL)
+                // URLSession.download 只在传输错误时抛，HTTP 4xx/5xx 也会
+                // 落盘成“IPA”再装；先验状态，非 2xx 按 DownloadDelegate
+                // 同款文案抛错。
+                if let httpResponse = response as? HTTPURLResponse,
+                   !(200...299).contains(httpResponse.statusCode) {
+                    throw NSError(domain: "", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回 \(httpResponse.statusCode)"])
+                }
                 // 裸域名/无路径链接 lastPathComponent 为空，destURL 会是
                 // Documents 目录本身，前面 removeItem 会删整个 Documents；
                 // 裸 UUID 无 .ipa 后缀落盘成无扩展名文件，Files 不认 IPA。
@@ -1961,6 +1981,18 @@ func czfIsVersion(_ a: String, newerThan b: String) -> Bool {
     return false
 }
 
+// 版本 + build 二元组比较（只升 build 号的更新也能检出）：
+// 版本不等时只比版本；版本相等时比 build（数字比，缺 build 按 0）。
+// 三处消费者（computeUpdatableApps、LCSourceAppBanner.hasUpdate、
+// CZFSourceGridView 格子）共用这一份。
+func czfIsNewerVersion(_ version: String, build: String?, newerThan installedVersion: String, installedBuild: String?) -> Bool {
+    if czfIsVersion(version, newerThan: installedVersion) { return true }
+    if czfIsVersion(installedVersion, newerThan: version) { return false }
+    let aBuild = Int(build ?? "") ?? 0
+    let bBuild = Int(installedBuild ?? "") ?? 0
+    return aBuild > bBuild
+}
+
 // LCSourceAppBanner 不再 private：网格详情页（CZFSourceGridView.swift）
 // 复用同一份行（见 CZFSourceAppListView）。
 struct LCSourceAppBanner: View {
@@ -2002,10 +2034,14 @@ struct LCSourceAppBanner: View {
     // 源里版本比已装版本新 → 有更新（被用户忽略的这个版本不算）
     private var hasUpdate: Bool {
         _ = ignoreRefresh
-        guard let sourceVersion = app.latestVersion?.version,
+        // latest 先解包：latestVersion?.buildVersion 是 String??（双层
+        // 可选），直接传给 String? 参数编不过；解包后 buildVersion
+        // 是 String?，单层。
+        guard let latest = app.latestVersion,
               let installed = installedAppModel else { return false }
+        let sourceVersion = latest.version
         if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
-        return czfIsVersion(sourceVersion, newerThan: installed.appInfo.version())
+        return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
     }
     
     private var isPluginInstalled: Bool {
@@ -2637,7 +2673,10 @@ private final class CZFSourceIconCache {
             store(img, forKey: key)
             return img
         }
-        guard let (data, _) = try? await URLSession.shared.data(from: url),
+        // 图标走 hostSession：代理开时经节点取（URLSession.shared
+        // 绕开代理、图标一直灰占位）；代理关时 hostSession() 回落
+        // .shared，行为不变。
+        guard let (data, _) = try? await CZFVPNManager.hostSession().data(from: url),
               let img = Self.decodedImage(from: data) else { return nil }
         store(img, forKey: key)
         if let dest = diskURL(for: url) {

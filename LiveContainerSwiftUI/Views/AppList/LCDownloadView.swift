@@ -146,7 +146,13 @@ public final class DownloadHelper : ObservableObject {
                         ansError = error
                     }
                 }
+                // 先置 nil 再 resume：cancel() 也会 resume 同一个
+                // continuation，下载完成到 isDownloading=false 传播
+                // 前取消按钮仍可点，两路各 resume 一次会双 resume 崩溃。
+                // 先置 nil，cancel() 看到 nil 就跳过；反过来 cancel()
+                // 先跑时这里看到 nil 同样跳过。
                 if self.continuation != nil {
+                    self.continuation = nil
                     c.resume()
                 }
 

@@ -459,11 +459,12 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
         // 原来传 rawValue 3（allow.rawValue + 2，公开枚举里没有）：
         // 当前 WebKit 把它当允许处理才没出事，换 SDK 可能变脸，
         // 直接写 .allow，行为不变、零成本。
-        decisionHandler(.allow)
-        guard let url = navigationAction.request.url, let scheme = navigationAction.request.url?.scheme else {
+        guard let url = navigationAction.request.url, let scheme = url.scheme else {
+            decisionHandler(.allow)
             return
         }
         if(scheme == "https") {
+            decisionHandler(.allow)
             Task {
                 await self.loadDomainAssociations(url: url)
                 if let host = url.host, let appIDs = self.domainBundleIdDict[host] {
@@ -473,8 +474,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
             return
         }
         if(scheme == "http" || scheme == "about" || scheme == "itms-apps") {
+            decisionHandler(.allow)
             return;
         }
+        // 自定义协议（weixin:// 等）WKWebView 载不了：放行会以
+        // NSURLErrorUnsupportedURL（-1002）失败、再弹一个假错误框。
+        // 直接 cancel（反正载不了），只走 urlSchemeHandler 跳 App。
+        decisionHandler(.cancel)
         Task{ await urlSchemeHandler(url) }
 
     }

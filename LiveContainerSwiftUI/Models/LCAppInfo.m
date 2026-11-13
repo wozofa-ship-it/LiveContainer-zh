@@ -154,6 +154,17 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     }
 }
 
+// 构建号（只升 build 的更新靠它检出）：读 CFBundleVersion，
+// 缺省按 0（比较时缺 build 即 0，与 czfIsNewerVersion 对齐）。
+- (NSString*)buildVersion {
+    NSString* build = _infoPlist[@"CFBundleVersion"];
+    if (build) {
+        return build;
+    } else {
+        return @"0";
+    }
+}
+
 - (NSString*)bundleIdentifier {
     NSString* ans = nil;
     if([self doUseLCBundleId]) {

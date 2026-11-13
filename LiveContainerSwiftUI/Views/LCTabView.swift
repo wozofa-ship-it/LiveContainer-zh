@@ -71,7 +71,11 @@ struct LCTabView: View {
             // 第一个 VPN App 点开不用等冷启动。11（3.8.277）：
             // 前台进 App 页就预热，不过测速后的抑制——测速后
             // 抑制一直拦着预热，下一个 VPN App 每次都吃满冷启动。
-            CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
+            // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，别卡主线程
+            //（代码自注 :455；applyRestoredNodeSettings 同款）。
+            Task.detached {
+                CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
+            }
             // 定时备份/定时清理的到点检查：原来只挂在数据管理页
             // 的 onAppear 上，不去那页就永远不触发（审计发现）。
             // 改成打开 LiveContainer 就查，到没到点由各自的
@@ -85,7 +89,10 @@ struct LCTabView: View {
             // 从后台切回前台时也预热一次（核心可能已被自动停）；
             // 同上，不过测速后的抑制。
             if newPhase == .active {
-                CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
+                // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，别卡主线程。
+                Task.detached {
+                    CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
+                }
                 // 优5（3.8.277）：定时备份/清理的到点检查原来只在
                 // 冷打开时跑（onAppear）；从后台切回也查一次，
                 // 恢复/导入改了定时后不用等下次冷打开。开关与
