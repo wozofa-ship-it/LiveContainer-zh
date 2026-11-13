@@ -156,19 +156,18 @@ struct LCWebView: View {
     }
 
     private func czfDismissTopmostPresented() {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        for scene in scenes where scene.activationState == .foregroundActive {
-            for window in scene.windows {
-                guard let rootVC = window.rootViewController else { continue }
-                var topVC = rootVC
-                while let presented = topVC.presentedViewController {
-                    topVC = presented
-                }
-                if topVC.presentingViewController != nil {
-                    topVC.dismiss(animated: true)
-                    return
-                }
-            }
+        // 只关网页自己所在 window 那条链：原来遍历全部前台 scene、
+        // 全部 window、关第一个已呈现 VC 就 return，多任务下客 App
+        // 窗口或坞浮层先被遍历到就关错层，网页那层永远轮不到。
+        // WKWebView 自带 window，装着弹窗的就是那扇窗。
+        guard let window = webView.webView.window,
+              let rootVC = window.rootViewController else { return }
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+        if topVC.presentingViewController != nil {
+            topVC.dismiss(animated: true)
         }
     }
 
