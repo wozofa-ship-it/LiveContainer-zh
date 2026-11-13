@@ -761,15 +761,26 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // 在列表里）；容器单个删失败记下来继续，不中断整批。
     // removeFromList 由调用方传：单个走 delegate.removeApp，
     // 批量走列表自己的 removeApp（同一个方法）。返回删失败的容器名。
-    static func deleteAppFiles(_ model: LCAppModel, removeDataFolders: Bool, removeFromList: (LCAppModel) -> Void) throws -> [String] {
+    static func deleteAppFiles(_ model: LCAppModel, removeDataFolders: Bool, removeFromList: (LCAppModel) -> Void) throws -> (failedContainers: [String], keptBackupName: String?) {
         let appInfo = model.appInfo
         guard let bundlePath = appInfo.bundlePath() else {
             throw CocoaError(.fileNoSuchFile)
         }
         let fileManager = FileManager.default
+        // 删数据时顺带清本地备份，先把备份文件夹名算好（删之前
+        // App 还在列表里，backupFolderName 的 dataUUID 配对最准；
+        // 删完再算可能认领到别的同名文件夹）。
+        var backupFolderName: String? = nil
+        var backupRoot: URL? = nil
+        if removeDataFolders,
+           let docsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let root = docsURL.appendingPathComponent("Backups")
+            backupRoot = root
+            backupFolderName = LCDataManagementView.backupFolderName(for: model, backupRoot: root, fm: fileManager)
+        }
         try fileManager.removeItem(atPath: bundlePath)
         removeFromList(model)
-        guard removeDataFolders else { return [] }
+        guard removeDataFolders else { return ([], nil) }
         var failedContainers: [String] = []
         for container in appInfo.containers {
             let dataUUID = container.folderName
@@ -782,7 +793,30 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             LCUtils.removeAppKeychain(dataUUID: dataUUID)
             DataManager.shared.model.appDataFolderNames.removeAll { $0 == dataUUID }
         }
-        return failedContainers
+        // 删 App 及其数据时清本地备份（用户定）：锁了的留着，
+        // 没锁的才删。只认 manifest dataUUID 对得上的那一个
+        // 文件夹（同实例），认不出/对不上就不删，绝不删错
+        // 别人的备份。本地与 iCloud 同名共用一把锁，两边同
+        // 删同留（只删本地的话 iCloud 那份下次刷新又冒出来，
+        // 见 deleteBackup 3.8.306）。
+        var keptBackupName: String? = nil
+        if let folderName = backupFolderName, let root = backupRoot {
+            let folderURL = root.appendingPathComponent(folderName)
+            if fileManager.fileExists(atPath: folderURL.path),
+               let info = LCDataManagementView.manifestInfo(of: folderURL),
+               let myUUID = appInfo.dataUUID, !myUUID.isEmpty,
+               info.dataUUID == myUUID {
+                if LCDataManagementView.isBackupLocked(folderName) {
+                    keptBackupName = folderName
+                } else {
+                    try? fileManager.removeItem(at: folderURL)
+                    if let externalRoot = LCDataManagementView.externalBackupFolderURL() {
+                        try? fileManager.removeItem(at: externalRoot.appendingPathComponent(folderName))
+                    }
+                }
+            }
+        }
+        return (failedContainers, keptBackupName)
     }
 
     private func uninstall() async {
@@ -810,11 +844,18 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
 
         do {
-            let failedContainers = try Self.deleteAppFiles(configuration.model, removeDataFolders: shouldRemoveAppFolders) { [weak self] model in
+            let (failedContainers, keptBackupName) = try Self.deleteAppFiles(configuration.model, removeDataFolders: shouldRemoveAppFolders) { [weak self] model in
                 self?.delegate.removeApp(app: model)
             }
+            var messages: [String] = []
             if !failedContainers.isEmpty {
-                showError("以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
+                messages.append("以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
+            }
+            if let kept = keptBackupName {
+                messages.append("备份「\(kept)」已锁定，已保留")
+            }
+            if !messages.isEmpty {
+                showError(messages.joined(separator: "\n"))
             }
         } catch {
             showError(error.localizedDescription)

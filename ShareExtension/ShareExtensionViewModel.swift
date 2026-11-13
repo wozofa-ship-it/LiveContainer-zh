@@ -291,7 +291,12 @@ final class ShareExtensionViewModel: ObservableObject {
         }
         let appInfo = (NSDictionary(contentsOf: appURL.appendingPathComponent("LCAppInfo.plist")) as? [String: Any]) ?? [:]
         let relativeBundlePath = appURL.lastPathComponent
-        let displayName = (infoPlist["CFBundleDisplayName"] as? String)
+        // 多开自定义名：与 LCAppInfo.displayName 同款优先顺序——
+        // LCAppInfo.plist 里的 LCCustomDisplayName（如 Muse8）优先于
+        // 包内原名，不然分享页两个分身都显示包名，分不清。
+        let customName = appInfo["LCCustomDisplayName"] as? String
+        let displayName = (customName?.isEmpty == false ? customName : nil)
+            ?? (infoPlist["CFBundleDisplayName"] as? String)
             ?? (infoPlist["CFBundleName"] as? String)
             ?? (infoPlist["CFBundleExecutable"] as? String)
             ?? relativeBundlePath

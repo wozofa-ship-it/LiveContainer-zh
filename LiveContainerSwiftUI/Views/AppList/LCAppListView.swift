@@ -1093,17 +1093,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         var deleted: [String] = []
         var failed: [String] = []
         var failedContainers: [String] = []
+        var keptBackups: [String] = []
         for app in apps {
             let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
             do {
                 // removeFromList 是非逃逸闭包（deleteAppFiles 内同步调完），
                 // 抓 struct 的 self 合法、不产生循环引用；[weak self]
                 // 只能用于 class，LCAppListView 是 struct，编不过。
-                let failedC = try LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { model in
+                let (failedC, keptBackupName) = try LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { model in
                     self.removeApp(app: model)
                 }
                 deleted.append(name)
                 failedContainers.append(contentsOf: failedC)
+                if let kept = keptBackupName {
+                    keptBackups.append(kept)
+                }
             } catch {
                 failed.append("\(name)：\(LCUtils.czfFriendlyError(error))")
             }
@@ -1112,7 +1116,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             errorInfo = "删除失败，一个都没删除：\n" + failed.joined(separator: "\n")
             errorShow = true
         } else {
-            installInfo = "已删除 \(deleted.count) 个 App" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")) + (failedContainers.isEmpty ? "" : "\n以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
+            installInfo = "已删除 \(deleted.count) 个 App" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")) + (failedContainers.isEmpty ? "" : "\n以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))") + (keptBackups.isEmpty ? "" : "\n以下备份已锁定，已保留：\(keptBackups.joined(separator: "、"))")
             installInfoShow = true
         }
         batchMode = false

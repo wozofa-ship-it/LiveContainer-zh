@@ -226,13 +226,20 @@ struct CZFAppGridView: View {
         guard let app = czfGridDeleteTarget else { return }
         czfGridDeleteTarget = nil
         do {
-            let failedContainers = try LCAppBannerViewController.deleteAppFiles(
+            let (failedContainers, keptBackupName) = try LCAppBannerViewController.deleteAppFiles(
                 app,
                 removeDataFolders: removeDataFolders,
                 removeFromList: { model in onRemoveApp(model) }
             )
+            var messages: [String] = []
             if !failedContainers.isEmpty {
-                czfGridError = "以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))"
+                messages.append("以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
+            }
+            if let kept = keptBackupName {
+                messages.append("备份「\(kept)」已锁定，已保留")
+            }
+            if !messages.isEmpty {
+                czfGridError = messages.joined(separator: "\n")
             }
         } catch {
             czfGridError = error.localizedDescription

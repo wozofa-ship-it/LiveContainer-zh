@@ -5028,9 +5028,9 @@ private struct RunningAppsStripView: View {
             if dockManager.apps.isEmpty {
                 HStack {
                     Spacer()
-                    collapseStripButton
-                    Spacer()
                     minimizeAllStripButton
+                    Spacer()
+                    collapseStripButton
                     Spacer()
                     maximizeStripButton
                     Spacer()
@@ -5044,8 +5044,8 @@ private struct RunningAppsStripView: View {
                     // 3.8.365：按钮间距 12→8（用户 15:34 截图圈出
                     // 收起/最小化/放大/关闭全部之间太空）。
                     HStack(spacing: 8) {
-                        collapseStripButton
                         minimizeAllStripButton
+                        collapseStripButton
                         maximizeStripButton
                         closeAllStripButton
                         // 分隔线定死 64 高（46 图标+4 间距+约

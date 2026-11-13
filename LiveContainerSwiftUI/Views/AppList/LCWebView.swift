@@ -32,6 +32,7 @@ struct LCWebView: View {
     @State private var errorInfo = ""
     
     @EnvironmentObject private var sharedModel : SharedModel
+    @Environment(\.dismiss) private var dismiss
 
     private let navigationBarHeight: CGFloat = 60
     private let bottomBarHeight: CGFloat = 64
@@ -117,10 +118,20 @@ struct LCWebView: View {
         pageURL ?? url
     }
 
+    // 关网页：两条路一起走——isPresent=false 是绑定驱动的关，
+    // dismiss() 是 UIKit 直关。客 App 在跑时网页是从宿主的
+    // fullScreenCover 弹的，绑定那条路有时不生效（呈现方被
+    // 客 App 的虚拟窗口盖在下面），只留一条就关不掉。
+    // 两条同指一个呈现，第二个是空操作，不会重复关。
+    private func close() {
+        isPresent = false
+        dismiss()
+    }
+
     private var navigationBar: some View {
         HStack(spacing: 8) {
             Button {
-                isPresent = false
+                close()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 17, weight: .medium))
@@ -245,7 +256,7 @@ struct LCWebView: View {
             if let urlToOpen = URL(string: "\(runningLC)://livecontainer-launch?bundle-name=\(bundleId)&open-url=\(encodedUrl)"), UIApplication.shared.canOpenURL(urlToOpen) {
                 NSLog("[LC] urlToOpen = \(urlToOpen.absoluteString)")
                 await UIApplication.shared.open(urlToOpen)
-                isPresent = false
+                close()
                 return
             }
 
@@ -269,7 +280,7 @@ struct LCWebView: View {
             if let doInstall = await installAppAlert.open(), !doInstall {
                 return
             }
-            isPresent = false
+            close()
             Task { await handler(url.absoluteString) }
             return
         }
