@@ -924,6 +924,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
+        // 3.8.374：备份前先刷快照（见 refreshKeychainSnapshot），别读旧 dump
+        // （backupApps 同款；批量备份原来直接调 backupOneAppSync）。
+        for app in apps {
+            await LCDataManagementView.refreshKeychainSnapshot(for: app)
+        }
         let (okNames, failedNames, skippedNames, overwrittenCount, copyFailedCount): ([String], [String], [String], Int, Int) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default

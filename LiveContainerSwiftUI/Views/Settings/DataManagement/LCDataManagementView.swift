@@ -1597,22 +1597,35 @@ struct LCDataManagementView : View {
     private static var cachedExternalFolderURL: URL? = nil
 
     func saveExternalBackupFolder(_ url: URL) {
+        // 创建侧 withSecurityScope = 1 << 11（不是 1 << 10，
+        // 那是 suitableForBookmarkFile；CZFLocalIpaFolderView 同款）。
+        let czfWithSecurityScope: UInt = 1 << 11
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-        if let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(data, forKey: "LCExternalBackupFolderBookmark")
-            Self.cachedExternalFolderURL = nil
-            externalFolderName = url.lastPathComponent
-            // 立即把已有本地备份同步过去（后台线程）
-            Task.detached {
-                Self.syncAllLocalBackupsToExternalFolder()
-            }
-            successInfo = "备份文件夹已设置：\(url.lastPathComponent)\n之后的备份会同步到该文件夹，恢复时也会从该文件夹读取"
-            successShow = true
-        } else {
+        guard let data = try? url.bookmarkData(options: URL.BookmarkCreationOptions(rawValue: czfWithSecurityScope), includingResourceValuesForKeys: nil, relativeTo: nil) else {
             errorInfo = "保存文件夹授权失败，请重新选择"
             errorShow = true
+            return
         }
+        // 建完当场解出来验 startAccessing 能过，才算真有 scope、
+        // 才存；验不过就不存，别拿无 scope 书签冒充。
+        var isStale = false
+        guard let resolved = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), relativeTo: nil, bookmarkDataIsStale: &isStale),
+              resolved.startAccessingSecurityScopedResource() else {
+            errorInfo = "保存文件夹授权失败，请重新选择"
+            errorShow = true
+            return
+        }
+        resolved.stopAccessingSecurityScopedResource()
+        UserDefaults.standard.set(data, forKey: "LCExternalBackupFolderBookmark")
+        Self.cachedExternalFolderURL = nil
+        externalFolderName = url.lastPathComponent
+        // 立即把已有本地备份同步过去（后台线程）
+        Task.detached {
+            Self.syncAllLocalBackupsToExternalFolder()
+        }
+        successInfo = "备份文件夹已设置：\(url.lastPathComponent)\n之后的备份会同步到该文件夹，恢复时也会从该文件夹读取"
+        successShow = true
     }
 
     static func externalBackupFolderURL() -> URL? {
@@ -1621,9 +1634,19 @@ struct LCDataManagementView : View {
         }
         guard let data = UserDefaults.standard.data(forKey: "LCExternalBackupFolderBookmark") else { return nil }
         var stale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
-        // 本次运行内保持访问权限，供列表/恢复/删除直接使用
-        _ = url.startAccessingSecurityScopedResource()
+        // 先按 security scope 解析（1 << 10），不行再按普通方式解析
+        // （老书签是无 scope 的；CZFLocalIpaFolderView.restore 同款回落）。
+        let url: URL
+        if let scoped = try? URL(resolvingBookmarkData: data, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), relativeTo: nil, bookmarkDataIsStale: &stale) {
+            url = scoped
+        } else if let plain = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) {
+            url = plain
+        } else {
+            return nil
+        }
+        // 本次运行内保持访问权限，供列表/恢复/删除直接使用；
+        // 拿不到访问权限就当没配过，别把打不开的 URL 缓存下来。
+        guard url.startAccessingSecurityScopedResource() else { return nil }
         Self.cachedExternalFolderURL = url
         return url
     }
@@ -1752,14 +1775,17 @@ struct LCDataManagementView : View {
     @discardableResult
     static func writeCZFSettingsBackup() -> (local: URL?, externalFolderName: String?) {
         let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
+        // 定时打开的按日标记（CZFSchedMinLastDate-<bid>）不进备份：
+        // 带进备份、恢复后当天定时打开被跳过一次。按前缀跳过，
+        // 不是精确集合（bid 各不相同）。
         var payload: [String: Any] = [:]
-        for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && czfIsJSONValue(value) {
+        for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && !key.hasPrefix("CZFSchedMinLastDate-") && czfIsJSONValue(value) {
             payload[key] = value
         }
         // App Group 里的 CZF 键也要：最小化省电三个开关存在
         // App Group 里，只扫标准库会漏掉它们；已在 payload
         // 里的（标准库同名）不动，标准库优先。
-        for (key, value) in LCUtils.appGroupUserDefault.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && payload[key] == nil && czfIsJSONValue(value) {
+        for (key, value) in LCUtils.appGroupUserDefault.dictionaryRepresentation() where key.hasPrefix("CZF") && !skip.contains(key) && !key.hasPrefix("CZFSchedMinLastDate-") && payload[key] == nil && czfIsJSONValue(value) {
             payload[key] = value
         }
         // 排序在 App Group 里、定时备份/清理在标准库里但前缀是 LC，
@@ -2552,13 +2578,21 @@ struct LCDataManagementView : View {
         var deleted = 0
         // 3.8.281：锁了的不删
         var lockedSkipped = 0
+        // 本地+iCloud 同一份备份（同名）只算一次：两边各删一份
+        // 是对的，但计数按 URL 涨两次，用户看到的“已删除 N 个”虚高。
+        var countedNames: Set<String> = []
         for url in backupFolderList + externalBackupFolderList {
-            if lockedBackupNames.contains(url.lastPathComponent) {
-                lockedSkipped += 1
+            let name = url.lastPathComponent
+            if lockedBackupNames.contains(name) {
+                if countedNames.insert(name).inserted {
+                    lockedSkipped += 1
+                }
                 continue
             }
             if (try? fm.removeItem(at: url)) != nil {
-                deleted += 1
+                if countedNames.insert(name).inserted {
+                    deleted += 1
+                }
             }
         }
         backupFolderList = backupFolders(fromExternal: false)
@@ -2893,6 +2927,8 @@ struct LCDataManagementView : View {
     /// backupFolderName），新版装上有问题时能在数据管理里
     /// 恢复回滚。备份失败不挡安装，静默跳过
     static func autoBackupBeforeOverwrite(_ app: LCAppModel) async {
+        // 3.8.374：备份前先刷快照，别读旧 dump（batchBackup 同款缺口）。
+        await Self.refreshKeychainSnapshot(for: app)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
@@ -4810,8 +4846,27 @@ struct LCDataManagementView : View {
                 // iCloud 源先等数据下完再合并，否则拷到占位空壳
                 let mergeDownloaded = await Self.waitForUbiquitousDownload(folder, fm: fm, onProgress: downloadProgress)
                 if !mergeDownloaded { downloadIncomplete = true }
-                guard let target = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n })
-                        ?? app.uiSelectedContainer ?? app.uiContainers.first else { continue }
+                // 找目标容器：按名对上的才合并；对不上的按备份文件夹新建
+                // 一个容器（完整恢复分支同款注册），再把会话文件合进它。
+                // 原来回落到选中容器/首个容器，多容器重装后各容器会话全
+                // 并进同一个容器，跨容器数据混杂。是 manifest 默认容器时
+                // 同时设为选中（完整恢复同款），否则只是多一个可切换容器。
+                let target: LCContainer
+                if let matched = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n }) {
+                    target = matched
+                } else {
+                    let newContainer = LCContainer(folderName: n, name: n, isShared: app.appInfo.isShared)
+                    var containers = app.uiContainers
+                    containers.append(newContainer)
+                    app.uiContainers = containers
+                    app.appInfo.containers = containers
+                    if n == manifestDataUUID {
+                        app.uiSelectedContainer = newContainer
+                        app.uiDefaultDataFolder = n
+                        app.appInfo.dataUUID = n
+                    }
+                    target = newContainer
+                }
                 // 合并拷盘挪后台（见三件套注释）：目标值先在
                 // 调用方线程取出，只把纯 URL 传进 detached。
                 let mergeDest = target.containerURL
@@ -6053,6 +6108,10 @@ struct LCDataManagementView : View {
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 var backedUpFolderNames: [String] = []
+                // 3.8.283 跳过已有完整备份的登录态档：跳过也要记数，
+                // 全跳过且无失败时当天同样算结算（原来只看有没有备
+                // 上，永不结算，每次进页都重跑、还关客 App 窗口）。
+                var skippedFullCount = 0
                 // 3.8.306：定时备份失败别静默——原来失败用 try?
                 // 吞掉，整批全失败也不留痕、第二天照常重试，
                 // 用户根本不知道没备上。失败的 App 记下来，
@@ -6073,6 +6132,7 @@ struct LCDataManagementView : View {
                         //（弹窗会警告）。只查已有完整备份的 App，
                         // 没备份的照常备。
                         if loginOnly && Self.hasExistingFullBackup(for: app, backupRoot: backupRoot, fm: fm) {
+                            skippedFullCount += 1
                             continue
                         }
                         // v216：同步按返回的实际文件夹名（多开后缀名
@@ -6108,7 +6168,9 @@ struct LCDataManagementView : View {
                         UserDefaults.standard.synchronize()
                     }
                 }
-                continuation.resume(returning: !backedUpFolderNames.isEmpty)
+                // 全跳过且无失败时当天同样算结算（见上面 skippedFullCount），
+                // 真失败时不结算，第二天照常重试。
+                continuation.resume(returning: !backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount == selected.count))
             }
         }
         if didBackup {

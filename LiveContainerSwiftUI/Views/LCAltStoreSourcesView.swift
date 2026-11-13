@@ -1535,7 +1535,16 @@ struct LCSourcesView: View {
         Task {
             do {
                 let (tempURL, _) = try await CZFVPNManager.hostSession().download(from: downloadURL)
-                let fileName = downloadURL.lastPathComponent
+                // 裸域名/无路径链接 lastPathComponent 为空，destURL 会是
+                // Documents 目录本身，前面 removeItem 会删整个 Documents；
+                // 裸 UUID 无 .ipa 后缀落盘成无扩展名文件，Files 不认 IPA。
+                // 照抄 installFromUrl 的兜底（空名用 app.ipa），缺后缀补 .ipa。
+                var fileName = downloadURL.lastPathComponent
+                if fileName.isEmpty {
+                    fileName = "app.ipa"
+                } else if !fileName.lowercased().hasSuffix(".ipa") {
+                    fileName += ".ipa"
+                }
                 let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let destURL = docsURL.appendingPathComponent(fileName)
                 if FileManager.default.fileExists(atPath: destURL.path) {
