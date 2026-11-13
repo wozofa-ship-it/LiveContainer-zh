@@ -221,20 +221,32 @@ struct LCTabView: View {
                 errorShow = true
                 return
             }
-            
+
+            // R-5：host 是设置页标识（backupall 等）时直接走
+            // czfDirectPage 直出 sheet（与面板 openSettingsPage
+            // 同款出口，LCTabView 监听弹 sheet），不写 deepLink；
+            // 原先落 default 弹“无法识别的链接”，设置页的
+            // deepLinkSettingsPage 分支已死、一并删掉。
+            if let page = CZFSettingsPage(rawValue: host) {
+                sharedModel.czfDirectPage = page
+                return
+            }
+
             switch host {
             case "livecontainer-launch", "install", "open-web-page", "open-url":
                 sharedModel.selectedTab = .apps
             case "certificate":
                 sharedModel.selectedTab = .settings
             case "source":
-                // 副 LC（multiLCStatus == 2）没有源 Tab：不切 .sources，
-                // 改落 App 页，deepLink 照常写下去由 App 页 onChange 消费。
+                // S-2/R-7：副 LC（multiLCStatus == 2）没有源 Tab，
+                // App 页 handleURL 也没有 source 分支，写进 deepLink
+                // 只会被静默丢掉；直接弹错，不写 deepLink。
                 if DataManager.shared.model.multiLCStatus == 2 {
-                    sharedModel.selectedTab = .apps
-                } else {
-                    sharedModel.selectedTab = .sources
+                    errorInfo = "副 LC 不支持添加源，请在主 LC 里打开"
+                    errorShow = true
+                    return
                 }
+                sharedModel.selectedTab = .sources
             default:
                 // 第三批低 #47：未知 host 原来静默丢弃，弹一次提示。
                 errorInfo = "无法识别的链接：\(url.absoluteString)"

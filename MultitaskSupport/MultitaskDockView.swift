@@ -4061,9 +4061,10 @@ struct SourcesPanelView: View {
     // 设置——用户 01:13 视频亲证：点“后台保活”快捷方式被甩
     // 到设置页。原先只有备份四路走 czfDirectDataPage，其余
     // 页走 selectedTab=.settings + deepLink，观感就是“跑去
-    // 设置”。现全部 CZFSettingsPage 都走直出 sheet（与设置
-    // 页的 .sheet(item: $deepLinkSettingsPage) 同款结构：
-    // NavigationView 包 destinationView，左上“关闭”）。
+    // 设置”。现全部 CZFSettingsPage 都走直出 sheet（LCTabView
+    // 的 .sheet(item: $sharedModel.czfDirectPage)，NavigationView
+    // 包 destinationView，左上“关闭”；设置页的同款
+    // deepLinkSettingsPage 分支 R-5 已删，只剩这一条活路）。
     // destinationView 本就覆盖全部 15 个 case（数据管理/
     // 多任务/JIT/多开/存储/备份/恢复四路/插件/源/应用/
     // 保活），直出不缺页。非 CZFSettingsPage 的 raw（理论

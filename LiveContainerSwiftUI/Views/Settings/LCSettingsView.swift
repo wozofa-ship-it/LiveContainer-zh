@@ -209,10 +209,6 @@ struct LCSettingsView: View {
     
     @State private var isViewAppeared = false
 
-    // 3.8.308：源面板直开某设置页——deepLink host 对上
-    // CZFSettingsPage 就弹对应页（sheet，不动导航栈）。
-    @State private var deepLinkSettingsPage: CZFSettingsPage? = nil
-
     let storeName = LCUtils.getStoreName()
     
     init() {
@@ -338,20 +334,6 @@ struct LCSettingsView: View {
             guard sharedModel.selectedTab == .settings, let link else { return }
             sharedModel.deepLink = nil
             handleURL(url: link)
-        }
-        // 3.8.308：源面板直开设置页（sheet，不动导航栈；
-        // 关掉后 deepLinkSettingsPage 清掉，下次还能再开）。
-        .sheet(item: $deepLinkSettingsPage) { page in
-            NavigationView {
-                page.destinationView
-                    .navigationTitle(page.title)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("关闭") { deepLinkSettingsPage = nil }
-                        }
-                    }
-            }
         }
     }
 
@@ -1337,10 +1319,6 @@ struct LCSettingsView: View {
                 errorInfo = "证书链接无效，请检查链接参数后重试"
                 errorShow = true
             }
-        } else if let host = url.host, let page = CZFSettingsPage(rawValue: host) {
-            // 3.8.308：源面板直开设置页——host 对上页标识就弹
-            // 对应页（sheet）；host 不认就只停在设置页。
-            deepLinkSettingsPage = page
         }
     }
 }
