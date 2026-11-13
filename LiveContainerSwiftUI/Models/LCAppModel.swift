@@ -76,6 +76,7 @@ class LCAppModel: ObservableObject, Hashable {
     /// dock 里找归属对得上的条目：没有条目、条目归属对不上、
     /// 或归属验不出（appInfo 缺失/路径为空）都返回 nil，调用方
     /// 走新起；宁可多起一个窗口，不顶错别人的。
+    @available(iOS 16.0, *)
     private static func czfOwnedDockEntry(app: LCAppModel, uuid: String) -> DockAppModel? {
         guard let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }),
               let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty,
@@ -310,6 +311,7 @@ class LCAppModel: ObservableObject, Hashable {
     /// 拆容器换号后旧 uuid 等不来新窗）；④ 到期动作没跑就经
     /// onError 报一次超时。action 在窗口出现时调；timeout 是
     /// 等窗预算（秒）；launch 抛错时经 onError 报启动错、不再报超时。
+    @available(iOS 16.0, *)
     private static func czfLaunchThenActOnWindow(
         app: LCAppModel,
         multitask: Bool?,
