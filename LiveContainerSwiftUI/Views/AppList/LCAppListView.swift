@@ -3758,12 +3758,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             // StosDebug 没装时旧代码直接开、返回值丢掉，静默无事；
                             // open 返回 false 就弹提示。注：不用 canOpenURL，
                             // stosdebug 不在 LSApplicationQueriesSchemes 里。
-                            // 注2：必须 await——不 await 会调到同步重载（返 Void），
-                            // opened 就不是 Bool，编不过（3.8.460 唯一红字）。
-                            let opened = await UIApplication.shared.open(url)
-                            if !opened {
-                                errorInfo = "StosDebug 未安装/打不开，请先安装 StosDebug"
-                                errorShow = true
+                            // 注2：这里在 MainActor.run 同步闭包里，不能 await
+                            //（await 会让闭包变 async，MainActor.run 不接受）；
+                            // 用 completionHandler 版判失败，回调里回主线程写提示。
+                            UIApplication.shared.open(url, options: [:]) { opened in
+                                if !opened {
+                                    Task { @MainActor in
+                                        self.errorInfo = "StosDebug 未安装/打不开，请先安装 StosDebug"
+                                        self.errorShow = true
+                                    }
+                                }
                             }
                         } else {
                             errorInfo = "Failed to build JIT URL."
@@ -3790,12 +3794,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         // StikDebug 没装时旧代码直接开、返回值丢掉，静默无事；
                         // open 返回 false 就弹提示。注：不用 canOpenURL，
                         // stikjit 不在 LSApplicationQueriesSchemes 里。
-                        // 注2：必须 await——不 await 会调到同步重载（返 Void），
-                        // opened 就不是 Bool，编不过（3.8.460 同款红字）。
-                        let opened = await UIApplication.shared.open(url)
-                        if !opened {
-                            errorInfo = "StikDebug 未安装/打不开，请先安装 StikDebug 2.3.0+"
-                            errorShow = true
+                        // 注2：这里在 MainActor.run 同步闭包里，不能 await
+                        //（await 会让闭包变 async，MainActor.run 不接受）；
+                        // 用 completionHandler 版判失败，回调里回主线程写提示。
+                        UIApplication.shared.open(url, options: [:]) { opened in
+                            if !opened {
+                                Task { @MainActor in
+                                    self.errorInfo = "StikDebug 未安装/打不开，请先安装 StikDebug 2.3.0+"
+                                    self.errorShow = true
+                                }
+                            }
                         }
                     }
                 } else {
