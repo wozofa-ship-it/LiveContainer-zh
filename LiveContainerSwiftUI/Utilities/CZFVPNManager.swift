@@ -349,22 +349,21 @@ public final class CZFVPNManager {
         refreshSettingsBackup()
     }
 
-    /// 预热：有 App 标了 VPN 且预热开关没关时，提前把核心
-    /// 拉起来（用全局当前节点），第一个 VPN App 点开就不
-    /// 用等冷启动。核心已经在跑就直接返回，不打扰正在用
-    /// 的连接；起了没人用时原有的 30 分钟自动停不覆盖这种
-    /// 情况（没 App 启动过），核心随宿主进程被系统挂起，
-    /// 不额外耗电
-    /// ignoringSuppression：前台进 App 页时传 true——进 App 页
-    /// 本身就是要用 App 的意图，与“打开标了 VPN 的 App”
-    /// 同类（那路本来就清抑制）；测速后的抑制只拦非前台的
-    /// 预热触发。预热真把核心起起来后清掉抑制（前提已不存在）。
+    /// 重启恢复（耗电修法，用户令“启动需要 VPN 的 App 时
+    /// 再开启”，eager 预热已删）：只做一件事——上次亲手
+    /// 开着核心，宿主重启后起回来。从不因“有 App 标了
+    /// VPN”就提前起核心；要 VPN 的 App 启动时由 runApp
+    /// 的 ensureRunning 按需起（见 LCAppModel.runApp），
+    /// 全部关掉后自动停照常。预热开关（CZFVPNPrewarm）
+    /// 不再触发启动，设置页那行先不动。
+    /// ignoringSuppression：前台进 App 页时传 true——恢复
+    /// 本就是用户亲手开过的意图，不被测速后抑制拦住。
     public func prewarmIfNeeded(ignoringSuppression: Bool = false) {
-        // 测速窗口内不预热：预热起核心会让 pingBatch 被拒、
-        // 测速结果不准；预热本就是 opportunistic，下次进前台还会再跑
+        // 测速窗口内不恢复：起核心会让 pingBatch 被拒、
+        // 测速结果不准；恢复本就是 opportunistic，下次进前台还会再跑
         vpnCoreLock.lock()
         let pinging = isPinging
-        // 测速结束时核心没在跑就一直不预热：见字段注释，
+        // 测速结束时核心没在跑就一直不恢复：见字段注释，
         // 与时间无关、切走再进、进程重启都不放行，直到
         // 亲手起核心、打开标了 VPN 的 App、亲手拨一次
         // 预热开关三者之一出现；前台进 App 页也放行
@@ -377,31 +376,13 @@ public final class CZFVPNManager {
         // 3.8.282：重启恢复——上次亲手开着，宿主重启后起
         // 回来（不要求有 App 标 VPN，核心开关本身就是全局
         // 的；起成功后 start() 已把标志写回 true，起失败
-        // 下次进前台再试）；上次是关的就不预热，免得预热
-        // 把手动关的又起回来；没记过（nil，从没动过开关）
-        // 按老行为走预热。
+        // 下次进前台再试）；上次是关的就不恢复，免得把
+        // 手动关的又起回来；没记过（nil，从没动过开关）
+        // 也不起——只开 LiveContainer 看一眼不该起核心。
         if let wasRunning = coreWasRunning {
             if wasRunning, !isRunning, !nodeLinks.isEmpty {
                 _ = start()
             }
-            return
-        }
-        if UserDefaults.standard.object(forKey: "CZFVPNPrewarm") != nil, !UserDefaults.standard.bool(forKey: "CZFVPNPrewarm") {
-            return
-        }
-        guard !isRunning, !nodeLinks.isEmpty else { return }
-        let defaults = UserDefaults.standard
-        let hasMarked = defaults.dictionaryRepresentation().keys.contains { key in
-            key.hasPrefix("CZFVPNEnabled-") && defaults.bool(forKey: key)
-        }
-        guard hasMarked else { return }
-        if start() {
-            // 预热真把核心起起来了：测速后抑制的前提（核心停着）
-            // 已不存在，清掉——不然设置页一直显示“被压着”，
-            // 而实际上核心已经在跑了。
-            vpnCoreLock.lock()
-            prewarmSuppressedAfterPing = false
-            vpnCoreLock.unlock()
         }
     }
 

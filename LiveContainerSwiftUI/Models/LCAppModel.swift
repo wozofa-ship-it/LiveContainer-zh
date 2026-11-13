@@ -974,6 +974,18 @@ class LCAppModel: ObservableObject, Hashable {
 // 取消：acquire 的检查与 sleep 在任务取消时抛错，门不落袋；
 // 等待上限：持门等窗最多 15 秒、拿门最多 60 秒，超时即放
 // 行/无门启动，第二次启动绝不无限挂起。
+/// 只恢复一次的盒子（O-19）：窗口出现回调与 15 秒超时兜底
+/// 都在主队列串行跑，谁先到谁拿，另一个空转；continuation
+/// 只恢复一次，绝不 double-resume。
+private final class CZFOnceBox {
+    private var taken = false
+    func take() -> Bool {
+        guard !taken else { return false }
+        taken = true
+        return true
+    }
+}
+
 actor CZFMultitaskLaunchGate {
     static let shared = CZFMultitaskLaunchGate()
     private var holder: String?
@@ -1042,29 +1054,30 @@ actor CZFMultitaskLaunchGate {
         waiter.continuation.resume(throwing: CancellationError())
     }
 
-    /// 等窗后放门：每 0.3 秒在主线程认一次 dockManager.apps
-    /// 含本容器（与 smallWindowOpenApp 认同一信号），出现
-    /// 即放；15 秒未出现也放——门绝不为一次慢启动/失败启动
-    /// 一直占着。
+    /// 等窗后放门：客窗口出现（dock 条目追加）即放；15 秒
+    /// 未出现也放——门绝不为一次慢启动/失败启动一直占着。
+    /// O-19：原来每 0.3 秒在主线程认一次 dockManager.apps，
+    /// 最长 15 秒（50 次唤醒）。改走 czfOnWindowAppeared 回调
+    /// （MultitaskDockView 已有，出现先于注册的竞态由它开头
+    /// 的已存在检查兜底）；它超时不调 handler，所以另起一个
+    /// 15 秒 asyncAfter 兜底，超时也放门。出现/超时谁先到谁
+    /// 恢复，CZFOnceBox 保证只恢复一次。
     func czfWaitForWindowAndRelease(uuid: String) async {
-        let deadline = Date().addingTimeInterval(15)
-        while Date() < deadline {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let box = CZFOnceBox()
             // MultitaskDockManager 带 @available(iOS 16.0, *)，跨文件
             // 引用必须包 #available（v170 血泪：不包编不过）；16 以下
-            // 多任务根本不存在，else 走 false 即可（持门路本身也只在
-            // 16+ 才走，这里只是为编译兜底）。
-            let appeared: Bool
+            // 多任务根本不存在，不注册回调，只走下面 15 秒超时放门。
             if #available(iOS 16.0, *) {
-                appeared = await MainActor.run {
-                    MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == uuid })
+                MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: 15) {
+                    guard box.take() else { return }
+                    continuation.resume()
                 }
-            } else {
-                appeared = false
             }
-            if appeared {
-                break
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                guard box.take() else { return }
+                continuation.resume()
             }
-            try? await Task.sleep(nanoseconds: 300_000_000)
         }
         release(for: uuid)
     }

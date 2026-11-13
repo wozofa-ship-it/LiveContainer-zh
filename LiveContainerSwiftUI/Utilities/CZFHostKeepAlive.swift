@@ -63,6 +63,15 @@ final class CZFHostKeepAlive {
                   type == .ended else { return }
             self.refresh()
         }
+        // O-25：音频服务丢了/重置了（mediaserverd 崩了重起等），
+        // 播放器会静默停掉且不发 interruption——原来全靠 30 秒
+        // 看门狗兜底。直接听这两个通知，丢了就重起，比等表快。
+        center.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.refresh()
+        }
+        center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.refresh()
+        }
     }
 
     /// 白名单读法与 LCAppSettingsView.readKeepAliveList 同款：先读
@@ -183,13 +192,19 @@ final class CZFHostKeepAlive {
             return
         }
         if watchdog == nil {
-            watchdog = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            // O-25：看门狗只作兜底——原来 30 秒一轮常驻转，
+            // 后台有游客在跑时每小时 120 次唤醒。静默停播的
+            // 主因（中断结束、音频服务丢/重置、前后台切换）
+            // 都已有通知直接触发 refresh() 重起；这表只防
+            // 通知没覆盖到的漏网情况，改 5 分钟一轮（唤醒
+            // 降到每小时 12 次），tolerance 60 秒让系统并批。
+            watchdog = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
                 if self.isBackgrounded && !(self.player?.isPlaying ?? false) {
                     self.start()
                 }
             }
-            watchdog?.tolerance = 10.0
+            watchdog?.tolerance = 60.0
         }
     }
 
