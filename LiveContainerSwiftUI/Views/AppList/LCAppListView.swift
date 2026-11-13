@@ -504,6 +504,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Button(vpnCoreRunning ? "停止核心" : "启动核心") {
                 toggleVPNCore()
             }
+            .disabled(vpnPinging)
             Button(vpnPinging ? "测速中…" : "测延迟") {
                 toolbarPingNodes()
             }
@@ -3672,11 +3673,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
     
-    func jitLaunch(appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async {
+    func jitLaunch(appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async -> Bool {
         await jitLaunch(withScript: "", appName: appName, classicMode: classicMode, selectedBundlePath: selectedBundlePath, selectedContainerFolder: selectedContainerFolder, launchURL: launchURL)
     }
 
-    func jitLaunch(withScript script: String, appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async {
+    func jitLaunch(withScript script: String, appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async -> Bool {
         await MainActor.run {
             jitLog = ""
         }
@@ -3695,7 +3696,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 UserDefaults.standard.removeObject(forKey: "selected")
                 UserDefaults.standard.removeObject(forKey: "selectedContainer")
             }
-            return
+            // 取消返 false：调用方不盖“最近启动”。
+            return false
         }
         // 确认后：先写键，再启动 JIT 任务（TrollStore 分支
         // 此时提前启动读到的是新鲜键），最后走原有 launch。
@@ -3732,6 +3734,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         LCSharedUtils.launchToGuestApp(withClassicMode: classicMode)
+        // 真启动才返 true，调用方盖“最近启动”。
+        return true
 
     }
     
@@ -3785,7 +3789,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     }
                     return
                 }
-                
+
+                // 非 Stik 系 JIT 方式（SideJITServer/JITStreamer/SideStore）
+                // 没有多任务 JIT 路：原来无条件拼 stikjit URL，报的却是
+                // “StikDebug 未安装”假错、JIT 根本不尝试。先拦住，报实情。
+                guard jitEnabler == .StikJIT || jitEnabler == .StikJITLC else {
+                    errorInfo = "当前 JIT 方式不支持多任务 JIT，请改用 StikDebug/StosDebug"
+                    errorShow = true
+                    return
+                }
+
                 let encoded = encodedData.map { "&script-data=\($0)" } ?? ""
                 if let url = URL(string: "stikjit://enable-jit?bundle-id=\(Bundle.main.bundleIdentifier!)&pid=\(pid)\(encoded)") {
                     if jitEnabler == .StikJITLC {

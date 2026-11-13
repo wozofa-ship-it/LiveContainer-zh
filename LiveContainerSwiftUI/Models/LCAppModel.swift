@@ -3,8 +3,8 @@ import Foundation
 protocol LCAppModelDelegate {
     func closeNavigationView()
     func changeAppVisibility(app : LCAppModel)
-    func jitLaunch(appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async
-    func jitLaunch(withScript script: String, appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async
+    func jitLaunch(appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async -> Bool
+    func jitLaunch(withScript script: String, appName: String, classicMode: UInt, selectedBundlePath: String?, selectedContainerFolder: String?, launchURL: String?) async -> Bool
     func jitLaunch(withPID pid: Int, withScript script: String?, appName: String) async
     func showRunWhenMultitaskAlert() async -> Bool?
 }
@@ -664,6 +664,9 @@ class LCAppModel: ObservableObject, Hashable {
             UserDefaults.standard.set(uiSelectedContainer?.folderName, forKey: "selectedContainer")
         }
 
+        // JIT 确认取消时不盖“最近启动”：delegate 的 jitLaunch 返 Bool，
+        // 取消返 false；其它路（多任务/直接启动）照常盖戳。
+        var czfDidLaunch = true
         if jitNeeded {
             if multitask, #available(iOS 17.4, *) {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -691,9 +694,9 @@ class LCAppModel: ObservableObject, Hashable {
                 // （见 jitLaunch(withScript:)），这里只传值不写键；
                 // bundleIdOverride 为空时退回自身包路径，与旧写键一致。
                 if let scriptData = jitLaunchScriptJs, !scriptData.isEmpty {
-                    await delegate?.jitLaunch(withScript: scriptData, appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr)
+                    czfDidLaunch = await delegate?.jitLaunch(withScript: scriptData, appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr) ?? false
                 } else {
-                    await delegate?.jitLaunch(appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr)
+                    czfDidLaunch = await delegate?.jitLaunch(appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr) ?? false
                 }
             }
         } else if multitask, #available(iOS 16.0, *) {
@@ -717,7 +720,11 @@ class LCAppModel: ObservableObject, Hashable {
         }
 
         // Record the launch time
-        appInfo.lastLaunched = Date()
+        // JIT 确认取消时不盖（czfDidLaunch 为 false），免得“最近启动”
+        // 排一个根本没启动的 App；其它路照常盖。
+        if czfDidLaunch {
+            appInfo.lastLaunched = Date()
+        }
 
         await MainActor.run {
             isAppRunning = false

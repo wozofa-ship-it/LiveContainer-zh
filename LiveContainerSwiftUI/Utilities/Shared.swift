@@ -122,7 +122,9 @@ class SharedModel: ObservableObject {
     @Published var arm32EmuApps : [LCAppModel] = []
     @Published var hiddenApps : [LCAppModel] = []
     
-    @Published var pidCallback : ((NSNumber, Error?) -> Void)? = nil
+    // 待回的 PID 回调按 dataUUID 分发（原来是单人全局槽，第二个
+    // 多任务启动会覆盖第一个 JIT 启动的回调，A 永远等不到 PID）。
+    @Published var pidCallbacks: [String: ((NSNumber, Error?) -> Void)] = [:]
     
     static let isPhone: Bool = {
         UIDevice.current.userInterfaceIdiom == .phone

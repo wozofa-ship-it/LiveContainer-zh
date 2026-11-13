@@ -200,7 +200,10 @@ final class CZFHostKeepAlive {
             // 降到每小时 12 次），tolerance 60 秒让系统并批。
             watchdog = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
-                if self.isBackgrounded && !(self.player?.isPlaying ?? false) {
+                // 只在真后台才重起：willResignActive 来电/控制中心也会触发，
+                // isBackgrounded 为 true 时看门狗会在通话中重启静默音频；
+                // applicationState 才是真后台。willResignActive 的提前启动不动。
+                if UIApplication.shared.applicationState == .background && !(self.player?.isPlaying ?? false) {
                     self.start()
                 }
             }

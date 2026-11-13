@@ -137,13 +137,11 @@ struct LCAppSettingsView: View {
                     list.removeAll { $0 == bid }
                     try writeKeepAliveList(list)
                 } else {
-                    // 首次关：用全部 App 名单种子，只去掉这个 App
+                    // 首次关：用全部 App 名单种子，只去掉这个 App。
+                    // 只装 1 个 App 时 all 为空也照写：空文件就是合法的
+                    // “无人保活”态（readKeepAliveList 返 []），原来 guard
+                    // 拒掉空名单，开关关不掉。
                     let all = (sharedModel.apps + sharedModel.hiddenApps).compactMap { $0.appInfo.bundleIdentifier() }.filter { !$0.isEmpty && $0 != bid }
-                    guard !all.isEmpty else {
-                        errorShow = true
-                        errorInfo = "应用列表为空，无法建立保活名单"
-                        return
-                    }
                     try writeKeepAliveList(all)
                 }
             }

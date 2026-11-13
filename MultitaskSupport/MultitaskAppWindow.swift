@@ -26,7 +26,9 @@ struct MultitaskAppInfo {
     
     @objc class func openAppWindow(displayName: String, dataUUID: String, bundleId: String, pidCallback: ((NSNumber, Error?) -> Void)?) {
         DataManager.shared.model.enableMultipleWindow = true
-        DataManager.shared.model.pidCallback = pidCallback
+        if let pidCallback {
+            DataManager.shared.model.pidCallbacks[dataUUID] = pidCallback
+        }
         appDict[dataUUID] = MultitaskAppInfo(displayName: displayName, dataUUID: dataUUID, bundleId: bundleId)
         openWindow(id: "appView", value: dataUUID)
     }
@@ -150,8 +152,11 @@ struct MultitaskAppWindow: View {
                         } else {
                             self.errorMessage = error?.localizedDescription
                         }
-                        DataManager.shared.model.pidCallback?(NSNumber(value: pid), error)
-                        DataManager.shared.model.pidCallback = nil
+                        // 按 dataUUID 取回自己的回调，各回各的 continuation；
+                        // 取完即删，免得下次初始化又调到旧的。
+                        if let cb = DataManager.shared.model.pidCallbacks.removeValue(forKey: appInfo.dataUUID) {
+                            cb(NSNumber(value: pid), error)
+                        }
                     }
                 })
                 .background(.black)

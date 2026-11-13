@@ -1025,6 +1025,10 @@ extension Notification.Name {
             top = presented
         }
         guard let presenter = top else { return }
+        // present 前确认 presenter 空闲：已有弹窗在上面时本轮跳过，
+        // 标志不动（原来先置 true 再 present，被顶掉就永不清，
+        // 上限此后整会话不再提醒）。
+        guard presenter.presentedViewController == nil else { return }
         czfCapAlertShowing = true
         let alert = UIAlertController(
             title: "同时运行已满 3 个",

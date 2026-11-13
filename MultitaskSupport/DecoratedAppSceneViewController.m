@@ -631,6 +631,12 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         if(error) {
             [vc appTerminationCleanUp];
+            // 初始化失败也要把 PID/错误回给等待方（scene 路径同款）：
+            // 原来只弹 alert 不回调，runApp 的 continuation 永不恢复，
+            // czfLaunchInFlight 一直 true，下次点启动直接被挡掉。
+            if (self.pidAvailableHandler) {
+                self.pidAvailableHandler(nil, error);
+            }
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"lc.common.error".loc message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"lc.common.ok".loc style:UIAlertActionStyleCancel handler:nil]];
             [alert addAction:[UIAlertAction actionWithTitle:@"lc.common.copy".loc style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
