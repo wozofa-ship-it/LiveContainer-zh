@@ -52,7 +52,7 @@ class LCAppModel: ObservableObject, Hashable {
     }
 
     func czfAuthenticateIfLocked() async -> Bool {
-        Self.czfAuthenticateIfLocked(appInfo: appInfo)
+        await Self.czfAuthenticateIfLocked(appInfo: appInfo)
     }
     @Published var isSigningInProgress = false
     @Published var signProgress = 0.0
