@@ -626,19 +626,24 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         }
     }
 
-    // 设备指纹伪装（IDFA + 设备名 + 系统版本 + 机型）：与 IDFV
-    // 同款，容器设置里开，值存在 LCContainerInfo.plist；四项
+    // 设备指纹伪装（IDFA + 设备名 + 系统版本 + 机型 + 地区 + 代理）：与 IDFV
+    // 同款，容器设置里开，值存在 LCContainerInfo.plist；各项
     // 各自独立，缺哪项就只 hook 有的那几项，不全量回落。
     if([guestContainerInfo[@"spoofDeviceFingerprint"] boolValue]) {
         NSString *spoofedIDFA = guestContainerInfo[@"spoofedAdvertisingIdentifier"];
         NSString *spoofedName = guestContainerInfo[@"spoofedDeviceName"];
         NSString *spoofedVersion = guestContainerInfo[@"spoofedSystemVersion"];
         NSString *spoofedMachine = guestContainerInfo[@"spoofedMachine"];
+        NSString *spoofedRegion = guestContainerInfo[@"spoofedRegion"];
+        NSString *spoofedProxyHost = guestContainerInfo[@"spoofedProxyHost"];
+        NSInteger spoofedProxyPort = [guestContainerInfo[@"spoofedProxyPort"] integerValue];
         if(![spoofedIDFA isKindOfClass:NSString.class]) spoofedIDFA = nil;
         if(![spoofedName isKindOfClass:NSString.class]) spoofedName = nil;
         if(![spoofedVersion isKindOfClass:NSString.class]) spoofedVersion = nil;
         if(![spoofedMachine isKindOfClass:NSString.class]) spoofedMachine = nil;
-        DeviceFingerprintHookInit(spoofedIDFA, spoofedName, spoofedVersion, spoofedMachine);
+        if(![spoofedRegion isKindOfClass:NSString.class]) spoofedRegion = nil;
+        if(![spoofedProxyHost isKindOfClass:NSString.class]) spoofedProxyHost = nil;
+        DeviceFingerprintHookInit(spoofedIDFA, spoofedName, spoofedVersion, spoofedMachine, spoofedRegion, spoofedProxyHost, spoofedProxyPort);
     }
     
     bool is32bit = [guestAppInfo[@"is32bit"] boolValue];

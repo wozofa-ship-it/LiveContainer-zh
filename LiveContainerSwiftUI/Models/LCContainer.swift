@@ -50,6 +50,9 @@ class LCContainer : ObservableObject, Hashable {
                 if spoofedMachine == nil {
                     spoofedMachine = LCContainer.czfRandomMachine()
                 }
+                if spoofedRegion == nil {
+                    spoofedRegion = LCContainer.czfRandomRegion()
+                }
             }
         }
     }
@@ -57,9 +60,53 @@ class LCContainer : ObservableObject, Hashable {
     public var spoofedDeviceName: String?
     public var spoofedSystemVersion: String?
     public var spoofedMachine: String?
+    // 地区（国家/地区码）：语言 + 时区 + 地区三件套由此推导，
+    // 客端 hook NSLocale/NSTimeZone 注入。每个分身随机一个，
+    // 固定不变。
+    public var spoofedRegion: String?
+
+    // 每分身单独代理：用户自己填（host + 端口），空 = 不走代理。
+    // 不是自动生成的——代理服务器得用户自己有，填错/填了不可用
+    // 的代理会让客端联网全断，只在填了且端口 > 0 时才 hook 生效。
+    public var spoofedProxyHost: String?
+    public var spoofedProxyPort: Int = 0
+
+    static func czfRandomRegion() -> String {
+        ["US", "JP", "GB", "DE", "FR", "KR", "AU", "CA"].randomElement() ?? "US"
+    }
 
     static func czfRandomDeviceName() -> String {
-        "iPhone-\(UUID().uuidString.prefix(4))"
+        // 拟真设备名：真机名大多是“xxx 的 iPhone”或就叫“iPhone”，
+        // “iPhone-XXXX”一眼机器生成。从一组通用名里随机挑一个，
+        // 每个分身固定不变；IDFA/机型本来就区分各分身，名字撞了也无妨。
+        // 注意：别用用户自己的名字（隐私），只用通用名。
+        let names = [
+            "iPhone",
+            "我的 iPhone",
+            "小明的 iPhone",
+            "阿杰的 iPhone",
+            "小红的 iPhone",
+            "小李的 iPhone",
+            "小王的 iPhone",
+            "小张的 iPhone",
+            "小刘的 iPhone",
+            "小赵的 iPhone",
+            "小周的 iPhone",
+            "小吴的 iPhone",
+            "小郑的 iPhone",
+            "小林的 iPhone",
+            "小何的 iPhone",
+            "小郭的 iPhone",
+            "小马的 iPhone",
+            "小罗的 iPhone",
+            "小梁的 iPhone",
+            "小宋的 iPhone",
+            "小唐的 iPhone",
+            "小冯的 iPhone",
+            "小于的 iPhone",
+            "小董的 iPhone"
+        ]
+        return names.randomElement() ?? "iPhone"
     }
 
     static func czfRandomSystemVersion() -> String {
@@ -166,6 +213,9 @@ class LCContainer : ObservableObject, Hashable {
                 spoofedDeviceName = plistInfo["spoofedDeviceName"] as? String
                 spoofedSystemVersion = plistInfo["spoofedSystemVersion"] as? String
                 spoofedMachine = plistInfo["spoofedMachine"] as? String
+                spoofedRegion = plistInfo["spoofedRegion"] as? String
+                spoofedProxyHost = plistInfo["spoofedProxyHost"] as? String
+                spoofedProxyPort = plistInfo["spoofedProxyPort"] as? Int ?? 0
                 spoofDeviceFingerprint = plistInfo["spoofDeviceFingerprint"] as? Bool ?? false
             }
         } catch {
@@ -208,6 +258,15 @@ class LCContainer : ObservableObject, Hashable {
         if let spoofedMachine {
             infoDict!["spoofedMachine"] = spoofedMachine
         }
+        if let spoofedRegion {
+            infoDict!["spoofedRegion"] = spoofedRegion
+        }
+        if let spoofedProxyHost, !spoofedProxyHost.isEmpty {
+            infoDict!["spoofedProxyHost"] = spoofedProxyHost
+        }
+        if spoofedProxyPort > 0 {
+            infoDict!["spoofedProxyPort"] = spoofedProxyPort
+        }
         
         do {
             let fm = FileManager.default
@@ -241,6 +300,9 @@ class LCContainer : ObservableObject, Hashable {
         spoofedDeviceName = infoDict["spoofedDeviceName"] as? String
         spoofedSystemVersion = infoDict["spoofedSystemVersion"] as? String
         spoofedMachine = infoDict["spoofedMachine"] as? String
+        spoofedRegion = infoDict["spoofedRegion"] as? String
+        spoofedProxyHost = infoDict["spoofedProxyHost"] as? String
+        spoofedProxyPort = infoDict["spoofedProxyPort"] as? Int ?? 0
         spoofDeviceFingerprint = infoDict["spoofDeviceFingerprint"] as? Bool ?? false
     }
     

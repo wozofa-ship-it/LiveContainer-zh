@@ -30,6 +30,8 @@ struct LCContainerView : View {
     @EnvironmentObject private var sharedModel : SharedModel
     @State private var typingContainerName : String = ""
     @State private var typingIDFV: String = ""
+    @State private var typingProxyHost: String = ""
+    @State private var typingProxyPort: String = ""
     @State private var inUse = false
     @State private var runningLC : String? = nil
     
@@ -151,6 +153,36 @@ struct LCContainerView : View {
                             Text(container.spoofedMachine ?? "")
                                 .foregroundStyle(.gray)
                         }
+                        HStack {
+                            Text("lc.container.spoofedRegion".loc)
+                            Spacer()
+                            Text(container.spoofedRegion ?? "")
+                                .foregroundStyle(.gray)
+                        }
+                        // 每分身单独代理：用户自己填 host + 端口，
+                        // 留空 = 不走代理。填错代理会让客端联网断，
+                        // 只在 host 非空且端口是 1...65535 时存。
+                        HStack {
+                            Text("lc.container.spoofedProxyHost".loc)
+                            Spacer()
+                            TextField("lc.container.spoofedProxyHostPlaceholder".loc, text: $typingProxyHost)
+                                .multilineTextAlignment(.trailing)
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .onSubmit {
+                                    saveProxy()
+                                }
+                        }
+                        HStack {
+                            Text("lc.container.spoofedProxyPort".loc)
+                            Spacer()
+                            TextField("lc.container.spoofedProxyPortPlaceholder".loc, text: $typingProxyPort)
+                                .multilineTextAlignment(.trailing)
+                                .keyboardType(.numberPad)
+                                .onSubmit {
+                                    saveProxy()
+                                }
+                        }
                     }
                 }
 
@@ -267,6 +299,8 @@ struct LCContainerView : View {
             if let spoofedIDFV = container.spoofedIdentifier {
                 typingIDFV = spoofedIDFV
             }
+            typingProxyHost = container.spoofedProxyHost ?? ""
+            typingProxyPort = container.spoofedProxyPort > 0 ? "\(container.spoofedProxyPort)" : ""
             settingsBundle = delegate.getSettingsBundle()
             runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName)
             inUse = runningLC != nil
@@ -287,6 +321,9 @@ struct LCContainerView : View {
             if !typingIDFV.isEmpty, typingIDFV != (container.spoofedIdentifier ?? ""), UUID(uuidString: typingIDFV) != nil {
                 saveIDFV()
             }
+            if typingProxyHost != (container.spoofedProxyHost ?? "") || typingProxyPort != (container.spoofedProxyPort > 0 ? "\(container.spoofedProxyPort)" : "") {
+                saveProxy()
+            }
         }
         
     }
@@ -298,6 +335,23 @@ struct LCContainerView : View {
             return
         }
         container.spoofedIdentifier = newIDFV.uuidString
+        delegate.saveContainer(container: container)
+    }
+
+    func saveProxy() {
+        // host 留空 = 不走代理（同时清端口）；端口只认 1...65535，
+        // 非法输入静默丢弃（与 IDFV 离开时丢弃非法输入同款）。
+        let host = typingProxyHost.trimmingCharacters(in: .whitespaces)
+        let port = Int(typingProxyPort.trimmingCharacters(in: .whitespaces)) ?? 0
+        if host.isEmpty {
+            container.spoofedProxyHost = nil
+            container.spoofedProxyPort = 0
+        } else if (1...65535).contains(port) {
+            container.spoofedProxyHost = host
+            container.spoofedProxyPort = port
+        } else {
+            return
+        }
         delegate.saveContainer(container: container)
     }
 
