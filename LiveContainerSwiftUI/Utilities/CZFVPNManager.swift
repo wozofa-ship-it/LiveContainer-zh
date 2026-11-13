@@ -1312,8 +1312,10 @@ public final class CZFVPNManager {
 
     // 测速缓存（与设置页同一份 UserDefaults，格式 link -> {v: code, t: time}；
     // code >= 0 为通的延迟 ms，-1/-2/-3 为不通/超时/不支持；24h 后算旧数不用）。
-    private static let pingCacheKey = "CZFVPNPingCache"
-    private static let pingCacheStaleAfter: TimeInterval = 86400
+    // R-3：键与过期时间只此一份（两页的读写/恢复方法也在本文件
+    // 下面，与轮换的 freshPingDelay 共用同一份缓存）。
+    static let pingCacheKey = "CZFVPNPingCache"
+    static let pingCacheStaleAfter: TimeInterval = 86400
 
     private static func freshPingDelay(for link: String) -> Int? {
         guard let raw = UserDefaults.standard.dictionary(forKey: pingCacheKey),
@@ -1374,6 +1376,91 @@ public final class CZFVPNManager {
             self.delay = delay
             self.conversionFailed = conversionFailed
         }
+    }
+
+    // MARK: - 测速结果持久化（R-3：两页共用同一份 CZFVPNPingCache）
+    // 以前这套读写只在 VPN 页（CZFVPNSettingsView 私有方法），
+    // App 页测速结果只存内存：VPN 页刚测完的毫秒数，切到 App 页
+    // 盾牌菜单里仍显示"未测速"。现在抽到 manager 当静态方法，
+    // 两页共用同一缓存、同一编解码；按节点链接内容存，增删别的
+    // 节点不影响已有结果，重排后按内容对回新下标。
+    // 编码：≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时；-3 = 不支持
+    // （转换失败）。新格式每条带时间戳（v = 延迟码，t = 测于何时
+    // 的秒时间戳）：超 24 小时的结果算旧。旧格式（直接存 Int）
+    // 兼容读，时间戳按 0 计、即直接算旧。键与过期时间见上面
+    // freshPingDelay 旁的同一份声明（R-3 合并，不重复声明）。
+    static func readPingCache() -> [String: (code: Int, time: TimeInterval)] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: pingCacheKey) else { return [:] }
+        var out: [String: (code: Int, time: TimeInterval)] = [:]
+        for (link, value) in raw {
+            if let dict = value as? [String: Any] {
+                let code = (dict["v"] as? NSNumber)?.intValue ?? 0
+                let time = (dict["t"] as? NSNumber)?.doubleValue ?? 0
+                out[link] = (code: code, time: time)
+            } else if let num = value as? NSNumber {
+                out[link] = (code: num.intValue, time: 0)
+            }
+        }
+        return out
+    }
+
+    static func writePingCache(_ cache: [String: (code: Int, time: TimeInterval)]) {
+        var out: [String: [String: Any]] = [:]
+        for (link, entry) in cache {
+            out[link] = ["v": entry.code, "t": entry.time]
+        }
+        UserDefaults.standard.set(out, forKey: pingCacheKey)
+    }
+
+    /// 测速结果落盘编码（与 restorePingResults 的解码对应）：
+    /// ≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时；-3 = 不支持。
+    static func pingCacheCode(for result: CZFNodePingResult) -> Int {
+        result.success ? result.delay : (result.conversionFailed ? -3 : (result.delay == 11000 ? -2 : -1))
+    }
+
+    /// 整表落盘：先剪掉已不在列表里的节点，缓存不无限长。
+    static func savePingResults(_ results: [Int: CZFNodePingResult], nodes: [String]) {
+        var merged = readPingCache().filter { nodes.contains($0.key) }
+        let now = Date().timeIntervalSince1970
+        for (index, result) in results {
+            guard nodes.indices.contains(index) else { continue }
+            merged[nodes[index]] = (code: pingCacheCode(for: result), time: now)
+        }
+        writePingCache(merged)
+    }
+
+    /// 单测只写该条缓存：以前单测调全量 savePingResults，
+    /// 全表时间戳都被刷成"刚才"，几天前的旧结果杀掉重进后
+    /// "·旧"消失、冒充新鲜。整表测速仍走全量（确实全测了）。
+    static func savePingResult(link: String, result: CZFNodePingResult, nodes: [String]) {
+        var merged = readPingCache().filter { nodes.contains($0.key) }
+        merged[link] = (code: pingCacheCode(for: result), time: Date().timeIntervalSince1970)
+        writePingCache(merged)
+    }
+
+    /// 按节点内容从落盘缓存重建下标结果 + 旧结果下标集。
+    static func restorePingResults(nodes: [String]) -> (results: [Int: CZFNodePingResult], stale: Set<Int>) {
+        let cache = readPingCache()
+        var map: [Int: CZFNodePingResult] = [:]
+        var stale: Set<Int> = []
+        let now = Date().timeIntervalSince1970
+        for (index, link) in nodes.enumerated() {
+            guard let entry = cache[link] else { continue }
+            let v = entry.code
+            if v >= 0 {
+                map[index] = CZFNodePingResult(success: true, delay: v)
+            } else if v == -2 {
+                map[index] = CZFNodePingResult(success: false, delay: 11000)
+            } else if v == -3 {
+                map[index] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+            } else {
+                map[index] = CZFNodePingResult(success: false, delay: 10000)
+            }
+            if entry.time == 0 || now - entry.time > pingCacheStaleAfter {
+                stale.insert(index)
+            }
+        }
+        return (map, stale)
     }
 
     /// 测延迟前停核心（用户 2026-11-03 定的“停止测速启动”）：

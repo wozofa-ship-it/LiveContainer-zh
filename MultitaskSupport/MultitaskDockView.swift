@@ -5804,7 +5804,12 @@ private struct CZFPanelCustomSettingsPicker: View {
                     // 就退到选页，裸 page:backupScope 条目建出来
                     // 也没意义；只备某 App 走下面“App 设置”里的
                     // “备份此 App”（appbackup: 条目）。
-                    ForEach(CZFSettingsPage.allCases.filter { $0 != .backupScope }) { page in
+                    // R-6：.selectbackup 也不列——它是 .backup 的
+                    // 兼容别名（destinationView 里早已合并成一个
+                    // case），单列会让选单里"备份"与"选择备份"两
+                    // 个入口点开同一页。已存的 page:selectbackup
+                    // 快捷方式仍能解析（enum case 保留），不受影响。
+                    ForEach(CZFSettingsPage.allCases.filter { $0 != .backupScope && $0 != .selectbackup }) { page in
                         let item = CZFPanelCustomShortcuts.pageItem(page.rawValue)
                         Button {
                             onPick(item)

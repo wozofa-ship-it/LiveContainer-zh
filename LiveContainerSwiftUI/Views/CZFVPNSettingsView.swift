@@ -608,7 +608,7 @@ struct CZFVPNSettingsView: View {
                 CZFVPNManager.shared.replaceNodesWithoutCoreChange(kept)
                 vpnNodes = CZFVPNManager.shared.nodeLinks
                 vpnPingResults = [:]
-                savePingResults()
+                CZFVPNManager.savePingResults(vpnPingResults, nodes: vpnNodes)
                 refreshVPNState()
             }
             Button("取消", role: .cancel) {}
@@ -708,7 +708,7 @@ struct CZFVPNSettingsView: View {
         // 被替换掉的节点还留在缓存里，下次存结果时才剪；
         // 先按新列表剪掉，再刷新、再从缓存恢复，恢复的
         // 只会是新列表里还留着的节点。
-        writePingCache(readPingCache().filter { deduped.contains($0.key) })
+        CZFVPNManager.writePingCache(CZFVPNManager.readPingCache().filter { deduped.contains($0.key) })
         vpnPingResults = [:]
         refreshVPNState()
         successInfo = "订阅导入完成：共 \(deduped.count) 个节点（节点列表已替换为订阅内容）"
@@ -737,7 +737,7 @@ struct CZFVPNSettingsView: View {
         // 走清理同款只换列表不碰核心：活动节点按内容找回，
         // 追加在末尾不移位，核心在跑也不重启。
         CZFVPNManager.shared.replaceNodesWithoutCoreChange(existing + fresh)
-        writePingCache(readPingCache().filter { (existing + fresh).contains($0.key) })
+        CZFVPNManager.writePingCache(CZFVPNManager.readPingCache().filter { (existing + fresh).contains($0.key) })
         vpnPingResults = [:]
         refreshVPNState()
         successInfo = "合并导入完成：新增 \(fresh.count) 个节点，共 \(existing.count + fresh.count) 个"
@@ -794,12 +794,25 @@ struct CZFVPNSettingsView: View {
                 vpnPingStaleIndices = []
                 vpnSingleRejectedLinks = []
                 vpnPingRejected = false
-                savePingResults()
+                CZFVPNManager.savePingResults(map, nodes: vpnNodes)
             }
             // 停过的核心测完重启原来那条（没停过就不启动）；
             // 放 refresh 之前，状态行直接显示重启后的状态。
             if pingStoppedCore {
                 CZFVPNManager.shared.restartCoreAfterPing()
+            }
+            // R-3：测完自动切最快，与 App 页盾牌菜单同策略
+            // （3.8.306）：只认刚测通的节点、已是最快就不切
+            // （省一次重启）；切了就明示，不静默换节点。
+            // 被拒那批全是失败，filter 自然找不到最快，不切。
+            // 手动"切到最快"按钮还在（按缓存切，不用重测）。
+            if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }),
+               best.offset != CZFVPNManager.shared.activeNodeIndex,
+               best.offset < CZFVPNManager.shared.nodeLinks.count {
+                CZFVPNManager.shared.setActiveNode(at: best.offset)
+                let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[best.offset]).name
+                successInfo = "已切到最快节点：\(name)（\(best.element.delay)ms）"
+                successShow = true
             }
             vpnPinging = false
             vpnPingDone = 0
@@ -838,7 +851,7 @@ struct CZFVPNSettingsView: View {
                 vpnPingStaleIndices.remove(currentIndex)
                 vpnSingleRejectedLinks.remove(link)
                 // 只写该条缓存，别刷全表时间戳（见 savePingResult）。
-                savePingResult(link: link, result: result)
+                CZFVPNManager.savePingResult(link: link, result: result, nodes: vpnNodes)
             }
             // 停过的核心测完重启原来那条（没停过就不启动）；
             // 放 refresh 之前，状态行直接显示重启后的状态。
@@ -925,96 +938,17 @@ struct CZFVPNSettingsView: View {
         // 内存里的测速结果被清空（增删/导入/排序都会清）时，
         // 从落盘缓存按节点内容重建，没测过的节点不显示
         if vpnPingResults.isEmpty && !vpnPinging {
-            restorePingResults()
-        }
-    }
-
-    // MARK: - 测速结果持久化（打磨：以前只存内存，增删/导入任一
-    // 节点就整表清零、重启也没了，而测速要停一次核心，代价不小。
-    // 按节点链接内容存：增删别的节点不影响已有结果，重排后按
-    // 内容对回新下标。编码：≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时；-3 = 不支持（转换失败）
-    // 新格式每条带时间戳（v = 延迟码，t = 测于何时的秒时间戳）：
-    // 超 24 小时的结果界面灰色显示“·旧”，别按旧延迟误切节点。
-    // 旧格式（直接存 Int）兼容读，时间戳按 0 计、即直接算旧。
-    private static let pingCacheKey = "CZFVPNPingCache"
-    private static let pingCacheStaleAfter: TimeInterval = 86400
-
-    private func readPingCache() -> [String: (code: Int, time: TimeInterval)] {
-        guard let raw = UserDefaults.standard.dictionary(forKey: Self.pingCacheKey) else { return [:] }
-        var out: [String: (code: Int, time: TimeInterval)] = [:]
-        for (link, value) in raw {
-            if let dict = value as? [String: Any] {
-                let code = (dict["v"] as? NSNumber)?.intValue ?? 0
-                let time = (dict["t"] as? NSNumber)?.doubleValue ?? 0
-                out[link] = (code: code, time: time)
-            } else if let num = value as? NSNumber {
-                out[link] = (code: num.intValue, time: 0)
+            let restored = CZFVPNManager.restorePingResults(nodes: vpnNodes)
+            if !restored.results.isEmpty {
+                vpnPingResults = restored.results
+                vpnPingStaleIndices = restored.stale
             }
         }
-        return out
     }
 
-    private func writePingCache(_ cache: [String: (code: Int, time: TimeInterval)]) {
-        var out: [String: [String: Any]] = [:]
-        for (link, entry) in cache {
-            out[link] = ["v": entry.code, "t": entry.time]
-        }
-        UserDefaults.standard.set(out, forKey: Self.pingCacheKey)
-    }
-
-    private func savePingResults() {
-        // 先剪掉已不在列表里的节点，缓存不无限长
-        var merged = readPingCache().filter { vpnNodes.contains($0.key) }
-        let now = Date().timeIntervalSince1970
-        for (index, result) in vpnPingResults {
-            guard vpnNodes.indices.contains(index) else { continue }
-            merged[vpnNodes[index]] = (code: Self.pingCacheCode(for: result), time: now)
-        }
-        writePingCache(merged)
-    }
-
-    /// 测速结果落盘编码（与 restorePingResults 的解码对应）：
-    /// ≥0 = 通的延迟 ms；-1 = 不通；-2 = 超时；-3 = 不支持。
-    private static func pingCacheCode(for result: CZFVPNManager.CZFNodePingResult) -> Int {
-        result.success ? result.delay : (result.conversionFailed ? -3 : (result.delay == 11000 ? -2 : -1))
-    }
-
-    /// 单测只写该条缓存：以前单测调全量 savePingResults，
-    /// 全表时间戳都被刷成“刚才”，几天前的旧结果杀掉重进后
-    /// “·旧”消失、冒充新鲜。整表测速仍走全量（确实全测了）。
-    private func savePingResult(link: String, result: CZFVPNManager.CZFNodePingResult) {
-        var merged = readPingCache().filter { vpnNodes.contains($0.key) }
-        merged[link] = (code: Self.pingCacheCode(for: result), time: Date().timeIntervalSince1970)
-        writePingCache(merged)
-    }
-
-    private func restorePingResults() {
-        let cache = readPingCache()
-        guard !cache.isEmpty else { return }
-        var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
-        var stale: Set<Int> = []
-        let now = Date().timeIntervalSince1970
-        for (index, link) in vpnNodes.enumerated() {
-            guard let entry = cache[link] else { continue }
-            let v = entry.code
-            if v >= 0 {
-                map[index] = CZFVPNManager.CZFNodePingResult(success: true, delay: v)
-            } else if v == -2 {
-                map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 11000)
-            } else if v == -3 {
-                map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
-            } else {
-                map[index] = CZFVPNManager.CZFNodePingResult(success: false, delay: 10000)
-            }
-            if entry.time == 0 || now - entry.time > Self.pingCacheStaleAfter {
-                stale.insert(index)
-            }
-        }
-        if !map.isEmpty {
-            vpnPingResults = map
-            vpnPingStaleIndices = stale
-        }
-    }
+    // R-3：测速结果持久化已抽到 CZFVPNManager（共用缓存，
+    // 与 App 页同一份 CZFVPNPingCache，同一编解码）；本页
+    // 只留调用点，私有读写/编解码/恢复方法已删。
 
 }
 

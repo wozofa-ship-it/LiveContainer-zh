@@ -1288,9 +1288,14 @@ struct LCSourcesView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFRefreshSourcesRequest"))) { _ in
             // App 每次打开时主框架发一次：源页在的话顺手刷新，
-            // 红点不用等用户点进源页才准；忽略/取消忽略也走这个
-            // 通知，顺带重算可更新名单
+            // 红点不用等用户点进源页才准。
             autoRefreshSourcesIfNeeded()
+            refreshUpdatableCache()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFRecomputeUpdatableCache"))) { _ in
+            // S-12：忽略/取消忽略版本只用重算红点与可更新名单，
+            // 不用联网刷新源——以前也发 CZFRefreshSourcesRequest，
+            // 名字说"刷新源"实际生效的只是重算，名不副实。
             refreshUpdatableCache()
         }
     }
@@ -2442,9 +2447,10 @@ struct LCSourceAppBanner: View {
                 Button {
                     CZFUpdateIgnore.setIgnored(version, for: app.bundleIdentifier)
                     ignoreRefresh.toggle()
-                    // 让源页顺带重算红点和「全部更新」名单（带
-                    // 5 分钟节流，不会频繁打网络）
-                    NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
+                    // S-12：只重算红点和「全部更新」名单，不用
+                    // 联网刷新源——发 CZFRecomputeUpdatableCache，
+                    // 不再挂"刷新源"的通知。
+                    NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
                 } label: {
                     Label("忽略此版本", systemImage: "bell.slash")
                 }
@@ -2453,7 +2459,8 @@ struct LCSourceAppBanner: View {
                 Button {
                     CZFUpdateIgnore.setIgnored(nil, for: app.bundleIdentifier)
                     ignoreRefresh.toggle()
-                    NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
+                    // S-12：同上，只重算，不刷新源。
+                    NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
                 } label: {
                     Label("取消忽略更新", systemImage: "bell")
                 }

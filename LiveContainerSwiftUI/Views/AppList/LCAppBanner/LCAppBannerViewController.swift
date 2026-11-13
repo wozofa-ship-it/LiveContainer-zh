@@ -167,24 +167,10 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
     }
 
-    // 启动偏好记忆（3.8.277 新3）：键 LCAppLastLaunchMode：
-    // [唯一 ID: "large"/"small"/"minimized"]，存 App Group。
-    // 小窗口/最小化按钮点时写；启动按钮不再读它——启动一律
-    // 大窗口（用户亲定；3.8.277 让启动按记忆开，点过一次小
-    // 窗后每次启动都开小窗，已废）。读函数已删，只留写。
-    private static let lastLaunchModeKey = "LCAppLastLaunchMode"
-
-    private enum LaunchMode: String {
-        case large, small, minimized
-    }
-
-    private static func setLastLaunchMode(_ mode: LaunchMode, for model: LCAppModel) {
-        guard let id = LCAppSortManager.shared.getUniqueIdentifier(for: model) else { return }
-        var dict = LCUtils.appGroupUserDefault.dictionary(forKey: lastLaunchModeKey) as? [String: String] ?? [:]
-        dict[id] = mode.rawValue
-        LCUtils.appGroupUserDefault.set(dict, forKey: lastLaunchModeKey)
-        LCDataManagementView.writeCZFSettingsBackupDebounced()
-    }
+    // 启动偏好记忆已删（F-5）：3.8.277 新3 的 LCAppLastLaunchMode
+    // 全仓零读者（读函数早已删，只剩写），每次启动/最小化/小窗口
+    // 点按都写一次字典 + 触发一次设置备份，白白 churn；启动一律
+    // 大窗口是用户亲定的，不读记忆。写函数与备份键表里那一项已删。
 
     // O-3：锁屏守卫——runButtonTapped 带回路与 runApp / launchForAux 新起路
     // 共用：锁了且没解锁过就先人脸，通过返回 true；取消返回 false、抛错弹错
@@ -215,13 +201,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             // F-4：带回走共用助手（LCAppModel，banner/网格/面板三处共用）。
             if await MainActor.run(body: { LCAppModel.czfBringRunningAppToFront(self.configuration.model, maximize: true) }) { return }
             // 启动一律大窗口（用户亲定：启动=大窗，小窗口按钮=
-            // 小窗，两按钮不得都开小窗）。3.8.277 新3 让启动按
-            // 记忆开——上次点过小窗口/最小化，记忆就是 small/
-            // minimized，下次点启动就跟着开小窗/最小化，正是本
-            // 次回归。记忆只写不读，启动不再读它。
+            // 小窗，两按钮不得都开小窗）。3.8.277 新3 的启动偏好
+            // 记忆（LCAppLastLaunchMode）已删——全仓零读者，只写
+            // 不读（F-5）；带回不记偏好。
             // 已在跑的带回逻辑在上面已处理（return），到这里的
-            // 都是要新起的；带回不记偏好，免得一次带回冲掉偏好。
-            Self.setLastLaunchMode(.large, for: self.configuration.model)
+            // 都是要新起的。
             await self.runApp()
             // 新开路拉满（3.8.240）：App 没在跑时启动只管起新窗、
             // 起完没人拉满——上次关时是小窗就还是小窗，3.8.238
@@ -289,9 +273,6 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func minimizeButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
-        // 新3：记偏好（启动不再读它，只写；启动一律大窗口）。
-        // 记的是点的意图，启动失败也不改回。
-        Self.setLastLaunchMode(.minimized, for: configuration.model)
         // 容器删光（L14）：先启动（runApp 会重建容器），容器一
         // 出现就重走正常路；60 次内没出现就停（启动失败已由
         // launch 侧 showError，不在这里重复报错）。
@@ -336,9 +317,6 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     @objc private func smallWindowButtonTapped() {
         guard #available(iOS 16.0, *) else { return }
-        // 新3：记偏好（启动不再读它，只写；启动一律大窗口）。
-        // 记的是点的意图，启动失败也不改回。
-        Self.setLastLaunchMode(.small, for: configuration.model)
         // O-3：小窗口按钮同款旁路——已在运行的带回并还原小窗会直接露出
         // 内容，原来不走认证。锁了先人脸，过了重进本函数（此时
         // isHiddenAppUnlocked 已置 true，不会重复弹；未运行分支走

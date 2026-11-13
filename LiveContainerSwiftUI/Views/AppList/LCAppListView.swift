@@ -375,6 +375,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         return mark + name + suffix
     }
 
+    // R-3：盾牌菜单的毫秒数从共用缓存恢复（VPN 页测完的
+    // 结果也能显示）；只在内存表空着且没在测时恢复，不覆写
+    // 刚测的。下标按节点链接内容对回，重排/增删不错位。
+    private func czfRestorePingResultsFromCache() {
+        guard vpnPingResults.isEmpty, !vpnPinging else { return }
+        let restored = CZFVPNManager.restorePingResults(nodes: CZFVPNManager.shared.nodeLinks)
+        guard !restored.results.isEmpty else { return }
+        vpnPingResults = restored.results
+    }
+
     // 3.8.282：长按菜单的测延迟——直接调 manager 的只读测速
     //（不像设置页那样先停核心）：核心在跑时可能整批被拒，
     // completion 的 rejected 为真时如实提示，不谎报延迟
@@ -409,6 +419,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (idx, r) in results.enumerated() { stored[idx] = r }
                 self.vpnPingResults = stored
+                // R-3：结果写共用缓存（与 VPN 页同一份
+                // CZFVPNPingCache），VPN 页测完切到 App 页，
+                // 盾牌菜单不再显示"未测速"。
+                CZFVPNManager.savePingResults(stored, nodes: links)
                 if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }) {
                     bestIndex = best.offset
                     let name = CZFVPNManager.nodeDisplay(for: links[best.offset]).name
@@ -1412,7 +1426,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 带回是 UIKit 活，主线程上做；带回成功直接 return，不再新起。
             // F-4：带回走共用助手（LCAppModel，banner/网格/面板三处共用）。
             if await MainActor.run(body: { LCAppModel.czfBringRunningAppToFront(app, maximize: true) }) { return }
-            Self.czfSetLastLaunchMode(.large, for: app)
             await self.launchAppWithBundleId(bundleId: app.appInfo.relativeBundlePath ?? "", container: nil)
             // 新开路拉满（F-4 共用助手，LCAppModel）：uuid 在助手内
             // 起完再取——无容器的 App 首启时 runApp 会新建容器并改
@@ -1425,23 +1438,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
             }
         }
-    }
-
-    // 启动偏好记忆（banner setLastLaunchMode 同款 5 行）：键
-    // LCAppLastLaunchMode：[唯一 ID: "large"/"small"/"minimized"]，
-    // 存 App Group。启动一律记 .large（用户亲定：启动=大窗）。
-    private static let czfGridLastLaunchModeKey = "LCAppLastLaunchMode"
-
-    private enum CZFGridLaunchMode: String {
-        case large, small, minimized
-    }
-
-    private static func czfSetLastLaunchMode(_ mode: CZFGridLaunchMode, for model: LCAppModel) {
-        guard let id = LCAppSortManager.shared.getUniqueIdentifier(for: model) else { return }
-        var dict = LCUtils.appGroupUserDefault.dictionary(forKey: czfGridLastLaunchModeKey) as? [String: String] ?? [:]
-        dict[id] = mode.rawValue
-        LCUtils.appGroupUserDefault.set(dict, forKey: czfGridLastLaunchModeKey)
-        LCDataManagementView.writeCZFSettingsBackupDebounced()
     }
 
     // body 拆分（3.8.423，422 构建红字）：body 太大编译器
@@ -1494,6 +1490,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.404：每次回到本页都扫分享收件箱（切回 App
             // 页时 onAppear 也触发，didAppear 守卫只拦 onAppear()）。
             czfClaimShareInbox()
+            // R-3：进页时从共用缓存恢复测速结果（VPN 页测完的
+            // 毫秒数也能在盾牌菜单里显示）；内存表空着才恢复。
+            czfRestorePingResultsFromCache()
         }
         .onChange(of: czfBackgroundVersion) { _ in
             czfBackgroundImage = CZFAppBackground.loadImage()
@@ -1519,6 +1518,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 测速期间核心是停着测的，翻了就错）。
                 if !vpnPinging {
                     vpnCoreRunning = CZFVPNManager.shared.isRunning
+                    // R-3：回前台也从共用缓存恢复测速结果
+                    // （VPN 页测完切回来时盾牌菜单不再"未测速"）。
+                    czfRestorePingResultsFromCache()
                 }
             }
         }

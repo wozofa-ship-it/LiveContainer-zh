@@ -1710,8 +1710,6 @@ struct LCDataManagementView : View {
         "LCAppSortType", "LCCustomSortOrder",
         // 新1（3.8.277）：多套排序方案与正在用的方案名也进备份。
         "LCCustomSortSchemes", "LCCustomSortSchemeCurrent",
-        // 新3（3.8.277）：启动偏好（按 App 记忆的窗口方式）也进备份。
-        "LCAppLastLaunchMode",
         // App Group 里的开关：排序之外这些原来也没进备份。
         // CZFMin* 三个也在 App Group 里（设置页 @AppStorage
         // 指明了 store），必须进这张表——导入先判这张表，
