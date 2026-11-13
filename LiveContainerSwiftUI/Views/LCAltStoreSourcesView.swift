@@ -644,14 +644,18 @@ func czfDedupSourceApps(_ apps: [AltStoreSourceApp]) -> [AltStoreSourceApp] {
 // 每行图标 + 名字 + 已装版本 → 新版本 + 单独“更新”按钮；
 // 底部“全部更新”走批量队列。O-4：单行更新不关整单——点过
 // 的行标“已入队”并从名单剔除，可连续点下一行；onUpdateOne
-// 返回是否已接单（无下载链接返回 false，行保留）。
+// 返回错误文本（nil = 已接单）。S-3：失败反馈进 sheet 内显示——
+// onUpdateOne 的错误（无下载链接、dylib 安装失败）由 sheet
+// 自己的 sheetError alert 弹，不再写父级 errorMessage（sheet
+// 盖着时父级 alert 会被 UIKit 静默丢弃，见 ManageSourcesSheet
+// 的 addError 同款做法）。
 // 跳过（3.8.454，用户 03:16 令“更新这里也可以选择不更新”）：
 // 每行左滑出“跳过”，点了把该 App 从本次更新名单剔除（不装、
 // 不进批量队列）；跳过记版本持久化，源出新版本才重新出现，
 // 不是永久不更新。onSkip 只删名单，不动已装 App。
 struct CZFUpdatableAppsSheet: View {
     let apps: [AltStoreSourceApp]
-    let onUpdateOne: (AltStoreSourceApp) -> Bool
+    let onUpdateOne: (AltStoreSourceApp) async -> String?
     let onUpdateAll: () -> Void
     let onSkip: (AltStoreSourceApp) -> Void
 
@@ -662,6 +666,10 @@ struct CZFUpdatableAppsSheet: View {
     // 父级名单没刷新时，已入队的行至少显示状态、不让重
     // 复点。
     @State private var updatingIDs: Set<String> = []
+    // S-3：sheet 内本地错误——onUpdateOne 返回的错误文本
+    // 在这里弹（挂在 sheet 自己的层级上，不会被 sheet 盖
+    // 住吞掉；与 ManageSourcesSheet.addError 同款）。
+    @State private var sheetError: String?
 
     private func installedVersion(for app: AltStoreSourceApp) -> String {
         (sharedModel.apps + sharedModel.hiddenApps)
@@ -694,8 +702,15 @@ struct CZFUpdatableAppsSheet: View {
                                 .foregroundColor(.secondary)
                         } else {
                             Button("更新") {
-                                if onUpdateOne(app) {
-                                    updatingIDs.insert(app.czfStableID)
+                                // S-3：先标已入队防重复点（dylib 要等装完
+                                // 才知道成败，按钮不能一直敞着）；失败时
+                                // 恢复行、错误进 sheet 内 alert。
+                                updatingIDs.insert(app.czfStableID)
+                                Task {
+                                    if let error = await onUpdateOne(app) {
+                                        updatingIDs.remove(app.czfStableID)
+                                        sheetError = error
+                                    }
                                 }
                             }
                             .buttonStyle(.borderedProminent)
@@ -734,6 +749,16 @@ struct CZFUpdatableAppsSheet: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        // S-3：sheet 内本地弹错误，挂在 sheet 自己的层级上，
+        // 不会被 sheet 盖住吞掉（与 ManageSourcesSheet.addError 同款）。
+        .alert("lc.common.error".loc, isPresented: Binding<Bool>(
+            get: { sheetError != nil },
+            set: { if !$0 { sheetError = nil } })
+        ) {
+            Button("lc.common.ok".loc, role: .cancel) { sheetError = nil }
+        } message: {
+            Text(sheetError ?? "")
+        }
     }
 }
 
@@ -812,6 +837,13 @@ struct LCSourcesView: View {
     }
     
     @EnvironmentObject private var sharedModel : SharedModel
+    // S-7：存文件下载走共享 DownloadHelper（Tab 级注入，与安装
+    // 下载同一套，进度弹窗/取消/续传全复用；LCSourcesView 只在
+    // LCTabView:29 实例化，Tab 级 environmentObject 一定在）。
+    @EnvironmentObject private var downloadHelper: DownloadHelper
+    // S-7：存文件下载同名覆盖确认——目标已存在时先问用户，
+    // 确认才下载覆盖；取消则不下载。
+    @State private var czfDownloadOverwritePending: (url: URL, destURL: URL)?
     
     @State private var isViewAppeared = false
 
@@ -1102,6 +1134,26 @@ struct LCSourcesView: View {
                 Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(""))
             }
         }
+        // S-7：存文件下载同名覆盖前问一次——目标已存在时先弹确认，
+        // 用户点“覆盖”才下载，点取消不下载、不覆盖。
+        .confirmationDialog(
+            "文件已存在",
+            isPresented: Binding<Bool>(
+                get: { czfDownloadOverwritePending != nil },
+                set: { if !$0 { czfDownloadOverwritePending = nil } }
+            ),
+            presenting: czfDownloadOverwritePending
+        ) { pending in
+            Button("覆盖", role: .destructive) {
+                czfDownloadVersionTo(url: pending.url, destURL: pending.destURL)
+                czfDownloadOverwritePending = nil
+            }
+            Button("取消", role: .cancel) {
+                czfDownloadOverwritePending = nil
+            }
+        } message: { pending in
+            Text("\(pending.destURL.lastPathComponent) 已存在，是否覆盖？")
+        }
         .sheet(isPresented: $czfSourceGridSettingsShow) {
             CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode, showSort: false, isSource: true)
         }
@@ -1109,20 +1161,30 @@ struct LCSourcesView: View {
             CZFUpdatableAppsSheet(
                 apps: cachedUpdatableApps,
                 onUpdateOne: { app in
-                    // O-4：单行更新不关整单。无下载链接不接单，
-                    // 行保留（install 里的 errorMessage 在 sheet
-                    // 盖着时弹不出来，见 B-11；至少行还在、用户
-                    // 看得到它没入队）。
+                    // O-4：单行更新不关整单。S-3：失败返回错误文本，
+                    // 由 sheet 内 alert 显示，不再写父级 errorMessage
+                    // （sheet 盖着时父级 alert 弹不出来，见 B-11）。
                     guard app.latestVersion?.downloadURL != nil else {
-                        errorMessage = "lc.sources.error.missingDownload".loc
-                        return false
+                        return "lc.sources.error.missingDownload".loc
+                    }
+                    // S-3/S-8：dylib 等装完再决定——成功才从名单
+                    // 剔除，失败行保留、错误文本进 sheet 内显示。
+                    switch await installTweakIfDylib(app: app) {
+                    case .notDylib:
+                        break
+                    case .succeeded:
+                        cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                        updatableCountBadge = cachedUpdatableApps.count
+                        return nil
+                    case .failed(let error):
+                        return error.localizedDescription
                     }
                     install(app: app)
                     cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
                     // 单行更新也同步红点：不写这里 Tab 红标就一直挂着，
                     // 跟跳过同款毛病（只删名单不改 CZFUpdatableAppCount）。
                     updatableCountBadge = cachedUpdatableApps.count
-                    return true
+                    return nil
                 },
                 onUpdateAll: {
                     showUpdatableList = false
@@ -1332,6 +1394,28 @@ struct LCSourcesView: View {
         errorMessage = lines.joined(separator: "\n")
     }
 
+    // S-8：dylib 安装分支抽共用——install / installAsNew /
+    // installBatch 三处共用同一份判断与提交，不再各写一遍
+    // pathExtension == "dylib"。非 dylib 返回 .notDylib，调用
+    // 方继续走 IPA 路；dylib 等装完再报结果，调用方直接 return。
+    private enum CZFDylibInstallOutcome {
+        case notDylib
+        case succeeded
+        case failed(Error)
+    }
+
+    @MainActor
+    private func installTweakIfDylib(app: AltStoreSourceApp) async -> CZFDylibInstallOutcome {
+        guard let downloadURL = app.latestVersion?.downloadURL,
+              downloadURL.pathExtension.lowercased() == "dylib" else {
+            return .notDylib
+        }
+        if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
+            return .failed(error)
+        }
+        return .succeeded
+    }
+
     /// 批量安装一组 App（勾选批量装、「全部更新」共用）：
     /// 全部发给 App 页的安装队列串行执行，autoReplace =
     /// 已装同款直接覆盖、不逐个弹框确认
@@ -1357,14 +1441,16 @@ struct LCSourcesView: View {
                 result.skipped.append(app.name)
                 continue
             }
-            if downloadURL.pathExtension.lowercased() == "dylib" {
-                // 插件（dylib）走插件安装通道：等它装完再数，
-                // 失败进汇总，不再后台 Task 静默丢掉。
-                if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
-                    result.failed.append((name: app.name, reason: error.localizedDescription))
-                } else {
-                    result.succeeded.append(app.name)
-                }
+            // S-8：dylib 走共用分支（installTweakIfDylib），等装完
+            // 再数，失败进汇总，不再后台 Task 静默丢掉。
+            switch await installTweakIfDylib(app: app) {
+            case .notDylib:
+                break
+            case .succeeded:
+                result.succeeded.append(app.name)
+                continue
+            case .failed(let error):
+                result.failed.append((name: app.name, reason: error.localizedDescription))
                 continue
             }
             if !switchedTab {
@@ -1441,9 +1527,10 @@ struct LCSourcesView: View {
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
             // O-4：单装 dylib 不切 Tab，用户还留在源页，失败走
-            // 源页 errorMessage 能看见；等 Task 跑完再写。
+            // 源页 errorMessage 能看见；S-8：走共用分支，等结果
+            // 再决定反馈（失败才写 errorMessage）。
             Task {
-                if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
+                if case .failed(let error) = await installTweakIfDylib(app: app) {
                     errorMessage = error.localizedDescription
                 }
             }
@@ -1481,8 +1568,9 @@ struct LCSourcesView: View {
             return
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
+            // S-8：走共用分支，等结果再决定反馈（失败才写 errorMessage）。
             Task {
-                if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
+                if case .failed(let error) = await installTweakIfDylib(app: app) {
                     errorMessage = error.localizedDescription
                 }
             }
@@ -1504,13 +1592,22 @@ struct LCSourcesView: View {
     @MainActor
     private func installTweak(from url: URL, name: String, bundleIdentifier: String) async -> Error? {
         do {
-            let (tempURL, response) = try await CZFVPNManager.hostSession().download(from: url)
-            // URLSession.download 只在传输错误时抛，HTTP 4xx/5xx 也会
-            // 落盘成“插件文件”再签名；先验状态，非 2xx 按 DownloadDelegate
-            // 同款文案抛错。
-            if let httpResponse = response as? HTTPURLResponse,
-               !(200...299).contains(httpResponse.statusCode) {
-                throw NSError(domain: "", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回 \(httpResponse.statusCode)"])
+            // S-7：插件下载同款走 DownloadHelper（失败重试 3 次/
+            // 断点续传），用独立实例——不占 App 页安装队列的共享
+            // 实例，不抢进度弹窗（与 LCAppListView 预取同款做法）。
+            let helper = DownloadHelper()
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("CZFTweak-\(UUID().uuidString).dylib")
+            try await helper.download(url: url, to: tempURL)
+            // DownloadHelper 不验 HTTP 状态：404 错误页也会落盘成
+            // “插件文件”再签名；验 Mach-O 魔数，错了按下载失败报
+            // （替掉原来的 2xx 状态校验，作用一样）。
+            guard czfFileHasPrefix(tempURL, prefixes: [
+                [0xFE, 0xED, 0xFA, 0xCE], [0xCE, 0xFA, 0xED, 0xFE],
+                [0xFE, 0xED, 0xFA, 0xCF], [0xCF, 0xFA, 0xED, 0xFE],
+                [0xCA, 0xFE, 0xBA, 0xBE], [0xCA, 0xFE, 0xBA, 0xBF],
+            ]) else {
+                try? FileManager.default.removeItem(at: tempURL)
+                throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
             }
             let fm = FileManager.default
             // 按“插件名-包名”建文件夹，不全塞一个。
@@ -1546,44 +1643,71 @@ struct LCSourcesView: View {
         downloadVersion(url: downloadURL)
     }
 
+    // S-7：验文件头魔数——DownloadHelper 不验 HTTP 状态，404
+    // 错误页也会落盘；读前 4 字节比对，IPA 必须是 ZIP（PK\x03\x04），
+    // dylib 必须是 Mach-O（32/64 位、大小端、fat 通吃）。
+    private func czfFileHasPrefix(_ url: URL, prefixes: [[UInt8]]) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 4), data.count == 4 else { return false }
+        return prefixes.contains([UInt8](data))
+    }
+
     // 3.8.307：源详情页历史版本下载——指定任意版本 URL
     // 下载（不只 latest）。与 download(app:) 同款流程：
-    // hostSession 下到文稿目录，再弹分享框；失败走 errorMessage。
+    // 下到文稿目录，再弹分享框；失败走 errorMessage。
     // download(app:) 已改走它，行为不变。
+    // S-7：先算目标路径——同名文件已存在时先弹覆盖确认
+    // （不先下、不静默覆盖），确认后才调 czfDownloadVersionTo；
+    // 共享下载器一次只能下一路，App 页安装正在下载时先提示、不抢。
     @MainActor
     private func downloadVersion(url downloadURL: URL) {
+        // 裸域名/无路径链接 lastPathComponent 为空，destURL 会是
+        // Documents 目录本身；裸 UUID 无 .ipa 后缀落盘成无扩展名
+        // 文件，Files 不认 IPA。照抄 installFromUrl 的兜底（空名
+        // 用 app.ipa），缺后缀补 .ipa。
+        var fileName = downloadURL.lastPathComponent
+        if fileName.isEmpty {
+            fileName = "app.ipa"
+        } else if !fileName.lowercased().hasSuffix(".ipa") {
+            fileName += ".ipa"
+        }
+        let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let destURL = docsURL.appendingPathComponent(fileName)
+        if downloadHelper.isDownloading {
+            errorMessage = "正在下载中，请稍候"
+            return
+        }
+        if FileManager.default.fileExists(atPath: destURL.path) {
+            czfDownloadOverwritePending = (url: downloadURL, destURL: destURL)
+            return
+        }
+        czfDownloadVersionTo(url: downloadURL, destURL: destURL)
+    }
+
+    // S-7：存文件下载真正下的一步——走共享 DownloadHelper
+    // （与安装下载同一套：Tab 级进度弹窗/取消/断点续传/失败
+    // 重试 3 次），不再用 hostSession().download 静默下载。
+    // DownloadHelper 不验 HTTP 状态：404 错误页也会落盘成
+    // “IPA”，验 ZIP 魔数，错了删文件、按下载失败报。
+    // 用户主动取消不弹错（与安装下载同款：cancelled 单独处理）。
+    @MainActor
+    private func czfDownloadVersionTo(url downloadURL: URL, destURL: URL) {
         Task {
             do {
-                let (tempURL, response) = try await CZFVPNManager.hostSession().download(from: downloadURL)
-                // URLSession.download 只在传输错误时抛，HTTP 4xx/5xx 也会
-                // 落盘成“IPA”再装；先验状态，非 2xx 按 DownloadDelegate
-                // 同款文案抛错。
-                if let httpResponse = response as? HTTPURLResponse,
-                   !(200...299).contains(httpResponse.statusCode) {
-                    throw NSError(domain: "", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回 \(httpResponse.statusCode)"])
+                try await downloadHelper.download(url: downloadURL, to: destURL)
+                guard czfFileHasPrefix(destURL, prefixes: [[0x50, 0x4B, 0x03, 0x04]]) else {
+                    try? FileManager.default.removeItem(at: destURL)
+                    throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
                 }
-                // 裸域名/无路径链接 lastPathComponent 为空，destURL 会是
-                // Documents 目录本身，前面 removeItem 会删整个 Documents；
-                // 裸 UUID 无 .ipa 后缀落盘成无扩展名文件，Files 不认 IPA。
-                // 照抄 installFromUrl 的兜底（空名用 app.ipa），缺后缀补 .ipa。
-                var fileName = downloadURL.lastPathComponent
-                if fileName.isEmpty {
-                    fileName = "app.ipa"
-                } else if !fileName.lowercased().hasSuffix(".ipa") {
-                    fileName += ".ipa"
-                }
-                let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                let destURL = docsURL.appendingPathComponent(fileName)
-                if FileManager.default.fileExists(atPath: destURL.path) {
-                    try FileManager.default.removeItem(at: destURL)
-                }
-                try FileManager.default.moveItem(at: tempURL, to: destURL)
                 await MainActor.run {
                     shareFile(at: destURL)
                 }
             } catch {
                 await MainActor.run {
-                    errorMessage = error.localizedDescription
+                    if !downloadHelper.cancelled {
+                        errorMessage = error.localizedDescription
+                    }
                 }
             }
         }
