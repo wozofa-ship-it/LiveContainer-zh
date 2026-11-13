@@ -1331,7 +1331,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         self.czfGridLaunch(app: app)
                     },
                     onLaunchMultitask: { app in self.czfGridLaunchMultitask(app: app) },
-                    onOpenSettings: { app in self.openNavigationView(view: AnyView(LCAppSettingsView(model: app))) }
+                    onOpenSettings: { app in
+                        // F-9：锁定 App 的设置页进前先认证（与启动同款守卫）；
+                        // 网格双击与菜单设置按钮都走这里，一处守住两路。
+                        Task {
+                            guard await app.czfAuthenticateIfLocked() else { return }
+                            self.openNavigationView(view: AnyView(LCAppSettingsView(model: app)))
+                        }
+                    }
                 ),
                 onRemoveApp: { app in self.removeApp(app: app) },
                 onAuthenticateHidden: { Task { await self.authenticateUser() } },

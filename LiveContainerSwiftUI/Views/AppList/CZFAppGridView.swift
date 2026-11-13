@@ -98,11 +98,12 @@ struct CZFAppGridActions {
     var onLaunch: (LCAppModel) -> Void
     var onLaunchMultitask: (LCAppModel) -> Void
     var onOpenSettings: (LCAppModel) -> Void
-    // 下面三项由 CZFAppGridView 就地实现（删除确认框、VPN 开关、
-    // 创建 App Clip），列表页传 actions 时不用填。
+    // 下面四项由 CZFAppGridView 就地实现（删除确认框、VPN 开关、
+    // 创建 App Clip、保存图标），列表页传 actions 时不用填。
     var onDeleteRequest: (LCAppModel) -> Void = { _ in }
     var onToggleVPN: (LCAppModel) -> Void = { _ in }
     var onCreateAppClip: (LCAppModel) async -> Void = { _ in }
+    var onSaveIcon: (LCAppModel) async -> Void = { _ in }
 }
 
 struct CZFAppGridView: View {
@@ -127,6 +128,10 @@ struct CZFAppGridView: View {
     @State private var czfGridDeleteTarget: LCAppModel?
     @State private var czfGridDeleteConfirm = false
     @State private var czfGridError: String?
+    // F-8：保存图标导出 picker 的 delegate——持有临时目录，
+    // 三个回调（选完/取消/手势关掉）都清掉它；@State 持有，
+    // picker 的 weak delegate 不会中途释放。
+    @State private var czfIconExportCoordinator = CZFIconExportCoordinator()
     // 网格拖拽重排（3.8.453）：长按图标拖到另一个图标上松手即换位，
     // 复用列表模式的 LCAppReorderDropDelegate + 同款提交逻辑。
     // 搜索中（显示子集）与批量模式（点按是勾选）不挂拖拽，见下面。
@@ -186,7 +191,8 @@ struct CZFAppGridView: View {
                 czfGridDeleteConfirm = true
             },
             onToggleVPN: { app in czfToggleVPN(for: app) },
-            onCreateAppClip: { app in await czfCreateAppClip(for: app) }
+            onCreateAppClip: { app in await czfCreateAppClip(for: app) },
+            onSaveIcon: { app in await czfSaveIcon(for: app) }
         )
     }
 
@@ -198,6 +204,56 @@ struct CZFAppGridView: View {
         } else {
             CZFVPNManager.setEnabled(true, for: app.appInfo)
             actions.onLaunch(app)
+        }
+    }
+
+    // 保存图标（banner saveIcon 同款，只改呈现出口）：风格先问
+    // delegate，图标写临时文件后用 UIDocumentPickerViewController
+    // 导出；网格是 SwiftUI，没有 VC 可 present，从前台 scene 的
+    // rootVC 弹（LCAppSettingsView 同款写法）；临时目录由
+    // coordinator 的三个回调清掉（选完/取消/手势关掉）。
+    private func czfSaveIcon(for app: LCAppModel) async {
+        guard let style = await promptForGeneratedIconStyle() else { return }
+        // 写盘失败时清掉已建的临时目录（banner saveIcon 的 catch
+        // 同款清理；导出成功时 coordinator 接管，不走这里）。
+        var temporaryDirectory: URL?
+        do {
+            guard let image = app.appInfo.generateLiveContainerWrappedIcon(with: style),
+                  let imageData = image.pngData() else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            temporaryDirectory = dir
+            let rawDisplayName = app.appInfo.displayName() ?? app.displayName
+            let displayName = rawDisplayName.replacingOccurrences(of: "/", with: "_")
+            let fileURL = dir.appendingPathComponent("\(displayName) Icon.png")
+            try imageData.write(to: fileURL, options: .atomic)
+            czfIconExportCoordinator.tempDir = dir
+            let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
+            picker.delegate = czfIconExportCoordinator
+            picker.presentationController?.delegate = czfIconExportCoordinator
+            // rootVC 正 presenting 时 UIKit 会静默丢弃本次 present：
+            // 先判空闲，不空闲清掉临时文件直接回（banner 同款守卫）。
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let rootViewController = windowScene.windows.first?.rootViewController,
+                  rootViewController.presentedViewController == nil else {
+                if let dir = temporaryDirectory {
+                    try? FileManager.default.removeItem(at: dir)
+                }
+                temporaryDirectory = nil
+                czfIconExportCoordinator.tempDir = nil
+                return
+            }
+            rootViewController.present(picker, animated: true)
+        } catch {
+            if let dir = temporaryDirectory {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            temporaryDirectory = nil
+            czfIconExportCoordinator.tempDir = nil
+            czfGridError = error.localizedDescription
         }
     }
 
@@ -383,6 +439,33 @@ private struct CZFAppGridTapGesture: ViewModifier {
     }
 }
 
+// F-8：保存图标导出 picker 的 delegate——持有临时目录，选完/
+// 取消/手势关掉三个回调都清掉它（banner saveIcon 的三个清理点
+// 同款）。picker 的 delegate 是 weak，由 CZFAppGridView 的
+// @State 持有，不会中途释放。
+private class CZFIconExportCoordinator: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+    var tempDir: URL?
+
+    private func cleanup() {
+        if let tempDir {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        self.tempDir = nil
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        cleanup()
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        cleanup()
+    }
+
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        cleanup()
+    }
+}
+
 // 网格单元：大图标 + 下方单行名字。图标取法与 banner 同款
 //（O-13：CZFAppIconLoader 快路径同步读缓存，未命中后台生成）。
 // GeometryReader + aspectRatio(1) 让图标区成正方形，图标宽 =
@@ -530,8 +613,7 @@ struct CZFAppGridCell: View {
     }
 
     // 长按菜单：banner makeContextMenu() 的 SwiftUI 复刻（顶层项
-    // 逐项接现有方法）。banner 里没有“置顶”这一项，网格也不编；
-    // “保存图标”因要 UIDocumentPickerViewController 没复用。
+    // 逐项接现有方法）。banner 里没有“置顶”这一项，网格也不编。
     @ViewBuilder
     private var czfContextMenu: some View {
         // 1. Containers：多容器时才出现；三个一起改（选中、默认
@@ -568,10 +650,13 @@ struct CZFAppGridCell: View {
                 actions.onLaunchMultitask(app)
             }
         }
-        // 添加到主屏幕：复制启动链接 + 创建 App Clip（保存图标未复用）。
+        // 添加到主屏幕：复制启动链接 + 保存图标 + 创建 App Clip（banner 同款三项）。
         Menu("lc.appBanner.addToHomeScreen".loc, systemImage: "plus.app") {
             Button("lc.appBanner.copyLaunchUrl".loc, systemImage: "link") {
                 czfCopyLaunchURL(for: app)
+            }
+            Button("lc.appBanner.saveAppIcon".loc, systemImage: "square.and.arrow.down") {
+                Task { await actions.onSaveIcon(app) }
             }
             Button("lc.appBanner.createAppClip".loc, systemImage: "appclip") {
                 Task { await actions.onCreateAppClip(app) }

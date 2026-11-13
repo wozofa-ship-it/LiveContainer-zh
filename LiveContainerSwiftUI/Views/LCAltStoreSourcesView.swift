@@ -937,6 +937,7 @@ struct LCSourcesView: View {
                                 onRemove: { item in sourcePendingRemoval = item },
                                 isBatchMode: isBatchMode,
                                 selectedIDs: selectedIDs,
+                                onBatchInstall: { batchInstallSelected() },
                                 onToggleSelect: { sourceURL, app in
                                     let key = czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)
                                     if selectedIDs.contains(key) {
@@ -2505,6 +2506,9 @@ struct LCSourceAppDetailView: View {
     let onInstallAsNew: (AltStoreSourceApp) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var copiedDownloadURL = false
+    // S-10②：无下载链接时安装/新建不在父级写错（详情单还在
+    // dismiss 动画里，父级 alert 会被吞）；在详情页内就地弹。
+    @State private var detailError: String?
 
     // 从描述或下载链接里找 GitHub 地址
     private var githubURL: URL? {
@@ -2546,9 +2550,16 @@ struct LCSourceAppDetailView: View {
                 // 安装/新建先关详情单再进队列（与下载按钮同款，
                 // 不然切到 App 页时详情单还盖在上面）；复制只写
                 // 剪贴板、不关单，按钮变“已复制”给反馈。
+                // S-10：顶部补「下载」按钮，与行/格子对齐（只在
+                // 有下载链接时出现）；安装/新建无链接时不关单，
+                // 在详情页内就地提示，不写父级 errorMessage。
                 Section {
                     HStack(spacing: 12) {
                         Button {
+                            guard app.latestVersion?.downloadURL != nil else {
+                                detailError = "lc.sources.error.missingDownload".loc
+                                return
+                            }
                             dismiss()
                             onInstall(app)
                         } label: {
@@ -2567,6 +2578,10 @@ struct LCSourceAppDetailView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         Button {
+                            guard app.latestVersion?.downloadURL != nil else {
+                                detailError = "lc.sources.error.missingDownload".loc
+                                return
+                            }
                             dismiss()
                             onInstallAsNew(app)
                         } label: {
@@ -2577,6 +2592,19 @@ struct LCSourceAppDetailView: View {
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
+                        if let downloadURL = app.latestVersion?.downloadURL {
+                            Button {
+                                dismiss()
+                                onDownloadVersion(downloadURL)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "arrow.down.circle")
+                                    Text("下载")
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         if let downloadURL = app.latestVersion?.downloadURL {
                             Button {
                                 UIPasteboard.general.string = downloadURL.absoluteString
@@ -2683,6 +2711,12 @@ struct LCSourceAppDetailView: View {
                         dismiss()
                     }
                 }
+            }
+            // S-10②：无下载链接的错误在详情页内弹，不写父级。
+            .alert("lc.common.error".loc, isPresented: Binding(get: { detailError != nil }, set: { if !$0 { detailError = nil } })) {
+                Button("lc.common.ok".loc, role: .cancel) { detailError = nil }
+            } message: {
+                Text(detailError ?? "")
             }
         }
     }

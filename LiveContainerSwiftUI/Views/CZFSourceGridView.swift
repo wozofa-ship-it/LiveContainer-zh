@@ -28,6 +28,8 @@ struct CZFSourceGridView: View {
     var onRemove: (AltStoreSourcesViewModel.SourceItem) -> Void
     var isBatchMode: Bool
     var selectedIDs: Set<String>
+    // S-13：详情页批量安装按钮——复用主页面板的 batchInstallSelected。
+    var onBatchInstall: () -> Void
     // U10：勾选回调带源 feed URL——同一 App 在两个源里是两条
     // 记录，回调只给 app 时父视图分不清勾的是哪一个源的。
     var onToggleSelect: (URL, AltStoreSourceApp) -> Void
@@ -86,6 +88,7 @@ struct CZFSourceGridView: View {
                         onRemove: { onRemove(item) },
                         isBatchMode: isBatchMode,
                         selectedIDs: selectedIDs,
+                        onBatchInstall: onBatchInstall,
                         onToggleSelect: onToggleSelect
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -130,6 +133,8 @@ struct CZFSourceGridGroupHeaderView: View {
     let onRemove: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
+    // S-13：只往详情页传，不在组头用。
+    let onBatchInstall: () -> Void
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
     var body: some View {
@@ -148,6 +153,7 @@ struct CZFSourceGridGroupHeaderView: View {
                     onRemove: onRemove,
                     isBatchMode: isBatchMode,
                     selectedIDs: selectedIDs,
+                    onBatchInstall: onBatchInstall,
                     onToggleSelect: onToggleSelect
                 )
             } label: {
@@ -533,7 +539,14 @@ struct CZFSourceDetailView: View {
     let onRemove: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
+    // S-13：详情页批量安装按钮——复用主页面板的 batchInstallSelected。
+    let onBatchInstall: () -> Void
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
+
+    // S-13：本源已勾数（供 toolbar 安装按钮显示与禁用）。
+    private var czfSelectedCountInDetail: Int {
+        filteredApps.filter { selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: $0.bundleIdentifier)) }.count
+    }
 
     var body: some View {
         ScrollView {
@@ -627,6 +640,19 @@ struct CZFSourceDetailView: View {
         }
         .navigationTitle(item.source?.name ?? item.displayName)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // S-13：批量模式下详情页内也能执行批量安装（与主页面板
+            // 同一个 batchInstallSelected，装全部已勾、去重、清勾选）；
+            // n 是本源已勾数，0 个时禁用。
+            if isBatchMode {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("安装（\(czfSelectedCountInDetail)）") {
+                        onBatchInstall()
+                    }
+                    .disabled(czfSelectedCountInDetail == 0)
+                }
+            }
+        }
         // S-4：源被删后详情页自动 pop，不留孤儿页（刷新/安装按钮
         // 全是已删源的快照，刷新静默无反应、安装还能按 URL 装）。
         .onChange(of: viewModel.sources) { sources in

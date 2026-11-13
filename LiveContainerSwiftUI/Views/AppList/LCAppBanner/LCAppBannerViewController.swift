@@ -546,7 +546,14 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     private func openSettings() {
-        delegate.openNavigationView(view: AnyView(LCAppSettingsView(model: configuration.model)))
+        // F-9：锁定 App 的设置页进前先认证（与启动同款守卫）；
+        // 双击与菜单都走这里，一处守住两路；未通过不打开
+        //（认证失败时 czfAuthenticateIfLocked 已弹错）。
+        Task { [weak self] in
+            guard let self else { return }
+            guard await self.czfAuthenticateIfLocked() else { return }
+            delegate.openNavigationView(view: AnyView(LCAppSettingsView(model: configuration.model)))
+        }
     }
 
     private func openDataFolder() {
