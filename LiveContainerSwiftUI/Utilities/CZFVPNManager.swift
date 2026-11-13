@@ -56,6 +56,14 @@ public final class CZFVPNManager {
     // 启动时间"+ 30 分钟延迟双保险，避免 App 重启时反复启停
     private var pendingStopWork: DispatchWorkItem?
     private var lastFlaggedLaunchAt = Date.distantPast
+    // O-29：每链接上次探通时间——连开几个 VPN App 时每个都实网探
+    // 一次，白白建会话、打 generate_204。60 秒内同一链接直接放行，
+    // 省重复探针、省电；坏节点轮换仍靠 scheduleRotateCheck 兜底，
+    // TTL 只省“刚验过”的重复验证，不影响首次探与失败重试。
+    // 读写都在 vpnCoreLock 下（waitUntilNodeReady 各路并发调）。
+    // 键是链接字面量，节点列表就那么多张，不会无限涨。
+    private var czfLastProbeOK: [String: Date] = [:]
+    private let czfProbeTTL: TimeInterval = 60
     // 节点自动轮换：核心在跑时每 30 秒读归属 App 的插件统计，
     // 窗口内失败一直涨、成功代理一条不涨，就判定当前节点对该
     // App 已死，按列表顺序切下一个支持协议的节点并重启核心。
@@ -831,7 +839,19 @@ public final class CZFVPNManager {
         let currentLink = runningLink
         vpnCoreLock.unlock()
         guard running, currentLink == link else { return false }
-        if await probeNodeThroughCore(timeout: timeout) { return true }
+        // O-29：60 秒内同一链接刚探通过，直接放行，不再实网探。
+        // 只在核心正跑着该 App 的节点时短路；核心没起来/换了
+        // 链接时上面 guard 已返回 false，不走这里。
+        vpnCoreLock.lock()
+        let lastOK = czfLastProbeOK[link]
+        vpnCoreLock.unlock()
+        if let lastOK, Date().timeIntervalSince(lastOK) < czfProbeTTL {
+            return true
+        }
+        if await probeNodeThroughCore(timeout: timeout) {
+            noteProbeOK(link: link)
+            return true
+        }
         // 不通立刻切下一个（不等攒够 3 次失败才轮换）：
         // 候选按新鲜测速从快到慢（startFallback 同款排序），
         // 最多再试 2 个；都探不通就 fail-open，调用方照常启动。
@@ -857,9 +877,19 @@ public final class CZFVPNManager {
                 UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
             }
             claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
-            if await probeNodeThroughCore(timeout: timeout) { return true }
+            if await probeNodeThroughCore(timeout: timeout) {
+                noteProbeOK(link: cand.link)
+                return true
+            }
         }
         return false
+    }
+
+    /// O-29：记一笔探通时间（vpnCoreLock 下写，与读同一把锁）。
+    private func noteProbeOK(link: String) {
+        vpnCoreLock.lock()
+        czfLastProbeOK[link] = Date()
+        vpnCoreLock.unlock()
     }
 
     // 经核心发一次真实请求验节点：走 HTTP 10828 代理访

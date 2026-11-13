@@ -173,6 +173,9 @@ final class AltStoreSourcesViewModel: ObservableObject {
     init() {
         loadStoredSources()
         Task {
+            // O-28：缓存解码先于刷新（顺序与原来同步版一致：
+            // 缓存先显示，刷新再盖新版），都放后台，解完回主线程填。
+            await loadStoredCaches()
             await refreshAllSources()
         }
     }
@@ -240,7 +243,9 @@ final class AltStoreSourcesViewModel: ObservableObject {
         }
         sources[index].isLoading = true
         sources[index].error = nil
-        let previousData = cachedData(for: url)
+        // O-28：缓存读盘放 detached——原来同步 Data(contentsOf:)
+        // 在主线程上。cachedData 是 nonisolated 纯读盘，无状态。
+        let previousData = await Task.detached { self.cachedData(for: url) }.value
         do {
             let (source, data) = try await AltStoreSourceLoader.load(from: url)
             guard let sourceIndex = sources.firstIndex(where: { $0.url == url }) else {
@@ -266,12 +271,25 @@ final class AltStoreSourcesViewModel: ObservableObject {
         let stored = defaults.array(forKey: defaultsKey) as? [String] ?? []
         let urls = stored.compactMap { URL(string: $0) }
         self.sources = urls.map { SourceItem(url: $0, isLoading: false) }
-        for index in sources.indices {
-            let url = sources[index].url
-            if let data = cachedData(for: url),
-               let cachedSource = try? AltStoreSourceLoader.decode(from: data, baseURL: url) {
-                sources[index].source = cachedSource
+    }
+
+    /// O-28：已存源缓存读盘 + 解码放后台——原来 init 里同步全在主
+    /// 线程。解完回主线程逐条填 source，只填仍为空的：刷新可能
+    /// 已写入新版，不拿旧缓存盖掉。decode 是静态纯函数、每轮
+    /// 自带格式器，线程安全。
+    private func loadStoredCaches() async {
+        let urls = sources.map { $0.url }
+        let decoded = await Task.detached {
+            urls.compactMap { url -> (URL, AltStoreSource)? in
+                guard let data = self.cachedData(for: url),
+                      let cachedSource = try? AltStoreSourceLoader.decode(from: data, baseURL: url) else { return nil }
+                return (url, cachedSource)
             }
+        }.value
+        for (url, cachedSource) in decoded {
+            guard let index = sources.firstIndex(where: { $0.url == url }),
+                  sources[index].source == nil else { continue }
+            sources[index].source = cachedSource
         }
     }
     
@@ -299,7 +317,11 @@ final class AltStoreSourcesViewModel: ObservableObject {
 }
 
 private extension AltStoreSourcesViewModel {
-    func cachedData(for url: URL) -> Data? {
+    // O-28：读盘四件套标 nonisolated——只用 FileManager + SHA256 +
+    // Data 读写，无共享可变状态，可在 detached 任务里跑；
+    // ensureCacheDirectory 并发建目录安全（已存在不报错）。
+    // storeCache/removeCache 仍在 MainActor 上调，不动。
+    nonisolated func cachedData(for url: URL) -> Data? {
         guard let fileURL = cacheFileURL(for: url) else { return nil }
         return try? Data(contentsOf: fileURL)
     }
@@ -313,13 +335,13 @@ private extension AltStoreSourcesViewModel {
         }
     }
     
-    func cacheFileURL(for url: URL) -> URL? {
+    nonisolated func cacheFileURL(for url: URL) -> URL? {
         guard let directory = ensureCacheDirectory() else { return nil }
         let fileName = cacheFileName(for: url)
         return directory.appendingPathComponent(fileName)
     }
     
-    func ensureCacheDirectory() -> URL? {
+    nonisolated func ensureCacheDirectory() -> URL? {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         let directory = caches.appendingPathComponent(cacheDirectoryName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: directory.path) {
@@ -332,7 +354,7 @@ private extension AltStoreSourcesViewModel {
         return directory
     }
     
-    func cacheFileName(for url: URL) -> String {
+    nonisolated func cacheFileName(for url: URL) -> String {
         let data = Data(url.absoluteString.utf8)
         let digest = SHA256.hash(data: data)
         let hex = digest.map { String(format: "%02x", $0) }.joined()
@@ -356,7 +378,11 @@ enum AltStoreSourceLoader {
            !(200...299).contains(httpResponse.statusCode) {
             throw NSError(domain: "AltStoreSource", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"])
         }
-        let source = try decode(from: data, baseURL: url)
+        // O-28：解码放 detached——原来网络 await 回来后 continuation
+        // 回到调用方 MainActor，JSON 解码 + 逐 App buildApp + 去重
+        // 全在主线程。decode 是静态纯函数、每轮自带格式器，线程安全；
+        // 解完回主线程写 sources，调用方语义不变。
+        let source = try await Task.detached { try decode(from: data, baseURL: url) }.value
         return (source, data)
     }
     

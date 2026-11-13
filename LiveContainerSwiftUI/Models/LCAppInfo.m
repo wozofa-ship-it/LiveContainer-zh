@@ -90,6 +90,16 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
 }
 
 - (NSMutableArray<NSString *>*)urlSchemes {
+    // O-27：惰性缓存一次——_infoPlist 初始化后只读不写（setBundlePath
+    // 只换路径、不重载 plist；CFBundleURLTypes 全仓无人改），scheme
+    // 表不会变，无需失效。深链/JIT 全量扫 App 时每 App 原来都重走
+    // 一遍 CFBundleURLTypes。调用方只读返回的数组（contains /
+    // addObjects(from:) 与 removeObjects(in:) 的实参），无人原地
+    // 改它，直接返回缓存实例。并发各算各的、同内容，后写胜出，
+    // 与 _cachedIcon 同款无锁写法。
+    if (_cachedURLSchemes) {
+        return _cachedURLSchemes;
+    }
     // find all url schemes
     NSMutableArray* urlSchemes = [[NSMutableArray alloc] init];
     int nowSchemeCount = 0;
@@ -108,7 +118,8 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
             }
         }
     }
-    
+
+    _cachedURLSchemes = urlSchemes;
     return urlSchemes;
 }
 
