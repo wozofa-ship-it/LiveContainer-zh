@@ -16,6 +16,7 @@ void NSFMGuestExtensionHooksInit(NSString *parentContainerPath);
 void NSURLSCGuestHooksInit(void);
 void initDead10ccFix(void);
 void IDFVHookInit(NSUUID* uuid);
+void DeviceFingerprintHookInit(NSString *advertisingIdentifier, NSString *deviceName, NSString *systemVersion, NSString *machine);
 void NSExtensionGuestHooksInit(NSURL *appURL, NSURL *containerURL);
 int LCRunGuestExtension(NSDictionary *request, NSExtensionContext *context);
 NSString *LCPrepareGuestExtension(NSDictionary *request);

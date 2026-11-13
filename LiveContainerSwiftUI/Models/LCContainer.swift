@@ -27,6 +27,51 @@ class LCContainer : ObservableObject, Hashable {
         }
     }
     public var spoofedIdentifier: String?
+
+    // 设备指纹伪装（多开分身各有一套环境用）：打开时一次性生成
+    // 一套伪装值并持久化，之后固定不变（换值会让平台认出是同一
+    // 台设备换了马甲，反而更可疑）。IDFA、设备名、系统版本、
+    // 机型（hw.machine）四项，客端 hook 在启动时注入。
+    // 机型只从近几代 Pro 机型里挑（不含本机 iPhone17,2），
+    // 系统版本只在当前大版本内浮动（不往低了编，免得 App
+    // 判系统太旧关功能）。
+    @Published var spoofDeviceFingerprint : Bool {
+        didSet {
+            if spoofDeviceFingerprint {
+                if spoofedAdvertisingIdentifier == nil {
+                    spoofedAdvertisingIdentifier = UUID().uuidString
+                }
+                if spoofedDeviceName == nil {
+                    spoofedDeviceName = LCContainer.czfRandomDeviceName()
+                }
+                if spoofedSystemVersion == nil {
+                    spoofedSystemVersion = LCContainer.czfRandomSystemVersion()
+                }
+                if spoofedMachine == nil {
+                    spoofedMachine = LCContainer.czfRandomMachine()
+                }
+            }
+        }
+    }
+    public var spoofedAdvertisingIdentifier: String?
+    public var spoofedDeviceName: String?
+    public var spoofedSystemVersion: String?
+    public var spoofedMachine: String?
+
+    static func czfRandomDeviceName() -> String {
+        "iPhone-\(UUID().uuidString.prefix(4))"
+    }
+
+    static func czfRandomSystemVersion() -> String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        let real = "\(v.majorVersion).\(v.minorVersion)"
+        let candidates = ["\(v.majorVersion).0", "\(v.majorVersion).1", "\(v.majorVersion).2", "\(v.majorVersion).3"].filter { $0 != real }
+        return candidates.randomElement() ?? "\(v.majorVersion).1"
+    }
+
+    static func czfRandomMachine() -> String {
+        ["iPhone17,1", "iPhone16,2", "iPhone16,1", "iPhone15,3", "iPhone15,2"].randomElement() ?? "iPhone17,1"
+    }
     private var infoDict : [String:Any]?
     public var containerURL : URL {
         if let resolvedContainerURL {
@@ -66,12 +111,13 @@ class LCContainer : ObservableObject, Hashable {
         }
     }
     
-    init(folderName: String, name: String, isShared : Bool, isolateAppGroup: Bool = false, spoofIdentifierForVendor: Bool = false, bookmarkData: Data? = nil, resolvedContainerURL: URL? = nil) {
+    init(folderName: String, name: String, isShared : Bool, isolateAppGroup: Bool = false, spoofIdentifierForVendor: Bool = false, spoofDeviceFingerprint: Bool = false, bookmarkData: Data? = nil, resolvedContainerURL: URL? = nil) {
         self.folderName = folderName
         self.name = name
         self.isShared = isShared
         self.isolateAppGroup = isolateAppGroup
         self.spoofIdentifierForVendor = spoofIdentifierForVendor
+        self.spoofDeviceFingerprint = spoofDeviceFingerprint
         self.storageBookMark = bookmarkData
         self.resolvedContainerURL = resolvedContainerURL
     }
@@ -114,6 +160,13 @@ class LCContainer : ObservableObject, Hashable {
                 isolateAppGroup = plistInfo["isolateAppGroup"] as? Bool ?? false
                 spoofIdentifierForVendor = plistInfo["spoofIdentifierForVendor"] as? Bool ?? false
                 spoofedIdentifier = plistInfo["spoofedIdentifierForVendor"] as? String
+                // 先读值再开开关：didSet 在开时会补没生成的值，
+                // 顺序反了会把刚生成的值又用 nil 盖掉。
+                spoofedAdvertisingIdentifier = plistInfo["spoofedAdvertisingIdentifier"] as? String
+                spoofedDeviceName = plistInfo["spoofedDeviceName"] as? String
+                spoofedSystemVersion = plistInfo["spoofedSystemVersion"] as? String
+                spoofedMachine = plistInfo["spoofedMachine"] as? String
+                spoofDeviceFingerprint = plistInfo["spoofDeviceFingerprint"] as? Bool ?? false
             }
         } catch {
             
@@ -137,10 +190,23 @@ class LCContainer : ObservableObject, Hashable {
             "name" : name,
             "keychainGroupId" : keychainGroupId,
             "isolateAppGroup" : isolateAppGroup,
-            "spoofIdentifierForVendor": spoofIdentifierForVendor
+            "spoofIdentifierForVendor": spoofIdentifierForVendor,
+            "spoofDeviceFingerprint": spoofDeviceFingerprint
         ]
         if let spoofedIdentifier {
             infoDict!["spoofedIdentifierForVendor"] = spoofedIdentifier
+        }
+        if let spoofedAdvertisingIdentifier {
+            infoDict!["spoofedAdvertisingIdentifier"] = spoofedAdvertisingIdentifier
+        }
+        if let spoofedDeviceName {
+            infoDict!["spoofedDeviceName"] = spoofedDeviceName
+        }
+        if let spoofedSystemVersion {
+            infoDict!["spoofedSystemVersion"] = spoofedSystemVersion
+        }
+        if let spoofedMachine {
+            infoDict!["spoofedMachine"] = spoofedMachine
         }
         
         do {
@@ -169,6 +235,13 @@ class LCContainer : ObservableObject, Hashable {
         isolateAppGroup = infoDict["isolateAppGroup"] as? Bool ?? false
         spoofIdentifierForVendor = infoDict["spoofIdentifierForVendor"] as? Bool ?? false
         spoofedIdentifier = infoDict["spoofedIdentifierForVendor"] as? String
+        // 先读值再开开关：didSet 在开时会补没生成的值，
+        // 顺序反了会把刚生成的值又用 nil 盖掉。
+        spoofedAdvertisingIdentifier = infoDict["spoofedAdvertisingIdentifier"] as? String
+        spoofedDeviceName = infoDict["spoofedDeviceName"] as? String
+        spoofedSystemVersion = infoDict["spoofedSystemVersion"] as? String
+        spoofedMachine = infoDict["spoofedMachine"] as? String
+        spoofDeviceFingerprint = infoDict["spoofDeviceFingerprint"] as? Bool ?? false
     }
     
     static func == (lhs: LCContainer, rhs: LCContainer) -> Bool {

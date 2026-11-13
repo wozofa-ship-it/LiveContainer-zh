@@ -115,6 +115,46 @@ struct LCContainerView : View {
                 }
 
                 Section {
+                    Toggle(isOn: $container.spoofDeviceFingerprint) {
+                        Text("lc.container.spoofDeviceFingerprint".loc)
+                    }
+                    .onChange(of: container.spoofDeviceFingerprint) { newValue in
+                        saveContainer()
+                    }
+
+                    // 指纹值只读展示：打开时自动生成、固定不变，
+                    // 让用户一眼看出每个分身是哪套环境。
+                    if container.spoofDeviceFingerprint {
+                        HStack {
+                            Text("IDFA")
+                            Spacer()
+                            Text(container.spoofedAdvertisingIdentifier ?? "")
+                                .foregroundStyle(.gray)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        HStack {
+                            Text("lc.container.spoofedDeviceName".loc)
+                            Spacer()
+                            Text(container.spoofedDeviceName ?? "")
+                                .foregroundStyle(.gray)
+                        }
+                        HStack {
+                            Text("lc.container.spoofedSystemVersion".loc)
+                            Spacer()
+                            Text(container.spoofedSystemVersion ?? "")
+                                .foregroundStyle(.gray)
+                        }
+                        HStack {
+                            Text("lc.container.spoofedMachine".loc)
+                            Spacer()
+                            Text(container.spoofedMachine ?? "")
+                                .foregroundStyle(.gray)
+                        }
+                    }
+                }
+
+                Section {
                     if inUse {
                         Text("lc.container.inUse".loc)
                             .foregroundStyle(.gray)

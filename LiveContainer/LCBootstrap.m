@@ -625,6 +625,21 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
             }
         }
     }
+
+    // 设备指纹伪装（IDFA + 设备名 + 系统版本 + 机型）：与 IDFV
+    // 同款，容器设置里开，值存在 LCContainerInfo.plist；四项
+    // 各自独立，缺哪项就只 hook 有的那几项，不全量回落。
+    if([guestContainerInfo[@"spoofDeviceFingerprint"] boolValue]) {
+        NSString *spoofedIDFA = guestContainerInfo[@"spoofedAdvertisingIdentifier"];
+        NSString *spoofedName = guestContainerInfo[@"spoofedDeviceName"];
+        NSString *spoofedVersion = guestContainerInfo[@"spoofedSystemVersion"];
+        NSString *spoofedMachine = guestContainerInfo[@"spoofedMachine"];
+        if(![spoofedIDFA isKindOfClass:NSString.class]) spoofedIDFA = nil;
+        if(![spoofedName isKindOfClass:NSString.class]) spoofedName = nil;
+        if(![spoofedVersion isKindOfClass:NSString.class]) spoofedVersion = nil;
+        if(![spoofedMachine isKindOfClass:NSString.class]) spoofedMachine = nil;
+        DeviceFingerprintHookInit(spoofedIDFA, spoofedName, spoofedVersion, spoofedMachine);
+    }
     
     bool is32bit = [guestAppInfo[@"is32bit"] boolValue];
     if(is32bit) {

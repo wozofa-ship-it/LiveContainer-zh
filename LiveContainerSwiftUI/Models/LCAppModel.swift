@@ -368,6 +368,7 @@ class LCAppModel: ObservableObject, Hashable {
         let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
         newContainer.isolateAppGroup = true
         newContainer.spoofIdentifierForVendor = true
+        newContainer.spoofDeviceFingerprint = true
         let group = czfFreeKeychainGroup(excluding: newContainer)
         uiContainers.append(newContainer)
         uiSelectedContainer = newContainer
@@ -379,7 +380,10 @@ class LCAppModel: ObservableObject, Hashable {
     }
     private func czfIsolateMultiOpenContainersIfNeeded() {
         guard !czfOtherSameBundleApps().isEmpty else { return }
-        let markerKey = "CZFMultiOpenIsolated-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")"
+        // V2：老标记只含 App Group / IDFV / 钥匙串组，换新标记让
+        // 已隔离过的分身也跑一遍，把设备指纹补上（重跑是幂等的，
+        // 已分好的组不换，只补没开的那几项）。
+        let markerKey = "CZFMultiOpenIsolatedV2-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")"
         if UserDefaults.standard.bool(forKey: markerKey) { return }
         var otherGroups = Set<Int>()
         var otherFolders = Set<String>()
@@ -399,9 +403,10 @@ class LCAppModel: ObservableObject, Hashable {
             if newGroup < 0 || otherGroups.contains(newGroup) {
                 newGroup = czfFreeKeychainGroup(excluding: container)
             }
-            if !container.isolateAppGroup || !container.spoofIdentifierForVendor || container.keychainGroupId != newGroup {
+            if !container.isolateAppGroup || !container.spoofIdentifierForVendor || !container.spoofDeviceFingerprint || container.keychainGroupId != newGroup {
                 container.isolateAppGroup = true
                 container.spoofIdentifierForVendor = true
+                container.spoofDeviceFingerprint = true
                 container.makeLCContainerInfoPlist(appIdentifier: bundleIdentifier, keychainGroupId: newGroup)
             }
             if newGroup >= 0 { otherGroups.insert(newGroup) }
@@ -431,6 +436,7 @@ class LCAppModel: ObservableObject, Hashable {
             if isMultiOpen {
                 newContainer.isolateAppGroup = true
                 newContainer.spoofIdentifierForVendor = true
+                newContainer.spoofDeviceFingerprint = true
                 group = czfFreeKeychainGroup(excluding: newContainer)
             } else {
                 group = Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
@@ -462,7 +468,7 @@ class LCAppModel: ObservableObject, Hashable {
             appInfo.dataUUID = newName
             uiDefaultDataFolder = newName
             if isMultiOpen {
-                UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolated-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
+                UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolatedV2-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
             }
         }
         czfIsolateMultiOpenContainersIfNeeded()
