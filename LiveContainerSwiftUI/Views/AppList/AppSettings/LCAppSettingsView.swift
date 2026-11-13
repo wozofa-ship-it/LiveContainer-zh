@@ -229,6 +229,109 @@ struct LCAppSettingsView: View {
     
     var body: some View {
         Form {
+            czfAppSettingsInfo
+            czfAppSettingsJIT
+            czfAppSettingsMultitaskLang
+            czfAppSettingsVPN
+            czfAppSettingsFixes
+            czfAppSettingsHide
+            czfAppSettingsActions
+        }
+        .navigationTitle(appInfo.displayName())
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { loadSchedMinSettings(); loadKeepAliveSetting() }
+        // #17：从后台切回前台时重读一次（别处改了同一批键后本页不再显示旧值）
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            loadSchedMinSettings()
+            loadKeepAliveSetting()
+        }
+        .alert("lc.common.error".loc, isPresented: $errorShow) {
+            Button("lc.common.ok".loc, action: {
+            })
+        } message: {
+            Text(errorInfo)
+        }
+        // #13：隐藏确认框
+        .alert("lc.appSettings.hideApp".loc, isPresented: $hideConfirmShow) {
+            Button("lc.appSettings.hideApp".loc) {
+                Task { await toggleHidden() }
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {
+            }
+        } message: {
+            Text("隐藏后将返回 App 列表。")
+        }
+        
+        .textFieldAlert(
+            isPresented: $renameFolderInput.show,
+            title: "lc.common.enterNewFolderName".loc,
+            text: $renameFolderInput.initVal,
+            placeholder: "",
+            action: { newText in
+                renameFolderInput.close(result: newText!)
+            },
+            actionCancel: {_ in
+                renameFolderInput.close(result: "")
+            }
+        )
+        .alert("lc.appSettings.toSharedApp".loc, isPresented: $moveToAppGroupAlert.show) {
+            Button {
+                self.moveToAppGroupAlert.close(result: true)
+            } label: {
+                Text("lc.common.move".loc)
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {
+                self.moveToAppGroupAlert.close(result: false)
+            }
+        } message: {
+            Text("lc.appSettings.toSharedAppDesc".loc)
+        }
+        .alert("lc.appSettings.toPrivateApp".loc, isPresented: $moveToPrivateDocAlert.show) {
+            Button {
+                self.moveToPrivateDocAlert.close(result: true)
+            } label: {
+                Text("lc.common.move".loc)
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {
+                self.moveToPrivateDocAlert.close(result: false)
+            }
+        } message: {
+            Text("lc.appSettings.toPrivateAppDesc".loc)
+        }
+        .alert("lc.appSettings.forceSign".loc, isPresented: $signUnsignedAlert.show) {
+            Button {
+                self.signUnsignedAlert.close(result: true)
+            } label: {
+                Text("lc.common.ok".loc)
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {
+                self.signUnsignedAlert.close(result: false)
+            }
+        } message: {
+            Text("lc.appSettings.signUnsignedDesc".loc)
+        }
+        .alert("lc.appSettings.addExternalNonLocalContainer".loc, isPresented: $addExternalNonLocalContainerWarningAlert.show) {
+            Button {
+                self.addExternalNonLocalContainerWarningAlert.close(result: true)
+            } label: {
+                Text("lc.common.continue".loc)
+            }
+            Button("lc.common.cancel".loc, role: .cancel) {
+                self.addExternalNonLocalContainerWarningAlert.close(result: false)
+            }
+        } message: {
+            Text("lc.appSettings.addExternalNonLocalContainerWarningAlert".loc)
+        }
+        .sheet(isPresented: $selectUnusedContainerSheetShow) {
+            LCSelectContainerView(isPresent: $selectUnusedContainerSheetShow, delegate: self)
+        }
+        .fileImporter(isPresented: $choosingStorage, allowedContentTypes: [.folder]) { result in
+            Task { await importDataStorage(result: result) }
+        }
+    }
+
+    // O-14：由 LCAppSettingsView.body 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfAppSettingsInfo: some View {
             Section {
                 HStack {
                     Text("lc.appSettings.bundleId".loc)
@@ -392,8 +495,10 @@ struct LCAppSettingsView: View {
             } header: {
                 Text("lc.common.container".loc)
             }
-            
-            
+    }
+
+    // O-14：由 LCAppSettingsView.body 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfAppSettingsJIT: some View {
             Section {
                 Toggle(isOn: $model.uiHelperProcessesSupport) {
                     Text("lc.appSettings.helperProcessesSupport".loc)
@@ -524,7 +629,10 @@ struct LCAppSettingsView: View {
                         .transition(.opacity.combined(with: .slide))
                 }
             }
-            
+    }
+
+    // O-14：由 LCAppSettingsView.body 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfAppSettingsMultitaskLang: some View {
             if #available(iOS 16.0, *) {
                 Section {
                     Picker(selection: $model.uiIsMultitaskModeSpecificed) {
@@ -597,7 +705,10 @@ struct LCAppSettingsView: View {
                     
                 }
             }
-            
+    }
+
+    // O-14：由 LCAppSettingsView.body 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfAppSettingsVPN: some View {
             Section {
                 Toggle(isOn: Binding(
                     get: { CZFVPNManager.isEnabled(for: model.appInfo) },
@@ -670,7 +781,10 @@ struct LCAppSettingsView: View {
             } footer: {
                 Text("每天到设定时间，自动把这个 App 以最小化方式打开。需要 LiveContainer 保持运行（在前台，或开着保活挂在后台）；如果到点时 LiveContainer 被彻底关掉了，下次打开它时会补开。这个 App 需要先手动打开过一次。")
             }
+    }
 
+    // O-14：由 LCAppSettingsView.body 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfAppSettingsFixes: some View {
             Section {
                 DisclosureGroup(isExpanded: $fixesExpanded) {
                     Toggle(isOn: $model.uiFixFilePickerNew) {
@@ -721,7 +835,10 @@ struct LCAppSettingsView: View {
                     }
                 }
             }
-            
+    }
+
+    // O-14：由 LCAppSettingsView.body 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfAppSettingsHide: some View {
             Section {
                 Toggle(isOn: $model.uiHideLiveContainer) {
                     HStack {
@@ -791,7 +908,10 @@ struct LCAppSettingsView: View {
             } footer: {
                 Text("lc.appSettings.fixFilePickerDesc".loc)
             }
-            
+    }
+
+    // O-14：由 LCAppSettingsView.body 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfAppSettingsActions: some View {
             Section {
                 Button {
                     Task { await forceResign() }
@@ -828,99 +948,6 @@ struct LCAppSettingsView: View {
             } header: {
                 Text("lc.common.statistics")
             }
-
-        }
-        .navigationTitle(appInfo.displayName())
-        .navigationBarTitleDisplayMode(.inline)
-        .onAppear { loadSchedMinSettings(); loadKeepAliveSetting() }
-        // #17：从后台切回前台时重读一次（别处改了同一批键后本页不再显示旧值）
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-            loadSchedMinSettings()
-            loadKeepAliveSetting()
-        }
-        .alert("lc.common.error".loc, isPresented: $errorShow) {
-            Button("lc.common.ok".loc, action: {
-            })
-        } message: {
-            Text(errorInfo)
-        }
-        // #13：隐藏确认框
-        .alert("lc.appSettings.hideApp".loc, isPresented: $hideConfirmShow) {
-            Button("lc.appSettings.hideApp".loc) {
-                Task { await toggleHidden() }
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-            }
-        } message: {
-            Text("隐藏后将返回 App 列表。")
-        }
-        
-        .textFieldAlert(
-            isPresented: $renameFolderInput.show,
-            title: "lc.common.enterNewFolderName".loc,
-            text: $renameFolderInput.initVal,
-            placeholder: "",
-            action: { newText in
-                renameFolderInput.close(result: newText!)
-            },
-            actionCancel: {_ in
-                renameFolderInput.close(result: "")
-            }
-        )
-        .alert("lc.appSettings.toSharedApp".loc, isPresented: $moveToAppGroupAlert.show) {
-            Button {
-                self.moveToAppGroupAlert.close(result: true)
-            } label: {
-                Text("lc.common.move".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.moveToAppGroupAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.toSharedAppDesc".loc)
-        }
-        .alert("lc.appSettings.toPrivateApp".loc, isPresented: $moveToPrivateDocAlert.show) {
-            Button {
-                self.moveToPrivateDocAlert.close(result: true)
-            } label: {
-                Text("lc.common.move".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.moveToPrivateDocAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.toPrivateAppDesc".loc)
-        }
-        .alert("lc.appSettings.forceSign".loc, isPresented: $signUnsignedAlert.show) {
-            Button {
-                self.signUnsignedAlert.close(result: true)
-            } label: {
-                Text("lc.common.ok".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.signUnsignedAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.signUnsignedDesc".loc)
-        }
-        .alert("lc.appSettings.addExternalNonLocalContainer".loc, isPresented: $addExternalNonLocalContainerWarningAlert.show) {
-            Button {
-                self.addExternalNonLocalContainerWarningAlert.close(result: true)
-            } label: {
-                Text("lc.common.continue".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.addExternalNonLocalContainerWarningAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.addExternalNonLocalContainerWarningAlert".loc)
-        }
-        .sheet(isPresented: $selectUnusedContainerSheetShow) {
-            LCSelectContainerView(isPresent: $selectUnusedContainerSheetShow, delegate: self)
-        }
-        .fileImporter(isPresented: $choosingStorage, allowedContentTypes: [.folder]) { result in
-            Task { await importDataStorage(result: result) }
-        }
     }
 
     func createFolder() async {

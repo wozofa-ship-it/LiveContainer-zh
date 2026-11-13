@@ -38,7 +38,13 @@ public final class DownloadHelper : ObservableObject {
         var lastError: Error?
         for attempt in 0..<3 {
             if attempt > 0 {
+                // O-15：重试前查取消——上轮失败后用户点了取消，
+                // 不再白等 2 秒、也不再重试；睡完再查一次，睡着
+                // 时取消也不再下。抛上轮的错（与下面 catch 里
+                // cancelled 就 throw error 同款）。
+                if cancelled { throw lastError ?? CancellationError() }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if cancelled { throw lastError ?? CancellationError() }
             }
             do {
                 if let data = savedResumeData, savedResumeURL == url {

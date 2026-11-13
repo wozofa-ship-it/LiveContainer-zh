@@ -768,12 +768,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         return sharedAppSortManager.sortedHiddenApps
     }
     
-    var filteredApps: [LCAppModel] {
+    // O-18 缓存：原来是计算属性，body 每次渲染都把全部 App
+    // 过滤一遍（搜字/进度/状态一变就重算）。只在输入变时重算：
+    // 输入 = 排序后列表 + 搜索词，onAppear 与下面两处 onChange
+    // 里刷新缓存；body 各处读缓存，不再每渲染算一次。过滤
+    // 逻辑本身不动（名字/Bundle ID/版本号三路匹配）。
+    @State private var czfFilteredAppsCache: [LCAppModel] = []
+    var filteredApps: [LCAppModel] { czfFilteredAppsCache }
+    private func czfRefreshFilteredApps() {
         let apps = sortedApps
         if searchContext.debouncedQuery.isEmpty {
-            return apps
+            czfFilteredAppsCache = apps
         } else {
-            return apps.filter { app in
+            czfFilteredAppsCache = apps.filter { app in
                 app.appInfo.displayName().localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
                 (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
                 // 优4（3.8.277）：搜版本号也命中。version 是
@@ -1560,6 +1567,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .coordinateSpace(name: "scroll")
         .onAppear {
             czfBackgroundImage = CZFAppBackground.loadImage()
+            // O-18：进页刷一次过滤缓存（输入=排序列表+搜索词）。
+            czfRefreshFilteredApps()
             if !didAppear {
                 onAppear()
             }
@@ -1569,6 +1578,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .onChange(of: czfBackgroundVersion) { _ in
             czfBackgroundImage = CZFAppBackground.loadImage()
+        }
+        // O-18：过滤缓存的两个输入变了才重算（搜字/排序列表），
+        // 其余渲染（进度/状态）不再触发全量过滤。
+        .onChange(of: searchContext.debouncedQuery) { _ in
+            czfRefreshFilteredApps()
+        }
+        .onChange(of: sortedApps) { _ in
+            czfRefreshFilteredApps()
         }
         .onChange(of: scenePhase) { newPhase in
             // 3.8.404：从后台切回前台时扫分享收件箱（本页已在
@@ -3439,19 +3456,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 更新。下载时把下载进度同步过来（占前 20%，与
             // installIpaFile 里解包 80 + 签名 20 的配比一致）；
             // 下载完停掉，解包开始时 installIpaFile 从 0 重走。
-            // 只在变化时写，避免 0.1 秒一次的无效重绘。
-            let czfDownloadProgressTask = Task {
-                var czfLastShown: Float = -1
-                while !Task.isCancelled {
-                    let czfShown = self.downloadHelper.downloadProgress * 0.2
-                    if czfShown != czfLastShown {
-                        czfLastShown = czfShown
-                        self.installProgressPercentage = czfShown
-                    }
-                    try? await Task.sleep(nanoseconds: 100_000_000)
+            // H-7：原来 0.1 秒轮询读 downloadHelper.downloadProgress；
+            // 进度本来就是 @Published（LCDownloadView 节流回调里发布，
+            // 1%/0.25s 口径不动），直接订阅它，变化才写进度条，
+            // 轮询 Task 删掉；函数返回时 defer 取消订阅。
+            // czfLastShown 先取当前值，订阅瞬间那下不重复写。
+            var czfLastShown: Float = self.downloadHelper.downloadProgress * 0.2
+            let czfDownloadProgressCancellable = downloadHelper.$downloadProgress.sink { progress in
+                let czfShown = progress * 0.2
+                if czfShown != czfLastShown {
+                    czfLastShown = czfShown
+                    self.installProgressPercentage = czfShown
                 }
             }
-            defer { czfDownloadProgressTask.cancel() }
+            defer { czfDownloadProgressCancellable.cancel() }
 
             try await downloadHelper.download(url: installUrl, to: destinationURL)
             if downloadHelper.cancelled {

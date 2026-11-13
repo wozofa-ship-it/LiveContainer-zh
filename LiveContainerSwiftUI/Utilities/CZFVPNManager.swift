@@ -667,12 +667,26 @@ public final class CZFVPNManager {
                 try? fm.removeItem(at: strictMarker)
             }
             guard let src = Bundle.main.url(forResource: "CZFProxy", withExtension: "dylib") else { return false }
-            let srcData = try? Data(contentsOf: src)
-            let destData = try? Data(contentsOf: dest)
-            if destData != srcData {
-                try? fm.removeItem(at: dest)
-                try? fm.copyItem(at: src, to: dest)
-                return true
+            // H-9 快筛：先比文件大小+修改时间，都一样就不读文件
+            // 直接判相同；不一样（或取不到属性）再整份比字节，
+            // 结论不变，只省一次全量读。
+            let czfSameByAttrs: Bool = {
+                guard let sAttrs = try? fm.attributesOfItem(atPath: src.path),
+                      let dAttrs = try? fm.attributesOfItem(atPath: dest.path),
+                      let sSize = sAttrs[.size] as? NSNumber,
+                      let dSize = dAttrs[.size] as? NSNumber,
+                      let sDate = sAttrs[.modificationDate] as? Date,
+                      let dDate = dAttrs[.modificationDate] as? Date else { return false }
+                return sSize == dSize && sDate == dDate
+            }()
+            if !czfSameByAttrs {
+                let srcData = try? Data(contentsOf: src)
+                let destData = try? Data(contentsOf: dest)
+                if destData != srcData {
+                    try? fm.removeItem(at: dest)
+                    try? fm.copyItem(at: src, to: dest)
+                    return true
+                }
             }
         } else {
             try? fm.removeItem(at: dest)

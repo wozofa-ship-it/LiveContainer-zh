@@ -198,6 +198,36 @@ struct CZFVPNSettingsView: View {
 
     @ViewBuilder private var vpnSection: some View {
         Section {
+            czfVPNSectionHead
+            czfVPNNodeList
+            czfVPNCoreRow
+            czfVPNBatchAndToggles
+        } footer: {
+        // 原来这里是一整段 400 多字说明，常驻占十几行。
+        // 改成默认只剩一行入口，点开才看精简版：关键意思
+        // 都还在（切换/删除、订阅替换、测速、开 VPN、预热、
+        // 源下载走节点、自动停、最小化不算关），但平时
+        // 模块页不再被这段顶下去。
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                showVPNHelp.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("VPN 说明")
+                    Image(systemName: showVPNHelp ? "chevron.up" : "chevron.down")
+                }
+            }
+            .font(.footnote)
+            .buttonStyle(.plain)
+            if showVPNHelp {
+                Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；测延迟会在核心在跑时先停核心、测完重启原来那条；核心没在跑时直接测、不启动。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2/tuic 等）；转换器只认这几类，未列出的链接会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。\n节点自动轮换开着时，核心在跑的 App 连续失败就自动按列表顺序换下一个支持的节点并重启核心，一圈都不通就停下来等手动处理。")
+            }
+        }
+        }
+    }
+
+    // O-14：由 vpnSection 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfVPNSectionHead: some View {
             HStack {
                 // 3.8.282：VPN 栏加美化图标（用户亲令）：跟数据管理、
                 // 保活等行一样挂彩色图标，不然整行只有字、太素
@@ -275,6 +305,10 @@ struct CZFVPNSettingsView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    // O-14：由 vpnSection 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfVPNNodeList: some View {
         // 手动拖拽排序：点“排序”出现拖动柄，拖完点“完成”；
         // 活动节点按内容跟随，不重启核心。
         HStack {
@@ -433,6 +467,10 @@ struct CZFVPNSettingsView: View {
                 .buttonStyle(.borderless)
             }
         }
+    }
+
+    // O-14：由 vpnSection 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfVPNCoreRow: some View {
         HStack {
             Button(vpnCoreRunning ? "停止核心" : "启动核心") {
                 CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
@@ -487,6 +525,10 @@ struct CZFVPNSettingsView: View {
                 }
             }
         }
+    }
+
+    // O-14：由 vpnSection 拆出，只拆表达式不改逻辑、不改显示顺序。
+    @ViewBuilder private var czfVPNBatchAndToggles: some View {
         // 测完后的批量操作单独放一行：原来启动/测延迟/
         // 切最快/清理/排序/被拒提示/状态全挤在一行，
         // 按钮一多就互相挤压截断；拆开后主操作行永远
@@ -651,28 +693,6 @@ struct CZFVPNSettingsView: View {
                 LCSettingsIcon(systemName: "timer", color: .red.opacity(0.85))
                 Text("核心关闭后自动停")
             }
-        }
-        } footer: {
-        // 原来这里是一整段 400 多字说明，常驻占十几行。
-        // 改成默认只剩一行入口，点开才看精简版：关键意思
-        // 都还在（切换/删除、订阅替换、测速、开 VPN、预热、
-        // 源下载走节点、自动停、最小化不算关），但平时
-        // 模块页不再被这段顶下去。
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                showVPNHelp.toggle()
-            } label: {
-                HStack(spacing: 4) {
-                    Text("VPN 说明")
-                    Image(systemName: showVPNHelp ? "chevron.up" : "chevron.down")
-                }
-            }
-            .font(.footnote)
-            .buttonStyle(.plain)
-            if showVPNHelp {
-                Text("点节点行切换（核心在跑时立即生效），左滑删除；订阅导入会整体替换节点列表，更新后重导一次。\n测延迟是真实请求往返毫秒数，不切换核心，通的节点先显示；测延迟会在核心在跑时先停核心、测完重启原来那条；核心没在跑时直接测、不启动。\n给 App 开 VPN：去该 App 设置页打开「VPN 打开（内置节点）」；标记的 App 打开时核心自启，全部关掉后按上面分钟数自停，期间重开会取消这次自停。\n预热开着进 App 就先热好核心；源和下载走节点只对境外源有用。\n最小化不算关，核心继续跑。\n节点行会显示协议（vless/vmess/trojan/ss/socks/hysteria2/tuic 等）；转换器只认这几类，未列出的链接会标“不支持”——不是网络不通，“清理不通”不会删它们。\n绕法：可以把出站写成原始 Xray JSON 当节点粘贴（转换器会保留其 outbounds），名字会显示成“节点”；测速与启动都走同一转换，JSON 节点同样能测。\n节点自动轮换开着时，核心在跑的 App 连续失败就自动按列表顺序换下一个支持的节点并重启核心，一圈都不通就停下来等手动处理。")
-            }
-        }
         }
     }
     func applySubscriptionLinks(_ links: [String]) {
@@ -1010,12 +1030,15 @@ private struct CZFVPNNodeLabel: View {
     let isStale: Bool
 
     var body: some View {
+        // O-18：nodeDisplay 每行只算一次——原来 name/detail 各调
+        // 一次（两次解析链接、读别名）；算一次、两次用同一结果。
+        let display = CZFVPNManager.nodeDisplay(for: link)
         HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(CZFVPNManager.nodeDisplay(for: link).name)
+                    Text(display.name)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text(CZFVPNManager.nodeDisplay(for: link).detail)
+                    Text(display.detail)
                         .font(.caption)
                         .foregroundStyle(.gray)
                         .lineLimit(1)

@@ -977,31 +977,69 @@ class LCAppModel: ObservableObject, Hashable {
 actor CZFMultitaskLaunchGate {
     static let shared = CZFMultitaskLaunchGate()
     private var holder: String?
+    private var waiters: [(uuid: String, continuation: CheckedContinuation<Bool, Error>)] = []
+    // H-10 事件驱动等待队列：拿不到门时挂起等放门，不再 0.1 秒
+    // 轮询。release/超时/取消三处都先把等待者移出队列再恢复，
+    // 只恢复一次；release 时把门原子交给队首，醒来即持门。
 
-    /// 拿门：已有持有者时每 0.1 秒轮询，最多 60 秒；返回
+    /// 拿门：无人持门直接拿；有人时挂起等放门或 60 秒超时；返回
     /// true = 已持门（调用方负责释放），false = 超时未拿到
     /// （无门放行，调用方不得释放）。任务取消时抛错。
     func acquire(for uuid: String) async throws -> Bool {
-        let deadline = Date().addingTimeInterval(60)
-        while true {
-            try Task.checkCancellation()
-            if holder == nil {
-                holder = uuid
-                return true
+        try Task.checkCancellation()
+        if holder == nil {
+            holder = uuid
+            return true
+        }
+        // 超时任务：60 秒后把本等待者移出队列并以 false 恢复；
+        // 拿到门/取消时在 defer 里取消它。
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+                await self.timeoutWaiter(uuid: uuid)
+            } catch {
+                // 取消/已拿到门：什么都不做
             }
-            if Date() >= deadline {
-                return false
+        }
+        defer { timeoutTask.cancel() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+                // 闭包同步执行，还在 actor 隔离内，直接入队。
+                waiters.append((uuid: uuid, continuation: continuation))
             }
-            try await Task.sleep(nanoseconds: 100_000_000)
+        } onCancel: {
+            Task { await self.cancelWaiter(uuid: uuid) }
         }
     }
 
     /// 放门：只有持有者能放，别人的释放一律忽略（超时无门
     /// 放行的调用方、已交接的等窗任务都不会误清别人的门）。
+    /// 有排队的直接把门交给队首（actor 内原子交接）。
     func release(for uuid: String) {
         if holder == uuid {
             holder = nil
+            if let next = waiters.first {
+                waiters.removeFirst()
+                holder = next.uuid
+                next.continuation.resume(returning: true)
+            }
         }
+    }
+
+    /// 超时：等待者还在队里就移出并以 false 恢复（已拿到门
+    /// 的不在队里，什么都不做）。
+    private func timeoutWaiter(uuid: String) {
+        guard let index = waiters.firstIndex(where: { $0.uuid == uuid }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
+
+    /// 取消：等待者还在队里就移出并抛取消错（已恢复的不在
+    /// 队里，什么都不做）。
+    private func cancelWaiter(uuid: String) {
+        guard let index = waiters.firstIndex(where: { $0.uuid == uuid }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
     }
 
     /// 等窗后放门：每 0.3 秒在主线程认一次 dockManager.apps

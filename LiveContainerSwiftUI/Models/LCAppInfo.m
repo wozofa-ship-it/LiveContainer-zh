@@ -7,6 +7,21 @@
 #import "LCUtils.h"
 #import "../../LiveContainer/LCSharedUtils.h"
 
+// 图标进程内缓存（H-6）：原来只有实例级 _cachedIcon/_cachedIconDark，
+// LCAppInfo 每次扫包都新建实例，实例缓存活不过一次扫描；磁盘缓存
+// （LCAppIconLight/Dark.png）又要读盘解码。加一层 NSCache，键与
+// 磁盘缓存同口径（bundle 路径 + 明/暗），命中直接返回；清除图标
+// 缓存时一并逐出。
+static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
+    static NSCache<NSString *, UIImage *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 200;
+    });
+    return cache;
+}
+
 
 @implementation LCAppInfo
 
@@ -183,6 +198,14 @@
 }
 
 - (UIImage*)iconIsDarkIcon:(BOOL)isDarkIcon {
+    // H-6：先查进程内 NSCache（键 = bundle 路径 + 明/暗，与磁盘
+    // 缓存 LCAppIconLight/Dark.png 同口径），命中直接返回，不再
+    // 读盘解码。
+    NSString *czfCacheKey = [_bundlePath stringByAppendingString:isDarkIcon ? @"#dark" : @"#light"];
+    UIImage *czfCachedIcon = [LCAppInfoIconCache() objectForKey:czfCacheKey];
+    if (czfCachedIcon) {
+        return czfCachedIcon;
+    }
     // if icon is already loaded in memory, return it
     if(_cachedIcon && !isDarkIcon) {
         return _cachedIcon;
@@ -217,6 +240,10 @@
     } else {
         _cachedIcon = uiIcon;
     }
+    // H-6：同时进进程内缓存（uiIcon 为 nil 时不进，NSCache 不收 nil）。
+    if (uiIcon) {
+        [LCAppInfoIconCache() setObject:uiIcon forKey:czfCacheKey];
+    }
 
     return uiIcon;
 
@@ -231,6 +258,10 @@
     [self setCachedColorDark:nil];
     _cachedIcon = nil;
     _cachedIconDark = nil;
+    // H-6：清除时一并逐出进程内缓存，否则“清除图标缓存”后
+    // 内存里还是旧图。
+    [LCAppInfoIconCache() removeObjectForKey:[_bundlePath stringByAppendingString:@"#light"]];
+    [LCAppInfoIconCache() removeObjectForKey:[_bundlePath stringByAppendingString:@"#dark"]];
 }
 
 - (UIImage *)generateLiveContainerWrappedIconWithStyle:(GeneratedIconStyle)style {
