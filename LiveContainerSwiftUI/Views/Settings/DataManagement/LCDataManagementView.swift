@@ -852,7 +852,7 @@ struct LCDataManagementView : View {
             .fileImporter(isPresented: $showSettingsImporter, allowedContentTypes: [UTType.json]) { result in
                 switch result {
                 case .success(let url):
-                    importCZFSettings(from: url)
+                    Task { await importCZFSettings(from: url) }
                 case .failure(let error):
                     settingsTransferMessage = "导入失败：\(error.localizedDescription)"
                     showSettingsTransferAlert = true
@@ -2199,14 +2199,18 @@ struct LCDataManagementView : View {
     /// 对应 UserDefaults（标准库/App Group 分流见
     /// applySettingsDictionary）。JSON 数字回来是 NSNumber，
     /// UserDefaults 读写都认，不用特殊处理
-    func importCZFSettings(from url: URL) {
+    func importCZFSettings(from url: URL) async {
         let scoped = url.startAccessingSecurityScopedResource()
         defer {
             if scoped {
                 url.stopAccessingSecurityScopedResource()
             }
         }
-        guard let data = try? Data(contentsOf: url),
+        // 3.8.502（L24）：fileImporter 选的文件可能在 iCloud Drive 且未下载——
+        // Data(contentsOf:) 在占位文件上会触发隐式下载、同步堵主线程
+        //（493 manifest 同款；慢网下主线程被堵久了看门狗杀进程，看着就是
+        // 导入时卡死闪退）。读字节放 Task.detached，安全域在读完前一直持有。
+        guard let data = await Task.detached { try? Data(contentsOf: url) }.value,
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             settingsTransferMessage = "导入失败：这个文件不是有效的设置备份"
             showSettingsTransferAlert = true

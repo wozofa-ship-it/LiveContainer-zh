@@ -1030,7 +1030,14 @@ struct LCAppSettingsView: View {
             
             var container: LCContainer? = nil
             if fm.fileExists(atPath: url.appendingPathComponent("LCContainerInfo.plist").path) {
-                let plistInfo = try PropertyListSerialization.propertyList(from: Data(contentsOf: url.appendingPathComponent("LCContainerInfo.plist")), format: nil)
+                // 3.8.502（L24）：用户挑的文件夹可能在 iCloud Drive、plist 未下载——
+                // Data(contentsOf:) 会触发隐式下载堵主线程（493 manifest 同款）。
+                // 读字节放 Task.detached；读不到按旧行为抛错、走外层 catch。
+                // 安全域在函数入口已持有、defer 到函数返回才释放，detached 读在作用域内。
+                let plistData = try await Task.detached {
+                    try Data(contentsOf: url.appendingPathComponent("LCContainerInfo.plist"))
+                }.value
+                let plistInfo = try PropertyListSerialization.propertyList(from: plistData, format: nil)
                 if let plistInfo = plistInfo as? [String : Any] {
                     let name = plistInfo["folderName"] as? String ?? url.lastPathComponent
                     container = LCContainer(infoDict: ["folderName": url.lastPathComponent, "name": name, "bookmarkData":bookmark], isShared: false)

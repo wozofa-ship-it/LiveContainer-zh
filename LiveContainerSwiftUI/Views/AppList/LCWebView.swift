@@ -653,8 +653,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         if name.isEmpty {
             name = "download"
         }
-        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-        try? FileManager.default.removeItem(at: dest)
+        // 3.8.502（L24）：同名文件两次并行下载会撞同一个 tmp 目标——
+        // 后开始的 decideDestination 先删掉先下载的半截文件，先下载的
+        // 继续往已解链的 inode 写，finish 时读到的却是后者的文件，
+        // 装/分享错文件。每个下载单独一个 tmp 子目录，文件名保持原样。
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("LCWebDownload-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent(name)
         Self.downloadDestinations[ObjectIdentifier(download)] = dest
         completionHandler(dest)
     }
@@ -675,7 +680,9 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         Self.czfLiveWebViews.removeValue(forKey: key)
         Self.czfLiveDelegates.removeValue(forKey: key)
         if let dest = Self.downloadDestinations.removeValue(forKey: key) {
-            try? FileManager.default.removeItem(at: dest)
+            // 3.8.502（L24）：dest 在本次下载独占的 tmp 子目录里，删整个目录
+            //（半截文件 + 空目录一起清，与旧的“删文件”同款效果）。
+            try? FileManager.default.removeItem(at: dest.deletingLastPathComponent())
         }
         self.loadStatus.wrappedValue = 1.0
         if (error as NSError).code == NSURLErrorCancelled { return }
