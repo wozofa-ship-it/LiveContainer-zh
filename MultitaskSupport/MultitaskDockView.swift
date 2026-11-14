@@ -4721,13 +4721,22 @@ struct SourcesPanelView: View {
     private func shareFileFromPanel(at url: URL) {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let rootVC = windowScene.windows.first?.rootViewController else { return }
+        // 3.8.552（L82）：从 rootVC 直弹会被已有弹窗静默顶掉——下载是异步的，
+        // 完成时用户可能正开着面板里的备份 sheet（rootVC 上已有 presentedVC），
+        // UIKit 直接丢掉这次 present，分享表不出、也不报错（czfEnforceRunningCap
+        // 同款：present 前先走到最顶层，:1063）。正常路 rootVC 上没弹窗，
+        // 走到顶就是它自己，行为不变。
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
         let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
         if let popover = activityVC.popoverPresentationController {
-            popover.sourceView = rootVC.view
-            popover.sourceRect = CGRect(x: rootVC.view.bounds.midX, y: rootVC.view.bounds.midY, width: 0, height: 0)
+            popover.sourceView = topVC.view
+            popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
             popover.permittedArrowDirections = []
         }
-        rootVC.present(activityVC, animated: true)
+        topVC.present(activityVC, animated: true)
     }
 }
 
