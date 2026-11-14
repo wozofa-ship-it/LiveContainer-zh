@@ -1774,7 +1774,7 @@ struct LCDataManagementView : View {
     }
 
     @discardableResult
-    static func writeCZFSettingsBackup() -> (local: URL?, externalFolderName: String?) {
+    static func writeCZFSettingsBackup() -> (local: URL?, externalFolderName: String?, externalWriteFailed: Bool) {
         let skip: Set<String> = ["CZFUpdatableAppCount", "CZFLastSourceAutoRefresh"]
         // 定时打开的按日标记（CZFSchedMinLastDate-<bid>）不进备份：
         // 带进备份、恢复后当天定时打开被跳过一次。按前缀跳过，
@@ -1804,10 +1804,10 @@ struct LCDataManagementView : View {
             }
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
-            return (nil, nil)
+            return (nil, nil, false)
         }
         let fm = FileManager.default
-        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return (nil, nil) }
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return (nil, nil, false) }
         let localURL = docs.appendingPathComponent("CZFSettingsBackup.json")
         var writtenLocal: URL? = nil
         do {
@@ -1815,14 +1815,21 @@ struct LCDataManagementView : View {
             writtenLocal = localURL
         } catch { }
         var extName: String? = nil
+        var extFailed = false
         if let extURL = Self.externalBackupFolderURL() {
             let dest = extURL.appendingPathComponent("CZFSettingsBackup.json")
             do {
                 try data.write(to: dest, options: .atomic)
                 extName = extURL.lastPathComponent
-            } catch { }
+            } catch {
+                // 3.8.487：外部写失败要分得清——原来只返 extName，
+                // 导出处分不清“没配文件夹”和“配了但写失败”，后者
+                // 也报“选好文件夹后自动存一份”，用户以为已备到
+                // iCloud、实际只有本地有。失败要单独报出来。
+                extFailed = true
+            }
         }
-        return (writtenLocal, extName)
+        return (writtenLocal, extName, extFailed)
     }
 
     // P7（3.8.280）：设置备份写盘防抖 + 后台写——原来每次启动/
@@ -2090,10 +2097,12 @@ struct LCDataManagementView : View {
     /// 本地文稿根目录一份；选了「iCloud 备份文件夹」的话，
     /// 那个文件夹里自动也存一份（与 App 备份同处）
     func exportCZFSettings() {
-        let (local, extName) = Self.writeCZFSettingsBackup()
+        let (local, extName, extFailed) = Self.writeCZFSettingsBackup()
         if local != nil {
             if let extName {
                 settingsTransferMessage = "设置备份已存好（CZFSettingsBackup.json）：本地文稿根目录一份，你选的备份文件夹「\(extName)」里也一份"
+            } else if extFailed {
+                settingsTransferMessage = "设置备份已存到本地文稿根目录（CZFSettingsBackup.json），但写进你选的备份文件夹失败了（iCloud 未同步或文件夹不可用），仅本地有这份"
             } else {
                 settingsTransferMessage = "设置备份已存到本地文稿根目录（CZFSettingsBackup.json）。在下面选好「iCloud 备份文件夹」后，导出会自动也存一份到那个文件夹"
             }
@@ -6149,7 +6158,7 @@ struct LCDataManagementView : View {
         for app in selected {
             await Self.refreshKeychainSnapshot(for: app)
         }
-        let didBackup: Bool = await withCheckedContinuation { continuation in
+        let (didBackup, hadFailure): (Bool, Bool) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 var backedUpFolderNames: [String] = []
@@ -6215,11 +6224,17 @@ struct LCDataManagementView : View {
                 }
                 // 全跳过且无失败时当天同样算结算（见上面 skippedFullCount），
                 // 真失败时不结算，第二天照常重试。
-                continuation.resume(returning: !backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount == selected.count))
+                continuation.resume(returning: (!backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount == selected.count), !failedNames.isEmpty || !copyFailedNames.isEmpty))
             }
         }
         if didBackup {
             defaults.set(today, forKey: "LCScheduleBackupLastDate")
+            // 3.8.487：上次失败记录要清——原来只写不删，一次失败后
+            // 设置页的红字警告永远挂着，哪怕之后天天备成功。零失败
+            // 才清；本轮有失败时上面刚写了新记录，别动它。
+            if !hadFailure {
+                defaults.removeObject(forKey: "LCScheduleBackupLastFailure")
+            }
             defaults.synchronize()
         }
     }
