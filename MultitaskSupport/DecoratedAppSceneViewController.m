@@ -107,6 +107,15 @@
     return self;
 }
 
+// 3.8.496（L15）：setupDecoratedView 里在 lcSharedDefaults 上注册了
+// LCMultitaskBottomWindowBar 的 KVO 观察者；窗口关掉后 VC 随父级移除
+// 而释放，观察者不拆，下次用户在设置页拨这个开关就会往已释放的观察
+// 者发通知，直接闪退。dealloc 里拆掉（被观察的是单例 defaults，
+// 一定比观察者活得久）。
+- (void)dealloc {
+    [NSUserDefaults.lcSharedDefaults removeObserver:self forKeyPath:@"LCMultitaskBottomWindowBar"];
+}
+
 // MARK: - 窗口状态还原（CZF）
 // 关窗/最大化切换/拖动结束时，把窗口的小窗尺寸、归一化位置
 // 和全屏状态按 bundleId 存进 lcUserDefaults；下次打开这个
@@ -611,6 +620,13 @@
             self.view.hidden = YES;
         } completion:^(BOOL b){
             [self.view removeFromSuperview];
+            // 3.8.496（L15）：视图拿掉后 VC 也要离队——init 时
+            // [rootVC addChildViewController:self] 把它挂在主 VC
+            // 名下，从没人调过 removeFromParentViewController，
+            // 关一个窗就漏一整套 VC（DecoratedVC + AppSceneVC +
+            // hostingController + 内容视图），开开关关内存一直涨。
+            // 全仓无 childViewControllers 的读取方，离队不影响查找。
+            [self removeFromParentViewController];
         }];
         
         if(skipTerminationScreen) {

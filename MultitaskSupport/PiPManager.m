@@ -14,7 +14,11 @@ API_AVAILABLE(ios(16.0))
 @property(nonatomic, strong) UIView *pipVideoCallContentView;
 @property(nonatomic, strong) AVPictureInPictureVideoCallViewController *pipVideoCallViewController;
 @property(nonatomic, strong) AVPictureInPictureController *pipController;
-@property(nonatomic) AppSceneViewController* displayingVC;
+@property(nonatomic, weak) AppSceneViewController* displayingVC;
+// 3.8.496（L15）：bounds KVO 按会话登记（控制器→当时观察的 layer）。
+// displayingVC 原来是 assign：窗口关掉、VC 释放后它就悬空，
+// 下次进 PiP 的 if(self.displayingVC) 会读野指针；改 weak 自动置空。
+@property(nonatomic, strong) NSMapTable<AVPictureInPictureController *, CALayer *> *pipObservedLayers;
 @end
 
 
@@ -48,6 +52,7 @@ static PiPManager* sharedInstance = nil;
     NSError* error = nil;
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:&error];
     [[AVAudioSession sharedInstance] setActive:YES withOptions:1 error:&error];
+    self.pipObservedLayers = [NSMapTable strongToStrongObjectsMapTable];
     return self;
 }
 
@@ -91,6 +96,22 @@ static PiPManager* sharedInstance = nil;
 }
 
 // PIP delegate
+// 3.8.496（L15）：bounds KVO 按会话登记、按会话注销——WillStart/WillStop
+// 是一一配对的，但 stopPictureInPicture 的 WillStop 是异步回调，切画中
+// 画时新会话的 WillStart 可能先跑（startPiPWithVC 里新 VC 在 0.3 秒后
+// 才建，WillStop 正常先到，但主线程卡住 0.3 秒以上就会反过来）；L14-2
+// 那种“WillStop 里直接对当前 VC 的 layer 拆观察者”会在错位时对从未注
+// 册过的 layer 调 removeObserver，直接抛 NSRangeException 崩。
+// 改按控制器分键记下当时观察的 layer，WillStop/failedToStart/DidStop
+// 都只拆自己那个会话的登记，错位的回调找不到登记就是空操作。
+- (void)czfRemoveBoundsObserverForController:(AVPictureInPictureController *)pictureInPictureController {
+    CALayer *layer = [self.pipObservedLayers objectForKey:pictureInPictureController];
+    if (layer) {
+        [layer removeObserver:self forKeyPath:@"bounds"];
+        [self.pipObservedLayers removeObjectForKey:pictureInPictureController];
+    }
+}
+
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
     [self.displayingDecoratedVC minimizeWindowPiP];
     if(self.displayingVC.usesHostingControllerAPI) {
@@ -101,10 +122,16 @@ static PiPManager* sharedInstance = nil;
         self.displayingVC.contentView.frame = CGRectMake(0, 0, self.displayingVC.view.bounds.size.width, self.displayingVC.view.bounds.size.height);
     }
     [self.pipVideoCallViewController.view addSubview:self.pipVideoCallContentView];
-    [self.pipVideoCallViewController.view.layer addObserver:self
-                                forKeyPath:@"bounds"
-                                   options:NSKeyValueObservingOptionNew
-                                   context:NULL];
+    // 3.8.496（L15）：按会话登记（见 czfRemoveBoundsObserverForController
+    // 注释）；同一控制器只登记一次，重复 WillStart 不重复注册。
+    CALayer *pipLayer = self.pipVideoCallViewController.view.layer;
+    if (![self.pipObservedLayers objectForKey:pictureInPictureController]) {
+        [pipLayer addObserver:self
+                   forKeyPath:@"bounds"
+                      options:NSKeyValueObservingOptionNew
+                      context:NULL];
+        [self.pipObservedLayers setObject:pipLayer forKey:pictureInPictureController];
+    }
     self.pipVideoCallViewController.preferredContentSize = self.displayingVC.view.bounds.size;
     [self.displayingVC setBackgroundNotificationEnabled:false];
     self.displayingVC.shouldIgnoreSceneUpdates = YES;
@@ -117,11 +144,11 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // L14-2：WillStart 里对 pipVideoCallViewController.view.layer 注册的
-    // bounds KVO 观察者，这里必须注销；否则 LCAutoEndPiP 开着时 DidStop
-    // 把 VC 置 nil、layer 释放时观察者还在册，KVO 释放异常崩溃；且每次
-    // WillStart 都重复注册，observeValue 会被调两次。3.8.495（L14）
-    [self.pipVideoCallViewController.view.layer removeObserver:self forKeyPath:@"bounds"];
+    // L14-2 + L15：WillStart 里注册的 bounds KVO 观察者，这里必须注销；
+    // 否则 LCAutoEndPiP 开着时 DidStop 把 VC 置 nil、layer 释放时观察者还
+    // 在册，KVO 释放异常崩溃。L15 改按会话登记拆（见 helper 注释），
+    // 错位的 WillStop 不会误拆新会话的 layer。3.8.495（L14）/3.8.496（L15）
+    [self czfRemoveBoundsObserverForController:pictureInPictureController];
     self.displayingVC.shouldIgnoreSceneUpdates = NO;
     [self.displayingDecoratedVC unminimizeWindowPiP];
 }
@@ -137,14 +164,26 @@ static PiPManager* sharedInstance = nil;
         self.pipController = nil;
         self.pipVideoCallViewController = nil;
     }
+    // 3.8.496（L15）：直接调 DidStop 切会话时（startPiPWithVC）WillStop
+    // 未必跑过，这里兜底拆掉该会话的登记；正常流程里 WillStop 已拆，
+    // 这里是空操作。
+    [self czfRemoveBoundsObserverForController:pictureInPictureController];
     // FIXME: HostingController path causes a tiny flicker during transition to and from PiP.
 }
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
+    // 3.8.496（L15）：WillStart 已跑、启动失败时没有 WillStop，登记不
+    // 清会一直挂着，下次该 VC 被释放时 KVO 释放异常；这里拆掉。
+    // 没跑过 WillStart 时找不到登记，是空操作。
+    [self czfRemoveBoundsObserverForController:pictureInPictureController];
     NSLog(@"%@", error.description);
 }
 
 - (void)observeValueForKeyPath:(NSString*)keyPath ofObject:(NSObject*)object change:(NSDictionary<NSString *,id> *) change context:(void *) context {
+    // 3.8.496（L15）：displayingVC 已改 weak——客窗关掉、VC 释放后它
+    // 自动置空；此时再收到 bounds 变化直接返回，否则 nil.contentView
+    // 的 bounds 是零宽，除零会把 transform 算成 NaN。
+    if (!self.displayingVC) return;
     CGRect rect = [change[@"new"] CGRectValue];
     CGFloat scale = self.displayingVC.usesHostingControllerAPI ? self.displayingVC.scaleRatio : 1;
     CGAffineTransform transform1 = CGAffineTransformScale(CGAffineTransformIdentity, rect.size.width / self.displayingVC.contentView.bounds.size.width/scale,rect.size.height /self.displayingVC.contentView.bounds.size.height/scale);
