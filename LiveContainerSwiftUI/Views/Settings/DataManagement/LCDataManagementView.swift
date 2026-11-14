@@ -6141,7 +6141,15 @@ struct LCDataManagementView : View {
         defaults.set(scheduleEnabled, forKey: "LCScheduleBackupEnabled")
         defaults.set(scheduleHour, forKey: "LCScheduleBackupHour")
         defaults.set(scheduleMinute, forKey: "LCScheduleBackupMinute")
-        defaults.set(Array(scheduleSelectedIDs), forKey: "LCScheduleBackupAppIDs")
+        // 3.8.503（L25）：冷启动扫描还没完时 App 列表是空的，
+        // loadScheduleSettings 会把 scheduleSelectedIDs 换算成
+        // 空集——这时点“保存”会把用户原来选好的 App 全写没，
+        // 定时备份从此悄悄备 0 个（3.8.355 同款冷启动竞态）。
+        // 列表为空时用户根本没法改选择，不写这一键、保留旧值；
+        // 列表非空时空集就是用户真的全取消，照常写。
+        if !(sharedModel.apps + sharedModel.hiddenApps).isEmpty {
+            defaults.set(Array(scheduleSelectedIDs), forKey: "LCScheduleBackupAppIDs")
+        }
         defaults.set(scheduleKeychainOnly, forKey: "LCScheduleBackupKeychainOnly")
         defaults.synchronize()
     }
@@ -6240,8 +6248,23 @@ struct LCDataManagementView : View {
             migrated.contains(Self.instanceKey(for: $0))
         }
         guard !selected.isEmpty else { return }
+        // 3.8.503（L25）：先刷快照前，先把“本轮一定会跳过”的 App
+        // 摘掉——登录态备份时已有完整备份的 App 在下面循环里直接
+        // continue、不备，但 refreshKeychainSnapshot 会先关掉它
+        // 的客窗口（还要等 dump，最多 5 秒）：用户正在用的客 App
+        // 会被悄悄关掉，备份却一个字节都没做。只摘刷新循环，循环
+        // 里的跳过判定不动（仍是备份决策的唯一口径；两处之间若有
+        // 手动备份改了状态，循环里会重新判定，最多白关一次窗口，
+        // 与现在一致）。非登录态备份不跳过任何 App，照旧全刷。
+        let fmForFilter = FileManager.default
+        let toRefresh: [LCAppModel]
+        if loginOnly, let backupRoot = fmForFilter.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("Backups") {
+            toRefresh = selected.filter { !Self.hasExistingFullBackup(for: $0, backupRoot: backupRoot, fm: fmForFilter) }
+        } else {
+            toRefresh = selected
+        }
         // 3.8.374：定时备份同样先刷快照，别读旧 dump
-        for app in selected {
+        for app in toRefresh {
             await Self.refreshKeychainSnapshot(for: app)
         }
         let (didBackup, hadFailure): (Bool, Bool) = await withCheckedContinuation { continuation in

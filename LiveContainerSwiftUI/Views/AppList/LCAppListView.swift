@@ -3544,6 +3544,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     if shouldDelete {
                         try fm.removeItem(at: installUrl)
                     }
+                    // 3.8.503（L25）：网页下载的 .ipa 落在本次下载独占的
+                    // tmp 子目录 LCWebDownload-<UUID>/（L24），装完整个
+                    // 子目录没人清——每个成功下载留一个目录 + 一个 IPA
+                    // 在 tmp 里（失败的按 I2 同款留着）。只成功才删，
+                    // 且只认 LCWebDownload- 前缀（用户从“文件”挑的
+                    // IPA 不在这个目录里，不会误删）；排队路径在
+                    // installIpaFile 之前就 return false，走到这里
+                    // 的一定是本次真正执行完的安装，删了不影响重试。
+                    if installUrl.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") {
+                        try fm.removeItem(at: installUrl.deletingLastPathComponent())
+                    }
                 } catch {
                     // 清理本身失败只记日志，不重写 errorInfo
                     print("delete inbox ipa failed: \(error)")
