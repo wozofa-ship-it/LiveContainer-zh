@@ -231,14 +231,29 @@ struct CZFAppGridView: View {
             let fileURL = dir.appendingPathComponent("\(displayName) Icon.png")
             try imageData.write(to: fileURL, options: .atomic)
             czfIconExportCoordinator.tempDir = dir
-            let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
-            picker.delegate = czfIconExportCoordinator
-            picker.presentationController?.delegate = czfIconExportCoordinator
-            // rootVC 正 presenting 时 UIKit 会静默丢弃本次 present：
-            // 先判空闲，不空闲清掉临时文件直接回（banner 同款守卫）。
-            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                  let rootViewController = windowScene.windows.first?.rootViewController,
-                  rootViewController.presentedViewController == nil else {
+            // 3.8.514（L38）：本函数从网格菜单的裸 Task 调来、不在
+            // 主 actor 上——项目 SWIFT_VERSION = 5.0，Swift 5 语言
+            // 模式下 Button 的 @escaping action 不继承 body 的
+            // @MainActor，Task 走全局执行器（L33 注释“网格那路
+            // 是 SwiftUI 主 actor，不动”不成立）；connectedScenes/
+            // rootVC 判窗与 present 都是 UIKit 活，必须回主线程
+            // 再判、再弹，否则选择器静默弹不出来、临时目录还漏了
+            //（L33-3 横幅卡同款）。单跳 MainActor.run 里建
+            // picker、判完即弹，中间无挂起；弹不出返回 false
+            // 再清临时目录。
+            let czfPresented = await MainActor.run { () -> Bool in
+                guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                      let rootViewController = windowScene.windows.first?.rootViewController,
+                      rootViewController.presentedViewController == nil else {
+                    return false
+                }
+                let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
+                picker.delegate = czfIconExportCoordinator
+                picker.presentationController?.delegate = czfIconExportCoordinator
+                rootViewController.present(picker, animated: true)
+                return true
+            }
+            guard czfPresented else {
                 if let dir = temporaryDirectory {
                     try? FileManager.default.removeItem(at: dir)
                 }
@@ -246,14 +261,15 @@ struct CZFAppGridView: View {
                 czfIconExportCoordinator.tempDir = nil
                 return
             }
-            rootViewController.present(picker, animated: true)
         } catch {
             if let dir = temporaryDirectory {
                 try? FileManager.default.removeItem(at: dir)
             }
             temporaryDirectory = nil
             czfIconExportCoordinator.tempDir = nil
-            czfGridError = error.localizedDescription
+            // 3.8.514（L38）：同上，本函数不在主 actor 上，
+            // czfGridError 是 @State，必须回主线程再写。
+            await MainActor.run { czfGridError = error.localizedDescription }
         }
     }
 
@@ -269,9 +285,20 @@ struct CZFAppGridView: View {
                 throw CocoaError(.propertyListWriteInvalid)
             }
             let data = try PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
-            installMdm(data)
+            // 3.8.514（L38）：本函数从网格菜单的裸 Task 调来、不在
+            // 主 actor 上（L38-1 同款：Swift 5 语言模式下 Button
+            // 的 @escaping action 不继承 body 的 @MainActor），
+            // installMdm 写 @State（safariViewURL/safariViewOpened，
+            // fullScreenCover 的开关），必须回主线程，否则 App Clip
+            // 配置页可能打不开（L33-2 横幅卡同款；L33 注释“网格
+            // 那路是 SwiftUI 主 actor”不成立）。
+            await MainActor.run {
+                installMdm(data)
+            }
         } catch {
-            czfGridError = error.localizedDescription
+            // 3.8.514（L38）：同上，本函数不在主 actor 上，
+            // czfGridError 是 @State，必须回主线程再写。
+            await MainActor.run { czfGridError = error.localizedDescription }
         }
     }
 

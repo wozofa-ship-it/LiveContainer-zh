@@ -1965,8 +1965,15 @@ extension Notification.Name {
                 if let appInfo = only.appInfo {
                     guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
                 }
-                guard bringMultitaskViewToFront(uuid: only.appUUID, from: nil) else { return }
-                edgeCallbackBuzz()
+                // 3.8.514（L38）：裸 Task 不在主 actor 上，
+                // bringMultitaskViewToFront 是纯 UIKit 活（找窗/
+                // 调层级/清死窗/脉冲动画），必须回主线程再调，
+                // 否则视图层级改动离主线程、切 App 可能丢动画
+                // 甚至撞上主线程的布局；震动也在同一跳里。
+                await MainActor.run {
+                    guard bringMultitaskViewToFront(uuid: only.appUUID, from: nil) else { return }
+                    edgeCallbackBuzz()
+                }
             }
             return
         }
@@ -1985,28 +1992,33 @@ extension Notification.Name {
             if let appInfo = target.appInfo {
                 guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
             }
-            // 切到大窗口：直接全屏调出来（用户定 2026-10-25）。
-            // 通用带脉冲动画的路径在 1 大 1 小时盖不住小窗口（实测）；
-            // 大窗口不走缩放脉冲（全屏窗脉冲多余），改走静默直提 + 重申最大化状态，
-            // 并保留 LCMaxOneAppOnStage 的最小化他人行为；切到小窗口走原路径不变。
-            // 但已最小化的大窗口不走静默直提：静默分支只调 z 序、不取消
-            // 隐藏，滑了也出不来（最小化过的 App 右缘叫不回来的根因）；
-            // 隐藏的目标改走带取消隐藏的通用路径（面板「打开」同款）。
-            if let targetView = target.view,
-               let targetVC = targetView._viewDelegate() as? DecoratedAppSceneViewController,
-               targetVC.isMaximized,
-               !targetView.isHidden, targetView.alpha >= 0.1,
-               let targetWindow = targetView.window ?? targetView.superview?.window {
-                passURLSchemeToView(targetView)
-                if UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") {
-                    minimizeAllWindows(except: targetVC)
+            // 3.8.514（L38）：同上，认证后整段都是 UIKit 活
+            //（读视图/调层级/脉冲动画/最小化他人），一并回主线
+            // 程；认证本身留在外面（async，可在后台等）。
+            await MainActor.run {
+                // 切到大窗口：直接全屏调出来（用户定 2026-10-25）。
+                // 通用带脉冲动画的路径在 1 大 1 小时盖不住小窗口（实测）；
+                // 大窗口不走缩放脉冲（全屏窗脉冲多余），改走静默直提 + 重申最大化状态，
+                // 并保留 LCMaxOneAppOnStage 的最小化他人行为；切到小窗口走原路径不变。
+                // 但已最小化的大窗口不走静默直提：静默分支只调 z 序、不取消
+                // 隐藏，滑了也出不来（最小化过的 App 右缘叫不回来的根因）；
+                // 隐藏的目标改走带取消隐藏的通用路径（面板「打开」同款）。
+                if let targetView = target.view,
+                   let targetVC = targetView._viewDelegate() as? DecoratedAppSceneViewController,
+                   targetVC.isMaximized,
+                   !targetView.isHidden, targetView.alpha >= 0.1,
+                   let targetWindow = targetView.window ?? targetView.superview?.window {
+                    passURLSchemeToView(targetView)
+                    if UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") {
+                        minimizeAllWindows(except: targetVC)
+                    }
+                    bringViewToFront(targetView, in: targetWindow)
+                    maximizeWindow(uuid: target.appUUID)
+                    edgeCallbackBuzz()
+                } else {
+                    guard bringMultitaskViewToFront(uuid: target.appUUID, from: nil) else { return }
+                    edgeCallbackBuzz()
                 }
-                bringViewToFront(targetView, in: targetWindow)
-                maximizeWindow(uuid: target.appUUID)
-                edgeCallbackBuzz()
-            } else {
-                guard bringMultitaskViewToFront(uuid: target.appUUID, from: nil) else { return }
-                edgeCallbackBuzz()
             }
         }
     }
@@ -5133,9 +5145,16 @@ private struct RunningAppsStripView: View {
                 if let appInfo = runningApp.appInfo {
                     guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
                 }
-                let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                dockManager.maximizeWindow(uuid: runningApp.appUUID)
-                onSwitch()
+                // 3.8.514（L38）：裸 Task 不在主 actor 上（Swift 5
+                // 语言模式下手势的 @escaping 闭包不继承 body 的
+                // @MainActor）；bring 是纯 UIKit 活、onSwitch 关面板
+                // 写 @State，必须回主线程再调（maximizeWindow 自己
+                // 内部已 dispatch，包进来无害）。
+                await MainActor.run {
+                    let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                    dockManager.maximizeWindow(uuid: runningApp.appUUID)
+                    onSwitch()
+                }
             }
         }
         .onLongPressGesture(minimumDuration: 0.45) {
@@ -5144,9 +5163,15 @@ private struct RunningAppsStripView: View {
                 if let appInfo = runningApp.appInfo {
                     guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
                 }
-                let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
-                onSwitch()
+                // 3.8.514（L38）：同上，裸 Task 不在主 actor 上，
+                // bring 是纯 UIKit 活、onSwitch 关面板写 @State，
+                // 必须回主线程再调（restoreSmallWindow 自己内部
+                // 已 dispatch，包进来无害）。
+                await MainActor.run {
+                    let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                    dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
+                    onSwitch()
+                }
             }
         }
     }
@@ -5417,7 +5442,11 @@ struct AppIconView: View {
                     if let appInfo = app.appInfo {
                         guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
                     }
-                    let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
+                    // 3.8.514（L38）：同上，裸 Task 不在主 actor 上，
+                    // bring 是纯 UIKit 活，必须回主线程再调。
+                    await MainActor.run {
+                        let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
+                    }
                 }
             }
         )

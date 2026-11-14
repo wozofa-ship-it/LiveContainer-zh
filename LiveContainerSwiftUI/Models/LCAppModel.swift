@@ -289,7 +289,12 @@ class LCAppModel: ObservableObject, Hashable {
         guard #available(iOS 16.0, *) else { return }
         guard app.czfInstanceUUID != nil else { return }
         onProceed()
-        if czfBringRunningAppToFront(app, maximize: false) { return }
+        // 3.8.514（L38）：本函数从横幅卡裸 Task 调来、不在主 actor
+        // 上，czfBringRunningAppToFront 是纯 UIKit 活（带回/拉满），
+        // 必须回主线程再调（横幅卡 :202 与面板 :1510 两处调用方
+        // 已是 await MainActor.run 包着的同款写法，这里是漏掉
+        // 的第三处）。
+        if await MainActor.run(body: { czfBringRunningAppToFront(app, maximize: false) }) { return }
         let expectedPath = app.appInfo.relativeBundlePath
         await czfLaunchThenActOnWindow(
             app: app,
