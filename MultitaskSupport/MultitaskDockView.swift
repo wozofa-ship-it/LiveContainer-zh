@@ -681,6 +681,16 @@ extension Notification.Name {
         }
     }
 
+    // 3.8.556（L86）：坞拖动代次——DragGesture 的 onEnded 把帧
+    // 移动排进 0.3 秒后的 asyncAfter（等弹簧动画跑完）；0.3 秒
+    // 内又拖一次、第二次 onEnded 先算好增量，第一次的 asyncAfter
+    // 才跑就会把第一次的增量再加一次（updateFrameAfterAnimation
+    // 是按当前帧加增量），坞落点错一整段位移。onEnded 每次 +1，
+    // 三处 asyncAfter 只认与自己同代的收尾，旧的直接跳过；
+    // 跳过后帧还是旧帧，新收尾的增量本来就是按旧帧算的，正好
+    // 对上。只在主线程碰（手势回调都在主线程），不用锁。
+    var czfDockDragGeneration = 0
+
     @objc public func updateFrameAfterAnimation(finalOffset: CGSize) {
         guard let hostingController = self.hostingController else { return }
         
@@ -2902,6 +2912,10 @@ public struct MultitaskDockSwiftView: View {
             }
             .onEnded { value in
                 self.isMoving = true
+                // 3.8.556（L86）：本次拖动的代次（见管理器注释）——
+                // 三处 asyncAfter 收尾只认同代，旧收尾直接跳过。
+                dockManager.czfDockDragGeneration += 1
+                let dragGeneration = dockManager.czfDockDragGeneration
 
                 let hcFrame = dockManager.hostingController?.view.frame ?? .zero
                 
@@ -2931,6 +2945,9 @@ public struct MultitaskDockSwiftView: View {
                     }
                     
                     DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) {
+                        // 3.8.556（L86）：只认最新一次拖动的收尾——
+                        // 0.3 秒内又拖一次时旧收尾跳过（见管理器注释）。
+                        guard dockManager.czfDockDragGeneration == dragGeneration else { return }
                         dockManager.updateFrameAfterAnimation(finalOffset: newOffset)
                         
                         self.dragOffset = .zero
@@ -2945,6 +2962,8 @@ public struct MultitaskDockSwiftView: View {
                         self.dragOffset = .zero
                     }
                     DispatchQueue.main.asyncAfter(deadline: .now() + MultitaskDockManager.Constants.longAnimationDuration) {
+                        // 3.8.556（L86）：同上，只认最新一次拖动的收尾。
+                        guard dockManager.czfDockDragGeneration == dragGeneration else { return }
                         self.isMoving = false
                     }
                     return
@@ -2976,6 +2995,9 @@ public struct MultitaskDockSwiftView: View {
                 }
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) {
+                    // 3.8.556（L86）：只认最新一次拖动的收尾——
+                    // 0.3 秒内又拖一次时旧收尾跳过（见管理器注释）。
+                    guard dockManager.czfDockDragGeneration == dragGeneration else { return }
                     dockManager.updateFrameAfterAnimation(finalOffset: newOffset)
                     
                     self.dragOffset = .zero
