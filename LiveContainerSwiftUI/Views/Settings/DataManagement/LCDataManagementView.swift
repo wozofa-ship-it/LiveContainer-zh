@@ -244,7 +244,10 @@ struct LCDataManagementView : View {
     @State private var scheduleHour = 3
     @State private var scheduleMinute = 0
     @State private var scheduleSelectedIDs = Set<String>()
-    @State private var exportBackupURL: URL? = nil
+    // 导出 picker 的 delegate 强持有：UIDocumentPickerViewController
+    // 的 delegate 是 weak，内联创建会被当场释放、回调永不触发
+    // （441 教训）；用 @State 持有到 picker 关掉。
+    @State private var exportPickerCoordinator: CZFExportPickerCoordinator?
     @State private var showScheduleCache = false
     @State private var cacheScheduleEnabled = false
     @State private var cacheScheduleHour = 3
@@ -6067,7 +6070,13 @@ struct LCDataManagementView : View {
         if cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now) < hour * 60 + minute { return }
         // 隐藏 App 也清：原来只扫 apps，隐藏 App 的图标缓存
         // 永远不清，手动清理与定时清理都漏。
-        for app in DataManager.shared.model.apps + DataManager.shared.model.hiddenApps {
+        // 冷启动空跑不记日期：冷启动扫描还没完成时 model.apps
+        // 是空的，循环一次没清也照常记了今天，当天就再也不会
+        // 清（定时备份同款是选空直接 return 不记日期；这里原来
+        // 无条件记）。零 App 的用户每次打开都重查一次，无害。
+        let appsToClear = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        guard !appsToClear.isEmpty else { return }
+        for app in appsToClear {
             app.appInfo.clearIconCache()
         }
         defaults.set(today, forKey: "LCScheduleCacheLastDate")
@@ -6077,12 +6086,29 @@ struct LCDataManagementView : View {
         await Self.runScheduledBackupIfDue()
     }
 
+    /// 定时备份在途守卫：LCTabView 冷启动时 onAppear 与 scenePhase
+    /// .active 各触发一次、数据管理页 onAppear 是第三路；三路几乎
+    /// 同时进时日期只在备完后才记，三路都会通过日期检查、同时备
+    /// 同一批 App 写同一个备份文件夹（两份备份互相覆盖、文件写一半
+    /// 被另一份顶掉）。先到的跑，后到的直接返回。
+    private static let scheduledBackupLock = NSLock()
+    private static var scheduledBackupRunning = false
+
     /// 定时备份的静默核心（静态：同上，主界面打开即查）。判断
     /// 口径：启用 + 选了 App + 今天没备过 + 已到设定时间 →
     /// 按设定范围（完整/登录态）在后台静默备完才记日期，全
     /// 失败不记、等下次打开重试。原来走 backupApps 会弹"备
     /// 份完成"窗，定时触发不弹窗更合适
     static func runScheduledBackupIfDue() async {
+        scheduledBackupLock.lock()
+        guard !scheduledBackupRunning else { scheduledBackupLock.unlock(); return }
+        scheduledBackupRunning = true
+        scheduledBackupLock.unlock()
+        defer {
+            scheduledBackupLock.lock()
+            scheduledBackupRunning = false
+            scheduledBackupLock.unlock()
+        }
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: "LCScheduleBackupEnabled") else { return }
         guard let ids = defaults.stringArray(forKey: "LCScheduleBackupAppIDs"), !ids.isEmpty else { return }
@@ -6192,7 +6218,11 @@ struct LCDataManagementView : View {
         }
     }
     
-    // 直接用 rootViewController 弹出文件选择器（避免 SwiftUI 套娃 sheet 冲突）
+    // 直接用 rootViewController 弹出文件选择器（避免 SwiftUI 套娃 sheet 冲突）。
+    // 不在这里弹“成功”：文件还没拷、用户还没选位置就报成功是假成功，
+    // 且弹窗与 picker 同一个 runloop 抢呈现位、弹窗会把 picker 静默吞掉
+    // （用户点“好”后根本没出现选位置的界面，什么都没导出）；成功只在
+    // delegate 的 didPickDocumentsAt 里报（那时系统已把文件拷到用户选的位置）。
     func presentExportPicker(for url: URL) {
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
         // 找到最顶层的 VC
@@ -6202,9 +6232,15 @@ struct LCDataManagementView : View {
         while let presented = topVC.presentedViewController {
             topVC = presented
         }
+        let coordinator = CZFExportPickerCoordinator()
+        coordinator.onPick = { dest in
+            let destName = dest.deletingLastPathComponent().lastPathComponent
+            self.successInfo = "已导出到「\(destName.isEmpty ? dest.lastPathComponent : destName)」"
+            self.successShow = true
+        }
+        picker.delegate = coordinator
+        exportPickerCoordinator = coordinator
         topVC.present(picker, animated: true)
-        successInfo = "请选择导出位置（可存到 iCloud 云盘）"
-        successShow = true
     }
 
     func presentExportPickerForAll() {
@@ -6217,11 +6253,36 @@ struct LCDataManagementView : View {
         while let presented = topVC.presentedViewController {
             topVC = presented
         }
+        // 同 presentExportPicker：成功只在 delegate 回调里报，不提前弹。
+        let coordinator = CZFExportPickerCoordinator()
+        coordinator.onPick = { dest in
+            let destName = dest.deletingLastPathComponent().lastPathComponent
+            self.successInfo = "已导出到「\(destName.isEmpty ? dest.lastPathComponent : destName)」"
+            self.successShow = true
+        }
+        picker.delegate = coordinator
+        exportPickerCoordinator = coordinator
         topVC.present(picker, animated: true)
-        successInfo = "请选择导出位置（可存到 iCloud 云盘）"
-        successShow = true
     }
 
+}
+
+// 备份导出 picker 的 delegate：UIDocumentPickerViewController 的
+// delegate 是 weak，内联创建会被当场释放、回调永不触发（441 教训）；
+// 由 LCDataManagementView 用 @State 强持有。成功只在
+// documentPicker(_:didPickDocumentsAt:) 里报——forExporting(asCopy:)
+// 的回调在系统把文件拷到用户选的位置之后才触发；取消静默，不报成功。
+final class CZFExportPickerCoordinator: NSObject, UIDocumentPickerDelegate {
+    var onPick: ((URL) -> Void)?
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        if let url = urls.first {
+            onPick?(url)
+        }
+    }
+
+    // 用户取消导出：不报成功，静默。
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {}
 }
 
 // 文件夹选择器（选 iCloud Drive 里的文件夹，授权后用 bookmark 长期访问）
