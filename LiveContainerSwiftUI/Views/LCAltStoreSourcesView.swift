@@ -269,7 +269,14 @@ final class AltStoreSourcesViewModel: ObservableObject {
     private func loadStoredSources() {
         let defaults = UserDefaults.standard
         let stored = defaults.array(forKey: defaultsKey) as? [String] ?? []
+        // 3.8.553（L83）：已存的重复源（归一前加进来的两种写法）
+        // 读时先归一再去重，留第一条——只按原字符串去重拦不住
+        // …/repo.json 与 …/repo.json/ 这种旧重复；下次增删源时
+        // persistSources 会把归一去重后的写回。
+        var seen = Set<String>()
         let urls = stored.compactMap { URL(string: $0) }
+            .map { stripTrailingSlash(from: $0) }
+            .filter { seen.insert($0.absoluteString).inserted }
         self.sources = urls.map { SourceItem(url: $0, isLoading: false) }
     }
 
@@ -304,15 +311,30 @@ final class AltStoreSourcesViewModel: ObservableObject {
             return nil
         }
         if trimmed.hasPrefix("/") {
-            return URL(fileURLWithPath: trimmed)
+            return stripTrailingSlash(from: URL(fileURLWithPath: trimmed))
         }
         if let url = URL(string: trimmed), let scheme = url.scheme, !scheme.isEmpty {
-            return url
+            return stripTrailingSlash(from: url)
         }
         if let httpsURL = URL(string: "https://\(trimmed)") {
-            return httpsURL
+            return stripTrailingSlash(from: httpsURL)
         }
         return nil
+    }
+
+    /// 3.8.553（L83）：末尾斜杠归一——同一源写成两种样子
+    /// （…/repo.json 与 …/repo.json/）会被当成两个源：addSource
+    /// 的去重是精确 URL 相等，拦不住，源列表出现两行、刷新拉
+    /// 两遍、源页 App 也出现两份（跨源去重只在单源解码内做，
+    /// B-10）。根路径 "/" 本身保留；query/fragment 不动。
+    private func stripTrailingSlash(from url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var path = components.percentEncodedPath
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        components.percentEncodedPath = path
+        return components.url ?? url
     }
 }
 
