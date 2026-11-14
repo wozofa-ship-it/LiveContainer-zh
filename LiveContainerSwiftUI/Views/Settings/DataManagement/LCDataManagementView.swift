@@ -2982,8 +2982,13 @@ struct LCDataManagementView : View {
                 newestDumpDate = mdate
             }
             keychainHasSnapshot = true
+            // 空快照也要建 Keychain 目录：下面校验要求“有快照
+            // 就有 Keychain 目录”，空快照（桥跑过、App 没存令牌）
+            // 不建目录会让校验报“钥匙串快照缺失”、整个备份抛错，
+            // 这个 App 从此一次都备不上；空目录恢复时读出 0 条，
+            // 与“快照为空”的回执口径一致。
+            try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
             if !items.isEmpty {
-                try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
                 // 写盘失败也别算成功：原来 try? 吞掉写失败、keychainCount 照加，校验又只核 Keychain 目录在不在（目录刚建好），备份会报“钥匙串 ✅ N 条”但里面根本没有快照文件，恢复时登录令牌悄悄丢了。写失败记失败清单、清掉半截文件。
                 let keychainDest = keychainRoot.appendingPathComponent(container.folderName + ".plist")
                 if (try? data.write(to: keychainDest)) != nil {
@@ -3300,6 +3305,16 @@ struct LCDataManagementView : View {
         } else if count == 0, !failedNames.isEmpty {
             // 一个都没成：别报“成功 0 个”，直接报失败清单
             errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n") + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+            errorShow = true
+        } else if count == 0 {
+            // 一个都没备上、失败清单也是空的：剩下的只有全部
+            // 跳过（锁了/今日已备过）或根本没传 App——别报
+            // “备份完成 0 个”假成功，跳过的明说，没传的直说。
+            if skippedNames.isEmpty {
+                errorInfo = "没有要备份的 App\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+            } else {
+                errorInfo = "没有备份上任何 App（全部已跳过）：\n" + skippedNames.joined(separator: "\n") + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+            }
             errorShow = true
         } else {
             // 钥匙串导了几条必须报出来：以前恒为 0 也照报"备份
@@ -3698,7 +3713,10 @@ struct LCDataManagementView : View {
         if #available(iOS 16.0, *) {
             MultitaskDockManager.refreshAfterAppChanged()
         }
-        successInfo = "一键恢复全部完成（共 \(lines.count) 个备份）：\n\n" + lines.joined(separator: "\n")
+        // 注意：头数只认备份数（merged.count），不照抄下面
+        // lines.count——settings 行也算进去了，设置恢复成功
+        // 时头数会多算 1 个（restoreSelectedBackups 同款修法）。
+        successInfo = "一键恢复全部完成（共 \(merged.count) 个备份）：\n\n" + lines.joined(separator: "\n")
         successShow = true
     }
 
@@ -4336,7 +4354,14 @@ struct LCDataManagementView : View {
                             let currentApps = sharedModel.apps + sharedModel.hiddenApps
                             installedApp = currentApps.first(where: {
                                 !czfMissingBeforeApps.contains(ObjectIdentifier($0)) &&
-                                ($0.appInfo.displayName() ?? "") == plan.name &&
+                                // 显示名认预设名或 manifest 名任一：安装时
+                                // 传的是文件夹名剥后缀的预设名（czfPresetName），
+                                // manifest 名（plan.name）是备份时的显示名；
+                                // 实例改名后备份过，文件夹名冻在首次备份
+                                // 时、manifest 每次备份都重写，两边会岔开——
+                                // 只认 plan.name 时装好的 App 永远对不上，
+                                // 空等 5 分钟报安装失败、数据也不恢复。
+                                (($0.appInfo.displayName() ?? "") == plan.name || ($0.appInfo.displayName() ?? "") == czfPresetName) &&
                                 (plan.bundleID.isEmpty || ($0.appInfo.bundleIdentifier() ?? "") == plan.bundleID)
                             })
                             if installedApp != nil { break }
@@ -4367,6 +4392,7 @@ struct LCDataManagementView : View {
                         }
                     })
                     keychainFoundTotal += outcome2.keychainFound
+                    keychainPlistTotal += outcome2.keychainPlistFiles
                     keychainQueuedTotal += outcome2.keychainQueued
                     keychainImportedTotal += outcome2.keychainImported
                     keychainUnwritableTotal += outcome2.keychainUnwritable
@@ -4978,12 +5004,30 @@ struct LCDataManagementView : View {
         // 组容器数据写回：和容器、钥匙串是同一时刻的快照，
         // 三处一起回滚，App 读到的才是一套对齐的数据
         let appGroupBackup = appFolder.appendingPathComponent("AppGroup")
-        if !loginOnly || isLoginBackup, let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
+        // 只恢复登录态时组容器也要进：登录态档走下面 isLoginBackup
+        // 分支；完整备份的登录态恢复原来被 !loginOnly 拦在外面，
+        // 组会话文件既不在容器合并循环里（顶层循环跳过 AppGroup），
+        // 隔离组容器的 App 又没有 LCAppGroup 镜像可走，就悄悄丢了。
+        if let groupFolders = try? fm.contentsOfDirectory(at: appGroupBackup, includingPropertiesForKeys: nil) {
             for groupFolder in groupFolders {
                 let dest = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupFolder.lastPathComponent)
                 // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
                 let groupDownloaded = await Self.waitForUbiquitousDownload(groupFolder, fm: fm, onProgress: downloadProgress)
                 if !groupDownloaded { downloadIncomplete = true }
+                if loginOnly && !isLoginBackup {
+                    // 只恢复登录态 + 完整备份：合并会话文件（只写
+                    // 会话文件，整组数据不动；dest 不存在时合并
+                    // 自己建目录，不走整替——整替会把整套组数据
+                    // 盖回来，违背“只恢复登录态”）。
+                    let mergeResult = await Self.mergeLoginStateOffMain(from: groupFolder, to: dest)
+                    mergedLoginFiles += mergeResult.merged
+                    mergedLoginFailed += mergeResult.failed
+                    if mergedLoginFailedPaths.count < 50 { mergedLoginFailedPaths.append(contentsOf: mergeResult.failedPaths.prefix(50 - mergedLoginFailedPaths.count)) }
+                    if mergeResult.merged > 0 {
+                        restoredExtras = true
+                    }
+                    continue
+                }
                 if isLoginBackup && fm.fileExists(atPath: dest.path) {
                     // 登录态档的组容器同样是半套：合并，不整替。
                     // 合并拷盘挪后台（见三件套注释）。
@@ -5064,6 +5108,17 @@ struct LCDataManagementView : View {
                             app.uiDefaultDataFolder = n
                             app.appInfo.dataUUID = n
                         }
+                    }
+                    // 新容器也要写 LCContainerInfo.plist：上面两处
+                    // 补容器（空容器兜底、钥匙串兜底）都调了
+                    // makeLCContainerInfoPlist，这里漏了——没 plist
+                    // 时 keychainGroupId 读 -1，宿主直写与游客桥
+                    // 都往 "...shared.-1" 这个没授权的组里写，
+                    // 令牌写不进；组号照 manifest 的来，没有就随机
+                    //（与上面两处同款；写 plist 时建目录，合并随后
+                    // 写文件，合并跳过 LCContainerInfo.plist 不覆盖）。
+                    if let bundleID = app.appInfo.bundleIdentifier() {
+                        newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
                     }
                     target = newContainer
                 }
@@ -5734,7 +5789,10 @@ struct LCDataManagementView : View {
         for app in sourceApps {
             let appBundleID = app["bundleIdentifier"] as? String ?? ""
             let appName = app["name"] as? String ?? ""
-            let match = (!bundleID.isEmpty && appBundleID == bundleID) || (!name.isEmpty && appName == name)
+            // 先认 Bundle ID：同名不同 App 时名字会撞，装错 IPA
+            // 后面等安装的循环又按 Bundle ID 卡住、空等 5 分钟。
+            // 名字只在 manifest 没写 Bundle ID 时才当兜底。
+            let match = !bundleID.isEmpty ? appBundleID == bundleID : (!name.isEmpty && appName == name)
             if match {
                 var downloadString: String? = app["downloadURL"] as? String
                 if downloadString == nil,
@@ -6398,11 +6456,20 @@ struct LCDataManagementView : View {
         // 手动备份改了状态，循环里会重新判定，最多白关一次窗口，
         // 与现在一致）。非登录态备份不跳过任何 App，照旧全刷。
         let fmForFilter = FileManager.default
+        // 锁了的备份定时也不备（手动备份同款跳过）：先摘掉，
+        // 别为它关客窗口、也别把它记成失败（见下面循环里
+        // skippedLockedCount；否则锁一个 App 就天天报失败、
+        // 失败记录永远不清、日期永远不结算）。
+        let filterRoot = fmForFilter.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("Backups")
+        func czfScheduledSkippedLocked(_ app: LCAppModel) -> Bool {
+            guard let backupRoot = filterRoot else { return false }
+            return Self.isBackupLocked(Self.backupFolderName(for: app, backupRoot: backupRoot, fm: fmForFilter))
+        }
         let toRefresh: [LCAppModel]
-        if loginOnly, let backupRoot = fmForFilter.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("Backups") {
-            toRefresh = selected.filter { !Self.hasExistingFullBackup(for: $0, backupRoot: backupRoot, fm: fmForFilter) }
+        if loginOnly, let backupRoot = filterRoot {
+            toRefresh = selected.filter { !czfScheduledSkippedLocked($0) && !Self.hasExistingFullBackup(for: $0, backupRoot: backupRoot, fm: fmForFilter) }
         } else {
-            toRefresh = selected
+            toRefresh = selected.filter { !czfScheduledSkippedLocked($0) }
         }
         // 3.8.374：定时备份同样先刷快照，别读旧 dump
         for app in toRefresh {
@@ -6416,6 +6483,10 @@ struct LCDataManagementView : View {
                 // 全跳过且无失败时当天同样算结算（原来只看有没有备
                 // 上，永不结算，每次进页都重跑、还关客 App 窗口）。
                 var skippedFullCount = 0
+                // 锁了的备份定时也不备（手动备份同款跳过）：
+                // backupOneAppSyncLocked 会直接抛“备份已锁定”，
+                // 不摘的话每天记一次失败、失败记录永远不清。
+                var skippedLockedCount = 0
                 // 3.8.306：定时备份失败别静默——原来失败用 try?
                 // 吞掉，整批全失败也不留痕、第二天照常重试，
                 // 用户根本不知道没备上。失败的 App 记下来，
@@ -6430,6 +6501,13 @@ struct LCDataManagementView : View {
                     let backupRoot = docs.appendingPathComponent("Backups")
                     try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                     for app in selected {
+                        // 锁了的备份不覆盖（手动备份同款跳过；上面
+                        // toRefresh 已摘，这里是兜底——两处之间若有
+                        // 手动备份改了状态，循环里重新判定）。
+                        if Self.isBackupLocked(Self.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)) {
+                            skippedLockedCount += 1
+                            continue
+                        }
                         // 3.8.283：定时登录态不覆盖完整备份——完整备份里
                         // 已有登录态，登录态档盖上去只丢数据不赚东西；
                         // 跳过（不记成功），想更新它就手动备一次
@@ -6473,8 +6551,9 @@ struct LCDataManagementView : View {
                     }
                 }
                 // 全跳过且无失败时当天同样算结算（见上面 skippedFullCount），
-                // 真失败时不结算，第二天照常重试。
-                continuation.resume(returning: (!backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount == selected.count), !failedNames.isEmpty || !copyFailedNames.isEmpty))
+                // 真失败时不结算，第二天照常重试。锁了的跳过与完整
+                // 备份的跳过同款计入结算。
+                continuation.resume(returning: (!backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount + skippedLockedCount == selected.count), !failedNames.isEmpty || !copyFailedNames.isEmpty))
             }
         }
         if didBackup {

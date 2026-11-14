@@ -668,9 +668,16 @@ class LCAppModel: ObservableObject, Hashable {
         // 旧数据、后启动的那个却捡了旧数据，完全反了。先按
         // installationDate 判，缺失时按包文件夹名判：克隆的
         // 文件夹是 包名_时间戳.app，原装的是 包名.app。
+        // 3.8.524（L51）：三条目以上共用同一容器时，“先装的不拆”
+        // 必须对全部共用者取与——原来循环里遇上第一个比自己新
+        // 的就 return，中间那个（比一个旧、比一个新）永远拆不
+        // 出去，一直跟最早的那个共用容器：按容器找窗口会把最
+        // 早那个的窗口顶回来、中间这个永远起不来，登录态也
+        // 天然同一份。改成先攒“比全部共用者都早”再决定。
+        var czfSelfIsEarliest = true
         for other in czfOtherSameBundleApps() where other.uiContainers.contains(where: { $0.folderName == sharedFolder }) {
             if let myDate = appInfo.installationDate, let otherDate = other.appInfo.installationDate {
-                if myDate < otherDate { return }
+                if !(myDate < otherDate) { czfSelfIsEarliest = false }
             } else {
                 let myPath = appInfo.relativeBundlePath ?? ""
                 let otherPath = other.appInfo.relativeBundlePath ?? ""
@@ -683,14 +690,15 @@ class LCAppModel: ObservableObject, Hashable {
                 // 有一边解析不出来才回落到有戳/无戳判。
                 if let myStamp = Self.czfCloneTimestamp(from: myPath),
                    let otherStamp = Self.czfCloneTimestamp(from: otherPath) {
-                    if myStamp < otherStamp { return }
+                    if !(myStamp < otherStamp) { czfSelfIsEarliest = false }
                 } else {
                     let myStamped = myPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
                     let otherStamped = otherPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
-                    if !myStamped && otherStamped { return }
+                    if !(!myStamped && otherStamped) { czfSelfIsEarliest = false }
                 }
             }
         }
+        if czfSelfIsEarliest { return }
         // 已有不共享的容器时直接切过去，不再新建（容器越生越多根因之二）：
         // 共享容器被重选（旧备份恢复把 dataUUID 指回旧容器、菜单点回旧容器）
         // 时，原来每次都要造一个新 UUID，列表只增不减；本条目自己的容器

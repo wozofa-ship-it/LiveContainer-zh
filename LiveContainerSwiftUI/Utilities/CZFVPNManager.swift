@@ -520,7 +520,18 @@ public final class CZFVPNManager {
         let std = normalizedShareLink(link)
         var name = ""
         var detail = ""
-        if let comps = URLComponents(string: std) {
+        // 3.8.523（L51）：vmess 链接整段 authority 是 base64 的
+        // JSON（备注在 ps、地址在 add、端口在 port），URLComponents
+        // 会把 base64 当主机名——要么整串乱码当名字、要么含 =
+        // / 解析失败、所有 vmess 节点都显示成一样的“节点 · vmess”，
+        // 列表里认不出是哪个节点（本函数注释的“列表里一眼能认出
+        // 是哪个节点”就 broken 在这里；仓内无任何地方解过 vmess
+        // 的 ps）。先解 base64 JSON，解不出再走通用路（JSON 节点
+        // 显示成“节点”是设置页帮助里写明的既有行为，不动它）。
+        if nodeScheme(for: link) == "vmess", let vmess = vmessDisplay(for: std) {
+            name = vmess.name
+            detail = vmess.detail
+        } else if let comps = URLComponents(string: std) {
             if let frag = comps.fragment, !frag.isEmpty {
                 name = frag
             }
@@ -550,6 +561,36 @@ public final class CZFVPNManager {
             name = alias
         }
         return (name, detail)
+    }
+
+    /// vmess 链接解备注/地址：`vmess://<base64-JSON>`，JSON 里
+    /// ps 是备注、add 是地址、port 是端口（字符串或数字）。
+    /// 解不出（非标准 base64/不是 JSON/既无 ps 又无 add）返回
+    /// nil，调用方走通用路。base64 可能是 URL 安全变体（- _）
+    /// 且缺 padding，与订阅解码同款处理。
+    private static func vmessDisplay(for link: String) -> (name: String, detail: String)? {
+        guard link.hasPrefix("vmess://") else { return nil }
+        var rest = String(link.dropFirst("vmess://".count))
+        if let hashIdx = rest.firstIndex(of: "#") { rest = String(rest[..<hashIdx]) }
+        if let qIdx = rest.firstIndex(of: "?") { rest = String(rest[..<qIdx]) }
+        let b64 = rest
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padded = b64 + String(repeating: "=", count: (4 - b64.count % 4) % 4)
+        guard let data = Data(base64Encoded: padded),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let dict = json as? [String: Any] else { return nil }
+        let address = (dict["add"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var port = ""
+        if let p = dict["port"] as? String {
+            port = p
+        } else if let p = dict["port"] as? NSNumber {
+            port = p.stringValue
+        }
+        let hostPort = address.isEmpty ? "" : (port.isEmpty ? address : "\(address):\(port)")
+        let remark = (dict["ps"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !remark.isEmpty || !hostPort.isEmpty else { return nil }
+        return (name: remark.isEmpty ? hostPort : remark, detail: hostPort)
     }
 
     /// 节点链接的协议 scheme（小写；原始 Xray JSON 出站记
@@ -688,8 +729,21 @@ public final class CZFVPNManager {
                 let srcData = try? Data(contentsOf: src)
                 let destData = try? Data(contentsOf: dest)
                 if destData != srcData {
+                    // 3.8.523（L51）：先拷到临时文件、再换位——原来
+                    // 先删旧插件再拷新，拷失败（磁盘满）时旧插件已
+                    // 没了、还返回 true（调用方以为换上了新插件就
+                    // 去单签，实际签的是不存在的文件）；钉死节点的
+                    // App 没了插件就断网。临时文件拷失败时旧插件
+                    // 原样保留、返回 false；换位是同目录 move，
+                    // 拷成功后基本不会失败，失败也清临时文件。
+                    let tmpDest = dest.appendingPathExtension("czf-tmp")
+                    try? fm.removeItem(at: tmpDest)
+                    guard (try? fm.copyItem(at: src, to: tmpDest)) != nil else { return false }
                     try? fm.removeItem(at: dest)
-                    try? fm.copyItem(at: src, to: dest)
+                    guard (try? fm.moveItem(at: tmpDest, to: dest)) != nil else {
+                        try? fm.removeItem(at: tmpDest)
+                        return false
+                    }
                     return true
                 }
             }
@@ -891,13 +945,20 @@ public final class CZFVPNManager {
             // 不冻调用方的协作线程（runApp 侧同款做法）。
             let started = await Task.detached(priority: .userInitiated) { CZFVPNManager.shared.start(withLink: cand.link) }.value
             guard started else { continue }
-            if Self.nodeOverride(for: appInfo) != nil {
-                Self.setNodeOverride(cand.link, for: appInfo)
-            } else {
-                UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
-            }
             claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
             if await probeNodeThroughCore(timeout: timeout) {
+                // 3.8.523（L51）：探通了才把候选节点写进钉死/
+                // 全局——原来先写再探，探不通继续试下一个，最
+                // 后全试完都失败时钉死/全局已指着最后一个探
+                // 证已死的节点，用户的原节点选择被悄悄换掉，
+                // 下次启动还先上这个死节点。全局下标按当前列
+                // 表现查（探针几秒里用户可能增删过节点，旧快
+                // 照的 idx 会指错行；钉死那路本来就是按内容写）。
+                if Self.nodeOverride(for: appInfo) != nil {
+                    Self.setNodeOverride(cand.link, for: appInfo)
+                } else if let idx = nodeLinks.firstIndex(of: cand.link) {
+                    UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+                }
                 noteProbeOK(link: cand.link)
                 return true
             }
@@ -1000,6 +1061,17 @@ public final class CZFVPNManager {
     public func start() -> Bool {
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
+        // 3.8.523（L51）：手动起核心是新的明确意图，之前排好的
+        // 自动停不能再按旧截止时间把它停掉——ensureRunning（开
+        // App）与 ensureRunningForHost 起核心时都会取消待停，
+        // 唯独设置页手动起核心与切节点走的 start() 漏了：标 VPN
+        // 的 App 关窗排好 10 分钟待停后，用户在设置页亲手起核
+        // 心，待停到点时 idle（自上次启动算起）已够档位，check-
+        // PendingStop 直接 stop()，刚亲手起的核心可能 1 分钟
+        // 后就被停掉。取消后下次关 App 时 noteRunningAppsChanged
+        // 再排新的；起失败时核心本就停着，待停到点也是空操作。
+        pendingStopWork?.cancel()
+        pendingStopWork = nil
         // 手动 / 宿主 / 预热起核心：不归某个 App 所有，清掉
         // 养号归属，之后 App 自动启动才可以重新抢核心
         coreOwnerBundleId = nil
@@ -1322,15 +1394,23 @@ public final class CZFVPNManager {
             }
             rotateTriedLinks.insert(current)
             rotateTriedLinks.insert(target)
-            if Self.nodeOverride(for: appInfo) != nil {
-                Self.setNodeOverride(target, for: appInfo)
-            } else if let idx = links.firstIndex(of: target) {
-                UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
-            }
             vpnCoreLock.lock()
             coreOwnerBundleId = nil
             vpnCoreLock.unlock()
             if start(withLink: target) {
+                // 3.8.523（L51）：起成功了才把目标节点写进钉死/
+                // 全局——原来先写再起，起失败继续试下一个，一圈
+                // 都起不来时钉死/全局已指着最后一个起失败的节
+                // 点（与 waitUntilNodeReady 探不通还写同款）；
+                // 下次启动先上这个死节点，养号钉死也被悄悄换
+                // 掉。全失败时钉死仍指着原来那个死节点，与报错
+                // 文案“手动换节点”一致。startFallback 本来就是
+                // 起成功才写的形状，这里照它。
+                if Self.nodeOverride(for: appInfo) != nil {
+                    Self.setNodeOverride(target, for: appInfo)
+                } else if let idx = links.firstIndex(of: target) {
+                    UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+                }
                 vpnCoreLock.lock()
                 if let bid = appInfo.bundleIdentifier() {
                     coreOwnerBundleId = bid
