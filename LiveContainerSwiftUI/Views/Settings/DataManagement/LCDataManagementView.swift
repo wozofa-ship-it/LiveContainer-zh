@@ -2785,6 +2785,8 @@ struct LCDataManagementView : View {
                     if (try? fm.copyItem(at: src, to: groupRoot.appendingPathComponent(groupID))) == nil {
                         loginFailed += 1
                         if loginFailedPaths.count < 50 { loginFailedPaths.append("AppGroup/\(groupID)") }
+                        // B-3/B-4 同款：copyItem 不是原子的，拷失败可能在目标留下一个不完整目录；.app 和数据容器都清残留，这里原来没清，半截组数据会进备份、恢复时再拷回去。
+                        try? fm.removeItem(at: groupRoot.appendingPathComponent(groupID))
                     }
                 }
             }
@@ -2864,8 +2866,15 @@ struct LCDataManagementView : View {
             keychainHasSnapshot = true
             if !items.isEmpty {
                 try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
-                try? data.write(to: keychainRoot.appendingPathComponent(container.folderName + ".plist"))
-                keychainCount += items.count
+                // 写盘失败也别算成功：原来 try? 吞掉写失败、keychainCount 照加，校验又只核 Keychain 目录在不在（目录刚建好），备份会报“钥匙串 ✅ N 条”但里面根本没有快照文件，恢复时登录令牌悄悄丢了。写失败记失败清单、清掉半截文件。
+                let keychainDest = keychainRoot.appendingPathComponent(container.folderName + ".plist")
+                if (try? data.write(to: keychainDest)) != nil {
+                    keychainCount += items.count
+                } else {
+                    loginFailed += 1
+                    if loginFailedPaths.count < 50 { loginFailedPaths.append("Keychain/\(container.folderName).plist") }
+                    try? fm.removeItem(at: keychainDest)
+                }
             }
         }
         // 3.8.281：备完校验——换上之前先核临时文件夹，通不过就
@@ -5243,6 +5252,8 @@ struct LCDataManagementView : View {
                 // 13：拷失败记入失败清单（不静默丢弃）。
                 failed += 1
                 if failedPaths.count < 50 { failedPaths.append(e.rel) }
+                // B-3/B-4 同款：单文件拷失败也可能留半截文件（磁盘满时最常见），不清掉的话截断的 .db/.plist 会进备份、恢复时盖掉 live 的好文件。
+                try? fm.removeItem(at: d)
             }
         }
         // 再拷其余文件，按大小升序、300MB 封顶
@@ -5264,6 +5275,8 @@ struct LCDataManagementView : View {
                 // 13：拷失败记入失败清单（不静默丢弃）。
                 failed += 1
                 if failedPaths.count < 50 { failedPaths.append(e.rel) }
+                // B-3/B-4 同款：拷失败的半截文件清掉，别让它进备份（同上，恢复时会盖掉 live 的好文件）。
+                try? fm.removeItem(at: d)
             }
         }
         return (count, loginStateDirBreakdown(for: copied), skipped, skippedPaths, failed, failedPaths)

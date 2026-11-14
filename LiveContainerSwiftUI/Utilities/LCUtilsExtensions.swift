@@ -804,10 +804,33 @@ extension LCUtils {
 
         // MARK: - Execute only after all preflight checks pass
 
+        // 真原子：执行中途失败时把已搬完的按相反顺序搬回去，
+        // 否则 App 会卡在“本体已搬、数据还在原处”的半截状态——
+        // 模型还指着旧路径（打不开），重试又撞 destinationAlreadyExists，
+        // 只能手动去 Filza 挪回来。回滚本身尽力而为；回滚也失败
+        // 时把两份错误都写进 underlying，用户看到的是实情。
+        var completed: [(URL, URL)] = []
         for (source, destination) in normalizedMoves {
             do {
                 try fileManager.moveItem(at: source, to: destination)
+                completed.append((source, destination))
             } catch {
+                var rollbackError: Error?
+                for (doneSource, doneDestination) in completed.reversed() {
+                    do {
+                        try fileManager.moveItem(at: doneDestination, to: doneSource)
+                    } catch {
+                        if rollbackError == nil { rollbackError = error }
+                    }
+                }
+                if let rollbackError {
+                    let combined = NSError(domain: "LiveContainerBatchMove", code: 1, userInfo: [NSLocalizedDescriptionKey: "Move failed (\(error.localizedDescription)); rolling back completed moves also failed (\(rollbackError.localizedDescription)). Files may be left in a partial state — please check their locations."])
+                    throw BatchMoveError.moveFailed(
+                        source: source,
+                        destination: destination,
+                        underlying: combined
+                    )
+                }
                 throw BatchMoveError.moveFailed(
                     source: source,
                     destination: destination,

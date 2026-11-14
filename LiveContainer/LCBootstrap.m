@@ -477,7 +477,9 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
                     bookmarkURL = [NSURL URLByResolvingBookmarkData:bookmarkData options:0 relativeToURL:nil bookmarkDataIsStale:&isStale error:&err];
                     bool access = [bookmarkURL startAccessingSecurityScopedResource];
                     if(!bookmarkURL || !access) {
-                        return [@"Bookmark resolution failed or unable to access the container. You might need to readd the data storage. %@" stringByAppendingString:err.localizedDescription];
+                        // stringByAppendingString 会把 "%@" 原样留在报错文案里（它本是 format 占位），且书签解出但 startAccessing 失败时 err 是 nil，append nil 会抛 NSInvalidArgumentException、进程直接死掉而不是报这句错。
+                        NSString *detail = err.localizedDescription ?: @"";
+                        return [NSString stringWithFormat:@"Bookmark resolution failed or unable to access the container. You might need to readd the data storage. %@", detail];
                     }
                     [lcUserDefaults removeObjectForKey:@"error"];
                 }
@@ -969,13 +971,10 @@ int LiveContainerMain(int argc, char *argv[]) {
     if ([fm fileExistsAtPath:cookies2URL.path isDirectory:&isDir] && isDir) {
         NSError *error = nil;
         NSURL *cookiesURL  = [libraryURL URLByAppendingPathComponent:@"Cookies"];
-        // Remove old Caches folder if exists
-        if ([fm fileExistsAtPath:cookiesURL.path]) {
-            if ([fm removeItemAtURL:cookiesURL error:&error]) {
-                [fm moveItemAtURL:cookies2URL toURL:cookiesURL error:&error];
-            } else{
-                NSLog(@"Failed to remove old Cookies folder: %@", error);
-            }
+        // Cookies 可能是客端留下的悬空软链（客端 WebKit 没建过自己的 Cookies 目录时目标不存在）：fileExistsAtPath 会跟软链、目标不存在就判不存在，移回就永远跳过，宿主的真 cookies 困在 Cookies2 里。removeItemAtURL 删链接本身不跟目标，先删再移；Cookies 不存在时删是空操作。
+        [fm removeItemAtURL:cookiesURL error:nil];
+        if (![fm moveItemAtURL:cookies2URL toURL:cookiesURL error:&error]) {
+            NSLog(@"Failed to restore Cookies folder: %@", error);
         }
     }
     
