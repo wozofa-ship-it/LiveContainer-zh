@@ -530,7 +530,13 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         Task { [weak self] in
             guard let self else { return }
             guard await self.czfAuthenticateIfLocked() else { return }
-            delegate.openNavigationView(view: AnyView(LCAppSettingsView(model: configuration.model)))
+            // 3.8.511（L33）：裸 Task 不在主 actor 上，openNavigationView
+            // 写 @State（navigateTo/isNavigationActive），必须回主线
+            // 程，否则设置页可能打不开、还报 Publishing changes from
+            // background threads（L32 toggleHidden 同款）。
+            await MainActor.run {
+                self.delegate.openNavigationView(view: AnyView(LCAppSettingsView(model: self.configuration.model)))
+            }
         }
     }
 
@@ -685,7 +691,13 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 throw CocoaError(.propertyListWriteInvalid)
             }
             let data = try PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
-            delegate.installMdm(data: data)
+            // 3.8.511（L33）：裸 Task 不在主 actor 上，installMdm 写
+            // @State（safariViewURL/safariViewOpened，fullScreenCover
+            // 的开关），必须回主线程，否则 App Clip 配置页可能打不开
+            //（L32 toggleHidden 同款；网格那路是 SwiftUI 主 actor，不动）。
+            await MainActor.run {
+                self.delegate.installMdm(data: data)
+            }
         } catch {
             showError(error.localizedDescription)
         }
@@ -713,15 +725,25 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             try imageData.write(to: fileURL, options: .atomic)
             exportTemporaryDirectory = temporaryDirectory
 
-            guard viewIfLoaded?.window != nil, presentedViewController == nil else {
+            // 3.8.511（L33）：saveIcon 从横幅卡裸 Task 调来、不在主
+            // actor 上，viewIfLoaded 的判窗与 present 都是 UIKit 活，
+            // 必须回主线程再判、再弹，否则选择器静默弹不出来、临时
+            // 目录还漏了（delegate 回调永不触发）。单跳 MainActor.run
+            // 里判完即弹，中间无挂起；弹不出返回 false 再清临时目录。
+            let czfPresented = await MainActor.run { () -> Bool in
+                guard viewIfLoaded?.window != nil, presentedViewController == nil else {
+                    return false
+                }
+                let documentPicker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
+                documentPicker.delegate = self
+                documentPicker.presentationController?.delegate = self
+                present(documentPicker, animated: true)
+                return true
+            }
+            guard czfPresented else {
                 cleanupExportTemporaryDirectory()
                 return
             }
-
-            let documentPicker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
-            documentPicker.delegate = self
-            documentPicker.presentationController?.delegate = self
-            present(documentPicker, animated: true)
         } catch {
             cleanupExportTemporaryDirectory()
             showError(error.localizedDescription)

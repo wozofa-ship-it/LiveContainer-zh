@@ -555,25 +555,33 @@ extension UIViewController {
         confirmTitle: String,
         cancelTitle: String
     ) async -> Bool? {
-        guard viewIfLoaded?.window != nil, presentedViewController == nil else {
-            return nil
-        }
-
-        return await withUnsafeContinuation { continuation in
-            let finishConfirmation =  { (result: Bool?, alert: UIAlertController?) in
-                alert?.dismiss(animated: true) {
-                    continuation.resume(returning: result)
+        // 3.8.511（L33）：uninstall() 从横幅卡（普通 UIViewController，
+        // 非 @MainActor）的裸 Task 里 await 这里，present 离主线程
+        // 会被 UIKit 静默丢掉、continuation 永不恢复，点“卸载”没
+        // 反应（L32 showError 同款根因）。回主线程再判窗、再弹；
+        // 判窗不过也 resume(nil)，不挂起。已在主线程时只多一跳。
+        await withUnsafeContinuation { continuation in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.viewIfLoaded?.window != nil, self.presentedViewController == nil else {
+                    continuation.resume(returning: nil)
+                    return
                 }
+
+                let finishConfirmation =  { (result: Bool?, alert: UIAlertController?) in
+                    alert?.dismiss(animated: true) {
+                        continuation.resume(returning: result)
+                    }
+                }
+                
+                let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: confirmTitle, style: .destructive) { [weak alert] _ in
+                    finishConfirmation(true, alert)
+                })
+                alert.addAction(UIAlertAction(title: cancelTitle, style: .cancel) { [weak alert] _ in
+                    finishConfirmation(false, alert)
+                })
+                self.present(alert, animated: true)
             }
-            
-            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: confirmTitle, style: .destructive) { [weak alert] _ in
-                finishConfirmation(true, alert)
-            })
-            alert.addAction(UIAlertAction(title: cancelTitle, style: .cancel) { [weak alert] _ in
-                finishConfirmation(false, alert)
-            })
-            present(alert, animated: true)
         }
     }
 
