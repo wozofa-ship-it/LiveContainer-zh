@@ -125,8 +125,10 @@ public final class CZFVPNManager {
     // 预热、测速自身不 +1——它们是自动触发，不能反过来
     // 推翻用户/ App 在测速窗口内做的决定。
     private var coreActionEpoch = 0
-    // 测速代次：每轮 pingAllNodes 开始时 +1，保留作代次
-    // 区分；只读版已删收尾后校验，不再用它去翻状态。
+    // 测速代次：每轮 ping 开始时 +1；收尾只认最新一轮——
+    // App 页与 VPN 页各有自己的测速标志，manager 的
+    // isPinging 不拦第二轮，先完的那轮不能清标志、不能
+    // 补跑被挡请求（见 pingAllNodes/pingSingleNode 尾部）。
     private var pingGeneration = 0
     // 测速结束时核心没在跑时对预热的持久抑制：v186 只压
     // 10 秒，超过窗口、切走再进 App，预热又把核心起回来，
@@ -1547,8 +1549,12 @@ public final class CZFVPNManager {
         // 志只在后台块里立，调用与后台执行之间的窗口里预
         // 热可能抢跑起核心，测速中就先变在跑；立标志本身
         // 不抓状态，状态快照仍在后台块里同一把锁下抓。
+        // 代次在调用线程同步取：后台块里再 +1 的话，两轮
+        // 几乎同时进时先后不定，先完的轮次可能误认最新。
         vpnCoreLock.lock()
         isPinging = true
+        pingGeneration += 1
+        let generation = pingGeneration
         vpnCoreLock.unlock()
         DispatchQueue.global(qos: .userInitiated).async {
             // 抓状态必须和 start/stop 同一把锁：否则抓到的
@@ -1558,7 +1564,6 @@ public final class CZFVPNManager {
             self.vpnCoreLock.lock()
             self.isPinging = true
             self.pingRetryLink = nil
-            self.pingGeneration += 1
             let epochAtPingStart = self.coreActionEpoch
             let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
@@ -1619,18 +1624,25 @@ public final class CZFVPNManager {
             var deferredHost = false
             var postPingActiveLink = prePingActiveLink
             self.vpnCoreLock.lock()
+            // 并发测速收尾：只有最新一轮才清标志、记预热抑制、
+            // 取走被挡请求；先完的旧轮只回自己的 completion，
+            // 不碰共享收尾状态——否则它会把核心起回来，让还在
+            // 跑的新轮探针撞上“核心占用”，还会提前放开 isPinging。
+            let isLatestPing = (generation == self.pingGeneration)
             let epochChanged = self.coreActionEpoch != epochAtPingStart
-            if !epochChanged {
-                self.prewarmSuppressedAfterPing = !self.isRunning
-            } else {
-                self.pingRetryLink = nil
+            if isLatestPing {
+                if !epochChanged {
+                    self.prewarmSuppressedAfterPing = !self.isRunning
+                } else {
+                    self.pingRetryLink = nil
+                }
+                postPingActiveLink = self.nodeLink
+                deferredApp = self.deferredEnsureApp
+                self.deferredEnsureApp = nil
+                deferredHost = self.deferredHostEnsure
+                self.deferredHostEnsure = false
+                self.isPinging = false
             }
-            postPingActiveLink = self.nodeLink
-            deferredApp = self.deferredEnsureApp
-            self.deferredEnsureApp = nil
-            deferredHost = self.deferredHostEnsure
-            self.deferredHostEnsure = false
-            self.isPinging = false
             self.vpnCoreLock.unlock()
             if let deferredApp {
                 self.ensureRunning(for: deferredApp)
@@ -1659,14 +1671,17 @@ public final class CZFVPNManager {
         let links = nodeLinks
         guard links.indices.contains(index) else { completion(nil, false); return }
         let link = links[index]
+        // 代次在调用线程同步取（同 pingAllNodes，防两轮并发时
+        // 先完的轮次误认最新）。
         vpnCoreLock.lock()
         isPinging = true
+        pingGeneration += 1
+        let generation = pingGeneration
         vpnCoreLock.unlock()
         DispatchQueue.global(qos: .userInitiated).async {
             self.vpnCoreLock.lock()
             self.isPinging = true
             self.pingRetryLink = nil
-            self.pingGeneration += 1
             let epochAtPingStart = self.coreActionEpoch
             let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
@@ -1689,18 +1704,23 @@ public final class CZFVPNManager {
             var deferredHost = false
             var postPingActiveLink = prePingActiveLink
             self.vpnCoreLock.lock()
+            // 并发测速收尾（同 pingAllNodes）：只有最新一轮才
+            // 清标志、记预热抑制、取走被挡请求。
+            let isLatestPing = (generation == self.pingGeneration)
             let epochChanged = self.coreActionEpoch != epochAtPingStart
-            if !epochChanged {
-                self.prewarmSuppressedAfterPing = !self.isRunning
-            } else {
-                self.pingRetryLink = nil
+            if isLatestPing {
+                if !epochChanged {
+                    self.prewarmSuppressedAfterPing = !self.isRunning
+                } else {
+                    self.pingRetryLink = nil
+                }
+                postPingActiveLink = self.nodeLink
+                deferredApp = self.deferredEnsureApp
+                self.deferredEnsureApp = nil
+                deferredHost = self.deferredHostEnsure
+                self.deferredHostEnsure = false
+                self.isPinging = false
             }
-            postPingActiveLink = self.nodeLink
-            deferredApp = self.deferredEnsureApp
-            self.deferredEnsureApp = nil
-            deferredHost = self.deferredHostEnsure
-            self.deferredHostEnsure = false
-            self.isPinging = false
             self.vpnCoreLock.unlock()
             if let deferredApp {
                 self.ensureRunning(for: deferredApp)

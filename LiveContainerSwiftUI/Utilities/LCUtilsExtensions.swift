@@ -72,6 +72,64 @@ extension LCUtils {
         }
     }
 
+    // S-7 魔数校验抽共用（原在 LCAltStoreSourcesView 私有，坞源
+    // 面板 installTweakFromPanel / downloadFromPanel 也要验）：
+    // DownloadHelper / URLSession 都不验 HTTP 状态，404 错误页
+    // 也会落盘；读前 4 字节比对。
+    static func czfFileHasPrefix(_ url: URL, prefixes: [[UInt8]]) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 4), data.count == 4 else { return false }
+        return prefixes.contains([UInt8](data))
+    }
+
+    // 按文件类型取期望前缀：dylib 是 Mach-O（32/64 位、大小端、
+    // fat 通吃），其余（IPA）是 ZIP（PK\x03\x04）。
+    static func czfExpectedPrefixes(for url: URL) -> [[UInt8]] {
+        if url.pathExtension.lowercased() == "dylib" {
+            return [
+                [0xFE, 0xED, 0xFA, 0xCE], [0xCE, 0xFA, 0xED, 0xFE],
+                [0xFE, 0xED, 0xFA, 0xCF], [0xCF, 0xFA, 0xED, 0xFE],
+                [0xCA, 0xFE, 0xBA, 0xBE], [0xCA, 0xFE, 0xBA, 0xBF],
+            ]
+        }
+        return [[0x50, 0x4B, 0x03, 0x04]]
+    }
+
+    // 插件文件名：裸域名链接 lastPathComponent 为空时兜底
+    // tweak.dylib（源页 installTweak 与坞面板
+    // installTweakFromPanel 共用）。
+    static func czfTweakFileName(for url: URL) -> String {
+        let name = url.lastPathComponent
+        return name.isEmpty ? "tweak.dylib" : name
+    }
+
+    // 换插件文件并签名（带回滚）：旧文件先挪到 .bak，签失败时
+    // 删新文件、把旧的挪回来；签成功再删备份。原来先删旧文件
+    // 再签，签失败旧的也没了，用户丢掉能用的插件。暂存名
+    // foo.dylib.bak 不以 .dylib 结尾，signTweaks 枚举不会把它也签了。
+    static func czfReplaceTweakFile(tempURL: URL, destURL: URL, folderURL: URL) async throws {
+        let fm = FileManager.default
+        let backupURL = destURL.appendingPathExtension("bak")
+        var oldBackedUp = false
+        if fm.fileExists(atPath: destURL.path) {
+            try? fm.removeItem(at: backupURL)
+            try fm.moveItem(at: destURL, to: backupURL)
+            oldBackedUp = true
+        }
+        do {
+            try fm.moveItem(at: tempURL, to: destURL)
+            try await LCUtils.signTweaks(tweakFolderUrl: folderURL, force: true)
+        } catch {
+            try? fm.removeItem(at: destURL)
+            if oldBackedUp {
+                try? fm.moveItem(at: backupURL, to: destURL)
+            }
+            throw error
+        }
+        try? fm.removeItem(at: backupURL)
+    }
+
     private static func signTweaksImpl(tweakFolderUrl: URL, force : Bool = false, progressHandler : ((Progress) -> Void)? = nil) async throws {
         guard LCSharedUtils.certificatePassword() != nil else {
             return

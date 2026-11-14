@@ -332,7 +332,9 @@ struct LCTweakFolderView : View {
         } catch {
             errorShow = true
             errorInfo = error.localizedDescription
-            return
+            // 删了一半才报错也别直接 return：已删掉的项要从列表里
+            // 去掉，不然列表里留着磁盘上已不存在的僵尸条目，点它
+            // 还会再报错；没删成的那几项留在列表里不动。
         }
         if isRoot {
             for iToRemove in indexToRemove {
@@ -402,9 +404,29 @@ struct LCTweakFolderView : View {
                 errorInfo = "lc.tweakView.noDylibToExport".loc
                 return
             }
+            // 停用的 .dylib 也导出：单条导出会拷一份去临时目录、
+            // 去掉 .disabled 后缀再分享；文件夹导出原来直接跳过，
+            // 备份会丢已停用的插件，恢复后用户得重下。
+            var tmpDir: URL?
             for case let entryURL as URL in enumerator {
-                if entryURL.lastPathComponent.hasSuffix(".dylib") {
+                let last = entryURL.lastPathComponent
+                if last.hasSuffix(".dylib") {
                     urls.append(entryURL)
+                } else if last.hasSuffix(".dylib" + LCTweakItem.disabledSuffix) {
+                    do {
+                        if tmpDir == nil {
+                            tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                            try fm.createDirectory(at: tmpDir!, withIntermediateDirectories: true)
+                        }
+                        let cleanName = String(last.dropLast(LCTweakItem.disabledSuffix.count))
+                        let cleanUrl = tmpDir!.appendingPathComponent(cleanName)
+                        try fm.copyItem(at: entryURL, to: cleanUrl)
+                        urls.append(cleanUrl)
+                    } catch {
+                        errorShow = true
+                        errorInfo = error.localizedDescription
+                        return
+                    }
                 }
             }
             if urls.isEmpty {

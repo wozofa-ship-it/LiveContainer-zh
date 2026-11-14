@@ -4539,17 +4539,21 @@ struct SourcesPanelView: View {
     private func installTweakFromPanel(from url: URL, name: String) async {
         do {
             let (tempURL, _) = try await URLSession.shared.download(from: url)
+            // S-7 同款魔数校验：URLSession 不验 HTTP 状态，404 错误页
+            // 也会落盘成“插件”再签名；错了按下载失败报，不装。
+            guard LCUtils.czfFileHasPrefix(tempURL, prefixes: LCUtils.czfExpectedPrefixes(for: url)) else {
+                try? FileManager.default.removeItem(at: tempURL)
+                throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
+            }
             let fm = FileManager.default
             let folderURL = LCPath.tweakPath.appendingPathComponent(name)
             if !fm.fileExists(atPath: folderURL.path) {
                 try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
             }
-            let destURL = folderURL.appendingPathComponent(url.lastPathComponent)
-            if fm.fileExists(atPath: destURL.path) {
-                try fm.removeItem(at: destURL)
-            }
-            try fm.moveItem(at: tempURL, to: destURL)
-            try await LCUtils.signTweaks(tweakFolderUrl: folderURL, force: true)
+            // 换文件并签名走共用（带回滚）：空名兜底 tweak.dylib
+            // + 旧文件先挪 .bak，签失败恢复旧的。
+            let destURL = folderURL.appendingPathComponent(LCUtils.czfTweakFileName(for: url))
+            try await LCUtils.czfReplaceTweakFile(tempURL: tempURL, destURL: destURL, folderURL: folderURL)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -4571,7 +4575,21 @@ struct SourcesPanelView: View {
         Task {
             do {
                 let (tempURL, _) = try await URLSession.shared.download(from: url)
-                let fileName = url.lastPathComponent
+                // 与源页 downloadVersion 同款三件套：空名兜底（空名时
+                // destURL 就是 Documents 目录本身，removeItem 会删
+                // 整个文稿目录）、缺 .ipa 后缀补上（dylib 不补）、按
+                // 文件类型验魔数（404 错误页不落地成“IPA”）。
+                let isDylib = url.pathExtension.lowercased() == "dylib"
+                var fileName = url.lastPathComponent
+                if fileName.isEmpty {
+                    fileName = isDylib ? "tweak.dylib" : "app.ipa"
+                } else if !isDylib && !fileName.lowercased().hasSuffix(".ipa") {
+                    fileName += ".ipa"
+                }
+                guard LCUtils.czfFileHasPrefix(tempURL, prefixes: LCUtils.czfExpectedPrefixes(for: url)) else {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
+                }
                 let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let destURL = docsURL.appendingPathComponent(fileName)
                 if FileManager.default.fileExists(atPath: destURL.path) {
@@ -4664,9 +4682,17 @@ private struct SourcePanelRow: View {
 
     private var isPluginInstalled: Bool {
         guard let downloadURL = app.latestVersion?.downloadURL,
-              downloadURL.pathExtension.lowercased() == "dylib" else { return false }
-        let pluginURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
-        return FileManager.default.fileExists(atPath: pluginURL.path)
+              downloadURL.pathExtension.lowercased() == "dylib",
+              // 空文件名时拼接出的就是文件夹本身，文件夹在就误报“已装”（源页同款守卫）。
+              !downloadURL.lastPathComponent.isEmpty else { return false }
+        // 源页装进“名-包名”文件夹、老版装进“名”文件夹，两边都认
+        //（以前只认“名”文件夹，源页装的插件面板会显示“未装”，
+        // 再点安装会在第二个文件夹里装一份重复的）。
+        let fileName = downloadURL.lastPathComponent
+        let newURL = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: newURL.path) { return true }
+        let oldURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(fileName)
+        return FileManager.default.fileExists(atPath: oldURL.path)
     }
 
     // 3.8.342：metadataText 删——行只留名字，版本/Bundle ID

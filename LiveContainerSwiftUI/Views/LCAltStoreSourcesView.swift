@@ -1608,11 +1608,7 @@ struct LCSourcesView: View {
             // DownloadHelper 不验 HTTP 状态：404 错误页也会落盘成
             // “插件文件”再签名；验 Mach-O 魔数，错了按下载失败报
             // （替掉原来的 2xx 状态校验，作用一样）。
-            guard czfFileHasPrefix(tempURL, prefixes: [
-                [0xFE, 0xED, 0xFA, 0xCE], [0xCE, 0xFA, 0xED, 0xFE],
-                [0xFE, 0xED, 0xFA, 0xCF], [0xCF, 0xFA, 0xED, 0xFE],
-                [0xCA, 0xFE, 0xBA, 0xBE], [0xCA, 0xFE, 0xBA, 0xBF],
-            ]) else {
+            guard LCUtils.czfFileHasPrefix(tempURL, prefixes: LCUtils.czfExpectedPrefixes(for: url)) else {
                 try? FileManager.default.removeItem(at: tempURL)
                 throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
             }
@@ -1622,19 +1618,10 @@ struct LCSourcesView: View {
             if !fm.fileExists(atPath: folderURL.path) {
                 try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
             }
-            // 裸域名链接 lastPathComponent 为空，destURL 会是文件夹本身，
-            // 前面 removeItem 会删整个插件文件夹；照 downloadVersion 同款
-            // 兜底，空名用 tweak.dylib。
-            var fileName = url.lastPathComponent
-            if fileName.isEmpty {
-                fileName = "tweak.dylib"
-            }
-            let destURL = folderURL.appendingPathComponent(fileName)
-            if fm.fileExists(atPath: destURL.path) {
-                try fm.removeItem(at: destURL)
-            }
-            try fm.moveItem(at: tempURL, to: destURL)
-            try await LCUtils.signTweaks(tweakFolderUrl: folderURL, force: true)
+            // 换文件并签名走共用（带回滚）：旧文件先挪 .bak，签失败
+            // 恢复旧的，不丢能用的插件。
+            let destURL = folderURL.appendingPathComponent(LCUtils.czfTweakFileName(for: url))
+            try await LCUtils.czfReplaceTweakFile(tempURL: tempURL, destURL: destURL, folderURL: folderURL)
             return nil
         } catch {
             return error
@@ -1650,16 +1637,6 @@ struct LCSourcesView: View {
         downloadVersion(url: downloadURL)
     }
 
-    // S-7：验文件头魔数——DownloadHelper 不验 HTTP 状态，404
-    // 错误页也会落盘；读前 4 字节比对，IPA 必须是 ZIP（PK\x03\x04），
-    // dylib 必须是 Mach-O（32/64 位、大小端、fat 通吃）。
-    private func czfFileHasPrefix(_ url: URL, prefixes: [[UInt8]]) -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
-        defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: 4), data.count == 4 else { return false }
-        return prefixes.contains([UInt8](data))
-    }
-
     // 3.8.307：源详情页历史版本下载——指定任意版本 URL
     // 下载（不只 latest）。与 download(app:) 同款流程：
     // 下到文稿目录，再弹分享框；失败走 errorMessage。
@@ -1672,11 +1649,14 @@ struct LCSourcesView: View {
         // 裸域名/无路径链接 lastPathComponent 为空，destURL 会是
         // Documents 目录本身；裸 UUID 无 .ipa 后缀落盘成无扩展名
         // 文件，Files 不认 IPA。照抄 installFromUrl 的兜底（空名
-        // 用 app.ipa），缺后缀补 .ipa。
+        // 用 app.ipa），缺后缀补 .ipa。dylib 例外：空名用
+        // tweak.dylib、缺后缀不补 .ipa——以前 foo.dylib 会被改
+        // 成 foo.dylib.ipa，分享出去是错名。
+        let isDylib = downloadURL.pathExtension.lowercased() == "dylib"
         var fileName = downloadURL.lastPathComponent
         if fileName.isEmpty {
-            fileName = "app.ipa"
-        } else if !fileName.lowercased().hasSuffix(".ipa") {
+            fileName = isDylib ? "tweak.dylib" : "app.ipa"
+        } else if !isDylib && !fileName.lowercased().hasSuffix(".ipa") {
             fileName += ".ipa"
         }
         let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -1696,14 +1676,16 @@ struct LCSourcesView: View {
     // （与安装下载同一套：Tab 级进度弹窗/取消/断点续传/失败
     // 重试 3 次），不再用 hostSession().download 静默下载。
     // DownloadHelper 不验 HTTP 状态：404 错误页也会落盘成
-    // “IPA”，验 ZIP 魔数，错了删文件、按下载失败报。
+    // “IPA”，按文件类型验魔数（dylib 是 Mach-O，IPA 是 ZIP），
+    // 错了删文件、按下载失败报。以前只验 ZIP，插件点“下载”
+    // 永远报“无效文件”。
     // 用户主动取消不弹错（与安装下载同款：cancelled 单独处理）。
     @MainActor
     private func czfDownloadVersionTo(url downloadURL: URL, destURL: URL) {
         Task {
             do {
                 try await downloadHelper.download(url: downloadURL, to: destURL)
-                guard czfFileHasPrefix(destURL, prefixes: [[0x50, 0x4B, 0x03, 0x04]]) else {
+                guard LCUtils.czfFileHasPrefix(destURL, prefixes: LCUtils.czfExpectedPrefixes(for: downloadURL)) else {
                     try? FileManager.default.removeItem(at: destURL)
                     throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
                 }
