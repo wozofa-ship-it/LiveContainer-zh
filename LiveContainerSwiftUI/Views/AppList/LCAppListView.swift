@@ -321,14 +321,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             let backupRoot = docsURL.appendingPathComponent("Backups")
             var byUUID: [String: String] = [:]
             var byNameBid: [String: String] = [:]
-            if let folders = try? fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil) {
-                for folder in folders {
-                    guard let info = LCDataManagementView.manifestInfo(of: folder), !info.backupDate.isEmpty else { continue }
-                    if !info.dataUUID.isEmpty {
-                        byUUID[info.dataUUID] = info.backupDate
-                    }
-                    if !info.displayName.isEmpty && !info.bundleID.isEmpty {
-                        byNameBid["\(info.displayName)|\(info.bundleID)"] = info.backupDate
+            // iCloud 外部夹也扫：换机/重装后本地是空的，备份全在
+            // iCloud 里，原来只扫本地，每行都显示“无备份”。外部先
+            // 扫、本地后扫（同键冲突时本地覆盖；同步拷过去的同名
+            // 备份日期本来就一样）。manifest 直读（detached 后台，
+            // 不堵界面；数据管理页列外部备份同款读法，占位会触发
+            // 下载、读到真日期）。
+            var czfScanRoots: [URL] = []
+            if let czfExtRoot = LCDataManagementView.externalBackupFolderURL() { czfScanRoots.append(czfExtRoot) }
+            czfScanRoots.append(backupRoot)
+            for czfRoot in czfScanRoots {
+                if let folders = try? fm.contentsOfDirectory(at: czfRoot, includingPropertiesForKeys: nil) {
+                    for folder in folders {
+                        guard let info = LCDataManagementView.manifestInfo(of: folder), !info.backupDate.isEmpty else { continue }
+                        if !info.dataUUID.isEmpty {
+                            byUUID[info.dataUUID] = info.backupDate
+                        }
+                        if !info.displayName.isEmpty && !info.bundleID.isEmpty {
+                            byNameBid["\(info.displayName)|\(info.bundleID)"] = info.backupDate
+                        }
                     }
                 }
             }
@@ -1028,17 +1039,68 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
+        // 换机/重装后本地 Backups 是空的，备份全在 iCloud 外部夹里：
+        // 原来只按本地算出的文件夹名找，外部有备份也报“没有备份”
+        //（autoRestore 同款，批量恢复这路漏了）。本地找不到时再去
+        // 外部索引里按 manifest 配对（同款严格三档）；外部索引只建
+        // 一次，manifest 等下载共用 15 秒总预算（autoRestore 同款）。
+        // 注意不用 backupFolderName 去外部夹算名：本地为空时它只会
+        // 返回显示名，多开分身的“名（UUID8）”文件夹就对不上。
+        var czfExtIndex: [(folder: URL, dataUUID: String, displayName: String, bundleID: String)] = []
+        var czfExtWaitBudget = 15
+        if let czfExtRoot = LCDataManagementView.externalBackupFolderURL(),
+           let extFolders = try? fm.contentsOfDirectory(at: czfExtRoot, includingPropertiesForKeys: nil) {
+            try? fm.startDownloadingUbiquitousItem(at: czfExtRoot)
+            for folder in extFolders {
+                var extIsDir: ObjCBool = false
+                guard fm.fileExists(atPath: folder.path, isDirectory: &extIsDir), extIsDir.boolValue else { continue }
+                let manifestURL = folder.appendingPathComponent("manifest.json")
+                while czfExtWaitBudget > 0, !LCDataManagementView.isFileDownloaded(manifestURL, underExternal: true) {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    czfExtWaitBudget -= 1
+                }
+                guard LCDataManagementView.isFileDownloaded(manifestURL, underExternal: true) else { continue }
+                if let info = LCDataManagementView.manifestInfo(of: folder) {
+                    czfExtIndex.append((folder, info.dataUUID, info.displayName, info.bundleID))
+                } else {
+                    czfExtIndex.append((folder, "", "", ""))
+                }
+            }
+        }
         var ok: [String] = []
         var failed: [String] = []
         var noBackup: [String] = []
         for app in apps {
             let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
             let folderName = LCDataManagementView.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
-            let folderURL = backupRoot.appendingPathComponent(folderName)
+            var folderURL = backupRoot.appendingPathComponent(folderName)
             var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: folderURL.path, isDirectory: &isDir), isDir.boolValue else {
-                noBackup.append(name)
-                continue
+            if !(fm.fileExists(atPath: folderURL.path, isDirectory: &isDir) && isDir.boolValue) {
+                // 本地没有，去外部索引里配对：dataUUID 精确匹配直接认；
+                // 否则显示名 + Bundle ID 都对上才算候选；多个候选不猜，
+                // 记失败让用户去数据恢复里手动选。
+                let appUUID = app.appInfo.dataUUID ?? ""
+                let appBid = app.appInfo.bundleIdentifier() ?? ""
+                if let exact = czfExtIndex.first(where: { !$0.dataUUID.isEmpty && !appUUID.isEmpty && $0.dataUUID == appUUID }) {
+                    folderURL = exact.folder
+                } else {
+                    let candidates = czfExtIndex.filter { entry in
+                        if entry.displayName.isEmpty && entry.bundleID.isEmpty {
+                            // 无 manifest 的老备份只认文件夹名 == 显示名
+                            return entry.folder.lastPathComponent == name
+                        }
+                        return !entry.bundleID.isEmpty && entry.bundleID == appBid && !entry.displayName.isEmpty && entry.displayName == name
+                    }
+                    if candidates.count == 1 {
+                        folderURL = candidates[0].folder
+                    } else if candidates.count > 1 {
+                        failed.append("\(name)：找到多个备份，请在数据恢复里手动选择恢复")
+                        continue
+                    } else {
+                        noBackup.append(name)
+                        continue
+                    }
+                }
             }
             do {
                 let outcome = try await LCDataManagementView.restoreOneApp(appFolder: folderURL, app: app, loginOnly: loginOnly)
