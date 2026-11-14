@@ -140,7 +140,14 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
                     continue
                 }
                 let folderName = tweakDir.hasSuffix(".disabled") ? String(tweakDir.dropLast(".disabled".count)) : tweakDir
-                tempTweakFolderNames.append(folderName)
+                // 3.8.565（L96）：本地循环原来不去重——`X` 与
+                // `X.disabled` 共存时（开关关掉 `X` 后又新建同名
+                // 文件夹，两步点按即到）注册表里进两个 `X`，App
+                // 设置/网格两处 ForEach(id: \.self) 撞重名；共享
+                // 循环下面本来就有这道 guard，照抄。
+                if !tempTweakFolderNames.contains(folderName) {
+                    tempTweakFolderNames.append(folderName)
+                }
             }
 
             // 共享（App Group）里的模块文件夹也要进注册表，否则转共享后

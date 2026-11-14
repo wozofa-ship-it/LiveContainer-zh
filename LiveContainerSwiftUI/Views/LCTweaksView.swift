@@ -499,7 +499,16 @@ struct LCTweakFolderView : View {
                     return
                 }
                 sharedModel.tweakFolderNames.remove(at: indexToRename2)
-                sharedModel.tweakFolderNames.insert(newName, at: indexToRename2)
+                // 3.8.565（L96）：注册表里只存去后缀的名（冷启动
+                // 扫描同款口径）——原来直接插用户敲的新名，改成
+                // `X.disabled` 会进一条带后缀的键，下次开 App 设
+                // 置的菜单里 `X` 与 `X.disabled` 各一条；新名去
+                // 后缀后若已在表里（磁盘上已有 `X.disabled`），
+                // 不再插第二条，ForEach(id: \.self) 不撞重名。
+                let registryName = newName.hasSuffix(LCTweakItem.disabledSuffix) ? String(newName.dropLast(LCTweakItem.disabledSuffix.count)) : newName
+                if !sharedModel.tweakFolderNames.contains(registryName) {
+                    sharedModel.tweakFolderNames.insert(registryName, at: indexToRename2)
+                }
             }
         }
     }
@@ -553,7 +562,16 @@ struct LCTweakFolderView : View {
         await MainActor.run {
             tweakItems.append(LCTweakItem(fileUrl: dest, isFolder: true, isFramework: false, isTweak: false, isEnabled: true))
             if isRoot {
-                sharedModel.tweakFolderNames.append(newName)
+                // 3.8.565（L96）：新建也只记去后缀的名、且表里
+                // 没有才加——开关关掉 `X`（磁盘 `X.disabled`、
+                // 表里还是 `X`）后又新建同名 `X`，原来直接 append
+                // 就造出两个 `X`，App 设置/网格两处 ForEach(id:
+                // \.self) 撞重名；名字本身带 `.disabled` 也一样
+                // 去后缀再记，与冷启动扫描同口径。
+                let registryName = newName.hasSuffix(LCTweakItem.disabledSuffix) ? String(newName.dropLast(LCTweakItem.disabledSuffix.count)) : newName
+                if !sharedModel.tweakFolderNames.contains(registryName) {
+                    sharedModel.tweakFolderNames.append(registryName)
+                }
             }
         }
     }
