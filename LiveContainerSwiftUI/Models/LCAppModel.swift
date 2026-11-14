@@ -262,7 +262,14 @@ class LCAppModel: ObservableObject, Hashable {
         // 直接动 UIView/dismiss），必须回主线程再调；横幅卡传默认
         // 空闭包，无行为变化。L38 只包了小窗口路的带回，没包这里。
         await MainActor.run { onProceed() }
-        if czfMinimizeRunningWindow(app) { return }
+        // 3.8.539（L69）：同款漏网——czfMinimizeRunningWindow 里
+        // czfOwnedDockEntry 读 @Published dockManager.apps（L67
+        // 修的是 pruneStaleDockEntries 改它的写侧，这是读侧），
+        // 本函数从横幅卡/面板的裸 Task 调来，读时主线程正增删
+        // 同一数组（add/prune/remove），Swift 数组读-写并发
+        // 是数据竞态、可能崩；minimizeWindow 自身已 dispatch
+        // 到主线程，读也回主线程再做（L64-3 同款 body: 标签形）。
+        if await MainActor.run(body: { czfMinimizeRunningWindow(app) }) { return }
         let expectedPath = app.appInfo.relativeBundlePath
         let dockManager = MultitaskDockManager.shared
         await czfLaunchThenActOnWindow(
