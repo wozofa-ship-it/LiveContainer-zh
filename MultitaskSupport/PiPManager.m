@@ -105,6 +105,12 @@ static PiPManager* sharedInstance = nil;
 // 改按控制器分键记下当时观察的 layer，WillStop/failedToStart/DidStop
 // 都只拆自己那个会话的登记，错位的回调找不到登记就是空操作。
 - (void)czfRemoveBoundsObserverForController:(AVPictureInPictureController *)pictureInPictureController {
+    // 3.8.497（L16）：controller 可能为 nil——LCAutoEndPiP 开着时
+    // DidStop 会把 pipController 置 nil，但 displayingVC 还留着，
+    // 下次 startPiPWithVC 会直接调 DidStop(nil) 走到这里；
+    // NSMapTable 的 nil 键查询行为未写进文档（NSDictionary 同款
+    // 会抛异常），先守空再查表。
+    if (!pictureInPictureController) return;
     CALayer *layer = [self.pipObservedLayers objectForKey:pictureInPictureController];
     if (layer) {
         [layer removeObserver:self forKeyPath:@"bounds"];
