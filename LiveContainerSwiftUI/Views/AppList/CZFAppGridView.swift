@@ -746,9 +746,11 @@ struct CZFAppGridCell: View {
     // banner copyLaunchUrl 同款。
     private func czfCopyLaunchURL(for app: LCAppModel) {
         guard let relativeBundlePath = app.appInfo.relativeBundlePath else { return }
-        let encodedBundlePath = relativeBundlePath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? relativeBundlePath
+        // L60-1：值里带 & 时 urlQueryAllowed 会放行它、接收侧从 &
+        // 处切断，改走 czfQueryValueAllowed（排除 &）。
+        let encodedBundlePath = relativeBundlePath.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? relativeBundlePath
         if let folderName = app.uiSelectedContainer?.folderName {
-            let encodedFolder = folderName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? folderName
+            let encodedFolder = folderName.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? folderName
             UIPasteboard.general.string = "livecontainer://livecontainer-launch?bundle-name=\(encodedBundlePath)&container-folder-name=\(encodedFolder)"
         } else {
             UIPasteboard.general.string = "livecontainer://livecontainer-launch?bundle-name=\(encodedBundlePath)"

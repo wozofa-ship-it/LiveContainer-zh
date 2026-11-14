@@ -632,7 +632,9 @@ extension LCUtils {
             guard let appName else { onServerMessage?("Unable to get App Name, Please try again."); return false }
             // App 名/脚本含空格或特殊字符时直接拼出的 URL 为 nil，旧代码强解包即闪退；
             // 先 percent-encoding 再拼，LC 中转分支（走 base64）不受影响。
-            let encodedAppName = appName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? appName
+            // L60-1：名里带 & 时 urlQueryAllowed 会放行它、接收侧从 & 处
+            // 切断，改走 czfQueryValueAllowed（排除 &）。
+            let encodedAppName = appName.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? appName
             var launchURLStr = "stosdebug://enableJIT?bundleId=\(Bundle.main.bundleIdentifier!)&appName=\(encodedAppName)"
             
             if let script = script, !script.isEmpty {

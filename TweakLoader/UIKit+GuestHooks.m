@@ -318,8 +318,12 @@ void handleLiveContainerLaunch(NSString* bundleName, NSString* containerFolderNa
             // nil，openURL:nil 静默无事，客 App 切不过去。两参数照 L10-12
             // 用 URLQueryAllowedCharacterSet 编码，建出的 NSURL 判空再 open。
             // 3.8.495（L14）
-            NSString* encodedBundleName = [bundleName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: bundleName;
-            NSString* encodedContainerFolderName = [containerFolderName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: containerFolderName;
+            // L60-1：URLQueryAllowedCharacterSet 会放行 &（query 分隔符），
+            // 名里带 &（如 H&M.app）时接收侧会从 & 处切断；把 & 排除。
+            NSMutableCharacterSet *czfQueryValueAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+            [czfQueryValueAllowed removeCharactersInString:@"&"];
+            NSString* encodedBundleName = [bundleName stringByAddingPercentEncodingWithAllowedCharacters:czfQueryValueAllowed] ?: bundleName;
+            NSString* encodedContainerFolderName = [containerFolderName stringByAddingPercentEncodingWithAllowedCharacters:czfQueryValueAllowed] ?: containerFolderName;
             NSString* urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@&container-folder-name=%@", runningLC, encodedBundleName, encodedContainerFolderName];
             NSURL* handoverURL = [NSURL URLWithString:urlStr];
             if (handoverURL) {

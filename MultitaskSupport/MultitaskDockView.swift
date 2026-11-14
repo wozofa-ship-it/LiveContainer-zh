@@ -1106,7 +1106,9 @@ extension Notification.Name {
             //（launchAppWithBundleId 已支持，直达被关实例的容器）。
             // bundlePath 是 .app 文件夹名，可能含空格；直接拼 URL(string:)
             // 会返回 nil，重启就变成只关不开。先 percent-encoding 再拼。
-            let encodedBundlePath = bundlePath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? bundlePath
+            // L60-1：值里带 & 时 urlQueryAllowed 会放行它、接收侧从
+            // & 处切断，改走 czfQueryValueAllowed（排除 &）。
+            let encodedBundlePath = bundlePath.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? bundlePath
             if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(encodedBundlePath)&container-folder-name=\(uuid)") {
                 #if !os(visionOS)
                 UIApplication.shared.open(url, options: [:], completionHandler: nil)

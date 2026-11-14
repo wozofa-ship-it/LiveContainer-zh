@@ -338,7 +338,11 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     NSString* appClipUrl;
     // .app 文件夹名可能含空格，直接拼出的 Web Clip 链接点开就断；
     // 先 percent-encoding，接收侧 URLComponents queryItems 会解回原名。
-    NSString *encodedName = [self.bundlePath.lastPathComponent stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    // L60-1：URLQueryAllowedCharacterSet 会放行 &（query 分隔符），
+    // 名里带 &（如 H&M.app）时接收侧会从 & 处切断；把 & 排除。
+    NSMutableCharacterSet *czfQueryValueAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+    [czfQueryValueAllowed removeCharactersInString:@"&"];
+    NSString *encodedName = [self.bundlePath.lastPathComponent stringByAddingPercentEncodingWithAllowedCharacters:czfQueryValueAllowed];
     if (!encodedName) { encodedName = self.bundlePath.lastPathComponent; }
     if(containerId) {
         appClipUrl = [NSString stringWithFormat:@"livecontainer://livecontainer-launch?bundle-name=%@&container-folder-name=%@", encodedName, containerId];

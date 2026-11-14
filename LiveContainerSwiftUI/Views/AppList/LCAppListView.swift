@@ -4127,7 +4127,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     let encoded = encodedData.map { "&script=\($0)" } ?? ""
                     // App 名含空格时 URL(string:) 直接返回 nil，旧代码静默失败；
                     // 先 percent-encoding 再拼，拼不出给提示而不是无反应。
-                    let encodedAppName = appName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? appName
+                    // L60-1：名里带 & 时 urlQueryAllowed 会放行它、接收侧从
+                    // & 处切断，改走 czfQueryValueAllowed（排除 &）。
+                    let encodedAppName = appName.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? appName
                     if jitEnabler == .StosDebugLC {
                         if let app = sharedModel.apps.first(where: { app in
                             return app.appInfo.urlSchemes().contains("stosdebug") &&

@@ -429,7 +429,12 @@ struct LCWebView: View {
         let bundleId = app.appInfo.relativeBundlePath!
         if let runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: app.uiDefaultDataFolder){
             let encodedUrl = Data(url.absoluteString.utf8).base64EncodedString()
-            if let urlToOpen = URL(string: "\(runningLC)://livecontainer-launch?bundle-name=\(bundleId)&open-url=\(encodedUrl)"), UIApplication.shared.canOpenURL(urlToOpen) {
+            // L60-1：bundleId 是 .app 文件夹名、原样裸插——带空格时
+            // URL(string:) 直接返 nil、交接静默跳过（只剩 runApp 里
+            // 的 URLComponents 兜底）；带 & 时接收侧从 & 处切断。
+            // 与其余交接 URL 同款走 czfQueryValueAllowed（排除 &）。
+            let encodedBundleId = bundleId.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? bundleId
+            if let urlToOpen = URL(string: "\(runningLC)://livecontainer-launch?bundle-name=\(encodedBundleId)&open-url=\(encodedUrl)"), UIApplication.shared.canOpenURL(urlToOpen) {
                 NSLog("[LC] urlToOpen = \(urlToOpen.absoluteString)")
                 await UIApplication.shared.open(urlToOpen)
                 close()

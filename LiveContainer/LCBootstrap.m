@@ -919,7 +919,13 @@ int LiveContainerMain(int argc, char *argv[]) {
             // 同款 URL（LCAppBannerViewController:666、CZFAppGridView:722、
             // LCUtilsExtensions:582）都用 .urlQueryAllowed 编码，这里补齐；
             // 接收侧 LCAppListView:3979 用 URLComponents 解析，会自动解码。
-            NSString *encodedApp = [selectedAppBackUp stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: selectedAppBackUp;
+            // L60-1：URLQueryAllowedCharacterSet 会放行 &（query 分隔
+            // 符），名里带 &（如 H&M.app）时接收侧会从 & 处切断、
+            // bundle-name 被截断、交接静默失败；L10-12 只修了空格。
+            // 这里把 & 排除，接收侧照常解码。
+            NSMutableCharacterSet *czfQueryValueAllowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+            [czfQueryValueAllowed removeCharactersInString:@"&"];
+            NSString *encodedApp = [selectedAppBackUp stringByAddingPercentEncodingWithAllowedCharacters:czfQueryValueAllowed] ?: selectedAppBackUp;
             NSString* urlStr;
             if(selectedContainer) {
                 urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@&container-folder-name=%@", runningLC, encodedApp, selectedContainer];

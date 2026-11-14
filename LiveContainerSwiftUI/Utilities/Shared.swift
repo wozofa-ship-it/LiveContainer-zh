@@ -52,6 +52,19 @@ struct LCPath {
     }
 }
 
+extension CharacterSet {
+    // L60-1：查询值专用字符集——urlQueryAllowed 会放行 &（它是
+    // query 里的分隔符），值里带 &（如 H&M.app）时接收侧
+    // URLComponents 会从 & 处切断，bundle-name/appName 被截断、
+    // 交接静默失败；L10-12 只修了空格。接收侧照常 percent-decode，
+    // 多编无害。script 值是 base64（无 &），不换。
+    static let czfQueryValueAllowed: CharacterSet = {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&")
+        return allowed
+    }()
+}
+
 class SharedModel: ObservableObject {
     @Published var selectedTab: LCTabIdentifier = .apps
     // 最小化的网页：WKWebView 存在这里，弹窗关了页面也不销毁，
