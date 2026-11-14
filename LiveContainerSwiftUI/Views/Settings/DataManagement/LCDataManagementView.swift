@@ -6105,10 +6105,23 @@ struct LCDataManagementView : View {
             let match = !bundleID.isEmpty ? appBundleID == bundleID : (!name.isEmpty && appName == name)
             if match {
                 var downloadString: String? = app["downloadURL"] as? String
+                // 3.8.550（L80）：versions 不按 JSON 顺序信——L79 只修了
+                // 解码后的 AltStoreSourceApp 模型，这条是恢复缺失 App
+                // 时走的原始 JSON 字典路（fetchAllSourceApps 直接
+                // JSONSerialization），versions.first 在升序/乱序源上
+                // 会取到旧版，缺 App 恢复就装上旧版再还数据。改取按
+                // （版本，build）最大的那一项，比较器就是 hasUpdate
+                // 同款 czfIsNewerVersion；max(by:) 的闭包是“a 是否
+                // 小于 b”，取反即“b 是否新于 a”。buildNumber 在
+                // JSON 里是字符串（解码侧同款，见 buildVersion）。
                 if downloadString == nil,
-                   let versions = app["versions"] as? [[String: Any]],
-                   let first = versions.first {
-                    downloadString = first["downloadURL"] as? String
+                   let versions = app["versions"] as? [[String: Any]] {
+                    let newest = versions.max(by: { a, b in
+                        let av = a["version"] as? String ?? ""
+                        let bv = b["version"] as? String ?? ""
+                        return czfIsNewerVersion(bv, build: b["buildNumber"] as? String, newerThan: av, installedBuild: a["buildNumber"] as? String)
+                    })
+                    downloadString = newest?["downloadURL"] as? String
                 }
                 if let ds = downloadString, let url = URL(string: ds) {
                     return url
