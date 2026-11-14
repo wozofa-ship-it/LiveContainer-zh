@@ -86,7 +86,18 @@ class AppInfoProvider {
     }
 
     private func findAppInfoFromSharedModel(appName: String, dataUUID: String) -> LCAppInfo? {
-        let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        // 3.8.540（L70）：DataManager.shared.model.apps/hiddenApps
+        // 是 @Published——findAppInfo 的调用方有后台队（Dock 图标
+        // loadAppIcon 的 DispatchQueue.global 块 :5536），直接读是
+        // 跨线程读（L69 同款）；主线程直读，后台线程经 main.sync 取
+        // 快照（磁盘兜底仍在后台跑，不把慢 I/O 搬回主线程；main.sync
+        // 只拷数组，极快）。addRunningApp 两路调用方都在主线程。
+        let allApps: [LCAppModel]
+        if Thread.isMainThread {
+            allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        } else {
+            allApps = DispatchQueue.main.sync { DataManager.shared.model.apps + DataManager.shared.model.hiddenApps }
+        }
         
         for appModel in allApps {
             if appModel.appInfo.containers.contains(where: { $0.folderName == dataUUID }) {

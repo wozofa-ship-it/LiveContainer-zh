@@ -1953,21 +1953,27 @@ struct LCDataManagementView : View {
         }
     }
         func cleanUpUnusedFolders() async {
-        
+        // 3.8.540（L70）：本函数从按钮的裸 Task 调来（L40 注释自认），
+        // sharedModel.apps/hiddenApps/appDataFolderNames 是 @Published，
+        // 直接读是跨线程读（L54 restoreFromBackup 同款已修）；三表经
+        // MainActor.run 一次取齐再算，删文件/清钥匙串仍在外面。
+        let (allApps, hiddenApps, allDataFolderNames) = await MainActor.run {
+            (sharedModel.apps, sharedModel.hiddenApps, sharedModel.appDataFolderNames)
+        }
         var folderNameToAppDict : [String:LCAppModel] = [:]
-        for app in sharedModel.apps {
+        for app in allApps {
             for container in app.appInfo.containers {
                 folderNameToAppDict[container.folderName] = app;
             }
         }
-        for app in sharedModel.hiddenApps {
+        for app in hiddenApps {
             for container in app.appInfo.containers {
                 folderNameToAppDict[container.folderName] = app;
             }
         }
         
         var foldersToDelete : [String]  = []
-        for appDataFolderName in sharedModel.appDataFolderNames {
+        for appDataFolderName in allDataFolderNames {
             if folderNameToAppDict[appDataFolderName] == nil {
                 foldersToDelete.append(appDataFolderName)
             }
@@ -2073,7 +2079,10 @@ struct LCDataManagementView : View {
 
         let fm = FileManager.default
 
-        var allApps = sharedModel.apps + sharedModel.hiddenApps
+        // 3.8.540（L70）：本函数从按钮的裸 Task 调来（:933），
+        // sharedModel.apps/hiddenApps 是 @Published，直接读是跨线
+        // 程读；经 MainActor.run 取快照，清缓存仍在外面。
+        var allApps = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
         if UserDefaults.sideStoreExist() {
             allApps.append(LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared))
         }
@@ -4200,7 +4209,11 @@ struct LCDataManagementView : View {
             // v216：钥匙串已排队的 App（恢复完逐个提示打开一次，
             // 排队快照在 App 下次全新启动时才由桥写回）。
             var keychainQueuedApps: [String] = []
-            let allApps = sharedModel.apps + sharedModel.hiddenApps
+            // 3.8.540（L70）：同函数 :4454/:4522 已认——本函数跑在裸
+            // Task 上，sharedModel.apps/hiddenApps 是 @Published，
+            // 直接读是跨线程读；经 MainActor.run 取快照（匹配只读
+            // 快照，语义不变）。
+            let allApps = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
             for (index, appFolder) in appFolders.enumerated() {
                 let folderName = appFolder.lastPathComponent
                 if presentResult {
@@ -6030,9 +6043,16 @@ struct LCDataManagementView : View {
     func moveDanglingFolders() async {
         let fm = FileManager()
         do {
+            // 3.8.540（L70）：本函数从按钮的裸 Task 调来（:893），
+            // sharedModel.apps/hiddenApps 是 @Published，直接读是跨
+            // 线程读（L54 restoreFromBackup 同款已修）；两表经
+            // MainActor.run 一次取齐再遍历，搬文件仍在外面。
+            let (appsSnapshot, hiddenAppsSnapshot) = await MainActor.run {
+                (sharedModel.apps, sharedModel.hiddenApps)
+            }
             var appDataFoldersInUse : Set<String> = Set();
             var tweakFoldersInUse : Set<String> = Set();
-            for app in sharedModel.apps {
+            for app in appsSnapshot {
                 if !app.appInfo.isShared {
                     continue
                 }
@@ -6058,7 +6078,7 @@ struct LCDataManagementView : View {
 
             }
             
-            for app in sharedModel.hiddenApps {
+            for app in hiddenAppsSnapshot {
                 if !app.appInfo.isShared {
                     continue
                 }
