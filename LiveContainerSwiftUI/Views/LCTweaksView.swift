@@ -397,7 +397,26 @@ struct LCTweakFolderView : View {
                 }
             }
         } else if tweakItem.isFramework {
-            urls = [tweakItem.fileUrl]
+            // 3.8.569（L100）：已停用的 .framework 不能直接分享带
+            // .disabled 后缀的目录——接收方用插件导入器导不回去
+            //（导入器只认 .framework 后缀的包，.disabled 结尾的
+            // 目录不在候选里）；与已停用 dylib 分享前先拷临时目录
+            // 去后缀同款。启用的直接给原包，不动。
+            if tweakItem.isEnabled {
+                urls = [tweakItem.fileUrl]
+            } else {
+                do {
+                    let tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                    try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+                    let cleanUrl = tmpDir.appendingPathComponent(tweakItem.displayName)
+                    try fm.copyItem(at: tweakItem.fileUrl, to: cleanUrl)
+                    urls = [cleanUrl]
+                } catch {
+                    errorShow = true
+                    errorInfo = error.localizedDescription
+                    return
+                }
+            }
         } else if tweakItem.isFolder {
             guard let enumerator = fm.enumerator(at: tweakItem.fileUrl, includingPropertiesForKeys: nil) else {
                 errorShow = true
