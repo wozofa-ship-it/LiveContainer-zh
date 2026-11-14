@@ -786,11 +786,15 @@ public final class CZFVPNManager {
         // 钉死了节点、核心正跑在它的节点上），这个 App 自动
         // 启动不准抢核心换节点——换 IP 正是养号最忌讳的。
         // 手动在设置里切节点（applyActiveNodeChange / start()）
-        // 会清掉归属，那时才换；自动启动只保证核心在跑
+        // 会清掉归属，那时才换；自动启动只保证核心在跑。
+        // appInfo 为 nil 的调用方（测速完 restartCoreAfterPing
+        // 的无归属快照）也不能抢：原来 `let bid` 要求调用方
+        // 必须有 bundleId，nil 调用方直接跳过守卫——测速中途
+        // 别的 App 刚起了核心，收尾会把它抢回旧节点、还把归属
+        // 写成 bundleId/空 appInfo 不同步的一对。
         if isRunning,
            let owner = coreOwnerBundleId,
-           let bid = appInfo?.bundleIdentifier(),
-           owner != bid {
+           appInfo?.bundleIdentifier() != owner {
             lastError = "核心正被另一个已钉死节点的 App 占用，暂不切换（手动在设置里切节点可强制切换）"
             return
         }
@@ -819,7 +823,14 @@ public final class CZFVPNManager {
             if let bid = appInfo?.bundleIdentifier() {
                 coreOwnerBundleId = bid
             }
-            coreOwnerAppInfo = appInfo
+            // appInfo 为 nil 时不动归属：上面只在有值时改
+            // bundleId，这里却把 appInfo 置 nil，会让两字段
+            // 不同步（bundleId 指着旧 App、appInfo 是空），
+            // 轮换巡检读到空归属就停摆。nil 调用方只认领
+            // “在跑”的事实，不改归属。
+            if let appInfo = appInfo {
+                coreOwnerAppInfo = appInfo
+            }
         }
         vpnCoreLock.unlock()
         if claimed {
@@ -955,7 +966,22 @@ public final class CZFVPNManager {
     private func checkPendingStop() {
         guard isRunning else { return }
         if Self.isHostProxyEnabled { return }
-        if Date().timeIntervalSince(lastFlaggedLaunchAt) < Self.autoStopDelay { return }
+        // 档位改长了：到点时闲置还不够新档位，别直接丢掉这次
+        // 自动停——否则核心一直跑到下次 App 变化才停。按剩余
+        // 时间重排（改短不影响：到点时闲置已够，直接往下走）。
+        // 改成“永不”时这次自动停作废（asyncAfter 拿 .infinity
+        // 排期行为未定义，绝不能排）。
+        let delay = Self.autoStopDelay
+        let idle = Date().timeIntervalSince(lastFlaggedLaunchAt)
+        if idle < delay {
+            guard !delay.isInfinite else { return }
+            let retry = DispatchWorkItem { [weak self] in
+                self?.checkPendingStop()
+            }
+            pendingStopWork = retry
+            DispatchQueue.main.asyncAfter(deadline: .now() + (delay - idle), execute: retry)
+            return
+        }
         vpnCoreLock.lock()
         let pinging = isPinging
         vpnCoreLock.unlock()
@@ -2033,6 +2059,10 @@ public final class CZFVPNManager {
             .joined(separator: "&")
         if let name = query["remarks"], !name.isEmpty {
             result += "#" + (name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name)
+        } else if let hashIdx = link.firstIndex(of: "#") {
+            // 老格式链接的名字一般在 # 片段里（remarks 参数反而少见）：
+            // 原来这里直接丢了，节点名退化成 地址:端口。原样保留。
+            result += String(link[hashIdx...])
         }
         return result
     }
