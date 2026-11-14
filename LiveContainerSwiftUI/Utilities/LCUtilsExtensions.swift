@@ -457,7 +457,14 @@ extension LCUtils {
         if !success {
             return false
         }
-        DispatchQueue.main.async {
+        // 3.8.512（L34）：原来 DispatchQueue.main.async 置标志、随即
+        // return true——写还没跑调用方就可能再读标志（LCAppModel:46 /
+        // BannerVC:224 / LCAppListView:1486 三处守卫都断言“认证成功
+        // 后已置、不弹第二次人脸”）。现在这一轮人脸走 main 跳/用户
+        // 交互兜住了没爆出来，但不变量是靠调度运气不是靠构造。
+        // await MainActor.run：标志在函数返回前一定已置，之后任
+        // 何路再读都短路；已在主线程时直接跑，不死锁。
+        await MainActor.run {
             DataManager.shared.model.isHiddenAppUnlocked = true
         }
         return true
