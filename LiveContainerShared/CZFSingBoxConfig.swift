@@ -214,7 +214,11 @@ public enum CZFSingBoxConfig {
         guard UUID(uuidString: uuid) != nil else {
             throw CZFSingBoxConfigError.invalidValue("uuid")
         }
-        guard let password = comps.password else {
+        // L14-5：原来只判 password 为 nil 不判空串，tuic://uuid:@host:port
+        // 会生成带空密码的配置，核心起不来才报错；与同文件 hysteria2Outbound
+        //（空密码抛 missingField）不一致，TUIC 协议要求密码，空密码恒非法。
+        // 3.8.495（L14）
+        guard let password = comps.password, !password.isEmpty else {
             throw CZFSingBoxConfigError.missingField("password")
         }
         let server = try requireHost(comps)

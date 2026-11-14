@@ -117,6 +117,11 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // L14-2：WillStart 里对 pipVideoCallViewController.view.layer 注册的
+    // bounds KVO 观察者，这里必须注销；否则 LCAutoEndPiP 开着时 DidStop
+    // 把 VC 置 nil、layer 释放时观察者还在册，KVO 释放异常崩溃；且每次
+    // WillStart 都重复注册，observeValue 会被调两次。3.8.495（L14）
+    [self.pipVideoCallViewController.view.layer removeObserver:self forKeyPath:@"bounds"];
     self.displayingVC.shouldIgnoreSceneUpdates = NO;
     [self.displayingDecoratedVC unminimizeWindowPiP];
 }

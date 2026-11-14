@@ -27,10 +27,29 @@ void refreshFile(NSString* path) {
         return;
     }
     NSString* newPath = [NSString stringWithFormat:@"%@.tmp", path];
-    NSError* error;
-    [NSFileManager.defaultManager copyItemAtPath:path toPath:newPath error:&error];
-    [NSFileManager.defaultManager removeItemAtPath:path error:&error];
-    [NSFileManager.defaultManager moveItemAtPath:newPath toPath:path error:&error];
+    // L14-4：原来 copy→remove→move 三步全不查错：copy 失败（磁盘满，或上次
+    // 崩溃残留的 .tmp 导致“目标已存在”）时仍删原文件；move 失败时主程序
+    // 直接没了，macho->Init 只报 Invalid mach-o file，App 已损坏；残留
+    // .tmp 时 copy 失败→删原文件→move 把陈旧 .tmp 挪回来，等于静默换回
+    // 旧版二进制还照常签名。先清残留 .tmp，任一步失败原文件不动。3.8.495（L14）
+    [NSFileManager.defaultManager removeItemAtPath:newPath error:nil];
+    NSError* error = nil;
+    if (![NSFileManager.defaultManager copyItemAtPath:path toPath:newPath error:&error]) {
+        ZLog::ErrorV(">>> refreshFile: copy failed %s: %s\n", path.UTF8String, error.localizedDescription.UTF8String);
+        return;
+    }
+    error = nil;
+    if (![NSFileManager.defaultManager removeItemAtPath:path error:&error]) {
+        ZLog::ErrorV(">>> refreshFile: remove failed %s: %s\n", path.UTF8String, error.localizedDescription.UTF8String);
+        [NSFileManager.defaultManager removeItemAtPath:newPath error:nil];
+        return;
+    }
+    error = nil;
+    if (![NSFileManager.defaultManager moveItemAtPath:newPath toPath:path error:&error]) {
+        ZLog::ErrorV(">>> refreshFile: move failed %s: %s\n", path.UTF8String, error.localizedDescription.UTF8String);
+        [NSFileManager.defaultManager copyItemAtPath:newPath toPath:path error:nil];
+        [NSFileManager.defaultManager removeItemAtPath:newPath error:nil];
+    }
 }
 
 

@@ -372,8 +372,11 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         NSMutableDictionary* infoPlist = [NSMutableDictionary dictionaryWithContentsOfFile:[NSString stringWithFormat:@"%@/Info.plist", bundlePath]];
         CFErrorRef error = NULL;
         void* taskSelf = SecTaskCreateFromSelf(NULL);
-        CFTypeRef value = SecTaskCopyValueForEntitlement(taskSelf, CFSTR("application-identifier"), &error);
-        CFRelease(taskSelf);
+        // L14-1：L10-14 同款——扩展进程（LiveProcess）里 SecTaskCreateFromSelf
+        // 可能返回 NULL，未判空就调 SecTaskCopyValueForEntitlement /
+        // CFRelease(NULL) 会崩；doUseLCBundleId 的客端走这里。3.8.495（L14）
+        CFTypeRef value = taskSelf ? SecTaskCopyValueForEntitlement(taskSelf, CFSTR("application-identifier"), &error) : NULL;
+        if (taskSelf) CFRelease(taskSelf);
         if (value) {
             NSString *entStr = (__bridge NSString *)value;
             CFRelease(value);

@@ -1211,6 +1211,11 @@ static int CZFGetAddrInfo(const char *node, const char *service, const struct ad
         return orig_getaddrinfo(node, service, hints, res);
     }
     NSString *host = [NSString stringWithUTF8String:node];
+    if (!host) {
+        // 非 UTF-8 主机名时 stringWithUTF8String 返 nil，往下
+        // CZFFakeIPForHost 会拿 nil 当字典键抛异常杀进程，走原解析。3.8.495（L14）
+        return orig_getaddrinfo(node, service, hints, res);
+    }
     if ([host hasSuffix:@".local"]) {
         return orig_getaddrinfo(node, service, hints, res);
     }

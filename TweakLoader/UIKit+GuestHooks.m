@@ -246,6 +246,10 @@ void LCOpenSideStoreURL(NSURL* sidestoreUrl) {
         [NSUserDefaults.lcUserDefaults setObject:sidestoreUrl.absoluteString forKey:@"launchAppUrlScheme"];
         [NSUserDefaults.lcUserDefaults setObject:@"builtinSideStore" forKey:@"selected"];
         [NSClassFromString(@"LCSharedUtils") launchToGuestAppWithClassicMode:0];
+        // L14-7：漏了 return，分支后继续建窗弹确认框，用户再点 OK 又启动
+        // 一次；两个同款函数（LCShowSwitchAppConfirmation、LCOpenWebPage）
+        // 的“不询问”分支都有 return，唯独这里漏了。3.8.495（L14）
+        return;
     }
     NSString *message = [@"lc.guestTweak.appSwitchTip %@" localizeWithFormat:@"SideStore"];
     UIWindow *window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
@@ -308,8 +312,19 @@ void handleLiveContainerLaunch(NSString* bundleName, NSString* containerFolderNa
             if([runningLC hasSuffix:@"liveprocess"]) {
                 runningLC = runningLC.stringByDeletingPathExtension;
             }
-            NSString* urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@&container-folder-name=%@", runningLC, bundleName, containerFolderName];
-            [UIApplication.sharedApplication openURL:[NSURL URLWithString:urlStr] options:@{} completionHandler:nil];
+            // L14-6：L10-12 同款漏网处（宿主侧 LCBootstrap.m:900 已修，游客侧
+            // 这里漏了）：bundle-name 是 .app 文件夹名，带空格的 App（如
+            // "Pokémon GO.app"）裸插进 URL 会让 [NSURL URLWithString:] 返
+            // nil，openURL:nil 静默无事，客 App 切不过去。两参数照 L10-12
+            // 用 URLQueryAllowedCharacterSet 编码，建出的 NSURL 判空再 open。
+            // 3.8.495（L14）
+            NSString* encodedBundleName = [bundleName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: bundleName;
+            NSString* encodedContainerFolderName = [containerFolderName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: containerFolderName;
+            NSString* urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@&container-folder-name=%@", runningLC, encodedBundleName, encodedContainerFolderName];
+            NSURL* handoverURL = [NSURL URLWithString:urlStr];
+            if (handoverURL) {
+                [UIApplication.sharedApplication openURL:handoverURL options:@{} completionHandler:nil];
+            }
             return;
         }
         
@@ -546,7 +561,11 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
         do {
             if([urlStr hasPrefix:[NSString stringWithFormat: @"%@://open-url", NSUserDefaults.lcAppUrlScheme]]) {
                 NSURLComponents* lcUrl = [NSURLComponents componentsWithString:urlStr];
-                NSString* realUrlEncoded = lcUrl.queryItems[0].value;
+                // L14-8：livecontainer://open-url 无 query 时 queryItems 是
+                // 空数组，[0] 抛 NSRangeException 崩；同文件
+                // LCDecodedURLStringFromControlURL 已用安全的
+                // queryItems.firstObject.value。3.8.495（L14）
+                NSString* realUrlEncoded = lcUrl.queryItems.firstObject.value;
                 if(!realUrlEncoded) break;
                 // Convert the base64 encoded url into String
                 NSData *decodedData = [[NSData alloc] initWithBase64EncodedString:realUrlEncoded options:0];
