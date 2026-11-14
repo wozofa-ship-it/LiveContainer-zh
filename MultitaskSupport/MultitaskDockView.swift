@@ -3717,10 +3717,12 @@ struct AllAppsListView: View {
             // 与 smallWindowOpenApp 同款；上面运行中实例的顶回
             // 前台路径一字不动。
             await MainActor.run { closePanel() }
+            // 3.8.544（L74）：launchApp 跑裸 Task；czfInstanceUUID 读 @Published + _info，离主线程读是 L69/L70 同款；起前现取（与原来“起前取旧值”语义一致，runApp 内建容器改号仍由起完拉满每轮重取跟）。
+            let instanceUUID = await MainActor.run { app.czfInstanceUUID }
             do {
                 // F-4：runApp 的容器与带回查 dock 用同一 uuid（选中
                 // 容器优先），与 banner 的 launchForAux 一致。
-                try await app.runApp(containerFolderName: app.czfInstanceUUID)
+                try await app.runApp(containerFolderName: instanceUUID)
                 // 新开路拉满（3.8.240）：面板启动同款，起完等窗进
                 // dock 再拉满一次，不管上次关时大小；在跑的顶回
                 // 前台那条路（上面）不动，不改面板点按聚焦行为。

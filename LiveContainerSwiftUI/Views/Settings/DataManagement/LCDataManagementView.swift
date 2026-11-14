@@ -5185,7 +5185,9 @@ struct LCDataManagementView : View {
             // iCloud 源先等数据下完再拷/合并，否则拷到占位空壳
             let containerDownloaded = await Self.waitForUbiquitousDownload(containerFolder, fm: fm, onProgress: downloadProgress)
             if !containerDownloaded { downloadIncomplete = true }
-            if let live = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == folderName }) {
+            // 3.8.544（L74）：逐点取当前值——本函数跑全局执行器，uiContainers 是 @Published；前面轮次刚注册的容器（L37 块写回主线程）本轮必须可见，一次快照到底会漏。
+            let live = await MainActor.run { app.uiContainers.first(where: { $0.containerURL.lastPathComponent == folderName }) }
+            if let live {
                 if isLoginBackup {
                     // 登录态备份只有半套会话文件：合并进现有
                     // 容器（同名文件覆盖、其他数据不动），整
@@ -5229,13 +5231,16 @@ struct LCDataManagementView : View {
                     continue
                 }
             }
-            let root = app.appInfo.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
+            // 3.8.544（L74）：isShared 是设置页可改的 plain 属性（LCAppSettingsView:1200/1277），主线程写、这里离主线程读是竞态；逐点现取。
+            let restoreIsShared = await MainActor.run { app.appInfo.isShared }
+            let root = restoreIsShared ? LCPath.lcGroupDataPath : LCPath.dataPath
             let destURL = root.appendingPathComponent(folderName)
             // 拷盘挪后台（见三件套注释）；替换是原子的，失败原
             // 数据保留（见 replaceContainerOffMain）。
             try await Self.replaceContainerOffMain(from: containerFolder, to: destURL)
             let restoredName = (NSDictionary(contentsOf: destURL.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["name"] as? String ?? folderName
-            let restored = LCContainer(infoDict: ["folderName": folderName, "name": restoredName], isShared: app.appInfo.isShared)
+            let restoredShared = await MainActor.run { app.appInfo.isShared }
+            let restored = LCContainer(infoDict: ["folderName": folderName, "name": restoredName], isShared: restoredShared)
             // 3.8.513（L37）：restoreOneApp 是非隔离 static async，
             // 全程跑全局执行器；uiContainers/uiSelectedContainer/
             // uiDefaultDataFolder 是 @Published，离主线程写报
@@ -5348,9 +5353,11 @@ struct LCDataManagementView : View {
         if loginOnly && !isLoginBackup {
             let topFolders = (try? fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)) ?? []
             loginMergeFolderCount = topFolders.filter { let n = $0.lastPathComponent; return n != "manifest.json" && !n.hasSuffix(".app") && n != "AppGroup" && n != "Keychain" }.count
-            if app.uiContainers.isEmpty, loginMergeFolderCount > 0 {
+            // 3.8.544（L74）：逐点取当前值（同 :5188 注释）。
+            let (loginContainersEmpty, loginIsShared) = await MainActor.run { (app.uiContainers.isEmpty, app.appInfo.isShared) }
+            if loginContainersEmpty, loginMergeFolderCount > 0 {
                 let newName = manifestDataUUID.isEmpty ? NSUUID().uuidString : manifestDataUUID
-                let newContainer = LCContainer(folderName: newName, name: newName, isShared: app.appInfo.isShared)
+                let newContainer = LCContainer(folderName: newName, name: newName, isShared: loginIsShared)
                 // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
                 await MainActor.run {
                     var containers = app.uiContainers
@@ -5361,7 +5368,9 @@ struct LCDataManagementView : View {
                     app.uiDefaultDataFolder = newName
                     app.appInfo.dataUUID = newName
                 }
-                if let bundleID = app.appInfo.bundleIdentifier() {
+                // 3.8.544（L74）：bundleIdentifier() 读 _info，离主线程读竞态；现取。
+                let loginBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
+                if let bundleID = loginBundleID {
                     newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
                 }
             }
@@ -5377,10 +5386,12 @@ struct LCDataManagementView : View {
                 // 并进同一个容器，跨容器数据混杂。是 manifest 默认容器时
                 // 同时设为选中（完整恢复同款），否则只是多一个可切换容器。
                 let target: LCContainer
-                if let matched = app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n }) {
+                // 3.8.544（L74）：逐点取当前值——前面轮次刚注册的容器必须可见（同 :5188）。
+                let (matched, mergeIsShared) = await MainActor.run { (app.uiContainers.first(where: { $0.containerURL.lastPathComponent == n }), app.appInfo.isShared) }
+                if let matched {
                     target = matched
                 } else {
-                    let newContainer = LCContainer(folderName: n, name: n, isShared: app.appInfo.isShared)
+                    let newContainer = LCContainer(folderName: n, name: n, isShared: mergeIsShared)
                     // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
                     await MainActor.run {
                         var containers = app.uiContainers
@@ -5401,7 +5412,9 @@ struct LCDataManagementView : View {
                     // 令牌写不进；组号照 manifest 的来，没有就随机
                     //（与上面两处同款；写 plist 时建目录，合并随后
                     // 写文件，合并跳过 LCContainerInfo.plist 不覆盖）。
-                    if let bundleID = app.appInfo.bundleIdentifier() {
+                    // 3.8.544（L74）：bundleIdentifier() 读 _info，离主线程读竞态；现取。
+                    let mergeBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
+                    if let bundleID = mergeBundleID {
                         newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
                     }
                     target = newContainer
@@ -5450,14 +5463,16 @@ struct LCDataManagementView : View {
             // （真机实测：装完自动恢复报"没有可恢复的数据"、
             // 手动恢复报 0 个）。照 runApp 首启的建法补一个默认
             // 容器，登录态才有着落
-            if app.uiContainers.isEmpty && !plistFiles.isEmpty {
+            // 3.8.544（L74）：逐点取当前值（同 :5188 注释）。
+            let (keychainContainersEmpty, keychainIsShared) = await MainActor.run { (app.uiContainers.isEmpty, app.appInfo.isShared) }
+            if keychainContainersEmpty && !plistFiles.isEmpty {
                 // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
                 // 容器名直接用备份时的原名（manifest 的
                 // dataUUID）：快照文件名、别名都按原名记账，
                 // 同名对上目标容器是第一优先落点，不用再靠
                 // 默认容器兜底猜；组号同样照备份时的建
                 let newName = manifestDataUUID.isEmpty ? NSUUID().uuidString : manifestDataUUID
-                let newContainer = LCContainer(folderName: newName, name: newName, isShared: app.appInfo.isShared)
+                let newContainer = LCContainer(folderName: newName, name: newName, isShared: keychainIsShared)
                 await MainActor.run {
                     var containers = app.uiContainers
                     containers.append(newContainer)
@@ -5467,7 +5482,9 @@ struct LCDataManagementView : View {
                     app.uiDefaultDataFolder = newName
                     app.appInfo.dataUUID = newName
                 }
-                if let bundleID = app.appInfo.bundleIdentifier() {
+                // 3.8.544（L74）：bundleIdentifier() 读 _info，离主线程读竞态；现取。
+                let keychainBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
+                if let bundleID = keychainBundleID {
                     newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
                 }
             }
@@ -5478,9 +5495,8 @@ struct LCDataManagementView : View {
                 // 辑只认同名/备份时默认/仅一份三种情况，容器
                 // 名字一换（删后重装、多容器）就整份丢弃，登录
                 // 态永远回不来；并入默认容器同键覆盖以备份为准
-                let target = app.uiContainers.first(where: { $0.folderName == folderName })
-                    ?? app.uiSelectedContainer
-                    ?? app.uiContainers.first
+                // 3.8.544（L74）：逐点取当前值——上面钥匙串兜底刚补的默认容器必须可见；uiSelectedContainer 也是 @Published，同跳取。
+                let target = await MainActor.run { app.uiContainers.first(where: { $0.folderName == folderName }) ?? app.uiSelectedContainer ?? app.uiContainers.first }
                 guard let target else { continue }
                 // 从 iCloud 文件夹恢复时文件可能还是占位没下到
                 // 本地：先触发下载、短等重试；读放 detached（见
@@ -5518,7 +5534,9 @@ struct LCDataManagementView : View {
                 // 3.8.375：删后重装时 App 会先装出一个新容器（随机组），恢复再把旧容器
                 // 补回来；宿主直写只写目标容器，若启动进了新容器，令牌就 orphan。
                 // 照排队文件同款，写进 App 全部容器各自的组（只写、不计入回执数）。
-                for container in app.uiContainers where container.folderName != target.folderName {
+                // 3.8.544（L74）：逐点取当前值（同 :5188 注释）。
+                let fanoutContainers = await MainActor.run { app.uiContainers }
+                for container in fanoutContainers where container.folderName != target.folderName {
                     _ = await Self.importKeychainItems(items, container: container)
                 }
                 // 宿主写回在这台机上同样靠不住（同一套 SecItem，
@@ -5529,7 +5547,9 @@ struct LCDataManagementView : View {
                 // 用哪个容器由 App 状态决定，只写一个出现过文
                 // 件在 A、启动进 B、桥扑空的错位，全写堵死
                 var queuedAny = false
-                for container in app.uiContainers {
+                // 3.8.544（L74）：逐点取当前值（同 :5188 注释）。
+                let queueContainers = await MainActor.run { app.uiContainers }
+                for container in queueContainers {
                     if (try? data.write(to: container.containerURL.appendingPathComponent("CZFKeychainImport.plist"))) != nil {
                         queuedAny = true
                     }
@@ -5537,7 +5557,9 @@ struct LCDataManagementView : View {
                 if queuedAny {
                     // 不注入插件的 App 桥不加载，排队文件永远没
                     // 人消费：别混进"已排队"骗人，单列无法写回
-                    if app.appInfo.dontInjectTweakLoader {
+                    // 3.8.544（L74）：dontInjectTweakLoader 读 _info（LCAppInfo.m:749），离主线程读竞态；现取。
+                    let dontInject = await MainActor.run { app.appInfo.dontInjectTweakLoader }
+                    if dontInject {
                         outcome.keychainUnwritable += items.count
                     } else {
                         outcome.keychainQueued += items.count
@@ -5548,7 +5570,9 @@ struct LCDataManagementView : View {
                     // 关窗集里没它，正在跑的 App 继续用内存旧状态、
                     // 看着像没恢复。把全部容器名补进关窗集，恢复后
                     // 统一关窗重开；没在跑就是空操作。
-                    for container in app.uiContainers {
+                    // 3.8.544（L74）：逐点取当前值（同 :5188 注释）。
+                    let closeContainers = await MainActor.run { app.uiContainers }
+                    for container in closeContainers {
                         restoredFolderNames.insert(container.folderName)
                     }
                 }
@@ -5561,8 +5585,10 @@ struct LCDataManagementView : View {
         // 刚恢复出来的文件夹都在磁盘上，不动。若当前选中正好被清掉，
         // 改选恢复出来的默认容器（或第一个还在的），免得下次打开仍
         // 进空容器。放关窗口之前，让关窗口也按纠正后的 dataUUID 走。
-        let existingContainers = app.uiContainers.filter { fm.fileExists(atPath: $0.containerURL.path) }
-        if existingContainers.count != app.uiContainers.count {
+        // 3.8.544（L74）：逐点取当前值——uiContainers 是 @Published；磁盘存在性检查仍在调用方线程做，只把数组读搬回主线程。
+        let currentContainers = await MainActor.run { app.uiContainers }
+        let existingContainers = currentContainers.filter { fm.fileExists(atPath: $0.containerURL.path) }
+        if existingContainers.count != currentContainers.count {
             // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
             await MainActor.run {
                 app.uiContainers = existingContainers

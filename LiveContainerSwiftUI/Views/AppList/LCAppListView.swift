@@ -1040,7 +1040,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 原来只取 folderName、失败数直接丢了；累上来进回执。
                 var copyFailed = 0
                 for app in apps {
-                    let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                    // 3.8.544（L74）：GCD 块里离主线程读 _info（displayName/bundleIdentifier），L73 备好的 helper 同款 main.sync 取。
+                    let name = LCDataManagementView.czfAppDisplayName(for: app)
                     // 3.8.281：锁了的跳过（报已锁定）；备之前先记有无
                     // 旧备份，成功了才算一次覆盖（跑完报“覆盖了 N 个”）。
                     let fname = LCDataManagementView.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
@@ -1143,7 +1144,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         var failed: [String] = []
         var noBackup: [String] = []
         for app in apps {
-            let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+            // 3.8.544（L74）：batchRestore 跑裸 Task（L61-4 注释），离主线程读 _info；L73 helper 同款 main.sync 取。
+            let name = LCDataManagementView.czfAppDisplayName(for: app)
             let folderName = LCDataManagementView.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
             var folderURL = backupRoot.appendingPathComponent(folderName)
             var isDir: ObjCBool = false
@@ -1151,8 +1153,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 本地没有，去外部索引里配对：dataUUID 精确匹配直接认；
                 // 否则显示名 + Bundle ID 都对上才算候选；多个候选不猜，
                 // 记失败让用户去数据恢复里手动选。
-                let appUUID = app.appInfo.dataUUID ?? ""
-                let appBid = app.appInfo.bundleIdentifier() ?? ""
+                // 3.8.544（L74）：同上，dataUUID/bundleIdentifier 也是 _info 读；本函数是 async，逐点 MainActor.run 现取。
+                let (appUUID, appBid) = await MainActor.run { (app.appInfo.dataUUID ?? "", app.appInfo.bundleIdentifier() ?? "") }
                 if let exact = czfExtIndex.first(where: { !$0.dataUUID.isEmpty && !appUUID.isEmpty && $0.dataUUID == appUUID }) {
                     folderURL = exact.folder
                 } else {
@@ -1286,7 +1288,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         var failedContainers: [String] = []
         var keptBackups: [String] = []
         for app in apps {
-            let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+            // 3.8.544（L74）：batchDelete 跑确认框按钮的裸 Task（本函数注释），离主线程读 _info；L73 helper 同款 main.sync 取。
+            let name = LCDataManagementView.czfAppDisplayName(for: app)
             do {
                 // removeFromList 是非逃逸闭包（deleteAppFiles 内同步调完），
                 // 抓 struct 的 self 合法、不产生循环引用；[weak self]

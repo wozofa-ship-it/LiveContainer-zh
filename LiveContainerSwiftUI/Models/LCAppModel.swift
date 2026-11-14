@@ -43,7 +43,9 @@ class LCAppModel: ObservableObject, Hashable {
     // 的入口（坞图标/运行条/右缘轮切）用；实例版供有 LCAppModel
     // 的入口用，谓词只写在静态版这一处。
     static func czfAuthenticateIfLocked(appInfo: LCAppInfo) async -> Bool {
-        guard appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked else { return true }
+        // 3.8.544（L74）：守卫在坞/运行条/源页/恢复页的裸 Task 里调（MultitaskDockView:1992/5223 等）；isLocked 读 _info、isHiddenAppUnlocked 是 @Published（Shared.swift:123），离主线程读是 L69/L70 同款；一点取齐再判。
+        let (locked, unlocked) = await MainActor.run { (appInfo.isLocked, DataManager.shared.model.isHiddenAppUnlocked) }
+        guard locked && !unlocked else { return true }
         do {
             return try await LCUtils.authenticateUser()
         } catch {
@@ -256,7 +258,9 @@ class LCAppModel: ObservableObject, Hashable {
         onProceed: @escaping () -> Void = {}
     ) async {
         guard #available(iOS 16.0, *) else { return }
-        guard app.czfInstanceUUID != nil else { return }
+        // 3.8.544（L74）：本函数从横幅卡/面板的裸 Task 调来；czfInstanceUUID 读 @Published uiSelectedContainer + _info dataUUID，超时文案的 displayName 读 _info，离主线程读是 L69/L70 同款；入口一次取齐。
+        let (instanceUUID, displayName) = await MainActor.run { (app.czfInstanceUUID, app.appInfo.displayName() ?? "App") }
+        guard instanceUUID != nil else { return }
         // 3.8.535（L62-1）：本函数从横幅卡/面板的裸 Task 调来、不在主
         // actor 上，onProceed 是面板的 closePanel（dismissPanelOverlay
         // 直接动 UIView/dismiss），必须回主线程再调；横幅卡传默认
@@ -276,7 +280,7 @@ class LCAppModel: ObservableObject, Hashable {
             app: app,
             multitask: nil,
             timeout: 6,
-            timeoutMessage: "最小化超时：6 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试",
+            timeoutMessage: "最小化超时：6 秒内没等到「\(displayName)」的窗口，请确认 App 已打开后重试",
             action: { waitUUID in
                 if let entry = dockManager.apps.first(where: { $0.appUUID == waitUUID }) {
                     let owned = entry.appInfo?.relativeBundlePath.map { !$0.isEmpty && $0 == expectedPath } ?? false
@@ -298,7 +302,9 @@ class LCAppModel: ObservableObject, Hashable {
         onProceed: @escaping () -> Void = {}
     ) async {
         guard #available(iOS 16.0, *) else { return }
-        guard app.czfInstanceUUID != nil else { return }
+        // 3.8.544（L74）：同 czfMinimizeApp——裸 Task 执行器上读 @Published + _info；入口一次取齐。
+        let (instanceUUID, displayName) = await MainActor.run { (app.czfInstanceUUID, app.appInfo.displayName() ?? "App") }
+        guard instanceUUID != nil else { return }
         // 3.8.535（L62-1）：同 czfMinimizeApp——onProceed 是面板的
         // closePanel（dismissPanelOverlay 直接动 UIView/dismiss），
         // 裸 Task 执行器上调会离主线程动 UI；回主线程再调。
@@ -314,7 +320,7 @@ class LCAppModel: ObservableObject, Hashable {
             app: app,
             multitask: true,
             timeout: 30,
-            timeoutMessage: "小窗口超时：30 秒内没等到「\(app.appInfo.displayName() ?? "App")」的窗口，请确认 App 已打开后重试",
+            timeoutMessage: "小窗口超时：30 秒内没等到「\(displayName)」的窗口，请确认 App 已打开后重试",
             action: { waitUUID in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     czfUnmaximizeWindowIfOwned(uuid: waitUUID, expectedPath: expectedPath)
@@ -339,7 +345,8 @@ class LCAppModel: ObservableObject, Hashable {
         action: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
     ) async {
-        guard let uuid = app.czfInstanceUUID else { return }
+        // 3.8.544（L74）：同上，裸 Task 执行器上读 @Published + _info；现取。
+        guard let uuid = await MainActor.run(body: { app.czfInstanceUUID }) else { return }
         let deadline = Date().addingTimeInterval(timeout)
         var done = false
         let act: (String) -> Void = { waitUUID in
@@ -362,7 +369,8 @@ class LCAppModel: ObservableObject, Hashable {
             await MainActor.run { onError(error.localizedDescription) }
             return
         }
-        if let freshUUID = app.czfInstanceUUID, freshUUID != uuid, Date() < deadline {
+        // 3.8.544（L74）：同上，启动完重读 uuid 也是离主线程读；现取。
+        if let freshUUID = await MainActor.run(body: { app.czfInstanceUUID }), freshUUID != uuid, Date() < deadline {
             MultitaskDockManager.shared.czfOnWindowAppeared(uuid: freshUUID, timeout: max(0, deadline.timeIntervalSinceNow)) {
                 act(freshUUID)
             }
@@ -1349,13 +1357,14 @@ class LCAppModel: ObservableObject, Hashable {
     }
 
     func setLocked(newLockState: Bool) async {
+        // 3.8.544（L74）：三路调用方全是裸 Task（设置页 Toggle :599、横幅卡 :450、网格 :725），isLocked 读/写 _info + save（LCAppInfo.m:698-708），离主线程是 L72-2 同款；入口现取。
+        let currentlyLocked = await MainActor.run { appInfo.isLocked }
         // if locked state in appinfo already match with the new state, we just the change
-        if appInfo.isLocked == newLockState {
+        if currentlyLocked == newLockState {
             return
         }
         
         if newLockState {
-            appInfo.isLocked = true
             // 3.8.520（L46）：成功加锁也要同步 uiIsLocked——横幅卡
             // 菜单（BannerVC:450）与网格（CZFAppGridView:725）直接调
             // setLocked，不经过设置页 Toggle 的绑定写点；不同步时
@@ -1363,7 +1372,11 @@ class LCAppModel: ObservableObject, Hashable {
             // 设置页开关（LCAppSettingsView:592/602/625）都显示错，
             // 直到下次 dock 变化或卡片重建才刷回来。设置页那路
             // Toggle 已先写过同值，再写一次无害。
-            await MainActor.run { uiIsLocked = true }
+            // 3.8.544（L74）：appInfo.isLocked 写 _info + save，合进同一跳。
+            await MainActor.run {
+                appInfo.isLocked = true
+                uiIsLocked = true
+            }
         } else {
             // authenticate before cancelling locked state
             // 3.8.441：解锁必须每次都弹人脸识别——原来调
@@ -1384,11 +1397,15 @@ class LCAppModel: ObservableObject, Hashable {
             }
             
             // auth pass, we need to cancel app's lock and hidden state
-            appInfo.isLocked = false
             // 3.8.520（L46）：成功解锁同款同步 uiIsLocked，理由同上
             // （横幅卡/网格调 setLocked 时不走 Toggle 绑定）。
-            await MainActor.run { uiIsLocked = false }
-            if appInfo.isHidden {
+            // 3.8.544（L74）：appInfo.isLocked 写 _info + save、isHidden 读 _info，同上回主线程。
+            await MainActor.run {
+                appInfo.isLocked = false
+                uiIsLocked = false
+            }
+            let hidden = await MainActor.run { appInfo.isHidden }
+            if hidden {
                 await toggleHidden()
             }
         }
