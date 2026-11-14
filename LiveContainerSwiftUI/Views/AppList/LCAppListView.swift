@@ -2715,7 +2715,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfCustomDisplayName = trimmed
                 }
             }
-            if let appToReplace = installOptionChosen.appToReplace, appToReplace.uiIsShared {
+            // 3.8.551（L81）：uiIsShared 是 @Published，安装路是裸 Task 执行器（LCAppListView 没标 @MainActor，L44 已证），离主线程读是 L70 同款；入口一次取齐。
+            let replaceIsShared = await MainActor.run { installOptionChosen.appToReplace?.uiIsShared ?? false }
+            if installOptionChosen.appToReplace != nil, replaceIsShared {
                 outputFolder = LCPath.lcGroupBundlePath.appendingPathComponent(installOptionChosen.nameOfFolderToInstall)
             } else {
                 outputFolder = LCPath.bundlePath.appendingPathComponent(installOptionChosen.nameOfFolderToInstall)
@@ -2732,8 +2734,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 默强杀；确认继续才装，取消=放弃这次安装（抛专用取消
         // 信号，批量里单独计取消）。只在真有被替换对象时查，
         // 残留文件夹无 App 记录那路不查。
-        if let appToReplace, appToReplace.isAppRunning {
+        // 3.8.551（L81）：isAppRunning 是 @Published、displayName()/bundleIdentifier() 读 _info、czfRunningAppName 是 @State——三者同跳取/写（L44-2 同款漏网：L44 只修了 9 处，这里不在其中；确认框 :2039 读 czfRunningAppName，离主线程写会丢更新、框里名字是旧的）。
+        let replaceRunning = await MainActor.run {
+            guard let appToReplace, appToReplace.isAppRunning else { return false }
             czfRunningAppName = appToReplace.appInfo.displayName() ?? appToReplace.appInfo.bundleIdentifier() ?? ""
+            return true
+        }
+        if replaceRunning {
             guard let czfProceed = await czfRunningAppConfirm.open(), czfProceed else {
                 try? fm.removeItem(at: payloadPath)
                 throw CZFInstallCancelled()
@@ -2827,8 +2834,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 就抢 resume（与超时/正常完成共用 CZFOnceFlag 互斥，只 resume 一次）。
         var czfSignTimeoutTask: Task<Void, Never>?
         var czfSignCancelTask: Task<Void, Never>?
+        // 3.8.551（L81）：uiDontSign 是 @Published，离主线程读是 L70 同款；下面 withUnsafeContinuation 的闭包是同步的、里面不能 await，先在外面取齐。
+        let replaceDontSign = await MainActor.run { appToReplace?.uiDontSign ?? false }
         await withUnsafeContinuation({ c in
-            if appToReplace?.uiDontSign ?? false || LCUtils.appGroupUserDefault.bool(forKey: "LCDontSignApp") {
+            if replaceDontSign || LCUtils.appGroupUserDefault.bool(forKey: "LCDontSignApp") {
                 finalNewApp.dontSign = true
             }
             czfSignTimeoutTask = Task {
@@ -2894,13 +2903,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         if let appToReplace {
-            LCAppModel.copy(fromApp: appToReplace, toAppInfo: finalNewApp)
-            // 覆盖更新保留被替换那个实例的自定义名（多开改名后更新
-            // 不丢名）；本分支只在覆盖时走，多开新实例不走这里。
-            // 上游 9d6ea09 把逐项拷贝抽成 LCAppModel.copy，但它不拷
-            // customDisplayName，这里补上，fork 定制不丢（setter
-            // 自带 save，无需另调 save）。
-            finalNewApp.customDisplayName = appToReplace.appInfo.customDisplayName
+            // 3.8.551（L81）：copy 读 fromApp.appInfo 二十多项 _info、customDisplayName 读 _info；安装路是裸 Task 执行器，整段回主线程做（L74 合进同一跳同款；toAppInfo 是本次新装的、还没进模型，写它本身不竞态，读侧才是问题）。
+            await MainActor.run {
+                LCAppModel.copy(fromApp: appToReplace, toAppInfo: finalNewApp)
+                // 覆盖更新保留被替换那个实例的自定义名（多开改名后更新
+                // 不丢名）；本分支只在覆盖时走，多开新实例不走这里。
+                // 上游 9d6ea09 把逐项拷贝抽成 LCAppModel.copy，但它不拷
+                // customDisplayName，这里补上，fork 定制不丢（setter
+                // 自带 save，无需另调 save）。
+                finalNewApp.customDisplayName = appToReplace.appInfo.customDisplayName
+            }
         } else {
             // enable SDK version spoof by defalut
             finalNewApp.spoofSDKVersion = true

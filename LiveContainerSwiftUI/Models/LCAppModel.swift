@@ -1577,7 +1577,10 @@ private final class CZFOnceBox {
 actor CZFMultitaskLaunchGate {
     static let shared = CZFMultitaskLaunchGate()
     private var holder: String?
-    private var waiters: [(uuid: String, continuation: CheckedContinuation<Bool, Error>)] = []
+    // 3.8.551（L81）：等待者带每次 acquire 的唯一 token——原来只按
+    // uuid 认，两个同 uuid 等待者时超时/取消按 uuid 找第一个会摘
+    // 错人（见 acquire 处注释）；放门仍按队首交接，不变。
+    private var waiters: [(token: UUID, uuid: String, continuation: CheckedContinuation<Bool, Error>)] = []
     // H-10 事件驱动等待队列：拿不到门时挂起等放门，不再 0.1 秒
     // 轮询。release/超时/取消三处都先把等待者移出队列再恢复，
     // 只恢复一次；release 时把门原子交给队首，醒来即持门。
@@ -1591,12 +1594,19 @@ actor CZFMultitaskLaunchGate {
             holder = uuid
             return true
         }
+        // 3.8.551（L81）：等待者按 uuid 认会摘错人——czfClaimLaunch
+        // 注释已认同容器还会在门里挂两个同 uuid 等待者（两条目共用
+        // 一容器）；后入队的取消时 cancelWaiter 按 uuid 找第一个，
+        // 会把先入队的摘掉并以取消错恢复它（先入队的启动无故失败，
+        // 后入队的还在队里挂到 60 秒超时）。等待者改按每次 acquire
+        // 的唯一 token 认，超时/取消只动自己；放门仍按队首交接，不变。
+        let token = UUID()
         // 超时任务：60 秒后把本等待者移出队列并以 false 恢复；
         // 拿到门/取消时在 defer 里取消它。
         let timeoutTask = Task {
             do {
                 try await Task.sleep(nanoseconds: 60_000_000_000)
-                await self.timeoutWaiter(uuid: uuid)
+                await self.timeoutWaiter(token: token)
             } catch {
                 // 取消/已拿到门：什么都不做
             }
@@ -1605,10 +1615,10 @@ actor CZFMultitaskLaunchGate {
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
                 // 闭包同步执行，还在 actor 隔离内，直接入队。
-                waiters.append((uuid: uuid, continuation: continuation))
+                waiters.append((token: token, uuid: uuid, continuation: continuation))
             }
         } onCancel: {
-            Task { await self.cancelWaiter(uuid: uuid) }
+            Task { await self.cancelWaiter(token: token) }
         }
     }
 
@@ -1626,18 +1636,18 @@ actor CZFMultitaskLaunchGate {
         }
     }
 
-    /// 超时：等待者还在队里就移出并以 false 恢复（已拿到门
-    /// 的不在队里，什么都不做）。
-    private func timeoutWaiter(uuid: String) {
-        guard let index = waiters.firstIndex(where: { $0.uuid == uuid }) else { return }
+    /// 超时：本等待者还在队里就移出并以 false 恢复（已拿到门
+    /// 的不在队里，什么都不做）。按 token 认，不按 uuid（见上）。
+    private func timeoutWaiter(token: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.token == token }) else { return }
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(returning: false)
     }
 
-    /// 取消：等待者还在队里就移出并抛取消错（已恢复的不在
-    /// 队里，什么都不做）。
-    private func cancelWaiter(uuid: String) {
-        guard let index = waiters.firstIndex(where: { $0.uuid == uuid }) else { return }
+    /// 取消：本等待者还在队里就移出并抛取消错（已恢复的不在
+    /// 队里，什么都不做）。按 token 认，不按 uuid（见上）。
+    private func cancelWaiter(token: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.token == token }) else { return }
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
     }

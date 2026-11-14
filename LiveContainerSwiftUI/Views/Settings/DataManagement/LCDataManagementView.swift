@@ -6094,7 +6094,7 @@ struct LCDataManagementView : View {
         return all
     }
 
-    // 纯查表：不碰网络。优先取 versions[0].downloadURL，兼容顶层 downloadURL
+    // 纯查表：不碰网络。优先取顶层 downloadURL，没有再取 versions 里按（版本，build）最大的那一项的 downloadURL（L80）
     func downloadURLForApp(bundleID: String, name: String, in sourceApps: [[String: Any]]) -> URL? {
         for app in sourceApps {
             let appBundleID = app["bundleIdentifier"] as? String ?? ""
