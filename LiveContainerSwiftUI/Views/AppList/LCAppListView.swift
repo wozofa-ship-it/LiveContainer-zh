@@ -2692,7 +2692,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         let root = docs.appendingPathComponent("Backups")
-        let folders = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        var folders = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        // 换机/重装后本地 Backups 是空的，备份全在 iCloud 外部夹里：
+        // 原来只扫本地，自动恢复直接报“没有可恢复的数据”，等于没
+        // 生效。本地优先（在列表前面，先配上、行为不变），后面再
+        // 接外部文件夹一起配对。外部夹先触发整树下载；单个
+        // manifest 等不到就不读（见循环内守卫），不比现在更差。
+        let czfExtRoot = LCDataManagementView.externalBackupFolderURL()
+        if let czfExtRoot {
+            try? fm.startDownloadingUbiquitousItem(at: czfExtRoot)
+            folders += (try? fm.contentsOfDirectory(at: czfExtRoot, includingPropertiesForKeys: nil)) ?? []
+        }
+        // 外部 manifest 下载等待总预算（restoreFromBackup 同款 15 秒）：
+        // 逐个文件夹等会把总时间拉长，共用一个预算；用完后剩下的外
+        // 部文件夹直接跳过（循环内守卫）。
+        var czfExtWaitBudget = 15
         // 3.8.283：自动恢复改严格配对（照手动恢复 restoreFromBackup
         // 的三档）：dataUUID 精确匹配直接认；否则显示名 + Bundle ID
         // 都对上才算候选；多个候选不猜（多开分身同 bundleID，取第
@@ -2704,6 +2718,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else {
                 continue
+            }
+            // 外部文件夹的 manifest 可能是 iCloud 占位：Data 读会触发隐式
+            // 下载长堵（restoreFromBackup 同款注释），先等它下完再读；
+            // 预算内等不到就跳过这个文件夹（不读占位、不误判）。
+            // 无 manifest 的老备份 isFileDownloaded 恒真（无状态即已下载），
+            // 直接过、不等。
+            if let czfExtRoot, folder.path.hasPrefix(czfExtRoot.path + "/") {
+                let manifestURL = folder.appendingPathComponent("manifest.json")
+                while czfExtWaitBudget > 0, !LCDataManagementView.isFileDownloaded(manifestURL, underExternal: true) {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    czfExtWaitBudget -= 1
+                }
+                guard LCDataManagementView.isFileDownloaded(manifestURL, underExternal: true) else { continue }
             }
             var json: [String: String]?
             if let data = try? Data(contentsOf: folder.appendingPathComponent("manifest.json")),
@@ -2729,8 +2756,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         if found == nil {
-            // 候选去重（同一文件夹可能同时满足二、三档）
-            let unique = Array(Set(candidates))
+            // 候选去重：同一文件夹只留一次；本地与外部同一份备份（同步拷
+            // 过去的）文件夹同名，按名再去重，只留一份——candidates 按扫描
+            // 顺序（本地在前），本地优先。不同名的才是真多开分身，照旧报
+            // “多个备份”让用户手动选。
+            var czfSeenNames = Set<String>()
+            let unique = candidates.filter { czfSeenNames.insert($0.lastPathComponent).inserted }
             if unique.count == 1 {
                 found = unique[0]
             } else if unique.count > 1 {
@@ -2979,7 +3010,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 processed += 1
                 installQueueDone = processed
+                // 预下载文件别漏：队里那一项被用户删掉/队列被清空时，
+                // 旧 prefetched 没人再消费，下一句直接覆盖/循环
+                // 退出就丢了引用，整包 IPA 烂在 tmp 里（CZFPrefetch-*
+                // 全仓只有这里产生、无启动清理）。覆盖前先删旧文件；
+                // 同 URL 换新文件也照删——下一项认新文件，不认旧的。
+                if let oldPrefetched = prefetched {
+                    try? FileManager.default.removeItem(at: oldPrefetched.file)
+                }
                 prefetched = await prefetchTask?.value ?? nil
+            }
+            // 队列中途被清空：循环退出时 prefetched 还攥着刚下好的包，
+            // 没人消费，顺手删掉，别留整包 IPA 在 tmp 里。
+            if let leftoverPrefetched = prefetched {
+                try? FileManager.default.removeItem(at: leftoverPrefetched.file)
             }
             downloadHelper.batchMode = false
             installQueueRunning = false
