@@ -1104,23 +1104,52 @@ class LCAppModel: ObservableObject, Hashable {
             }}
         }
         
+        // 3.8.499（L18）：启动路签名 continuation 加 5 分钟超时兜底——
+        // 与安装路（LCAppListView:2629）同款：patchExecAndSignIfNeed
+        // 回调一直不来时原来永远挂起，runApp 永不返、isAppRunning 一直
+        // true、App 再也点不开（L12-1 JIT 超时同款）。超时与正常完成
+        // 用 CZFOnceFlag 互斥，resume 只调一次；超时后走下面原有的
+        // 失败路径（signError 非空、signSuccess 为 false）。
+        let czfSignResumeOnce = CZFOnceFlag()
+        var czfSignTimeoutTask: Task<Void, Never>?
         await withUnsafeContinuation({ c in
+            czfSignTimeoutTask = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                if czfSignResumeOnce.claimTimeout() {
+                    c.resume()
+                }
+            }
             appInfo.patchExecAndSignIfNeed(completionHandler: { success, error in
-                signError = error;
-                signSuccess = success;
-                c.resume()
+                if czfSignResumeOnce.claim() {
+                    signError = error;
+                    signSuccess = success;
+                    c.resume()
+                }
             }, progressHandler: { signProgress in
                 guard let signProgress else {
                     return
                 }
                 self.isSigningInProgress = true
-                self.observer = signProgress.observe(\.fractionCompleted) { p, v in
+                // 3.8.499（L18）：KVO 闭包原来强抓 self 与 signProgress——
+                // self → observer token → 闭包 → self 是永久循环引用，
+                // 且闭包强留 Progress、观察永远等不到被观察对象释放，
+                // 循环到不了自解；每次启动都签一次，卸掉的 App 的模型
+                // 永远不释放。改 [weak self] + 用回调给的 p 读进度。
+                self.observer = signProgress.observe(\.fractionCompleted) { [weak self] p, _ in
+                    let fraction = p.fractionCompleted
                     DispatchQueue.main.async {
-                        self.signProgress = signProgress.fractionCompleted
+                        self?.signProgress = fraction
                     }
                 }
             }, forceSign: force)
         })
+        czfSignTimeoutTask?.cancel()
+        if czfSignResumeOnce.timedOut {
+            signError = "签名超时（已等待 5 分钟），请重试"
+            signSuccess = false
+        }
+        // 签名已结束（正常完成或超时），进度观察不再需要，放掉 token。
+        self.observer = nil
         if let signError {
             if !signSuccess {
                 throw signError.loc

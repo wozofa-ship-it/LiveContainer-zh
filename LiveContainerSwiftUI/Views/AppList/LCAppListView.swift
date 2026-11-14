@@ -2665,6 +2665,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             _ = czfTakeInstallCancel()
             throw CZFInstallCancelled()
         }
+        // 3.8.499（L18）：签名轮询 0.5 秒一查，取消点在两次检查之间、
+        // 签名又在下次检查前完成时，轮询被上面 cancel 掉、标志没人取——
+        // 本次安装照常装完（点了取消还装上），标志还留给下一次安装、
+        // 下次安装入口 :3409 直接取走当取消、白白记一次失败。签名刚完
+        // 在这里再取一次，抢到就按取消抛（与上面 cancelled 分支同款）。
+        if czfTakeInstallCancel() {
+            throw CZFInstallCancelled()
+        }
         if czfSignResumeOnce.timedOut {
             signError = "签名超时（已等待 5 分钟），请重试"
             signSuccess = false
@@ -3093,6 +3101,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             downloadHelper.batchMode = false
             installQueueRunning = false
+            // 3.8.499（L18）：队排空时清掉残留的取消标志——取消点在
+            // 签名完成后的收尾步骤里（最后一处检查点之后）时，标志没
+            // 人取、队里也没下一项可消耗它；不清掉，下次安装入口
+            // :3409 会取走这个过期标志、白白记一次失败。队已空、
+            // 没有在装的项，剩下的标志只可能是过期的，放心清掉。
+            czfInstallCancelRequested = false
             if processed > 1 {
                 // 汇总分开报成功/失败并点名失败的：原来只报总数，
                 // 装 10 个挂 3 个也显示"完成"，得逐个去核对
