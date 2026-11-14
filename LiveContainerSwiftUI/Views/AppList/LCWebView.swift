@@ -21,6 +21,9 @@ struct LCWebView: View {
     @State private var canGoForward = false
     @State private var isLoading = false
     @State private var showShareSheet = false
+    // 网页下载的非安装包文件（.ipa/.tipa 之外）：分享时用它，不用
+    // 当前页 URL；点分享按钮时清掉（见 bottomBar）。
+    @State private var shareFileURL: URL?
     
     @State private var runAppAlert = YesNoHelper()
     @State private var runAppAlertMsg = ""
@@ -38,17 +41,21 @@ struct LCWebView: View {
     private let bottomBarHeight: CGFloat = 64
     
     var itmsServicesHandler: ((String) async -> Void)?
+    // 网页里下的 .ipa/.tipa 文件：App 页传安装入口（installFromUrl，
+    // 接 file:// URL 走本地安装路）。其余文件不走这里，走分享。
+    var downloadedIPAHandler: ((URL) async -> Void)?
     
     // 恢复打开的网页：复用最小化时存下的 WebView，不重建、
     // 不重载（页面、滚动位置、登录态都在）。新开网页时为 false。
     private let isRestoredWebView: Bool
 
-    init(url: Binding<URL>, isPresent: Binding<Bool>, itmsServicesHandler: ((String) async -> Void)? = nil, existingWebView: WebView? = nil) {
+    init(url: Binding<URL>, isPresent: Binding<Bool>, itmsServicesHandler: ((String) async -> Void)? = nil, downloadedIPAHandler: ((URL) async -> Void)? = nil, existingWebView: WebView? = nil) {
         self._webView = State(initialValue: existingWebView ?? WebView())
         self.isRestoredWebView = existingWebView != nil
         self._url = url
         self._isPresent = isPresent
         self.itmsServicesHandler = itmsServicesHandler
+        self.downloadedIPAHandler = downloadedIPAHandler
     }
     
     var body: some View {
@@ -92,7 +99,8 @@ struct LCWebView: View {
             }
         }
         .sheet(isPresented: $showShareSheet) {
-            ActivityViewController(activityItems: [currentURL])
+            // 刚下完的非安装包文件分享它自己；平时分享当前页。
+            ActivityViewController(activityItems: [shareFileURL ?? currentURL])
         }
         .alert("lc.webView.runApp".loc, isPresented: $runAppAlert.show) {
             Button("lc.appBanner.run".loc, action: {
@@ -273,6 +281,8 @@ struct LCWebView: View {
 
             Spacer(minLength: 0)
             Button {
+                // 点分享按钮是分享当前页：清掉上次下载文件的残留。
+                shareFileURL = nil
                 showShareSheet = true
             } label: {
                 Image(systemName: "square.and.arrow.up")
@@ -303,9 +313,26 @@ struct LCWebView: View {
 
     func onViewAppear() {
         let observer = WebViewLoadObserver(loadStatus: $loadStatus, pageURL: $pageURL, canGoBack: $canGoBack, canGoForward: $canGoForward, isLoading: $isLoading, webView: webView.webView)
-        let webViewDelegate = WebViewDelegate(pageTitle: $pageTitle, errorShow: $errorShow, errorInfo: $errorInfo, loadStatus: $loadStatus, urlSchemeHandler:onURLSchemeDetected, universalLinkHandler: onUniversalLinkDetected,)
+        let webViewDelegate = WebViewDelegate(pageTitle: $pageTitle, errorShow: $errorShow, errorInfo: $errorInfo, loadStatus: $loadStatus, urlSchemeHandler:onURLSchemeDetected, universalLinkHandler: onUniversalLinkDetected, downloadedFileHandler: onDownloadedFile)
         webView.setDelegate(delegete: webViewDelegate)
         webView.setObserver(observer: observer)
+    }
+
+    // 网页下载完成后的分流（WKDownloadDelegate 回调）：.ipa/.tipa
+    // 走安装（与 itms-services 同款：先关网页再进安装队列——
+    // 安装进度在 App 页上，盖着网页用户看不到）；其余文件弹分享，
+    // 让用户自己存到“文件”或发给别的 App。
+    func onDownloadedFile(url: URL) async {
+        let ext = url.pathExtension.lowercased()
+        if ext == "ipa" || ext == "tipa" {
+            close()
+            if let handler = downloadedIPAHandler {
+                await handler(url)
+            }
+            return
+        }
+        shareFileURL = url
+        showShareSheet = true
     }
 
     func launchToApp(app: LCAppModel, url: URL) async {
@@ -477,22 +504,32 @@ class WebViewLoadObserver: NSObject {
     }
 }
 
-class WebViewDelegate : NSObject,WKNavigationDelegate {
+class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
     private var pageTitle: Binding<String>
     private var errorShow: Binding<Bool>
     private var errorInfo: Binding<String>
     private var loadStatus: Binding<Double>
     private var urlSchemeHandler: (URL) async -> Void
     private var universalLinkHandler: (URL , [String]) async -> Void // url, [String] of all apps that can open this web page
+    private var downloadedFileHandler: (URL) async -> Void
     var domainBundleIdDict : [String:[String]] = [:]
+    // 进行中的下载各放哪个目的地：按下载对象分键——两次下载
+    // 并行时单变量会被后一次盖掉，下完会拿错文件（装错包）。
+    // 用 static 存：最小化再恢复时会新建 delegate（onViewAppear
+    // 每次都建，为的是重新绑新视图的 @State）；下载中途最小化
+    // 再恢复，新 delegate 也能找到旧下载的目的地，不会静默丢包。
+    // 回调都在主线程跑，不用锁；decideDestinationUsing 每次都
+    // 覆盖写入，旧条目不会被新下载误认。
+    private static var downloadDestinations: [ObjectIdentifier: URL] = [:]
     
-    init(pageTitle: Binding<String>, errorShow: Binding<Bool>, errorInfo: Binding<String>, loadStatus: Binding<Double>, urlSchemeHandler: @escaping (URL) async -> Void, universalLinkHandler: @escaping (URL , [String]) async -> Void) {
+    init(pageTitle: Binding<String>, errorShow: Binding<Bool>, errorInfo: Binding<String>, loadStatus: Binding<Double>, urlSchemeHandler: @escaping (URL) async -> Void, universalLinkHandler: @escaping (URL , [String]) async -> Void, downloadedFileHandler: @escaping (URL) async -> Void) {
         self.pageTitle = pageTitle
         self.errorShow = errorShow
         self.errorInfo = errorInfo
         self.loadStatus = loadStatus
         self.urlSchemeHandler = urlSchemeHandler
         self.universalLinkHandler = universalLinkHandler
+        self.downloadedFileHandler = downloadedFileHandler
         super.init()
     }
     
@@ -548,6 +585,50 @@ class WebViewDelegate : NSObject,WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        self.loadStatus.wrappedValue = 1.0
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        self.errorInfo.wrappedValue = error.localizedDescription
+        self.errorShow.wrappedValue = true
+    }
+
+    // 网页里的文件直链（.ipa 等二进制）原来没有下载路：导航
+    // 放行后 WebKit 载不动，didFail 只弹一个错，用户看到的就
+    // 是“文件加载失败”。iOS 14.5+ 有 WKDownloadDelegate（部署
+    // 目标 15，不用 #available）：WebKit 显示不了的类型改走
+    // .download，下完按类型分流（见 downloadDidFinish）。
+    func webView(_ webView: WKWebView,
+                   decidePolicyFor navigationResponse: WKNavigationResponse,
+                   decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if navigationResponse.canShowMIMEType {
+            decisionHandler(.allow)
+        } else {
+            decisionHandler(.download)
+        }
+    }
+
+    func webView(_ webView: WKWebView, download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, decisionHandler: @escaping (URL?) -> Void) {
+        // 建议文件名只留最后一段（Content-Disposition 里可能
+        // 带路径）；空名给个默认名；同名文件先清掉再写（与
+        // installFromUrl 落盘同款），免得撞上残留。
+        var name = (suggestedFilename as NSString).lastPathComponent
+        if name.isEmpty {
+            name = "download"
+        }
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: dest)
+        Self.downloadDestinations[ObjectIdentifier(download)] = dest
+        decisionHandler(dest)
+    }
+
+    func webView(_ webView: WKWebView, downloadDidFinish download: WKDownload) {
+        guard let dest = Self.downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        Task { await self.downloadedFileHandler(dest) }
+    }
+
+    func webView(_ webView: WKWebView, download: WKDownload, didFailWithError error: Error, shouldResume resumeData: Data?) {
+        if let dest = Self.downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) {
+            try? FileManager.default.removeItem(at: dest)
+        }
         self.loadStatus.wrappedValue = 1.0
         if (error as NSError).code == NSURLErrorCancelled { return }
         self.errorInfo.wrappedValue = error.localizedDescription
@@ -647,6 +728,9 @@ struct WebView: UIViewRepresentable {
     mutating func setDelegate(delegete: WKNavigationDelegate) {
         self.delegate = delegete
         self.webView.navigationDelegate = delegete
+        // 下载走同一份 delegate（WKDownloadDelegate，iOS 14.5+；
+        // 部署目标 15，不用 #available）。
+        self.webView.downloadDelegate = delegete as? WKDownloadDelegate
     }
     
     mutating func setObserver(observer: WebViewLoadObserver) {

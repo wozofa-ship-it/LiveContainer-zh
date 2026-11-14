@@ -1979,6 +1979,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .fullScreenCover(isPresented: $webViewOpened) {
             LCWebView(url: $webViewURL, isPresent: $webViewOpened, itmsServicesHandler: { urlStr in
                 await installFromPlist(urlStr: urlStr)
+            }, downloadedIPAHandler: { fileURL in
+                // 网页里下的 .ipa/.tipa 直链：downloadDidFinish 已
+                // 落到 tmp，installFromUrl 接 file:// 走本地安装路。
+                await installFromUrl(urlStr: fileURL.absoluteString)
             }, existingWebView: sharedModel.czfMinimizedWebView)
         }
         .fullScreenCover(isPresented: $safariViewOpened) {
