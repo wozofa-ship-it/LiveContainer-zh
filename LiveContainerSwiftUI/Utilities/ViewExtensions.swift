@@ -515,9 +515,20 @@ struct BasicButtonStyle: ButtonStyle {
 struct ActivityViewController: UIViewControllerRepresentable {
     var activityItems: [Any]
     var applicationActivities: [UIActivity]? = nil
+    // 3.8.505（L27）：活动真正结束（完成或取消）后才调。
+    // .sheet 的 onDismiss 在活动自带界面弹出来之前就触发——
+    // “存储到‘文件’”的 picker 在用户选好目的地后才拷源文件、
+    // 第三方分享扩展在扩展进程启动后才读文件，都是 sheet 关
+    // 掉之后；那时删源文件就分享失败。completion 是官方的清
+    // 理点，活动读完文件、界面关掉后才调。（邮件/信息撰写
+    // 界面在创建时已读附件，本来就安全，completion 照样适用。）
+
+    var onComplete: ((UIActivity.ActivityType?, Bool, [Any]?, Error?) -> Void)? = nil
 
     func makeUIViewController(context: UIViewControllerRepresentableContext<ActivityViewController>) -> UIActivityViewController {
-        return UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+        let vc = UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+        vc.completionWithItemsHandler = onComplete
+        return vc
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: UIViewControllerRepresentableContext<ActivityViewController>) {}

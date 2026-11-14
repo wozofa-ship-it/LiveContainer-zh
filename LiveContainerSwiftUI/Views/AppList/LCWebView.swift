@@ -99,25 +99,41 @@ struct LCWebView: View {
             }
         }
         .sheet(isPresented: $showShareSheet, onDismiss: {
-            // 3.8.504（L26）：非 .ipa 下载分享完后清掉本次下载独占的
-            // tmp 子目录 LCWebDownload-<UUID>/（L24）——.ipa 成功路
-            // L25 在安装完清、失败路 L24 在 didFail 里清，只剩分享
-            // 这条路没人清，每个非安装包下载漏一个目录 + 一个文件
-            // 在 tmp 里。只认 LCWebDownload- 前缀；平时分享当前页
-            // 时 shareFileURL 是 nil，不删。分享活动在 sheet 关掉
-            // 前已读完/拷完文件，关掉再删不影响已分享出去的。
             // 3.8.504（516 509 红修法）：onDismiss 原来写在尾随闭包
             // 后面，尾随闭包必须是最后一个参数，编译不过
             //（incorrect argument label）；改成放进括号里、内容闭包
             // 仍走尾随，语义不变。
-            if let fileURL = shareFileURL,
-               fileURL.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") {
-                try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
-            }
+            // 3.8.505（L27）：只清状态，删文件已移到上面
+            // completion 里——onDismiss 删太早（见上）。
             shareFileURL = nil
         }) {
             // 刚下完的非安装包文件分享它自己；平时分享当前页。
-            ActivityViewController(activityItems: [shareFileURL ?? currentURL])
+            // 3.8.505（L27）：在内容闭包里当场抓住这次要分享的
+            // 文件——onDownloadedFile 在 sheet 已开时再来一个下
+            // 载会改 shareFileURL，onDismiss 读它会删错文件（删
+            // 没分享的第二个、漏真正分享的第一个）；抓局部量只
+            // 认创建时那一个，makeUIViewController 只调一次，
+            // 后面 state 再变也不会换掉已建好的活动控制器。
+            let fileToShare = shareFileURL
+            ActivityViewController(activityItems: [fileToShare ?? currentURL]) { _, _, _, _ in
+                // 3.8.505（L27）：非 .ipa 下载分享完后清掉本次下载
+                // 独占的 tmp 子目录 LCWebDownload-<UUID>/（L24）。
+                // 删的时机从 L26 的 onDismiss 移到这里：onDismiss
+                // 在活动自带界面弹出来之前就触发，“存储到‘文件’”
+                // （picker 在用户选好目的地后才拷源文件）与第三
+                // 方分享扩展（扩展进程在 sheet 关掉后才读文件）
+                // 那时还读不到文件，删了就分享失败；completion
+                // 是活动真正结束的点，读完、关掉后才调。.ipa
+                // 成功路 L25 在安装完清、失败路 L24 在 didFail
+                // 里清，只剩分享这条路。只认 LCWebDownload-
+                // 前缀；平时分享当前页时 fileToShare 是 nil，
+                // 不删。取消也删——文件是刚下的、用户没留它，
+                // 不留 tmp 残留。
+                if let fileURL = fileToShare,
+                   fileURL.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") {
+                    try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+                }
+            }
         }
         .alert("lc.webView.runApp".loc, isPresented: $runAppAlert.show) {
             Button("lc.appBanner.run".loc, action: {
