@@ -743,60 +743,70 @@ class LCAppModel: ObservableObject, Hashable {
             return
         }
 
-        if uiContainers.isEmpty {
-            let newName = NSUUID().uuidString
-            let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
-            let isMultiOpen = !czfOtherSameBundleApps().isEmpty
-            let group: Int
-            if isMultiOpen {
-                newContainer.enableMultiOpenIsolation()
-                group = czfFreeKeychainGroup(excluding: newContainer)
-            } else {
-                group = Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
-            }
-            uiContainers.append(newContainer)
-            if uiSelectedContainer == nil {
-                uiSelectedContainer = newContainer;
-            }
-            appInfo.containers = uiContainers;
-            newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: group)
-            // 3.8.377：卸载重装后首次启动新建容器时，把磁盘上已有容器里的
-            // CZFKeychainImport.plist 带过来——恢复时排队文件只写进了旧容器
-            // 37EDAD10（375 的恢复时循环是空操作：恢复时根本不存在第二个
-            // 容器），新容器里没有，桥就读不到令牌。只补缺的，不覆盖已有的。
-            do {
-                let containerDir = newContainer.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
-                let dst = newContainer.containerURL.appendingPathComponent("CZFKeychainImport.plist")
-                if !FileManager.default.fileExists(atPath: dst.path),
-                   let entries = try? FileManager.default.contentsOfDirectory(at: containerDir, includingPropertiesForKeys: nil) {
-                    for entry in entries where entry.lastPathComponent != newName {
-                        let src = entry.appendingPathComponent("CZFKeychainImport.plist")
-                        if FileManager.default.fileExists(atPath: src.path) {
-                            try? FileManager.default.copyItem(at: src, to: dst)
-                            break
+        // 3.8.510（L32）：容器准备整段放主 actor 上——LCAppModel.runApp
+        // 是非隔离 async，横幅卡（LCAppBannerViewController，普通
+        // UIViewController 非 @MainActor）与 openSideStore 的裸 Task
+        // 调它时整段都在全局执行器上，uiContainers/uiSelectedContainer/
+        // uiDefaultDataFolder 与容器自身的 isolate/spoof 三旗全是
+        // @Published，离主线程发更新、选中容器可能不刷新。段内无
+        // await、只做快活（建容器、写 plist、拷 keychain 导入），
+        // 主线程上跑无妨；其余调用方本来就在主 actor 上，包一层无害。
+        await MainActor.run {
+            if uiContainers.isEmpty {
+                let newName = NSUUID().uuidString
+                let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
+                let isMultiOpen = !czfOtherSameBundleApps().isEmpty
+                let group: Int
+                if isMultiOpen {
+                    newContainer.enableMultiOpenIsolation()
+                    group = czfFreeKeychainGroup(excluding: newContainer)
+                } else {
+                    group = Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
+                }
+                uiContainers.append(newContainer)
+                if uiSelectedContainer == nil {
+                    uiSelectedContainer = newContainer;
+                }
+                appInfo.containers = uiContainers;
+                newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: group)
+                // 3.8.377：卸载重装后首次启动新建容器时，把磁盘上已有容器里的
+                // CZFKeychainImport.plist 带过来——恢复时排队文件只写进了旧容器
+                // 37EDAD10（375 的恢复时循环是空操作：恢复时根本不存在第二个
+                // 容器），新容器里没有，桥就读不到令牌。只补缺的，不覆盖已有的。
+                do {
+                    let containerDir = newContainer.isShared ? LCPath.lcGroupDataPath : LCPath.dataPath
+                    let dst = newContainer.containerURL.appendingPathComponent("CZFKeychainImport.plist")
+                    if !FileManager.default.fileExists(atPath: dst.path),
+                       let entries = try? FileManager.default.contentsOfDirectory(at: containerDir, includingPropertiesForKeys: nil) {
+                        for entry in entries where entry.lastPathComponent != newName {
+                            let src = entry.appendingPathComponent("CZFKeychainImport.plist")
+                            if FileManager.default.fileExists(atPath: src.path) {
+                                try? FileManager.default.copyItem(at: src, to: dst)
+                                break
+                            }
                         }
                     }
                 }
+                appInfo.dataUUID = newName
+                uiDefaultDataFolder = newName
+                if isMultiOpen {
+                    UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolatedV2-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
+                }
             }
-            appInfo.dataUUID = newName
-            uiDefaultDataFolder = newName
-            if isMultiOpen {
-                UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolatedV2-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
+            czfIsolateMultiOpenContainersIfNeeded()
+            if let containerFolderName {
+                uiSelectedContainer = uiContainers.first { $0.folderName == containerFolderName } ?? uiSelectedContainer
             }
+            // 拆分只做一次、且只在最终选中定下来后做（容器越生越多根因之一）：
+            // 原来选前先拆一次、选后再拆一次，面板传 dataUUID 时若选前已是
+            // 共享容器，第一次拆出的新容器会被随后的指定选中覆盖、直接成
+            // 孤儿留在列表里，第二次又拆一个——一次启动多两个容器。
+            // 只留这一次：containerFolderName 为空时选中没变，等同于原来
+            // 的第一次；指定了容器时拆的就是最终那个，不造孤儿。
+            // 拆完选中已是新容器，当前文件夹就以选中为准，不再
+            // 用旧的 containerFolderName，否则拆了也白拆。
+            czfSplitSharedContainerIfNeeded()
         }
-        czfIsolateMultiOpenContainersIfNeeded()
-        if let containerFolderName {
-            uiSelectedContainer = uiContainers.first { $0.folderName == containerFolderName } ?? uiSelectedContainer
-        }
-        // 拆分只做一次、且只在最终选中定下来后做（容器越生越多根因之一）：
-        // 原来选前先拆一次、选后再拆一次，面板传 dataUUID 时若选前已是
-        // 共享容器，第一次拆出的新容器会被随后的指定选中覆盖、直接成
-        // 孤儿留在列表里，第二次又拆一个——一次启动多两个容器。
-        // 只留这一次：containerFolderName 为空时选中没变，等同于原来
-        // 的第一次；指定了容器时拆的就是最终那个，不造孤儿。
-        // 拆完选中已是新容器，当前文件夹就以选中为准，不再
-        // 用旧的 containerFolderName，否则拆了也白拆。
-        czfSplitSharedContainerIfNeeded()
         let currentDataFolder = uiSelectedContainer?.folderName
         
         let classicMode = appInfo.defaultClassicMode
@@ -1276,11 +1286,13 @@ class LCAppModel: ObservableObject, Hashable {
             do {
                 let result = try await LCUtils.authenticateUserForced()
                 if !result {
-                    uiIsLocked = true
+                    // 3.8.510（L32）：同 toggleHidden，横幅卡裸 Task 调
+                    // setLocked 时不在主 actor 上，uiIsLocked 必须包住。
+                    await MainActor.run { uiIsLocked = true }
                     return
                 }
             } catch {
-                uiIsLocked = true
+                await MainActor.run { uiIsLocked = true }
                 return
             }
             
@@ -1293,15 +1305,22 @@ class LCAppModel: ObservableObject, Hashable {
     }
     
     func toggleHidden() async {
-        delegate?.closeNavigationView()
-        if appInfo.isHidden {
-            appInfo.isHidden = false
-            uiIsHidden = false
-        } else {
-            appInfo.isHidden = true
-            uiIsHidden = true
+        // 3.8.510（L32）：整段放主 actor 上——LCAppBannerViewController
+        // 是普通 UIViewController（非 @MainActor），它的 UIAction
+        // 里裸 Task 调这里，uiIsHidden 直接写会离主线程发更新、
+        // delegate 的 closeNavigationView 还会离主线程改 @State；
+        // 其余调用方（网格/列表/设置页）都在主 actor 上，包一层无害。
+        await MainActor.run {
+            delegate?.closeNavigationView()
+            if appInfo.isHidden {
+                appInfo.isHidden = false
+                uiIsHidden = false
+            } else {
+                appInfo.isHidden = true
+                uiIsHidden = true
+            }
+            delegate?.changeAppVisibility(app: self)
         }
-        delegate?.changeAppVisibility(app: self)
     }
     
     func loadSupportedLanguages() throws {

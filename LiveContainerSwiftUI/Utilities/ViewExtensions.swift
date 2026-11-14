@@ -578,26 +578,33 @@ extension UIViewController {
     }
 
     func showError(_ message: String) {
-        guard viewIfLoaded?.window != nil else {
-            return
-        }
-
-        let presentError = { [weak self] in
-            guard let self else {
+        // 3.8.510（L32）：12 个调用点全在 LCAppBannerViewController 里，
+        // 它是普通 UIViewController（非 @MainActor），裸 Task 里调这里
+        // 时不在主线程——UIAlertController 必须主线程 present，否则静默
+        // 弹不出来（启动失败连错都不报）。回主线程再判 window、再弹；
+        // 已在主线程时只多一跳，无行为变化。
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.viewIfLoaded?.window != nil else {
                 return
             }
-            let alert = UIAlertController(title: "lc.common.error".loc, message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "lc.common.ok".loc, style: .default))
-            alert.addAction(UIAlertAction(title: "lc.common.copy".loc, style: .default) { _ in
-                UIPasteboard.general.string = message
-            })
-            self.present(alert, animated: true)
-        }
 
-        if let presentedViewController {
-            presentedViewController.dismiss(animated: true, completion: presentError)
-        } else {
-            presentError()
+            let presentError = { [weak self] in
+                guard let self else {
+                    return
+                }
+                let alert = UIAlertController(title: "lc.common.error".loc, message: message, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "lc.common.ok".loc, style: .default))
+                alert.addAction(UIAlertAction(title: "lc.common.copy".loc, style: .default) { _ in
+                    UIPasteboard.general.string = message
+                })
+                self.present(alert, animated: true)
+            }
+
+            if let presentedViewController {
+                presentedViewController.dismiss(animated: true, completion: presentError)
+            } else {
+                presentError()
+            }
         }
     }
 }
