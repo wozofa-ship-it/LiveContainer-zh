@@ -101,6 +101,19 @@ struct LCWebView: View {
         .sheet(isPresented: $showShareSheet) {
             // 刚下完的非安装包文件分享它自己；平时分享当前页。
             ActivityViewController(activityItems: [shareFileURL ?? currentURL])
+        } onDismiss: {
+            // 3.8.504（L26）：非 .ipa 下载分享完后清掉本次下载独占的
+            // tmp 子目录 LCWebDownload-<UUID>/（L24）——.ipa 成功路
+            // L25 在安装完清、失败路 L24 在 didFail 里清，只剩分享
+            // 这条路没人清，每个非安装包下载漏一个目录 + 一个文件
+            // 在 tmp 里。只认 LCWebDownload- 前缀；平时分享当前页
+            // 时 shareFileURL 是 nil，不删。分享活动在 sheet 关掉
+            // 前已读完/拷完文件，关掉再删不影响已分享出去的。
+            if let fileURL = shareFileURL,
+               fileURL.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") {
+                try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+            }
+            shareFileURL = nil
         }
         .alert("lc.webView.runApp".loc, isPresented: $runAppAlert.show) {
             Button("lc.appBanner.run".loc, action: {

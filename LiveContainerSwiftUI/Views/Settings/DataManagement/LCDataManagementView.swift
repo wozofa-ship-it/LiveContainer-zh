@@ -246,6 +246,12 @@ struct LCDataManagementView : View {
     @State private var scheduleHour = 3
     @State private var scheduleMinute = 0
     @State private var scheduleSelectedIDs = Set<String>()
+    // 3.8.504（L26）：这次载入定时备份设置时 App 列表是不是空的——
+    // 冷启动扫描还没完时列表是空的，loadScheduleSettings 会把已存
+    // 选择换算成空集；标记在，保存时不写 AppIDs（L25 只堵了保存时
+    // 列表仍空的那一半）；扫描在页打开后完成时下面 onChange 按已存
+    // 值重算一次；用户在页里点过勾选就以用户的为准，标记清掉。
+    @State private var czfScheduleLoadedWhileAppsEmpty = false
     // 导出 picker 的 delegate 强持有：UIDocumentPickerViewController
     // 的 delegate 是 weak，内联创建会被当场释放、回调永不触发
     // （441 教训）；用 @State 持有到 picker 关掉。
@@ -1345,6 +1351,9 @@ struct LCDataManagementView : View {
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
+                                // 3.8.504（L26）：用户亲手点了勾选就以
+                                // 用户的为准，冷启动空载入的标记清掉。
+                                czfScheduleLoadedWhileAppsEmpty = false
                                 let key = Self.instanceKey(for: app)
                                 if scheduleSelectedIDs.contains(key) {
                                     scheduleSelectedIDs.remove(key)
@@ -1356,6 +1365,18 @@ struct LCDataManagementView : View {
                     }
                 }
                 .onAppear { czfDirectCoverAppeared = true }
+                // 3.8.504（L26）：冷启动时开页、扫描在页打开后才完成——
+                // 行是活的（ForEach 直接读 sharedModel.apps），勾是死的
+                // （load 时列表是空的、选择被换算成空集）。列表第一次
+                // 非空时按已存值重算一次勾选，只动选择、不动用户已改的
+                // 时间/开关；用户点过勾选（标记已清）就不动。
+                .onChange(of: (sharedModel.apps + sharedModel.hiddenApps).count) { _ in
+                    guard czfScheduleLoadedWhileAppsEmpty,
+                          !(sharedModel.apps + sharedModel.hiddenApps).isEmpty,
+                          let ids = UserDefaults.standard.stringArray(forKey: "LCScheduleBackupAppIDs") else { return }
+                    scheduleSelectedIDs = Self.migratedScheduleIDs(from: ids, apps: sharedModel.apps + sharedModel.hiddenApps)
+                    czfScheduleLoadedWhileAppsEmpty = false
+                }
                 .navigationTitle("定时备份")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -6114,6 +6135,8 @@ struct LCDataManagementView : View {
 
     func loadScheduleSettings() {
         let defaults = UserDefaults.standard
+        // 3.8.504（L26）：记下这次载入时列表是不是空的（见上面标记）。
+        czfScheduleLoadedWhileAppsEmpty = (sharedModel.apps + sharedModel.hiddenApps).isEmpty
         scheduleEnabled = defaults.bool(forKey: "LCScheduleBackupEnabled")
         scheduleHour = defaults.integer(forKey: "LCScheduleBackupHour")
         scheduleMinute = defaults.integer(forKey: "LCScheduleBackupMinute")
@@ -6147,7 +6170,10 @@ struct LCDataManagementView : View {
         // 定时备份从此悄悄备 0 个（3.8.355 同款冷启动竞态）。
         // 列表为空时用户根本没法改选择，不写这一键、保留旧值；
         // 列表非空时空集就是用户真的全取消，照常写。
-        if !(sharedModel.apps + sharedModel.hiddenApps).isEmpty {
+        // 3.8.504（L26）：载入时列表是空的、保存时列表已非空——
+        // 内存里的空集是冷启动换算出来的，不是用户全取消，同样
+        // 不写（用户点过勾选时标记已清，不影响正常保存）。
+        if !(sharedModel.apps + sharedModel.hiddenApps).isEmpty && !czfScheduleLoadedWhileAppsEmpty {
             defaults.set(Array(scheduleSelectedIDs), forKey: "LCScheduleBackupAppIDs")
         }
         defaults.set(scheduleKeychainOnly, forKey: "LCScheduleBackupKeychainOnly")
