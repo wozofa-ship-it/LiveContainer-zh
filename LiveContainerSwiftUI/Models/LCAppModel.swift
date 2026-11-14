@@ -830,8 +830,12 @@ class LCAppModel: ObservableObject, Hashable {
                     URLQueryItem(name: "url", value: Data(urlStr.utf8).base64EncodedString())
                 ]
             }
-            if await UIApplication.shared.canOpenURL(openURLComp.url!) {
-                await UIApplication.shared.open(openURLComp.url!)
+            // 3.8.494（L13）：containerLock 里 runningLC 若是空串/
+            // 非法 scheme（plist 损坏），URLComponents.url 会是
+            // nil——原来两处 url! 直接闪退。拼不出就当没这条
+            // 交接路，往下走正常启动。
+            if let openURL = openURLComp.url, await UIApplication.shared.canOpenURL(openURL) {
+                await UIApplication.shared.open(openURL)
                 return
             }
         }

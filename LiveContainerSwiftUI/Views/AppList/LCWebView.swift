@@ -325,7 +325,17 @@ struct LCWebView: View {
     func onDownloadedFile(url: URL) async {
         let ext = url.pathExtension.lowercased()
         if ext == "ipa" || ext == "tipa" {
-            close()
+            // 3.8.494（L13）：下载完才关网页——但只关“自己”：
+            // 下载中途关掉网页后，保活的 delegate 还会跑到这里。
+            // isPresent 是 App 页共用的 $webViewOpened 绑定，分
+            // 不清是哪个网页，不能拿它判断；改按这份 WKWebView
+            // 是否还在窗口里（window != nil 即当前正呈现，恢
+            // 复打开后同一份 WKWebView 会重新进窗口），或它是
+            // 当前最小化的那一个。已关掉的直接走安装，不再碰
+            // 最小化状态，也别把用户其间新开的网页关掉。
+            if webView.webView.window != nil || sharedModel.czfMinimizedWebView?.webView === webView.webView {
+                close()
+            }
             if let handler = downloadedIPAHandler {
                 await handler(url)
             }
@@ -521,6 +531,14 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
     // 回调都在主线程跑，不用锁；decideDestinationUsing 每次都
     // 覆盖写入，旧条目不会被新下载误认。
     private static var downloadDestinations: [ObjectIdentifier: URL] = [:]
+    // 3.8.494（L13）：进行中的下载要保住 WKWebView 与
+    // delegate——网页关掉后 @State 的 WebView 结构体就释放，
+    // WKWebView 跟着没了，下载会被 WebKit 静默取消（delegate
+    // 也是 weak，downloadDestinations 的条目还会一直漏着）。
+    // 最小化不走这里（WebView 存在 sharedModel 里）。下载
+    // 完/失败即释放，不多留。
+    private static var czfLiveWebViews: [ObjectIdentifier: WKWebView] = [:]
+    private static var czfLiveDelegates: [ObjectIdentifier: WebViewDelegate] = [:]
     
     init(pageTitle: Binding<String>, errorShow: Binding<Bool>, errorInfo: Binding<String>, loadStatus: Binding<Double>, urlSchemeHandler: @escaping (URL) async -> Void, universalLinkHandler: @escaping (URL , [String]) async -> Void, downloadedFileHandler: @escaping (URL) async -> Void) {
         self.pageTitle = pageTitle
@@ -613,10 +631,15 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
     // 对象无害）。iOS 14.5+，部署目标 15，不用 #available。
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
         download.delegate = self
+        // 3.8.494（L13）：保住 WKWebView 与 delegate（见上面注释）。
+        Self.czfLiveWebViews[ObjectIdentifier(download)] = webView
+        Self.czfLiveDelegates[ObjectIdentifier(download)] = self
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
         download.delegate = self
+        Self.czfLiveWebViews[ObjectIdentifier(download)] = webView
+        Self.czfLiveDelegates[ObjectIdentifier(download)] = self
     }
 
     // WKDownloadDelegate 的方法名是 download(...)，不是
@@ -637,12 +660,21 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        guard let dest = Self.downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        // 3.8.494（L13）：先释放保住的 WebView 与 delegate——
+        // 即使目的地条目丢了（decideDestinationUsing 没跑到），
+        // 也不让 static 一直漏着。
+        let key = ObjectIdentifier(download)
+        Self.czfLiveWebViews.removeValue(forKey: key)
+        Self.czfLiveDelegates.removeValue(forKey: key)
+        guard let dest = Self.downloadDestinations.removeValue(forKey: key) else { return }
         Task { await self.downloadedFileHandler(dest) }
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-        if let dest = Self.downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) {
+        let key = ObjectIdentifier(download)
+        Self.czfLiveWebViews.removeValue(forKey: key)
+        Self.czfLiveDelegates.removeValue(forKey: key)
+        if let dest = Self.downloadDestinations.removeValue(forKey: key) {
             try? FileManager.default.removeItem(at: dest)
         }
         self.loadStatus.wrappedValue = 1.0
