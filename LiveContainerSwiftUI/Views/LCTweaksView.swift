@@ -58,10 +58,25 @@ struct LCTweakFolderView : View {
     init(baseUrl: URL, isRoot: Bool = false) {
         _baseUrl = State(initialValue: baseUrl)
         self.isRoot = isRoot
-        var tmpTweakItems : [LCTweakItem] = []
+        switch Self.scanTweakItems(at: baseUrl) {
+        case .success(let items):
+            _tweakItems = State(initialValue: items)
+        case .failure(let error):
+            _errorShow = State(initialValue: true)
+            _errorInfo = State(initialValue: error.localizedDescription)
+            _tweakItems = State(initialValue: [])
+        }
+    }
+
+    // 3.8.571（L102）：目录扫描抽出来——init 只扫一次，源页/
+    // 面板装插件是外部写盘（installTweak 写 Tweaks/<名>-<包名>
+    // 文件夹），切走再切回时列表还停在旧数，新装的插件看不到，
+    // 要重进模块才出现；onAppear 每现一次就重扫一遍。
+    private static func scanTweakItems(at baseUrl: URL) -> Result<[LCTweakItem], Error> {
         let fm = FileManager()
         do {
             let files = try fm.contentsOfDirectory(atPath: baseUrl.path)
+            var items: [LCTweakItem] = []
             for fileName in files {
                 let fileUrl = baseUrl.appendingPathComponent(fileName)
                 var isFolder : ObjCBool = false
@@ -77,14 +92,18 @@ struct LCTweakFolderView : View {
                 if !isFolder.boolValue && !isTweak {
                     continue
                 }
-                tmpTweakItems.append(LCTweakItem(fileUrl: fileUrl, isFolder: isFolder.boolValue, isFramework: isFramework, isTweak: isTweak, isEnabled: isEnabled))
+                items.append(LCTweakItem(fileUrl: fileUrl, isFolder: isFolder.boolValue, isFramework: isFramework, isTweak: isTweak, isEnabled: isEnabled))
             }
-            _tweakItems = State(initialValue: tmpTweakItems)
+            return .success(items)
         } catch {
             NSLog("[LC] failed to load tweaks \(error.localizedDescription)")
-            _errorShow = State(initialValue: true)
-            _errorInfo = State(initialValue: error.localizedDescription)
-            _tweakItems = State(initialValue: [])
+            return .failure(error)
+        }
+    }
+
+    private func czfReloadTweakItems() {
+        if case .success(let items) = Self.scanTweakItems(at: baseUrl) {
+            tweakItems = items
         }
     }
 
@@ -204,6 +223,14 @@ struct LCTweakFolderView : View {
                         .font(.system(size: 12))
                 }
             }
+        }
+        // 3.8.571（L102）：外部写盘后列表要跟上——源页/面板装
+        // 插件直接写磁盘，不经过本视图的 tweakItems；切 Tab
+        // 回来、从子文件夹返回时重扫一遍，新装的才出现。
+        // 列表状态全由磁盘派生（开关/类型/名字都看文件名），
+        // 重扫不会丢本视图自己的改动。
+        .onAppear {
+            czfReloadTweakItems()
         }
         .navigationTitle(isRoot ? "lc.tabView.tweaks".loc : baseUrl.lastPathComponent)
         .toolbar {
@@ -659,7 +686,14 @@ struct LCTweakFolderView : View {
 
                 let isFramework = toPath.lastPathComponent.hasSuffix(".framework")
                 let isTweak = toPath.lastPathComponent.hasSuffix(".dylib")
-                await MainActor.run { self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true)) }
+                // 3.8.571（L102）：导入中途切走再切回时 onAppear
+                // 重扫已把刚移好的文件收进列表，追加前先判重，
+                // 不然同一文件两行、ForEach(id: \.self) 撞重名。
+                await MainActor.run {
+                    if !self.tweakItems.contains(where: { $0.fileUrl == toPath }) {
+                        self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true))
+                    }
+                }
             }
             await MainActor.run { isTweakInstalling = false }
         } catch {

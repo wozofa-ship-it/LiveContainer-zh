@@ -5588,6 +5588,12 @@ struct AppIconView: View {
         .onAppear {
             loadAppIcon()
         }
+        // 3.8.571（L102）：设置页深色图标开关翻了，已在坞里的
+        // 图标要跟着换——原来只靠 onAppear 触发加载，开关翻了
+        // 活着的视图不重载（且下面修键之前缓存还串变体）。
+        .onChange(of: darkModeIcon) { _ in
+            loadAppIcon()
+        }
         .onPressGesture(
             onPress: {
                 isPressed = true
@@ -5615,7 +5621,14 @@ struct AppIconView: View {
     }
     
     private func loadAppIcon() {
-        let cacheKey = "\(app.appName)_\(app.appUUID)"
+        // 3.8.571（L102）：缓存键要带深浅变体——原来只用名字_UUID，
+        // 解出来的深色/浅色共用一个槽：先解了浅色进缓存，切深色
+        // 后重建视图也命中旧槽，坞图标一直不变色，要重启 App
+        // （内存 NSCache 清掉）才变；反向同款。键与 App 页
+        // CZFAppGridView.czfKey / LCAppInfo 内部缓存同款口径
+        // （bundlePath + "|dark"/"|light"）。
+        let wantDark = darkModeIcon
+        let cacheKey = "\(app.appName)_\(app.appUUID)_\(wantDark ? "dark" : "light")"
         
         if let cachedIcon = IconCacheManager.shared.getIcon(for: cacheKey) {
             self.appIcon = cachedIcon
@@ -5627,14 +5640,17 @@ struct AppIconView: View {
             var finalIcon: UIImage?
             
             if let appInfo = self.app.appInfo {
-                finalIcon = appInfo.iconIsDarkIcon(darkModeIcon)
+                finalIcon = appInfo.iconIsDarkIcon(wantDark)
             } else {
                 if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
-                    finalIcon = foundAppInfo.iconIsDarkIcon(darkModeIcon)
+                    finalIcon = foundAppInfo.iconIsDarkIcon(wantDark)
                 }
             }
             
             DispatchQueue.main.async {
+                // 迟到的旧变体解码不许盖掉新变体：切开关后旧解码
+                // 若后落盘，会把刚换好的图标又换回去。
+                guard self.darkModeIcon == wantDark else { return }
                 self.isLoading = false
                 if let icon = finalIcon {
                     self.appIcon = icon
