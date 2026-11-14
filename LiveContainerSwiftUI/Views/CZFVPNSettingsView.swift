@@ -414,7 +414,12 @@ struct CZFVPNSettingsView: View {
                     // 删在用节点先弹确认：manager 侧删在用
                     // 节点已改成停核心不自动切，界面再确认
                     // 一次，免得左滑手误把在用节点删了。
-                    if index == vpnActiveIndex {
+                    // L58-3：别读 @State 镜像 vpnActiveIndex——自动
+                    // 轮换/盾牌切节点会静默改 manager 的活动下标，
+                    // 视图收不到通知（跳过 34 同类），镜像过期时
+                    // 删真在用节点会跳过确认框直接删、核心停掉；
+                    // 读 manager 现值。
+                    if index == CZFVPNManager.shared.activeNodeIndex {
                         pendingDeleteIndices = [index]
                         showDeleteActiveConfirm = true
                     } else {
@@ -560,7 +565,10 @@ struct CZFVPNSettingsView: View {
             // 跟随、不重启核心。
             if vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }) {
                 Button("清理不通") {
-                    pendingClearFailedCount = vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }.count
+                    // L58-3：个数按 manager 现值算，别读 @State
+                    // 镜像——自动轮换后镜像过期，会把真在用节点
+                    // 也计进待删数（下面实际删的集合同款按现值）。
+                    pendingClearFailedCount = vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != CZFVPNManager.shared.activeNodeIndex }.count
                     showClearFailedConfirm = true
                 }
                 // 被拒时不再禁清理：被拒结果已不再覆写
@@ -579,7 +587,10 @@ struct CZFVPNSettingsView: View {
             if vpnPingResults.count > 1 {
                 Button("按延迟排序") {
                     let links = CZFVPNManager.shared.nodeLinks
-                    let activeIdx = vpnActiveIndex
+                    // L58-3：钉住的在用节点按 manager 现值认，别读
+                    // @State 镜像——自动轮换后镜像过期，会把错
+                    // 的节点钉在原位、真在用节点被排进其余节点。
+                    let activeIdx = CZFVPNManager.shared.activeNodeIndex
                     let activeLink: String? = links.indices.contains(activeIdx) ? links[activeIdx] : nil
                     let rest = links.enumerated().filter { $0.offset != activeIdx }.sorted { a, b in
                         let ka = vpnPingResults[a.offset].map { $0.success ? $0.delay : Int.max - 1 } ?? Int.max
@@ -602,7 +613,11 @@ struct CZFVPNSettingsView: View {
         // 太容易手误；确认框里写清删几个、在用与不支持的不删。
         .alert("清理不通的节点？", isPresented: $showClearFailedConfirm) {
             Button("清理 \(pendingClearFailedCount) 个", role: .destructive) {
-                let failed = Set(vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }.map { $0.key })
+                // L58-3：实际删的集合同款按 manager 现值算——确认框
+                // 弹着时自动轮换也可能刚切过节点，读现值才保证
+                // 删的永远不是此刻在用的那条；个数与这里差一
+                // 只是框上数字旧一拍，不删错节点。
+                let failed = Set(vpnPingResults.filter { !$0.value.success && !$0.value.conversionFailed && $0.key != CZFVPNManager.shared.activeNodeIndex }.map { $0.key })
                 let kept = CZFVPNManager.shared.nodeLinks.enumerated().filter { !failed.contains($0.offset) }.map { $0.element }
                 // 清理不碰核心：只换列表，核心在跑继续用
                 // 在用节点、停着继续停着；再清掉内存结果、
@@ -910,7 +925,10 @@ struct CZFVPNSettingsView: View {
         guard !vpnPinging && !vpnSinglePinging else { return }
         let indices = vpnNodes.enumerated().compactMap { vpnSelectedNodeLinks.contains($0.element) ? $0.offset : nil }
         guard !indices.isEmpty else { return }
-        if indices.contains(vpnActiveIndex) {
+        // L58-3：在用节点按 manager 现值认，别读 @State 镜像——
+        // 自动轮换后镜像过期，删真在用节点会跳过确认框直接删、
+        // 核心停掉。
+        if indices.contains(CZFVPNManager.shared.activeNodeIndex) {
             pendingDeleteIndices = indices.sorted()
             showDeleteActiveConfirm = true
         } else {

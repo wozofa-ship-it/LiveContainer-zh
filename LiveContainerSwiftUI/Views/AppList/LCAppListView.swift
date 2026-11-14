@@ -238,6 +238,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 核心在跑时可能被拒，见 toolbarPingNodes 的 rejected 处理）
     @State private var vpnPinging = false
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    // L58-2：内存测速结果属于哪个节点列表的快照（VPN 页 L43-2
+    // 同款）——结果按下标记存，设置页增删/重排节点后下标就过期；
+    // 下面 czfRestorePingResultsFromCache / switchToFastestNode
+    // 按快照校验，toolbarPingNodes 按内容换算下标。
+    @State private var vpnPingResultNodes: [String] = []
     // 内存测速结果的测量时间（恢复时取缓存里新鲜条目最旧的时间，
     // 现测时取当时）：切最快只认 24h 内的内存数，超了现场重测。
     @State private var vpnPingResultsFetchedAt: Date?
@@ -409,18 +414,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // “切到最快”也会按旧数切节点。旧数不恢复，显示“未测速”，
     // 切最快时走现场重测（与 R-3 之前一致）。
     private func czfRestorePingResultsFromCache() {
+        // L58-2：内存结果的下标属于旧列表时（设置页增删/重排后
+        // 回到本页），先清掉——下面 restore 按内容从缓存重建，
+        // 行上不再显示错行的延迟，“切到最快”也不按错下标走
+        // （VPN 页 L43-2 同款）。
+        if !vpnPingResults.isEmpty, vpnPingResultNodes != CZFVPNManager.shared.nodeLinks {
+            vpnPingResults = [:]
+            vpnPingResultNodes = []
+            vpnPingResultsFetchedAt = nil
+        }
         guard vpnPingResults.isEmpty, !vpnPinging else { return }
         let restored = CZFVPNManager.restorePingResults(nodes: CZFVPNManager.shared.nodeLinks)
         let fresh = restored.results.filter { !restored.stale.contains($0.key) }
         guard !fresh.isEmpty else { return }
         vpnPingResults = fresh
+        vpnPingResultNodes = CZFVPNManager.shared.nodeLinks
         vpnPingResultsFetchedAt = restored.oldestTime.map { Date(timeIntervalSince1970: $0) }
     }
 
     // 3.8.282：长按菜单的测延迟——直接调 manager 的只读测速
     //（不像设置页那样先停核心）：核心在跑时可能整批被拒，
     // completion 的 rejected 为真时如实提示，不谎报延迟
-    private func toolbarPingNodes(afterPing: (([CZFVPNManager.CZFNodePingResult]) -> Void)? = nil) {
+    private func toolbarPingNodes(afterPing: (([CZFVPNManager.CZFNodePingResult], [String]) -> Void)? = nil) {
         guard !vpnPinging else { return }
         let links = CZFVPNManager.shared.nodeLinks
         guard !links.isEmpty else {
@@ -451,6 +466,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (idx, r) in results.enumerated() { stored[idx] = r }
                 self.vpnPingResults = stored
+                // L58-2：结果按下标记存，快照记下它属于哪个列表，
+                // 下面自愈/切最快按快照校验（VPN 页 L43-2 同款）。
+                self.vpnPingResultNodes = links
                 self.vpnPingResultsFetchedAt = Date()
                 // R-3：结果写共用缓存（与 VPN 页同一份
                 // CZFVPNPingCache），VPN 页测完切到 App 页，
@@ -473,12 +491,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 再切节点时 applyActiveNodeChange 会重启新节点。
             // 已是最快就不切（省一次重启）。switchToFastestNode
             // 调这里时回调还会再切一次同节点，是空操作。
-            if let best = bestIndex, best != CZFVPNManager.shared.activeNodeIndex, best < CZFVPNManager.shared.nodeLinks.count {
-                CZFVPNManager.shared.setActiveNode(at: best)
-                let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[best]).name
+            // L58-2：best 是测速起跑时快照 links 里的下标——测速
+            // 期间去设置页增删/重排节点后，照旧下标切会切到错的
+            // 节点；按链接内容换算成当前列表下标，找不到了
+            // （已删）就不切，只报最快那条。
+            if let best = bestIndex, best < links.count,
+               let liveIdx = CZFVPNManager.shared.nodeLinks.firstIndex(of: links[best]),
+               liveIdx != CZFVPNManager.shared.activeNodeIndex {
+                CZFVPNManager.shared.setActiveNode(at: liveIdx)
+                let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[liveIdx]).name
                 self.vpnPingMessage = "已切到最快节点：\(name)（\(results[best].delay)ms）"
             }
-            afterPing?(results)
+            afterPing?(results, links)
         }
     }
 
@@ -488,6 +512,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 越界（setActiveNode 自带守卫，但下标取名字会崩）
     private func switchToFastestNode() {
         let links = CZFVPNManager.shared.nodeLinks
+        // L58-2：内存结果的下标属于旧列表时（设置页增删/重排后
+        // 没回过本页、自愈没跑到），先清掉再现场重测——只判
+        // best.key < links.count 不够，列表变了下标仍在界内、
+        // 指的却是另一个节点。
+        if !vpnPingResults.isEmpty, vpnPingResultNodes != links {
+            vpnPingResults = [:]
+            vpnPingResultNodes = []
+            vpnPingResultsFetchedAt = nil
+        }
         // 内存结果也会过期：LiveContainer 连续活过 24h 不重启时，
         // 恢复/测得的旧数仍在内存里，按旧数切会切到次优节点。
         // 有测量时间且在 24h 内才走内存快路，否则现场重测。
@@ -498,11 +531,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             vpnPingMessage = "已切到最快节点：\(name)（\(best.value.delay)ms）"
             return
         }
-        toolbarPingNodes { results in
+        // L58-2：回调的下标属于本次测速的快照 pingLinks，照旧
+        // 下标切会切错节点（toolbarPingNodes 里同款）；按链接
+        // 内容换算，找不到了就不切。
+        toolbarPingNodes { results, pingLinks in
             guard let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }),
-                  best.offset < CZFVPNManager.shared.nodeLinks.count else { return }
-            CZFVPNManager.shared.setActiveNode(at: best.offset)
-            let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[best.offset]).name
+                  best.offset < pingLinks.count,
+                  let liveIdx = CZFVPNManager.shared.nodeLinks.firstIndex(of: pingLinks[best.offset]) else { return }
+            CZFVPNManager.shared.setActiveNode(at: liveIdx)
+            let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[liveIdx]).name
             self.vpnPingMessage = "已切到最快节点：\(name)（\(best.element.delay)ms）"
         }
     }
@@ -3497,7 +3534,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Task {
                     let ok = await self.installFromUrl(urlStr: fileURLString)
                     if ok { try? fm.removeItem(at: url) }
-                    Self.czfClaimedInboxFiles.remove(fileKey)
+                    // L58-1：本 Task 是裸 Task、跑在全局执行器上，
+                    // czfClaimedInboxFiles 是静态 Set、其余读写
+                    // （contains/insert）都在主线程——离主线程删
+                    // 会与进页/切回前台的认领扫描竞态写坏 Set，
+                    // 回主线程再删。
+                    await MainActor.run { Self.czfClaimedInboxFiles.remove(fileKey) }
                 }
             case .launch:
                 guard let bundleName = entry.bundleName else {
@@ -3514,14 +3556,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Task {
                     await self.launchAppWithBundleId(bundleId: bundleName, container: entry.containerFolderName, urlStr: entry.launchURL)
                     try? fm.removeItem(at: url)
-                    Self.czfClaimedInboxFiles.remove(fileKey)
+                    // L58-1：同上，裸 Task 里删静态 Set 回主线程。
+                    await MainActor.run { Self.czfClaimedInboxFiles.remove(fileKey) }
                 }
             case .sidestore:
                 Self.czfClaimedInboxFiles.insert(fileKey)
                 Task {
                     await self.launchAppWithBundleId(bundleId: "builtinSideStore", container: nil, urlStr: entry.launchURL)
                     try? fm.removeItem(at: url)
-                    Self.czfClaimedInboxFiles.remove(fileKey)
+                    // L58-1：同上，裸 Task 里删静态 Set 回主线程。
+                    await MainActor.run { Self.czfClaimedInboxFiles.remove(fileKey) }
                 }
             }
         }
