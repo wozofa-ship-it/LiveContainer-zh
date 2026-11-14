@@ -120,19 +120,23 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
             try fm.createDirectory(at: LCPath.dataPath, withIntermediateDirectories: true)
             let dataDirs = try fm.contentsOfDirectory(atPath: LCPath.dataPath.path)
             for dataDir in dataDirs {
-                let dataDirUrl = LCPath.dataPath.appendingPathComponent(dataDir)
-                if !dataDirUrl.hasDirectoryPath {
+                // hasDirectoryPath 只看路径末尾有没有斜杠（纯字符串判断，
+                // appendingPathComponent 拼出来的路径从来没有斜杠），
+                // 在这里恒为 false，冷启动扫出来的注册表永远是空的——
+                // 必须用 fileExists:isDirectory: 真去磁盘问（LCTweaksView 同款）。
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: LCPath.dataPath.appendingPathComponent(dataDir).path, isDirectory: &isDir), isDir.boolValue else {
                     continue
                 }
                 tempAppDataFolderNames.append(dataDir)
             }
-            
+
             // load tweak folders
             try fm.createDirectory(at: LCPath.tweakPath, withIntermediateDirectories: true)
             let tweakDirs = try fm.contentsOfDirectory(atPath: LCPath.tweakPath.path)
             for tweakDir in tweakDirs {
-                let tweakDirUrl = LCPath.tweakPath.appendingPathComponent(tweakDir)
-                if !tweakDirUrl.hasDirectoryPath {
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: LCPath.tweakPath.appendingPathComponent(tweakDir).path, isDirectory: &isDir), isDir.boolValue else {
                     continue
                 }
                 let folderName = tweakDir.hasSuffix(".disabled") ? String(tweakDir.dropLast(".disabled".count)) : tweakDir
@@ -145,8 +149,8 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
             do {
                 let groupTweakDirs = try fm.contentsOfDirectory(atPath: LCPath.lcGroupTweakPath.path)
                 for tweakDir in groupTweakDirs {
-                    let tweakDirUrl = LCPath.lcGroupTweakPath.appendingPathComponent(tweakDir)
-                    if !tweakDirUrl.hasDirectoryPath {
+                    var isDir: ObjCBool = false
+                    guard fm.fileExists(atPath: LCPath.lcGroupTweakPath.appendingPathComponent(tweakDir).path, isDirectory: &isDir), isDir.boolValue else {
                         continue
                     }
                     let folderName = tweakDir.hasSuffix(".disabled") ? String(tweakDir.dropLast(".disabled".count)) : tweakDir

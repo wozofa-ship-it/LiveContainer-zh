@@ -135,8 +135,10 @@ extension View {
 // TextFieldAlertModifier）的 handlePresentationChange 共用骨架：
 // root 未 presenting 时才能 present，否则 UIKit 静默丢弃。
 // 返 rootViewController = 空闲可 present；nil = 正 presenting，
-// 本次跳过并留日志（调用方决定是否复位 isPresented：文件夹
-// 那个要置 false 才能下次再弹，另两个不置、留待下次 onChange 重试）。
+// 本次跳过并留日志。跳过时调用方一律把 isPresented 置回 false——
+// 不置的话值已是 true，下次点按钮 onChange 不触发，再也弹不出来
+//（文件夹选择器 3.8.439 同款卡死，DocModifier/TextFieldAlertModifier
+// 之前留 true 等"下次 onChange 重试"，但没有任何机制会再触发 onChange）。
 private func czfIdleRootViewController(from sceneDelegate: SceneDelegate, logTag: String) -> UIViewController? {
     guard let rootViewController = sceneDelegate.window?.rootViewController, rootViewController.presentedViewController == nil else {
         print("[\(logTag)] present skipped: rootViewController already presenting")
@@ -193,9 +195,12 @@ public struct DocModifier: ViewModifier {
             controller.allowsMultipleSelection = multiple
             controller.delegate = delegate
             // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-            // 不把 isPresented 置 false、不占 docController，
-            // 下次 onChange 再触发时重试，并留日志。
+            // 3.8.439 文件夹选择器同款：不把 isPresented 置 false，
+            // 下次点按钮时值已是 true、onChange 不触发，选择器再也
+            // 弹不出来——"下次 onChange 重试"没有触发机制，留 true
+            // 等于卡死。置回 false，下次点按钮能再触发。
             guard let rootViewController = czfIdleRootViewController(from: sceneDelegate, logTag: "DocModifier") else {
+                isPresented = false
                 return
             }
             self.docController = controller
@@ -340,9 +345,10 @@ public struct TextFieldAlertModifier: ViewModifier {
         if presented, alertController == nil {
             let alertController = makeAlertController()
             // 已有 sheet/alert 在上面：UIKit 会静默丢弃本次 present。
-            // 不把 isPresented 置 false、不占 alertController，
-            // 下次 onChange 再触发时重试，并留日志。
+            // DocModifier 同款（3.8.439 文件夹选择器修法）：不置
+            // false 就卡死——值已是 true，下次点按钮 onChange 不触发。
             guard let rootViewController = czfIdleRootViewController(from: sceneDelegate, logTag: "TextFieldAlertModifier") else {
+                isPresented = false
                 return
             }
             self.alertController = alertController

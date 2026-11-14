@@ -321,6 +321,13 @@ struct AppPreferencePageView : View {
     
     var body: some View {
             Form {
+                // init 里 plist 读失败会置 errorInfo，但原来 body 里
+                // 从没显示它——设置页只剩一张空白表单，用户不知道
+                // 是没读到还是本来就没项。读失败时把错亮出来。
+                if let errorInfo {
+                    Text(errorInfo)
+                        .foregroundStyle(.red)
+                }
                 ForEach(children.indices, id: \.self) { i in
                     children[i]
                 }

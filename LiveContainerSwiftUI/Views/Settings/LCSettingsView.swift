@@ -188,6 +188,13 @@ struct LCSettingsView: View {
             }
         }
     }
+    // 复制安装链接：把新版 IPA 直链拷到剪贴板，粘到浏览器就能下载安装。
+    private func copyInstallLink() {
+        guard let info = updateInfo else { return }
+        UIPasteboard.general.string = info.downloadURL.absoluteString
+        successInfo = "安装链接已复制，粘贴到浏览器即可下载安装"
+        successShow = true
+    }
     private var notificationAuthText: String {
         switch notificationAuthStatus {
         case .authorized: return "已开启"
@@ -751,6 +758,14 @@ struct LCSettingsView: View {
                     HStack {
                         LCSettingsIcon(systemName: "arrow.clockwise.circle", color: .green)
                         Text("去 Seal 更新")
+                    }
+                }
+                Button {
+                    copyInstallLink()
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "doc.on.doc", color: .blue)
+                        Text("复制安装链接")
                     }
                 }
                 Text("点更新会跳到 SideInstaller 🅥 下载安装，安装时会关闭 LiveContainer，装好后重新打开；更新前建议先在数据管理里备份一次。")

@@ -162,15 +162,16 @@ final class LCStorageManagementModel: ObservableObject {
 
         var containersSize: Int64 = 0
         for container in input.uiContainers {
-            if container.bookmarkResolved {
-                let _ = container.containerURL.startAccessingSecurityScopedResource()
+            // 扫一半取消/抛错时也要停访问，不然这次的安全域访问就漏了；
+            // defer 在本轮循环结束时跑，抛错路径也一样停。
+            let didAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
+            defer {
+                if didAccess {
+                    container.containerURL.stopAccessingSecurityScopedResource()
+                }
             }
-            
+
             let size = try await calculateSize(at: container.containerURL)
-            
-            if container.bookmarkResolved {
-                container.containerURL.stopAccessingSecurityScopedResource()
-            }
             
             if container.storageBookMark == nil {
                 containersSize += size
@@ -290,8 +291,11 @@ final class LCStorageManagementModel: ObservableObject {
         while let fileURL = enumerator.nextObject() as? URL {
             try Task.checkCancellation()
 
-            let resourceValues = try fileURL.resourceValues(forKeys: resourceKeys)
-            guard resourceValues.isRegularFile == true else {
+            // 客端容器是活的：文件在扫描中途被客端删掉/改名时
+            // resourceValues 会抛错——跳过这个文件即可，不能让
+            // 一次瞬时错误把整轮存储统计都报成失败。
+            guard let resourceValues = try? fileURL.resourceValues(forKeys: resourceKeys),
+                  resourceValues.isRegularFile == true else {
                 continue
             }
 

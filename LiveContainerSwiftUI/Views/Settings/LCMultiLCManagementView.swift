@@ -144,6 +144,10 @@ struct LCMultiLCManagementView : View, InstallAnotherLCButtonDelegate {
         } message: {
             Text("lc.settings.multiLCInstallAlertDesc %@".localizeWithFormat(storeName))
         }
+        .alert("lc.common.error".loc, isPresented: $errorShow) {
+        } message: {
+            Text(errorInfo)
+        }
         .sheet(isPresented: $showShareSheet) {
             if let shareURL = shareURL {
                 ActivityViewController(activityItems: [shareURL])

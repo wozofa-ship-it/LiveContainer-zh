@@ -91,8 +91,11 @@ struct LCSelectContainerView : View{
             try fm.createDirectory(at: LCPath.dataPath, withIntermediateDirectories: true)
             let dataDirs = try fm.contentsOfDirectory(atPath: LCPath.dataPath.path)
             for dataDir in dataDirs {
-                let dataDirUrl = LCPath.dataPath.appendingPathComponent(dataDir)
-                if !dataDirUrl.hasDirectoryPath {
+                // 冷启动扫描同款：hasDirectoryPath 只看路径末尾有没有斜杠，
+                // 拼出来的路径从来没有斜杠，在这里恒为 false、“未使用容器”
+                // 列表永远是空的——用 fileExists:isDirectory: 真去磁盘问。
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: LCPath.dataPath.appendingPathComponent(dataDir).path, isDirectory: &isDir), isDir.boolValue else {
                     continue
                 }
                 appDataFolderNames.append(dataDir)
