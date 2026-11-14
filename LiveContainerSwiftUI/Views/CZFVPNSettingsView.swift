@@ -699,6 +699,24 @@ struct CZFVPNSettingsView: View {
                 CZFVPNManager.isHostProxyEnabled = newValue
                 if newValue {
                     CZFVPNManager.shared.ensureRunningForHost()
+                } else {
+                    // 3.8.572（L103）：宿主代理关掉也是“没人用核心了”——原来只在
+                    // 关窗（removeRunningApp）时才排自动停：最后已标 VPN 的 App 关
+                    // 掉时宿主代理开着，自动停根本没排；或关窗时排好的自动停被开
+                    // 宿主代理取消掉；之后再关宿主代理，谁也不重排，核心一直跑到
+                    // 下次关 App。关开关时与 removeRunningApp 同款口径现算还有没有
+                    // 已标的在跑，有就取消待停、没有就按档位重排（checkPendingStop
+                    // 到点再逐项重查）。只在虚拟窗模式下算坞列表：原生窗口模式
+                    // App 不进坞表，列表空不代表没 App 在跑，那路保持现状（关窗
+                    // 本就不排自动停）；iOS 16 以下多任务不存在，同样不排。
+                    if #available(iOS 16.0, *),
+                       (MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow) == .virtualWindow {
+                        let stillHasFlagged = MultitaskDockManager.shared.apps.contains { app in
+                            guard let info = app.appInfo else { return false }
+                            return CZFVPNManager.isEnabled(for: info)
+                        }
+                        CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: stillHasFlagged)
+                    }
                 }
                 refreshVPNState()
             }

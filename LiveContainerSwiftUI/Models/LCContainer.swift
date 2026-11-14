@@ -281,7 +281,6 @@ class LCContainer : ObservableObject, Hashable {
     // 把刚生成的值又用 nil 盖掉。
     private func applyPlistInfo(_ plistInfo: [String: Any]) {
         isolateAppGroup = plistInfo["isolateAppGroup"] as? Bool ?? false
-        spoofIdentifierForVendor = plistInfo["spoofIdentifierForVendor"] as? Bool ?? false
         spoofedIdentifier = plistInfo["spoofedIdentifierForVendor"] as? String
         spoofedAdvertisingIdentifier = plistInfo["spoofedAdvertisingIdentifier"] as? String
         spoofedDeviceName = plistInfo["spoofedDeviceName"] as? String
@@ -296,6 +295,13 @@ class LCContainer : ObservableObject, Hashable {
         spoofedTimeZoneName = plistInfo["spoofedTimeZoneName"] as? String
         spoofedProxyHost = plistInfo["spoofedProxyHost"] as? String
         spoofedProxyPort = plistInfo["spoofedProxyPort"] as? Int ?? 0
+        // 3.8.572（L103）：开旗必须在读值之后——原来上面先开
+        // spoofIdentifierForVendor 再读 spoofedIdentifier，didSet
+        // 开旗时刚生成的 UUID 会被下一行 nil（plist 里没这个键
+        // 时）盖掉，旗开着、值没了，客端静默不 hook、IDFV 用回
+        // 真的，L89 的种子判据还认旗开着是“已隔离”不再修；
+        // spoofDeviceFingerprint 本来就在最后，没动。
+        spoofIdentifierForVendor = plistInfo["spoofIdentifierForVendor"] as? Bool ?? false
         spoofDeviceFingerprint = plistInfo["spoofDeviceFingerprint"] as? Bool ?? false
     }
     
