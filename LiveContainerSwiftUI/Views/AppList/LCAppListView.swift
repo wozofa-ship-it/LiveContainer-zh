@@ -1004,12 +1004,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func batchBackup(loginOnly: Bool) async {
         let apps = selectedBatchApps
         guard !apps.isEmpty else { return }
-        batchBusy = true
-        defer { batchBusy = false }
+        // 3.8.534（L61-4）：本函数从批量备份范围单按钮的裸 Task 调来、
+        // 不在主 actor 上（L40 同款）；batchBusy/installInfo/
+        // installInfoShow/errorInfo/errorShow/batchMode/
+        // batchSelectedIDs 是 @State，回主线程再写。L44 留作“可单独
+        // 立批修”，L54 C2 只修了数据管理页那侧，本页这两处仍留着。
+        // defer 里不能 await，改各 return 路同跳清（L44 batchHide
+        // 同款；本函数设标志后有一条中途 return，尾部再清一次）。
+        await MainActor.run { batchBusy = true }
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            errorInfo = "lc.settings.backupFail".loc
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.settings.backupFail".loc
+                errorShow = true
+                batchBusy = false
+            }
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
@@ -1058,17 +1067,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         if okNames.isEmpty && failedNames.isEmpty && !skippedNames.isEmpty {
             // 3.8.281：全被跳过（都锁了）不是失败，如实报跳过。
-            installInfo = "已跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")
-            installInfoShow = true
+            await MainActor.run {
+                installInfo = "已跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")
+                installInfoShow = true
+            }
         } else if okNames.isEmpty {
-            errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n")
+                errorShow = true
+            }
         } else {
-            installInfo = "批量备份完成：成功 \(okNames.count) 个" + (loginOnly ? "（只备份登录态）" : "（完整备份）") + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")) + (copyFailedCount > 0 ? "\n其中 \(copyFailedCount) 个文件拷贝失败（备份可能不完整）" : "")
-            installInfoShow = true
+            await MainActor.run {
+                installInfo = "批量备份完成：成功 \(okNames.count) 个" + (loginOnly ? "（只备份登录态）" : "（完整备份）") + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")) + (copyFailedCount > 0 ? "\n其中 \(copyFailedCount) 个文件拷贝失败（备份可能不完整）" : "")
+                installInfoShow = true
+            }
         }
-        batchMode = false
-        batchSelectedIDs.removeAll()
+        await MainActor.run {
+            batchMode = false
+            batchSelectedIDs.removeAll()
+            batchBusy = false
+        }
         refreshBackupStatus()
     }
 
@@ -1079,12 +1097,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func batchRestore(loginOnly: Bool) async {
         let apps = selectedBatchApps
         guard !apps.isEmpty else { return }
-        batchBusy = true
-        defer { batchBusy = false }
+        // 3.8.534（L61-4）：同 batchBackup，范围单按钮的裸 Task 调来、
+        // 不在主 actor 上；@State 写回主线程再写，defer 改各 return
+        // 路同跳清（设标志后有一条中途 return）。
+        await MainActor.run { batchBusy = true }
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            errorInfo = "lc.settings.backupFail".loc
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.settings.backupFail".loc
+                errorShow = true
+                batchBusy = false
+            }
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
@@ -1163,11 +1186,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         if ok.isEmpty && failed.isEmpty && !noBackup.isEmpty {
-            installInfo = "所选 App 都没有备份：\n" + noBackup.joined(separator: "\n")
-            installInfoShow = true
+            await MainActor.run {
+                installInfo = "所选 App 都没有备份：\n" + noBackup.joined(separator: "\n")
+                installInfoShow = true
+            }
         } else if ok.isEmpty {
-            errorInfo = "恢复失败，一个都没恢复上：\n" + failed.joined(separator: "\n")
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "恢复失败，一个都没恢复上：\n" + failed.joined(separator: "\n")
+                errorShow = true
+            }
         } else {
             // 长串一次拼编译器算不动（3.8.320 构建 #370 红字），
             // 拆成几句一段一段拼。
@@ -1179,11 +1206,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if !noBackup.isEmpty {
                 summary += "，无备份 \(noBackup.count) 个：\n" + noBackup.joined(separator: "\n")
             }
-            installInfo = summary
-            installInfoShow = true
+            await MainActor.run {
+                installInfo = summary
+                installInfoShow = true
+            }
         }
-        batchMode = false
-        batchSelectedIDs.removeAll()
+        await MainActor.run {
+            batchMode = false
+            batchSelectedIDs.removeAll()
+            batchBusy = false
+        }
         refreshBackupStatus()
     }
 
@@ -1320,7 +1352,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private var czfSearchWebURL: URL? {
         let q = czfSearchText
         guard !q.isEmpty else { return nil }
-        let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+        // L61-1：L60-1 同款——urlQueryAllowed 会放行 &（query 分隔符），
+        // 搜 “H&M” 会拼成 wd=H&M、百度侧只认 wd=H；改走 czfQueryValueAllowed。
+        let encoded = q.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? q
         return URL(string: "https://www.baidu.com/s?wd=" + encoded)
     }
 
@@ -2319,8 +2353,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         return
                     }
                 } catch {
-                    errorInfo = error.localizedDescription
-                    errorShow = true
+                    // 3.8.534（L61-3）：L44 只包了本函数其余三处写点
+                    // （guard 报错、scheme 找不到 App、runApp catch），
+                    // 人脸认证这处 catch 漏了——锁 App 的外链打开时
+                    // 人脸报错，弹窗不弹；同款包进 MainActor.run。
+                    await MainActor.run {
+                        errorInfo = error.localizedDescription
+                        errorShow = true
+                    }
                     return
                 }
             }

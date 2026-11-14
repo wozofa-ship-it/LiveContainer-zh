@@ -408,6 +408,12 @@ struct LCTweakFolderView : View {
             // 去掉 .disabled 后缀再分享；文件夹导出原来直接跳过，
             // 备份会丢已停用的插件，恢复后用户得重下。
             var tmpDir: URL?
+            // 3.8.534（L61-5）：不同子文件夹里同名的已停用 dylib 去
+            // .disabled 后缀后同名，拷进同一临时目录会撞名抛错、
+            // 整个文件夹导出直接 abort（已收集的也一并丢掉）；重名
+            // 加 -2/-3 去重。单条导出与已启用 dylib 不走临时目录，
+            // 不受影响。
+            var usedCleanNames = Set<String>()
             for case let entryURL as URL in enumerator {
                 let last = entryURL.lastPathComponent
                 if last.hasSuffix(".dylib") {
@@ -418,7 +424,18 @@ struct LCTweakFolderView : View {
                             tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                             try fm.createDirectory(at: tmpDir!, withIntermediateDirectories: true)
                         }
-                        let cleanName = String(last.dropLast(LCTweakItem.disabledSuffix.count))
+                        var cleanName = String(last.dropLast(LCTweakItem.disabledSuffix.count))
+                        if usedCleanNames.contains(cleanName) {
+                            let base = String(cleanName.dropLast(".dylib".count))
+                            var n = 2
+                            var cand = cleanName
+                            while usedCleanNames.contains(cand) {
+                                cand = "\(base)-\(n).dylib"
+                                n += 1
+                            }
+                            cleanName = cand
+                        }
+                        usedCleanNames.insert(cleanName)
                         let cleanUrl = tmpDir!.appendingPathComponent(cleanName)
                         try fm.copyItem(at: entryURL, to: cleanUrl)
                         urls.append(cleanUrl)
@@ -446,9 +463,15 @@ struct LCTweakFolderView : View {
             return
         }
 
-        let indexToRename = tweakItems.firstIndex(where: { s in
-            return s == tweakItem
-        })
+        // 3.8.534（L61-2）：本函数从长按菜单按钮的裸 Task 调来、不在
+        // 主 actor 上（L40 同款），tweakItems/sharedModel.
+        // tweakFolderNames/errorInfo/errorShow 回主线程再读写；
+        // 文件改名本身仍在外面做。
+        let indexToRename = await MainActor.run {
+            tweakItems.firstIndex(where: { s in
+                return s == tweakItem
+            })
+        }
         guard let indexToRename = indexToRename else {
             return
         }
@@ -459,38 +482,50 @@ struct LCTweakFolderView : View {
         do {
             try fm.moveItem(at: tweakItem.fileUrl, to: newUrl)
         } catch {
-            errorShow = true
-            errorInfo = error.localizedDescription
+            await MainActor.run {
+                errorShow = true
+                errorInfo = error.localizedDescription
+            }
             return
         }
-        tweakItems.remove(at: indexToRename)
-        let newTweakItem = LCTweakItem(fileUrl: newUrl, isFolder: tweakItem.isFolder, isFramework: tweakItem.isFramework, isTweak: tweakItem.isTweak, isEnabled: tweakItem.isEnabled)
-        tweakItems.insert(newTweakItem, at: indexToRename)
+        await MainActor.run {
+            tweakItems.remove(at: indexToRename)
+            let newTweakItem = LCTweakItem(fileUrl: newUrl, isFolder: tweakItem.isFolder, isFramework: tweakItem.isFramework, isTweak: tweakItem.isTweak, isEnabled: tweakItem.isEnabled)
+            tweakItems.insert(newTweakItem, at: indexToRename)
 
-        if isRoot {
-            let indexToRename2 = sharedModel.tweakFolderNames.firstIndex(of: tweakItem.displayName)
-            guard let indexToRename2 = indexToRename2 else {
-                return
+            if isRoot {
+                let indexToRename2 = sharedModel.tweakFolderNames.firstIndex(of: tweakItem.displayName)
+                guard let indexToRename2 = indexToRename2 else {
+                    return
+                }
+                sharedModel.tweakFolderNames.remove(at: indexToRename2)
+                sharedModel.tweakFolderNames.insert(newName, at: indexToRename2)
             }
-            sharedModel.tweakFolderNames.remove(at: indexToRename2)
-            sharedModel.tweakFolderNames.insert(newName, at: indexToRename2)
-
         }
     }
     
     func signAllTweaks() async {
+        // 3.8.534（L61-2）：本函数从工具栏按钮的裸 Task 调来、不在
+        // 主 actor 上（L40 同款：Swift 5 语言模式下 Button 的 @escaping
+        // action 不继承 body 的 @MainActor）；isTweakSigning/errorInfo/
+        // errorShow 是 @State，回主线程再写。进度回调更跑在签名串行
+        // 队列起的后台 Task 里（LCUtilsExtensions signTweaksImpl
+        // :298/:336 同步调 progressHandler），同步闭包里不能 await，
+        // 用 Task { @MainActor in }（AGENTS.md 既定修法）。defer 里
+        // 不能 await，改尾部两路同跳清（L44 batchHide 同款）。
+        // L33 曾判“4 处 Task 在 View 内、主 actor 继承”——不成立，
+        // 见上，进度回调那路与 Button 语义无关、必在后台线程。
         do {
-            defer {
+            try await LCUtils.signTweaks(tweakFolderUrl: self.baseUrl, force: true) { p in
+                Task { @MainActor in isTweakSigning = true }
+            }
+            await MainActor.run { isTweakSigning = false }
+        } catch {
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
                 isTweakSigning = false
             }
-            
-            try await LCUtils.signTweaks(tweakFolderUrl: self.baseUrl, force: true) { p in
-                isTweakSigning = true
-            }
-
-        } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
             return
         }
     }
@@ -499,24 +534,36 @@ struct LCTweakFolderView : View {
         guard let newName = await renameFileInput.open(), newName != "" else {
             return
         }
+        // 3.8.534（L61-2）：本函数从菜单按钮的裸 Task 调来、不在
+        // 主 actor 上（L40 同款），tweakItems/sharedModel.
+        // tweakFolderNames/errorInfo/errorShow 回主线程再写；
+        // 建目录本身仍在外面做。
         let fm = FileManager()
         let dest = baseUrl.appendingPathComponent(newName)
         do {
             try fm.createDirectory(at: dest, withIntermediateDirectories: false)
         } catch {
-            errorShow = true
-            errorInfo = error.localizedDescription
+            await MainActor.run {
+                errorShow = true
+                errorInfo = error.localizedDescription
+            }
             return
         }
-        tweakItems.append(LCTweakItem(fileUrl: dest, isFolder: true, isFramework: false, isTweak: false, isEnabled: true))
-        if isRoot {
-            sharedModel.tweakFolderNames.append(newName)
+        await MainActor.run {
+            tweakItems.append(LCTweakItem(fileUrl: dest, isFolder: true, isFramework: false, isTweak: false, isEnabled: true))
+            if isRoot {
+                sharedModel.tweakFolderNames.append(newName)
+            }
         }
     }
     
     func startInstallTweak(_ urls: [URL]) async {
-        isTweakInstalling = true
-        defer { isTweakInstalling = false }
+        // 3.8.534（L61-2）：本函数从文件导入回调的裸 Task 调来、不在
+        // 主 actor 上（L40 同款；回调方是 DocModifier 的 Coordinator，
+        // 普通 NSObject 方法）；isTweakInstalling/tweakItems/errorInfo/
+        // errorShow 是 @State，回主线程再写。defer 里不能 await，改
+        // 尾部两路同跳清（L44 batchHide 同款）。
+        await MainActor.run { isTweakInstalling = true }
         do {
             let fm = FileManager()
             // we will sign later before app launch
@@ -534,11 +581,15 @@ struct LCTweakFolderView : View {
 
                 let isFramework = toPath.lastPathComponent.hasSuffix(".framework")
                 let isTweak = toPath.lastPathComponent.hasSuffix(".dylib")
-                self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true))
+                await MainActor.run { self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true)) }
             }
+            await MainActor.run { isTweakInstalling = false }
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true            
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+                isTweakInstalling = false
+            }
             return
         }
     }
