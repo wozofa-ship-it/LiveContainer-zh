@@ -543,9 +543,13 @@ struct CZFSourceDetailView: View {
     let onBatchInstall: () -> Void
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
-    // S-13：本源已勾数（供 toolbar 安装按钮显示与禁用）。
-    private var czfSelectedCountInDetail: Int {
-        filteredApps.filter { selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: $0.bundleIdentifier)) }.count
+    // S-13：toolbar 按钮装的是全部已勾（onBatchInstall 是主页面板
+    // 的 batchInstallSelected，跨源全装、不认搜索过滤），数字必须
+    // 跟动作一致。原来数的是本源搜索过滤后的已勾：搜索开着时数字
+    // 比实际装的少；本源没勾但别源有勾时按钮还会被禁用。改数全部
+    // 已勾（selectedIDs 本身就是跨源全集，不认搜索）。
+    private var czfSelectedCountTotal: Int {
+        selectedIDs.count
     }
 
     var body: some View {
@@ -649,10 +653,10 @@ struct CZFSourceDetailView: View {
             // 同款修法），内容为空时 ToolbarItem 不占位。
             ToolbarItem(placement: .topBarTrailing) {
                 if isBatchMode {
-                    Button("安装（\(czfSelectedCountInDetail)）") {
+                    Button("安装（\(czfSelectedCountTotal)）") {
                         onBatchInstall()
                     }
-                    .disabled(czfSelectedCountInDetail == 0)
+                    .disabled(czfSelectedCountTotal == 0)
                 }
             }
         }

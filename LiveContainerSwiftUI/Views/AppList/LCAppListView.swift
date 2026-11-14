@@ -378,11 +378,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // R-3：盾牌菜单的毫秒数从共用缓存恢复（VPN 页测完的
     // 结果也能显示）；只在内存表空着且没在测时恢复，不覆写
     // 刚测的。下标按节点链接内容对回，重排/增删不错位。
+    // 只恢复新鲜的（<24h）：>24h 的旧数在 VPN 页显示“·旧”，
+    // App 页没有旧标记——照单全收会把几天前的延迟当新鲜显示，
+    // “切到最快”也会按旧数切节点。旧数不恢复，显示“未测速”，
+    // 切最快时走现场重测（与 R-3 之前一致）。
     private func czfRestorePingResultsFromCache() {
         guard vpnPingResults.isEmpty, !vpnPinging else { return }
         let restored = CZFVPNManager.restorePingResults(nodes: CZFVPNManager.shared.nodeLinks)
-        guard !restored.results.isEmpty else { return }
-        vpnPingResults = restored.results
+        let fresh = restored.results.filter { !restored.stale.contains($0.key) }
+        guard !fresh.isEmpty else { return }
+        vpnPingResults = fresh
     }
 
     // 3.8.282：长按菜单的测延迟——直接调 manager 的只读测速
