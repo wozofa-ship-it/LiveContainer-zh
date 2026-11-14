@@ -1085,7 +1085,14 @@ class LCAppModel: ObservableObject, Hashable {
         if isAppRunning {
             return
         }
-        isAppRunning = true
+        // 3.8.509（L31）：forceResign 是非隔离 async 方法，await 进来
+        // 时已跳出主 actor——isAppRunning 是 @Published，直接写会离
+        // 主线程发更新；设置页“强制重新签名”按钮的 disabled 读它，
+        // 更新丢了按钮就不灰、点启动会撞上正在签名的 App。照 runApp
+        // 同款用 MainActor.run 包住（defer 里重置早已是这写法）。
+        await MainActor.run {
+            isAppRunning = true
+        }
         defer {
             Task{ await MainActor.run {
                 self.isAppRunning = false
@@ -1129,7 +1136,16 @@ class LCAppModel: ObservableObject, Hashable {
                 guard let signProgress else {
                     return
                 }
-                self.isSigningInProgress = true
+                // 3.8.509（L31）：progressHandler 是 ObjC 回调，LCAppInfo.m
+                // 里直接调、没 dispatch 到主线程（completionHandler 那路
+                // 有）；signApp 本身是非隔离 async，await 进来已离主
+                // actor。isSigningInProgress 是 @Published，直接写会
+                // 报“Publishing changes from background threads”、横
+                // 幅签名指示可能不刷新——L28 网页回调同款。照本函数
+                // defer 与下面 signTweaks 两处同款，用 Task + MainActor.run 包住。
+                Task{ await MainActor.run {
+                    self.isSigningInProgress = true
+                } }
                 // 3.8.499（L18）：KVO 闭包原来强抓 self 与 signProgress——
                 // self → observer token → 闭包 → self 是永久循环引用，
                 // 且闭包强留 Progress、观察永远等不到被观察对象释放，
