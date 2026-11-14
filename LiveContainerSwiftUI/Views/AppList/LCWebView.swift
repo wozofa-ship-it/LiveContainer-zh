@@ -179,8 +179,9 @@ struct LCWebView: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 17, weight: .medium))
                     .frame(width: 44, height: 44)
-                    .modifier(LCWebViewGlassBackground(shape: Circle(), isInteractive: true))
+                    .modifier(LCWebViewGlassBackground(shape: Circle()))
             }
+            .contentShape(Circle())
             // 最小化：收起网页、页面不销毁，App 页浮动按钮点回即最大化。
             Button {
                 minimize()
@@ -188,8 +189,9 @@ struct LCWebView: View {
                 Image(systemName: "minus")
                     .font(.system(size: 17, weight: .medium))
                     .frame(width: 44, height: 44)
-                    .modifier(LCWebViewGlassBackground(shape: Circle(), isInteractive: true))
+                    .modifier(LCWebViewGlassBackground(shape: Circle()))
             }
+            .contentShape(Circle())
 
             VStack(spacing: 3) {
                 Text(pageTitle.isEmpty ? (currentURL.host ?? currentURL.absoluteString) : pageTitle)
@@ -227,7 +229,8 @@ struct LCWebView: View {
             }
             .font(.system(size: 20, weight: .medium))
             .frame(width: 44, height: 44)
-            .modifier(LCWebViewGlassBackground(shape: Circle(), isInteractive: true))
+            .modifier(LCWebViewGlassBackground(shape: Circle()))
+            .contentShape(Circle())
 
         }
         .padding(.horizontal, 16)
@@ -257,6 +260,7 @@ struct LCWebView: View {
                 Image(systemName: "chevron.backward")
                     .frame(width: 44, height: 44)
             }
+            .contentShape(Circle())
             .disabled(!canGoBack)
 
             Spacer(minLength: 0)
@@ -264,6 +268,7 @@ struct LCWebView: View {
                 Image(systemName: "chevron.forward")
                     .frame(width: 44, height: 44)
             }
+            .contentShape(Circle())
             .disabled(!canGoForward)
 
             Spacer(minLength: 0)
@@ -273,6 +278,7 @@ struct LCWebView: View {
                 Image(systemName: "square.and.arrow.up")
                     .frame(width: 44, height: 44)
             }
+            .contentShape(Circle())
 
             Spacer(minLength: 0)
             Button {
@@ -281,13 +287,14 @@ struct LCWebView: View {
                 Image(systemName: "safari")
                     .frame(width: 44, height: 44)
             }
+            .contentShape(Circle())
             .disabled(!["http", "https"].contains(currentURL.scheme ?? ""))
         }
         .font(.system(size: 20))
         .frame(maxWidth: 420)
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
-        .modifier(LCWebViewGlassBackground(shape: Capsule(), isInteractive: true))
+        .modifier(LCWebViewGlassBackground(shape: Capsule()))
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
@@ -426,14 +433,19 @@ struct LCWebView: View {
     }
 }
 
+// iOS 26 玻璃命中测试教训（用户真机 3.8.475 实证：X/— 点下去没反应）：
+// ① .interactive() 的玻璃会把触摸自己吃掉，底下的 Button 收不到
+// （模拟器鼠标点能穿透，真机拇指点不到）；② .buttonStyle(.plain)
+// 的图标按钮没有 contentShape 时只认字形像素，不认玻璃圆。
+// 所以玻璃一律不用 interactive（按钮自己响应触摸），每个图标按钮
+// 再补与玻璃同形的 contentShape，整个 44pt 圆都能点。
 private struct LCWebViewGlassBackground<S: Shape>: ViewModifier {
     let shape: S
-    var isInteractive = false
 
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            content.glassEffect(.regular.interactive(isInteractive), in: shape)
+            content.glassEffect(.regular, in: shape)
         } else {
             content.background(.regularMaterial, in: shape)
         }
