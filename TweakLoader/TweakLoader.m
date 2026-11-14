@@ -178,13 +178,13 @@ static const void *kCZFDockGesturePanKey = &kCZFDockGesturePanKey;
 static const void *kCZFDockGestureCancelKey = &kCZFDockGestureCancelKey;
 // 起手位置：0=不在边缘 1=左边缘 2=右边缘（shouldReceive 时记录，handler 里判定）
 static NSInteger gCZFStartEdge = 0;
-// 起手高度是否在启用带内：边缘手势只认屏幕高度 70%–90% 一段
-//（=距底部 10%–30%，2026-10-24 用户红圈定，别再放中间，
+// 起手高度是否在启用带内：边缘手势只认屏幕高度 83%–98% 一段
+//（=距底部 2%–17%，2026-11-15 用户红圈定，只留红线处，
 // 与宿主中档同值；上下两段不调防误触）
 static BOOL gCZFStartInBand = YES;
 // 起手高度是否在往外弹专用带内：用户 2026-11-03 令往外弹
-// 高度跟 App 面板一样——即上面普通带 70%–90%（原往外弹带
-// 0.55–0.93 已废）；只给左缘往外弹（→源面板）用，往里拖
+// 高度跟 App 面板一样——即上面普通带 83%–98%（2026-11-15
+// 用户红圈定，只留红线处）；只给左缘往外弹（→源面板）用，往里拖
 // 与右边缘一律不认它。
 static BOOL gCZFStartInOutwardBand = YES;
 // 起手是否真正碰到左边缘（用户 2026-11-02 亲令“面板碰到边缘
@@ -194,12 +194,11 @@ static BOOL gCZFStartInOutwardBand = YES;
 // 触。终结兜底“落点贴边 12”不动；右边缘切 App 不走面板，
 // 不用它。
 static const CGFloat kCZFEdgeTouchMax = 20;
-// 往外弹起手带：44pt（18bfbe5 之前的值，用户亲证丝滑）。
-// 20pt 只认拇指正贴边，用户实测“靠边边才能调出来”——拇指
-// 贴边时质心本来就在 15–35pt，偏里一点就死。往外弹放宽
-// 到 44pt 后，防误触靠左移方向 + 落点贴边/速度判据，不靠
-// 起手带；往里拖与拦截器仍用 20pt（不动）。
-static const CGFloat kCZFEdgeOutwardMax = 44;
+// 往外弹起手带：20pt（2026-11-15 用户红圈定，只留红线处；
+// 44pt 是 2026-11-04 放宽的好用值，已作废——20pt 只认拇指
+// 正贴边，用户实测“靠边边才能调出来”，拇指贴边时质心本
+// 来就在 15–35pt，偏里一点就死；若真机觉得难触发，再放宽）。
+static const CGFloat kCZFEdgeOutwardMax = 20;
 static BOOL gCZFStartAtEdge = NO;
 // 起手 x（shouldReceive 时记录）：终结位移跟起手位置挂钩用——
 // 贴边起手（≤20pt，见 kCZFEdgeTouchMax）左移行程物理上只有
@@ -248,7 +247,7 @@ static BOOL CZFTouchOnSliderOrProgress(UITouch *touch) {
 }
 
 // 边缘带拦截识别器（手势双触发修正）：只负责一件事——起手
-// 在边缘带（左 16pt / 右 44pt 内 + 高度 70%–90%，见 shouldReceiveTouch
+// 在边缘带（左 20pt / 右 20pt 内 + 高度 83%–98%，见 shouldReceiveTouch
 // 分支）且约 6pt 内横向占优时，立刻认是手势并取消 App 那路
 // 触摸（cancelsTouchesInView=YES）。6pt 是刻意卡在系统 pan
 // 门槛（约 10pt）之前：拦截先认，App 的滚动/返回识别器才
@@ -312,7 +311,7 @@ static BOOL CZFTouchOnSliderOrProgress(UITouch *touch) {
 @end
 
 // 左缘往外 flick 判据（灵敏修法，不动高度带）：
-// 贴边起手（往外弹带 ≤44pt，见 kCZFEdgeOutwardMax）+ 净左移
+// 贴边起手（往外弹带 ≤20pt，见 kCZFEdgeOutwardMax）+ 净左移
 // （仅作方向确认，≥2pt）+ 左向速度 ≥300pt/s。旧判据 dx ≤ -8
 // 是写错的根因：手指起于边缘、往外没有行程——拇指贴边时
 // 质心本来就在 15–20pt，往左一共只能移几 pt 就离屏，8pt
@@ -339,7 +338,7 @@ static BOOL CZFIsOutwardCancelled(NSInteger startEdge, CGFloat dx, CGFloat dy) {
 }
 
 // 终结时贴边往外判据（漏斗 Ended 与 pan Cancelled 共用）：
-// 手指起于往外弹带（≤44pt，见 kCZFEdgeOutwardMax）、净左移
+// 手指起于往外弹带（≤20pt，见 kCZFEdgeOutwardMax）、净左移
 // ≥3/6pt（跟起手位置挂钩，见下）且横向分量过 0.2 底线。终结态才
 // 有落点信息，比实时门槛（0.9）宽松是合理的：纯竖滑横向位移不够，进不来；拇指弧线纵向分量大的慢速往外滑，0.2
 // 能接住、0.4 接不住（251 的 flick 只接快速的，慢速仍漏）。
@@ -347,7 +346,7 @@ static BOOL CZFIsOutwardCancelled(NSInteger startEdge, CGFloat dx, CGFloat dy) {
 // 2026-11-04 256修：往外弹不再验落点贴边——endX ≤ 12 等价于
 // 行程 ≥ 起手x-12，起手 40pt 的短滑永远够不着，这才是 255
 // 之后仍不灵敏的根因（用户模型是“往左滑”，不是“滑出屏幕”）。
-// 边缘起手（≤44pt）+ 带内 + 左移 + 方向比已足够；误触代价
+// 边缘起手（≤20pt）+ 带内 + 左移 + 方向比已足够；误触代价
 // 只是开合面板，可滑回。
 static BOOL CZFIsOutwardEnded(NSInteger startEdge, BOOL startInOutwardZone, CGFloat dx, CGFloat dy, CGFloat startX) {
     CGFloat need = (startX <= kCZFEdgeTouchMax) ? 3 : 6;
@@ -362,7 +361,7 @@ static BOOL CZFIsOutwardEnded(NSInteger startEdge, BOOL startInOutwardZone, CGFl
 // 它，调用点门槛保证起手在带内（往外弹带已与普通带同值，
 // 用户 2026-11-03 令）；往里拖与右边缘两个方向在分支内验它。
 // startAtEdge：起手是否贴边（≤20pt）——往里拖要求它，App 内
-// 滑动不触发；往外弹不要求它（进 startEdge==1 分支即 ≤44pt
+// 滑动不触发；往外弹不要求它（进 startEdge==1 分支即 ≤20pt
 // 往外弹带，见 kCZFEdgeOutwardMax）；右边缘两个方向不用它。
 static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat endX, CGFloat width, BOOL startInBand, BOOL startAtEdge, CGFloat startX, NSString **outName, NSString **outSelector) {
     CGFloat dx = translation.x;
@@ -370,8 +369,8 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     if (startEdge == 1) {
         // 2026-10-23 真机纠正后对调：往外弹（左移）= 源面板，
         // 往里拖（右移）= App 面板；门槛跟着物理方向走。
-        // 往外弹起手带已放宽到 44pt（见 kCZFEdgeOutwardMax）：
-        // 进 startEdge==1 分支即 ≤44，不再另验 20pt 贴边；
+        // 往外弹起手带收窄到 20pt（2026-11-15 用户红圈定，只留红线处）：
+        // 进 startEdge==1 分支即 ≤20，不再另验 20pt 贴边；
         // 往里拖仍验 20pt 贴边（不动）。
         // 2026-11-04 2 号机制修：同终结判据，位移门槛跟起手
         // 位置挂钩——贴边起手（≤20pt）只认 3pt，离边维持 8pt。
@@ -476,27 +475,27 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
     CZFEdgeCancelRecognizer *cancelPan = objc_getAssociatedObject(window, kCZFDockGestureCancelKey);
     if (gestureRecognizer == cancelPan) {
         // 拦截器只接边缘带起手：左边缘贴边 16pt 内（与面板触发
-        // 同值，免得 App 内滑动被白白取消）、右边缘 44pt 内 +
-        // 高度 70%–90%；其余一律不接，App 完全不受影响；
+        // 同值，免得 App 内滑动被白白取消）、右边缘 20pt 内 +
+        // 高度 83%–98%（2026-11-15 用户红圈定，只留红线处）；
+        // 其余一律不接，App 完全不受影响；
         // 全局变量只归观察 pan 写，不碰
-        BOOL inBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
-        return inBand && (loc.x <= kCZFEdgeTouchMax || loc.x >= width - 44);
+        BOOL inBand = (loc.y >= height * 0.83 && loc.y <= height * 0.98);
+        return inBand && (loc.x <= kCZFEdgeTouchMax || loc.x >= width - 20);
     }
     // 在途不改写（见本函数头 L47 注释）：新手势才记起手位置。
     if (czfStartStateLocked) return YES;
-    gCZFStartInBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
-    // 往外弹带恢复收窄前的好用值 0.55–0.93（用户 2026-11-04
-    // 令：左往左滑根本不好用，检查好修复；11-03 收窄到跟
-    // App 面板一致后左滑大半高度认不出）；拦截器分支（上
-    // 面）仍只认普通带——放宽取消区会误取消 App 触摸，往外
-    // 弹不需要取消 App 触摸，故不动它。
-    gCZFStartInOutwardBand = (loc.y >= height * 0.55 && loc.y <= height * 0.93);
+    gCZFStartInBand = (loc.y >= height * 0.83 && loc.y <= height * 0.98);
+    // 2026-11-15 用户红圈定：往外弹带与普通带合一，只留红线处
+    // 83%–98%——2026-11-04 放宽到 0.55–0.93 的好用值就此作废；
+    // 拦截器分支（上面）仍只认普通带——放宽取消区会误取消
+    // App 触摸，往外弹不需要取消 App 触摸，故不动它。
+    gCZFStartInOutwardBand = (loc.y >= height * 0.83 && loc.y <= height * 0.98);
     // 面板只认贴边起手（见文件头 kCZFEdgeTouchMax 注释）
     gCZFStartAtEdge = (loc.x <= kCZFEdgeTouchMax);
     // 全部接收、只记录起手位置；是否触发在 handler 按起手+位移判定
-    if (loc.x >= width - 44) {
+    if (loc.x >= width - 20) {
         gCZFStartEdge = 2;
-    } else if (loc.x <= 44) {
+    } else if (loc.x <= 20) {
         gCZFStartEdge = 1;
     } else {
         gCZFStartEdge = 0;
@@ -611,9 +610,8 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // 方向，门槛保持严，宁可多滑一点也不抢 App 的指令，
         // 且只认 20pt 贴边起手（见 kCZFEdgeTouchMax 注释）；
         // 往外弹（手指左移，门槛6，flick 不走位移门槛）= 源面板
-        // ——往外弹起手带已放宽到 44pt（见 kCZFEdgeOutwardMax），
-        // 进本分支即 ≤44，不再另验 20pt 贴边（20pt 只认拇指
-        // 正贴边，用户实测“靠边边才能调出来”）。
+        // ——2026-11-15 用户红圈定：往外弹起手带收窄到 20pt，
+        // 进本分支即 ≤20（44pt 放宽值已作废）。
         // 往外弹带已与普通带同值（用户 2026-11-03 令）：往里
         // 拖验普通带；往外弹由 handler 入口的带门保证（两带
         // 同值，即普通带）。
@@ -704,15 +702,14 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                 }
                 gCZFTapStarts[key] = @[ @(loc.x), @(loc.y) ];
                 // 记录带放宽到 96：抬手兜底规则需要它。高度带：
-                // 用户 2026-11-03 令往外弹高度跟 App 面板一样，
-                // 记录带即普通带 0.70–0.90（原往外弹带 0.55–
-                // 0.93 已废）；第 4 位记起手是否在普通带内——记
+                // 用户 2026-11-15 红圈定只留红线处，记录带即
+                // 普通带 0.83–0.98；第 4 位记起手是否在普通带内——记
                 // 录带既已等于普通带，录入的触摸该位恒为真，
                 // 字段留着不动结构。触发起手带见各分支（往里拖
-                // 20pt、往外弹 44pt）。
+                // 20pt、往外弹 20pt）。
                 CGFloat winHeight = window.bounds.size.height;
-                if (loc.x <= 96 && loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90) {
-                    BOOL inOldBand = (loc.y >= winHeight * 0.70 && loc.y <= winHeight * 0.90);
+                if (loc.x <= 96 && loc.y >= winHeight * 0.83 && loc.y <= winHeight * 0.98) {
+                    BOOL inOldBand = (loc.y >= winHeight * 0.83 && loc.y <= winHeight * 0.98);
                     // 后三位记最后一段位移的起点（终结时算 flick
                     // 速度用）：起手时最后一段就是起手本身。
                     gCZFTouchStates[key] = @[ @(loc.x), @(loc.y), @NO, @(inOldBand), @(loc.x), @(loc.y), @(touch.timestamp) ];
@@ -739,7 +736,7 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                     NSString *fireName = nil;
                     NSString *fireSelector = nil;
                     if (touch.phase == UITouchPhaseMoved) {
-                        // 提前触发（严判定防误触）：往外弹带起手（≤44pt，
+                        // 提前触发（严判定防误触）：往外弹带起手（≤20pt，
                         // 见 kCZFEdgeOutwardMax）、往外弹（左移）8、
                         // 横向占优 = 源面板（2026-10-23 对调后）
                         if ([state[0] doubleValue] <= kCZFEdgeOutwardMax && dx <= -8 && fabs(dx) > 0.9 * fabs(dy)) {

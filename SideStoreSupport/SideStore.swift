@@ -142,6 +142,12 @@ class RefreshHandler: NSObject, RefreshServer {
                 self.c?.resume(throwing: NSError(domain: "SideStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "Built-in SideStore quit unexpectedly"]))
                 self.c = nil
                 self.sideStorePid = 0
+                // 3.8.525（L52）：启动等待中被打断时 launchContinuation 也要恢复——
+                // 原来只清掉不恢复，300 秒超时读的又是 self.launchContinuation
+                //（已是 nil，不动作），启动那路的 withUnsafeThrowingContinuation
+                // 就永远等不到恢复，快捷指令/小组件一直转圈。finishedLaunching
+                // 与超时都先恢复再置 nil，同一路只认一次，与上面 c 同款写法。
+                self.launchContinuation?.resume(throwing: NSError(domain: "SideStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "Built-in SideStore quit unexpectedly"]))
                 self.launchContinuation = nil
             }
             

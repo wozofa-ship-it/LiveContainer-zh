@@ -1004,9 +1004,21 @@ struct LCSettingsView: View {
                 let srcData = try? Data(contentsOf: src)
                 let destData = try? Data(contentsOf: dest)
                 if destData != srcData {
-                    try? fm.removeItem(at: dest)
-                    if (try? fm.copyItem(at: src, to: dest)) != nil {
-                        copied = true
+                    // 3.8.525（L52）：先拷到临时文件、再换位——原来先删
+                    // 旧 dylib 再拷新，拷失败（磁盘满）时旧的已没了、
+                    // 保活 dylib 失效，游客保活悄悄停掉（与
+                    // CZFVPNManager.syncProxyTweak 的 L51-14 同款）。
+                    // 临时文件拷失败时旧 dylib 原样保留；换位是同目录
+                    // move，拷成功后基本不会失败，失败也清临时文件。
+                    let tmpDest = dest.appendingPathExtension("czf-tmp")
+                    try? fm.removeItem(at: tmpDest)
+                    if (try? fm.copyItem(at: src, to: tmpDest)) != nil {
+                        try? fm.removeItem(at: dest)
+                        if (try? fm.moveItem(at: tmpDest, to: dest)) != nil {
+                            copied = true
+                        } else {
+                            try? fm.removeItem(at: tmpDest)
+                        }
                     }
                 }
             } else {
