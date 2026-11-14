@@ -1957,7 +1957,13 @@ struct LCDataManagementView : View {
                 foldersToDelete.append(appDataFolderName)
             }
         }
-        folderRemoveCount = foldersToDelete.count
+        // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在主
+        // actor 上（L40-1 同款），folderRemoveCount 是 @State、
+        // appDataFolderNames 是 SharedModel 的 @Published，
+        // 回主线程再写；删文件/清钥匙串仍在外面。
+        await MainActor.run {
+            folderRemoveCount = foldersToDelete.count
+        }
         
         guard let result = await appFolderRemovalAlert.open(), result else {
             return
@@ -1967,13 +1973,17 @@ struct LCDataManagementView : View {
             for folder in foldersToDelete {
                 try fm.removeItem(at: LCPath.dataPath.appendingPathComponent(folder))
                 LCUtils.removeAppKeychain(dataUUID: folder)
-                sharedModel.appDataFolderNames.removeAll(where: { s in
-                    return s == folder
-                })
+                await MainActor.run {
+                    sharedModel.appDataFolderNames.removeAll(where: { s in
+                        return s == folder
+                    })
+                }
             }
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
         
     }
@@ -1983,15 +1993,21 @@ struct LCDataManagementView : View {
             return
         }
         
-        [kSecClassGenericPassword, kSecClassInternetPassword, kSecClassCertificate, kSecClassKey, kSecClassIdentity].forEach {
+        // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在主
+        // actor 上（L40-1 同款），errorInfo/errorShow 是 @State，
+        // 回主线程再写。原来 forEach 的闭包是同步的、里面不能
+        // await，改成 for 循环。
+        for cls in [kSecClassGenericPassword, kSecClassInternetPassword, kSecClassCertificate, kSecClassKey, kSecClassIdentity] {
           let status = SecItemDelete([
-            kSecClass: $0,
+            kSecClass: cls,
             kSecAttrSynchronizable: kSecAttrSynchronizableAny
           ] as CFDictionary)
           if status != errSecSuccess && status != errSecItemNotFound {
-              //Error while removing class $0
-              errorInfo = status.description
-              errorShow = true
+              //Error while removing class
+              await MainActor.run {
+                  errorInfo = status.description
+                  errorShow = true
+              }
           }
         }
     }
@@ -2264,8 +2280,16 @@ struct LCDataManagementView : View {
         // 导入时卡死闪退）。读字节放 Task.detached，安全域在读完前一直持有。
         guard let data = await Task.detached { try? Data(contentsOf: url) }.value,
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            settingsTransferMessage = "导入失败：这个文件不是有效的设置备份"
-            showSettingsTransferAlert = true
+            // 3.8.516（L40）：本函数从 fileImporter 的裸 Task 调来、
+            // 不在主 actor 上（L32/L38/L39 同款），
+            // settingsTransferMessage/showSettingsTransferAlert
+            // 是 @State，离主线程写报 Publishing changes、导入
+            // 结果提示可能不弹；回主线程再写。applySettingsDictionary
+            // 本身只写 UserDefaults + 主线程 dispatch 重读，不动。
+            await MainActor.run {
+                settingsTransferMessage = "导入失败：这个文件不是有效的设置备份"
+                showSettingsTransferAlert = true
+            }
             return
         }
         let (count, sortRestored) = Self.applySettingsDictionary(dict)
@@ -2274,10 +2298,12 @@ struct LCDataManagementView : View {
         // 重连），定时、窗口模式与窗口位置下次打开 App 时生效。
         // 旧文案“重启后全部生效”已不准确，改掉。
         let hotNote = "手势、多任务栏、节点、分组已直接生效（核心在跑时节点自动重连），定时、窗口模式与窗口位置下次打开 App 时生效"
-        settingsTransferMessage = sortRestored
-            ? "已导入 \(count) 项设置，App 排序已直接恢复；\(hotNote)"
-            : "已导入 \(count) 项设置；\(hotNote)"
-        showSettingsTransferAlert = true
+        await MainActor.run {
+            settingsTransferMessage = sortRestored
+                ? "已导入 \(count) 项设置，App 排序已直接恢复；\(hotNote)"
+                : "已导入 \(count) 项设置；\(hotNote)"
+            showSettingsTransferAlert = true
+        }
     }
 
     // #23：Backups 树单次遍历——原来恢复 sheet 里每个备份各
@@ -3716,30 +3742,43 @@ struct LCDataManagementView : View {
     // 下载，放 detached 读，解析 + 判断仍在这里）。
     private func loadMigrationContents() async {
         let folders = backupFolders(fromExternal: migrationSourceExternal)
-        migrationFolders = folders
+        // 3.8.516（L40）：本函数从按钮/视图的裸 Task 调来、不在
+        // 主 actor 上（L40-1 同款），migrationFolders/
+        // migrationPreviews/migrationHasSettings/migrationHasSort/
+        // migrationHasSchemes 全是 @State，回主线程再写；读盘
+        // 与 previewItems 仍在外面。
+        await MainActor.run {
+            migrationFolders = folders
+        }
         var items: [BackupPreviewItem] = []
         for folder in folders {
             items.append(contentsOf: await Self.previewItems(for: folder))
         }
-        migrationPreviews = items
+        await MainActor.run {
+            migrationPreviews = items
+        }
         let settingsURL: URL?
         if migrationSourceExternal {
             settingsURL = Self.externalBackupFolderURL()?.appendingPathComponent("CZFSettingsBackup.json")
         } else {
             settingsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("CZFSettingsBackup.json")
         }
-        migrationHasSettings = false
-        migrationHasSort = false
-        migrationHasSchemes = false
+        await MainActor.run {
+            migrationHasSettings = false
+            migrationHasSort = false
+            migrationHasSchemes = false
+        }
         if let url = settingsURL {
             let dict: [String: Any]? = await Task.detached {
                 guard let data = try? Data(contentsOf: url) else { return nil }
                 return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             }.value
             if let dict {
-                migrationHasSettings = true
-                migrationHasSort = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil
-                migrationHasSchemes = dict["LCCustomSortSchemes"] != nil
+                await MainActor.run {
+                    migrationHasSettings = true
+                    migrationHasSort = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil
+                    migrationHasSchemes = dict["LCCustomSortSchemes"] != nil
+                }
             }
         }
     }
@@ -3755,10 +3794,17 @@ struct LCDataManagementView : View {
         let folders = migrationFolders
         Task {
             await restoreSelectedBackups(folders: folders, loginOnly: false)
-            successShow = false
-            migrationReport = successInfo.isEmpty ? "恢复完成，未返回报告。" : successInfo
-            migrationRunning = false
-            migrationStep = 3
+            // 3.8.516（L40）：本 Task 是裸 Task、不在主 actor 上
+            //（L40-1 同款），successShow/migrationReport/
+            // migrationRunning/migrationStep 全是 @State，回主线
+            // 程再写；successInfo 在同一跳里读，读到的就是刚写
+            // 完的最终值。
+            await MainActor.run {
+                successShow = false
+                migrationReport = successInfo.isEmpty ? "恢复完成，未返回报告。" : successInfo
+                migrationRunning = false
+                migrationStep = 3
+            }
         }
     }
 
@@ -5791,12 +5837,19 @@ struct LCDataManagementView : View {
                 try fm.moveItem(at: LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolderInUse), to: LCPath.tweakPath.appendingPathComponent(tweakFolderInUse))
                 movedTweakFolderCount += 1
             }
-            successInfo = "lc.settings.moveDanglingFolderComplete %lld %lld".localizeWithFormat(movedDataFolderCount,movedTweakFolderCount)
-            successShow = true
+            // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在主
+            // actor 上（L40-1 同款），successInfo/successShow 是
+            // @State，回主线程再写；搬文件仍在外面。
+            await MainActor.run {
+                successInfo = "lc.settings.moveDanglingFolderComplete %lld %lld".localizeWithFormat(movedDataFolderCount,movedTweakFolderCount)
+                successShow = true
+            }
             
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
     

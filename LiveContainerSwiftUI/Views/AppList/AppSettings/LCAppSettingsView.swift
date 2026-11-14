@@ -678,13 +678,13 @@ struct LCAppSettingsView: View {
                                 .foregroundStyle(.secondary)
                             Button("重试") {
                                 languageLoadFailed = false
-                                Task { loadSupportedLanguages() }
+                                Task { await loadSupportedLanguages() }
                             }
                         }
                     } else {
                         Text("lc.common.loading".loc)
                             .onAppear() {
-                                Task{ loadSupportedLanguages() }
+                                Task{ await loadSupportedLanguages() }
                             }
                     }
                 } label: {
@@ -964,12 +964,22 @@ struct LCAppSettingsView: View {
         do {
             try fm.createDirectory(at: dest, withIntermediateDirectories: false)
         } catch {
-            errorShow = true
-            errorInfo = error.localizedDescription
+            // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在主
+            // actor 上（L40-1 同款），errorInfo/errorShow 是 @State，
+            // 回主线程再写。
+            await MainActor.run {
+                errorShow = true
+                errorInfo = error.localizedDescription
+            }
             return
         }
         
-        sharedModel.appDataFolderNames.append(newName)
+        // 3.8.516（L40）：appDataFolderNames 是 SharedModel 的
+        // @Published，离主线程写报 Publishing changes，回主线
+        // 程再写；顺序照原样（guard 之前就登记名字）。
+        await MainActor.run {
+            sharedModel.appDataFolderNames.append(newName)
+        }
         let newContainer = LCContainer(folderName: newName, name: displayName, isShared: model.uiIsShared)
         // assign keychain group
         var keychainGroupSet : Set<Int> = Set(minimumCapacity: 3)
@@ -980,20 +990,29 @@ struct LCAppSettingsView: View {
             keychainGroupSet.remove(container.keychainGroupId)
         }
         guard let freeKeyChainGroup = keychainGroupSet.randomElement() else {
-            errorInfo = "lc.container.notEnoughKeychainGroup".loc
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.container.notEnoughKeychainGroup".loc
+                errorShow = true
+            }
             return
         }
         
-        model.uiContainers.append(newContainer)
-        if model.uiSelectedContainer == nil {
-            model.uiSelectedContainer = newContainer;
+        // 3.8.516（L40）：同上，uiContainers/uiSelectedContainer/
+        // uiDefaultDataFolder 是 LCAppModel 的 @Published，离主线
+        // 程写报 Publishing changes、容器列表可能不刷新（L37-2
+        // 同款）；读改写包进 MainActor.run。写盘
+        //（makeLCContainerInfoPlist）仍在外面。
+        await MainActor.run {
+            model.uiContainers.append(newContainer)
+            if model.uiSelectedContainer == nil {
+                model.uiSelectedContainer = newContainer;
+            }
+            if model.uiDefaultDataFolder == nil {
+                model.uiDefaultDataFolder = newName
+                appInfo.dataUUID = newName
+            }
+            appInfo.containers = model.uiContainers;
         }
-        if model.uiDefaultDataFolder == nil {
-            model.uiDefaultDataFolder = newName
-            appInfo.dataUUID = newName
-        }
-        appInfo.containers = model.uiContainers;
         newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: freeKeyChainGroup)
     }
     
@@ -1001,8 +1020,13 @@ struct LCAppSettingsView: View {
         do {
             let url = try result.get()
             guard url.startAccessingSecurityScopedResource() else {
-                errorInfo = "unable to access directory, startAccessingSecurityScopedResource returns false"
-                errorShow = true
+                // 3.8.516（L40）：本函数从 fileImporter 的裸 Task
+                // 调来、不在主 actor 上（L40-1 同款），errorInfo/
+                // errorShow 是 @State，回主线程再写。
+                await MainActor.run {
+                    errorInfo = "unable to access directory, startAccessingSecurityScopedResource returns false"
+                    errorShow = true
+                }
                 return
             }
             // 第三批低 #40：用完释放安全域访问，否则一直不释放。
@@ -1023,8 +1047,10 @@ struct LCAppSettingsView: View {
             }
             
             guard let bookmark = LCUtils.bookmark(for: url) else {
-                errorInfo = "Unable to generate a bookmark for the selected URL!"
-                errorShow = true
+                await MainActor.run {
+                    errorInfo = "Unable to generate a bookmark for the selected URL!"
+                    errorShow = true
+                }
                 return
             }
             
@@ -1055,8 +1081,10 @@ struct LCAppSettingsView: View {
                     keychainGroupSet.remove(container.keychainGroupId)
                 }
                 guard let freeKeyChainGroup = keychainGroupSet.randomElement() else {
-                    errorInfo = "lc.container.notEnoughKeychainGroup".loc
-                    errorShow = true
+                    await MainActor.run {
+                        errorInfo = "lc.container.notEnoughKeychainGroup".loc
+                        errorShow = true
+                    }
                     return
                 }
                 
@@ -1066,27 +1094,42 @@ struct LCAppSettingsView: View {
                     }
 //                }
             }
-            model.uiContainers.append(container!)
-            appInfo.containers = model.uiContainers;
-            if model.uiSelectedContainer == nil {
-                model.uiSelectedContainer = container;
-            }
-            if model.uiDefaultDataFolder == nil {
-                model.uiDefaultDataFolder = url.lastPathComponent
-                appInfo.dataUUID = url.lastPathComponent
+            // 3.8.516（L40）：同上，uiContainers/uiSelectedContainer/
+            // uiDefaultDataFolder 是 LCAppModel 的 @Published（类本
+            // 身非 @MainActor），离主线程写报 Publishing changes、
+            // 容器列表可能不刷新（L37-2 restoreOneApp 同款）；读
+            // 改写包进 MainActor.run。写盘（makeLCContainerInfoPlist）
+            // 仍在外面。
+            await MainActor.run {
+                model.uiContainers.append(container!)
+                appInfo.containers = model.uiContainers;
+                if model.uiSelectedContainer == nil {
+                    model.uiSelectedContainer = container;
+                }
+                if model.uiDefaultDataFolder == nil {
+                    model.uiDefaultDataFolder = url.lastPathComponent
+                    appInfo.dataUUID = url.lastPathComponent
+                }
             }
 
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
 
     func moveToAppGroup() async {
         for container in appInfo.containers {
             if let runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
-                errorInfo = "lc.appSettings.appOpenInOtherLc %@ %@".localizeWithFormat(runningLC, runningLC)
-                errorShow = true
+                // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在
+                // 主 actor 上（L40-1 同款），errorInfo/errorShow
+                // 是 @State，回主线程再写。
+                await MainActor.run {
+                    errorInfo = "lc.appSettings.appOpenInOtherLc %@ %@".localizeWithFormat(runningLC, runningLC)
+                    errorShow = true
+                }
                 return
             }
         }
@@ -1130,29 +1173,38 @@ struct LCAppSettingsView: View {
             
             try LCUtils.moveFilesAtomicallyAfterPreflight(moves)
             
-            for container in model.uiContainers {
-                if container.storageBookMark != nil {
-                    continue
+            // 3.8.516（L40）：同上，appDataFolderNames/tweakFolderNames
+            // 是 SharedModel 的 @Published、container.isShared 是
+            // LCContainer 的 @Published、model.uiIsShared 是 LCAppModel
+            // 的 @Published，离主线程写报 Publishing changes；搬完
+            // 后的记账包进 MainActor.run。搬文件仍在外面。
+            await MainActor.run {
+                for container in model.uiContainers {
+                    if container.storageBookMark != nil {
+                        continue
+                    }
+                    sharedModel.appDataFolderNames.removeAll(where: { s in
+                        return s == container.folderName
+                    })
+                    container.isShared = true
                 }
-                sharedModel.appDataFolderNames.removeAll(where: { s in
-                    return s == container.folderName
-                })
-                container.isShared = true
-            }
-            
-            if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
-                // 注册表里存的是拆分后的单名，拿整串比永远删不掉。
-                for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
-                    sharedModel.tweakFolderNames.removeAll(where: { $0 == name })
+                
+                if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
+                    // 注册表里存的是拆分后的单名，拿整串比永远删不掉。
+                    for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
+                        sharedModel.tweakFolderNames.removeAll(where: { $0 == name })
+                    }
                 }
+                
+                appInfo.setBundlePath(LCPath.lcGroupBundlePath.appendingPathComponent(appInfo.relativeBundlePath).path)
+                appInfo.isShared = true
+                model.uiIsShared = true
             }
-            
-            appInfo.setBundlePath(LCPath.lcGroupBundlePath.appendingPathComponent(appInfo.relativeBundlePath).path)
-            appInfo.isShared = true
-            model.uiIsShared = true
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
         
     }
@@ -1160,8 +1212,10 @@ struct LCAppSettingsView: View {
     func movePrivateDoc() async {
         for container in appInfo.containers {
             if let runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {                
-                errorInfo = "lc.appSettings.appOpenInOtherLc %@ %@".localizeWithFormat(runningLC, runningLC)
-                errorShow = true
+                await MainActor.run {
+                    errorInfo = "lc.appSettings.appOpenInOtherLc %@ %@".localizeWithFormat(runningLC, runningLC)
+                    errorShow = true
+                }
                 return
             }
         }
@@ -1199,44 +1253,61 @@ struct LCAppSettingsView: View {
             
             try LCUtils.moveFilesAtomicallyAfterPreflight(moves)
             
-            for container in model.uiContainers {
-                if container.storageBookMark != nil {
-                    continue
+            // 3.8.516（L40）：同上，appDataFolderNames/tweakFolderNames
+            // 是 SharedModel 的 @Published、model.uiTweakFolder/
+            // model.uiIsShared 是 LCAppModel 的 @Published、
+            // container.isShared 是 LCContainer 的 @Published，
+            // 离主线程写报 Publishing changes；搬完后的记账包进
+            // MainActor.run。搬文件仍在外面。
+            await MainActor.run {
+                for container in model.uiContainers {
+                    if container.storageBookMark != nil {
+                        continue
+                    }
+                    sharedModel.appDataFolderNames.append(container.folderName)
                 }
-                sharedModel.appDataFolderNames.append(container.folderName)
-            }
-            if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
-                for name in LCAppModel.czfSplitTweakFolders(tweakFolder) where !sharedModel.tweakFolderNames.contains(name) {
-                    sharedModel.tweakFolderNames.append(name)
+                if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
+                    for name in LCAppModel.czfSplitTweakFolders(tweakFolder) where !sharedModel.tweakFolderNames.contains(name) {
+                        sharedModel.tweakFolderNames.append(name)
+                    }
+                    model.uiTweakFolder = tweakFolder
                 }
-                model.uiTweakFolder = tweakFolder
-            }
-            
-            appInfo.setBundlePath(LCPath.bundlePath.appendingPathComponent(appInfo.relativeBundlePath).path)
-            appInfo.isShared = false
-            model.uiIsShared = false
-            for container in model.uiContainers {
-                container.isShared = false
+                
+                appInfo.setBundlePath(LCPath.bundlePath.appendingPathComponent(appInfo.relativeBundlePath).path)
+                appInfo.isShared = false
+                model.uiIsShared = false
+                for container in model.uiContainers {
+                    container.isShared = false
+                }
             }
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
         
     }
     
-    func loadSupportedLanguages() {
-        do {
-            try model.loadSupportedLanguages()
-            languageLoadFailed = false
-        } catch {
-            // #18：model 里失败时 supportedLanguages 已被置成 []，
-            // 不重置回 nil 的话页面会进“有语言”分支（空 Picker），
-            // 永远看不到失败态；重置后走 else if 分支显示重试。
-            // 这里不弹全局 error 弹窗，错误就显示在语言页内。
-            model.supportedLanguages = nil
-            languageLoadFailed = true
-            return
+    // 3.8.516（L40）：本函数从按钮/视图的裸 Task 调来、不在主
+    // actor 上（L40-1 同款），且模型方法 loadSupportedLanguages
+    // 内部也在写 supportedLanguages（@Published，LCAppModel:540）
+    // ——整段包进 MainActor.run；读盘只是扫包内 .lproj 目录，
+    // 很小，在主线程做无妨。
+    func loadSupportedLanguages() async {
+        await MainActor.run {
+            do {
+                try model.loadSupportedLanguages()
+                languageLoadFailed = false
+            } catch {
+                // #18：model 里失败时 supportedLanguages 已被置成 []，
+                // 不重置回 nil 的话页面会进“有语言”分支（空 Picker），
+                // 永远看不到失败态；重置后走 else if 分支显示重试。
+                // 这里不弹全局 error 弹窗，错误就显示在语言页内。
+                model.supportedLanguages = nil
+                languageLoadFailed = true
+                return
+            }
         }
     }
     
@@ -1249,14 +1320,22 @@ struct LCAppSettingsView: View {
             guard let result = await signUnsignedAlert.open(), result else {
                 return
             }
-            model.uiDontSign = false
+            // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在主
+            // actor 上（L40-1 同款），uiDontSign 是 LCAppModel 的
+            // @Published，回主线程再写（模型方法 forceResign 内部
+            // 的 isAppRunning 已由 L31 包过，这里是视图层漏的一处）。
+            await MainActor.run {
+                model.uiDontSign = false
+            }
         }
         
         do {
             try await model.forceResign()
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
     

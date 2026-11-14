@@ -1176,21 +1176,33 @@ struct LCSettingsView: View {
         do {
             certificateData = try Data(contentsOf: certificateURL)
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在
+            // 主 actor 上（L32/L38/L39 同款：Swift 5 语言模式下
+            // Button 的 @escaping action 不继承 body 的 @MainActor），
+            // errorInfo/errorShow 是 @State，离主线程写报
+            // Publishing changes、报错弹窗可能不弹；回主线程再写。
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
             return
         }
         
         guard let _ = LCUtils.getCertTeamId(withKeyData: certificateData, password: certificatePassword) else {
-            errorInfo = "lc.settings.invalidCertError".loc
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.settings.invalidCertError".loc
+                errorShow = true
+            }
             return
         }
 
         LCUtils.appGroupUserDefault.set(certificateData, forKey: "LCCertificateData")
         LCUtils.appGroupUserDefault.set(certificatePassword, forKey: "LCCertificatePassword")
         LCUtils.appGroupUserDefault.set(NSDate.now, forKey: "LCCertificateUpdateDate")
-        certificateDataFound = true
+        // 3.8.516（L40）：同上，certificateDataFound 是 @State。
+        await MainActor.run {
+            certificateDataFound = true
+        }
         // 证书换了团队：内存里“已验过”的插件夹要作废，否则同进程
         // 内下次启动直接短路跳过重签，插件留着旧团队签名、游客里
         // dlopen 报签名无效（直到重启 App 才自愈）。
@@ -1216,18 +1228,27 @@ struct LCSettingsView: View {
                 
                 guard status == errSecSuccess else {
                     if status == errSecItemNotFound {
-                        errorInfo = "lc.settings.importCertFromBuiltinSideStore.certNotFounndErr".loc
-                        errorShow = true
+                        // 3.8.516（L40）：本函数从按钮的裸 Task 调来、
+                        // 不在主 actor 上（L40-1 同款），errorInfo/
+                        // errorShow 是 @State，回主线程再写。
+                        await MainActor.run {
+                            errorInfo = "lc.settings.importCertFromBuiltinSideStore.certNotFounndErr".loc
+                            errorShow = true
+                        }
                     } else {
-                        errorInfo = "Keychain read error: \(status)"
-                        errorShow = true
+                        await MainActor.run {
+                            errorInfo = "Keychain read error: \(status)"
+                            errorShow = true
+                        }
                     }
                     return
                 }
                 
                 guard let data = item as? Data else {
-                    errorInfo = "Failed to decode certificate data"
-                    errorShow = true
+                    await MainActor.run {
+                        errorInfo = "Failed to decode certificate data"
+                        errorShow = true
+                    }
                     return
                 }
                 
@@ -1270,8 +1291,11 @@ struct LCSettingsView: View {
         // 商店 App 没装时 open 回 false，原来静默无事、用户以为点了没反应。
         let opened = await UIApplication.shared.open(url)
         if !opened {
-            errorInfo = "没能打开 \(storeName)，请确认它已安装"
-            errorShow = true
+            // 3.8.516（L40）：同上，@State 写回主线程再写。
+            await MainActor.run {
+                errorInfo = "没能打开 \(storeName)，请确认它已安装"
+                errorShow = true
+            }
         }
     }
     func onSideStoreCertificateCallback(certificateData: Data, password: String) {
@@ -1279,14 +1303,23 @@ struct LCSettingsView: View {
         // 签名时才报错，用户根本不知道是导入这步坏的。钥匙串那路密
         // 码读不到时传的是 ""，错密码同样在这里拦住。
         guard LCUtils.getCertTeamId(withKeyData: certificateData, password: password) != nil else {
-            errorInfo = "lc.settings.invalidCertError".loc
-            errorShow = true
+            // 3.8.516（L40）：本回调两路调用方——商店导入的裸 Task
+            //（离主线程）与证书 deep link 的 onChange（主线程），
+            // @State 写统一回主线程再写，两路都对。本函数是同步
+            // 函数不能 await，用 DispatchQueue.main.async（写完
+            // 不用等，调用方随后不读这两个状态）。
+            DispatchQueue.main.async {
+                errorInfo = "lc.settings.invalidCertError".loc
+                errorShow = true
+            }
             return
         }
         LCUtils.appGroupUserDefault.set(certificateData, forKey: "LCCertificateData")
         LCUtils.appGroupUserDefault.set(password, forKey: "LCCertificatePassword")
         LCUtils.appGroupUserDefault.set(NSDate.now, forKey: "LCCertificateUpdateDate")
-        certificateDataFound = true
+        DispatchQueue.main.async {
+            certificateDataFound = true
+        }
         // 与文件导入同款：证书换了团队就作废内存里“已验过”的插件夹，
         // 否则同进程内下次启动直接短路跳过重签（见 importCertificate）。
         LCUtils.czfInvalidateVerifiedTweakFolders()
@@ -1300,7 +1333,11 @@ struct LCSettingsView: View {
         LCUtils.appGroupUserDefault.set(nil, forKey: "LCCertificateData")
         LCUtils.appGroupUserDefault.set(nil, forKey: "LCCertificatePassword")
         LCUtils.appGroupUserDefault.set(nil, forKey: "LCCertificateUpdateDate")
-        certificateDataFound = false
+        // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在主
+        // actor 上（L40-1 同款），certificateDataFound 是 @State。
+        await MainActor.run {
+            certificateDataFound = false
+        }
 
         UserDefaults.standard.set(nil, forKey: "LCAppGroupID")
     }
@@ -1314,11 +1351,19 @@ struct LCSettingsView: View {
             let sidestoreAppGroupURL = LCPath.lcGroupDocPath.deletingLastPathComponent()
             try fm.removeItem(at: sidestoreAppGroupURL.appendingPathComponent("Database"))
             try fm.removeItem(at: sidestoreAppGroupURL.appendingPathComponent("Apps"))
-            successInfo = "SideStore 数据已清除"
-            successShow = true
+            // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在
+            // 主 actor 上（L40-1 同款），successInfo/successShow
+            // 是 @State，回主线程再写（只修线程，不动“部分失败
+            // 误报”那个已知待定项）。
+            await MainActor.run {
+                successInfo = "SideStore 数据已清除"
+                successShow = true
+            }
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
     
