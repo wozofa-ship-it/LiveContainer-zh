@@ -177,7 +177,13 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // 返回 false，调用方直接 return。LCUtils.authenticateUser 成功后置
     // isHiddenAppUnlocked，后面 runApp 里的同款检查直接短路，不弹第二次人脸。
     private func czfAuthenticateIfLocked() async -> Bool {
-        guard configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked else { return true }
+        // 3.8.573（L104）：本函数在四个裸 Task 里调（启动/最小化/
+        // 小窗口/设置），isLocked 读 _info（LCAppInfo.m:698）、
+        // isHiddenAppUnlocked 是 @Published（Shared.swift:123），
+        // 离主线程读是 L69/L70 同款——L74 只修了 LCAppModel 那份
+        // 共用守卫，本卡这份自写谓词漏了。一点取齐再判（同款形状）。
+        let (locked, unlocked) = await MainActor.run { (configuration.model.appInfo.isLocked, DataManager.shared.model.isHiddenAppUnlocked) }
+        guard locked && !unlocked else { return true }
         do {
             return try await LCUtils.authenticateUser()
         } catch {
@@ -221,16 +227,10 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     private func runApp(multitask: Bool? = nil) async {
-        if configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked {
-            do {
-                if !(try await LCUtils.authenticateUser()) {
-                    return
-                }
-            } catch {
-                showError(error.localizedDescription)
-                return
-            }
-        }
+        // 3.8.573（L104）：原来这里自写一份同款认证内联判据，离主
+        // 线程读 isLocked/_info 与 isHiddenAppUnlocked（L69/L70
+        // 同款）；与上面共用守卫语义一字不差，走它。
+        guard await self.czfAuthenticateIfLocked() else { return }
 
         do {
             try await configuration.model.runApp(multitask: multitask)
@@ -254,16 +254,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // 只多一个 containerFolderName 参数，面板两路都带它；
     // 容器删光时传 nil，runApp 会重建容器，见 L14）。
     private func launchForAux(multitask: Bool?, containerFolderName: String?) async {
-        if configuration.model.appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked {
-            do {
-                if !(try await LCUtils.authenticateUser()) {
-                    return
-                }
-            } catch {
-                showError(error.localizedDescription)
-                return
-            }
-        }
+        // 3.8.573（L104）：同 runApp，自写内联判据离主线程读
+        // isLocked/_info 与 isHiddenAppUnlocked；走共用守卫。
+        guard await self.czfAuthenticateIfLocked() else { return }
         do {
             try await configuration.model.runApp(multitask: multitask, containerFolderName: containerFolderName)
         } catch {

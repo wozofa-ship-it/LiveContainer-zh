@@ -1316,7 +1316,12 @@ struct LCAppSettingsView: View {
     }
     
     func forceResign() async {
-        if model.uiDontSign {
+        // 3.8.573（L104）：L40 只包了下面的写，入口的读还留在裸
+        // Task 上——uiDontSign 是 @Published（LCAppModel:496），
+        // 离主线程读是 L70 同款（L81 在 LCAppListView:2838 修过
+        // 同款读）；先在主线程取齐再判。
+        let dontSign = await MainActor.run { model.uiDontSign }
+        if dontSign {
             guard let result = await signUnsignedAlert.open(), result else {
                 return
             }
@@ -1370,12 +1375,13 @@ extension LCAppSettingsView : LCContainerViewDelegate {
         }
         // if the deleted container is the selected one, we change to the default one
         if model.uiSelectedContainer === container && !model.uiContainers.isEmpty {
-            for container in model.uiContainers {
-                if container.folderName == model.uiDefaultDataFolder {
-                    model.uiSelectedContainer = container
-                    break
-                }
-            }
+            // 3.8.573（L104）：默认文件夹名可能已过期（冷启动时
+            // dataUUID 指的文件夹已被外部删掉、init 里没配上选中
+            // 容器，之后新建/导入容器只设选中、不补默认），循环
+            // 找不到匹配就留下一个已删容器的悬空选中，下次启动
+            // 按它重建文件夹、刚删掉的容器悄悄回来；找不到默认
+            // 时回落第一个容器，有匹配时行为与原来一字不差。
+            model.uiSelectedContainer = model.uiContainers.first(where: { $0.folderName == model.uiDefaultDataFolder }) ?? model.uiContainers[0]
         }
         
         if model.uiContainers.isEmpty {
