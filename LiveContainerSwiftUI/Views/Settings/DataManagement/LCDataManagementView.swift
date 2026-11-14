@@ -3795,8 +3795,17 @@ struct LCDataManagementView : View {
         }
         // 恢复完成：清 AppInfo 缓存与 dock 残留条目（恢复会改
         // 模型容器/换实例，旧缓存与旧条目会指错 App）。
+        // 3.8.538（L67）：本函数从 startPendingRestore 的裸
+        // Task 调来、不在主 actor 上（L54 注释自认），L54 只
+        // 包了 @State 写、漏了这处静态调——refreshAfterAppChanged
+        // 自带“必须在主线程调”（pruneStaleDockEntries 改
+        // @Published apps，主线程手势/定时器正同时读它，离主
+        // 线程改会竞态；clearCache 那半自带 barrier 队列、
+        // 本来就是线程安全的）。回主线程再调。
         if #available(iOS 16.0, *) {
-            MultitaskDockManager.refreshAfterAppChanged()
+            await MainActor.run {
+                MultitaskDockManager.refreshAfterAppChanged()
+            }
         }
         // 注意：头数只认备份数（merged.count），不照抄下面
         // lines.count——settings 行也算进去了，设置恢复成功
@@ -3847,8 +3856,13 @@ struct LCDataManagementView : View {
             }
         }
         // 恢复完成：同款清缓存与 dock 残留（见一键恢复全部）。
+        // 3.8.538（L67）：同款——本函数从裸 Task 调来（迁移
+        // 恢复 startMigrationRestore 的裸 Task，L40 注释自认），
+        // 静态调回主线程再跑。
         if #available(iOS 16.0, *) {
-            MultitaskDockManager.refreshAfterAppChanged()
+            await MainActor.run {
+                MultitaskDockManager.refreshAfterAppChanged()
+            }
         }
         // 注意：这里用 folders.count，不照抄一键恢复全部的
         // lines.count——后者把 settings 行也算进去了，设置
@@ -4694,8 +4708,13 @@ struct LCDataManagementView : View {
                 // 单个恢复完成：同款清缓存与 dock 残留。只在
                 // presentResult 时跑一次；一键/已选逐个调时
                 // presentResult=false，不重复跑（批完成时跑）。
+                // 3.8.538（L67）：同款——本函数从裸 Task 调来
+                //（L54 注释自认），上面 MainActor.run 块已关，
+                // 这里回到全局执行器上；静态调回主线程再跑。
                 if #available(iOS 16.0, *) {
-                    MultitaskDockManager.refreshAfterAppChanged()
+                    await MainActor.run {
+                        MultitaskDockManager.refreshAfterAppChanged()
+                    }
                 }
             }
             // 汇总用的一行摘要：恢复数 + 各类问题计数
