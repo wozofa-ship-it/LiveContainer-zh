@@ -562,9 +562,16 @@ extension Notification.Name {
     }
     
     @objc public func removeRunningApp(_ appUUID: String) {
-        guard isDockEnabled() else { return }
-        
         DispatchQueue.main.async {
+            // 3.8.567（L98）：摘条目不能只看当前模式——虚拟窗模式
+            // 下开着 App 时切到原生窗口模式，关窗仍走这条路；原来
+            // 顶上 guard isDockEnabled() 直接 return，条目永远留
+            // 在 apps 里，面板运行条上挂着已关 App 的幽灵图标、
+            // 点它没反应（带回找不到视图直接回 false）。条目在表
+            // 里就照常摘；原生窗口本来就没进表，守卫照旧拦住、
+            // 不碰 VPN 待停等后续。守卫放块里与删条目同线程，
+            // 不在调用线程读 @Published。
+            guard self.isDockEnabled() || self.apps.contains(where: { $0.appUUID == appUUID }) else { return }
             // 3.8.501（L22）：摘掉本分身的 uuid 名；bid 名只在没有
             // 别的分身共用它时才摘——原来不管有没有共用都摘，关掉
             // 第 1 个分身就把第 2 个的点按置顶也断了。

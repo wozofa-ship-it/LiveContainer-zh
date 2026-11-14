@@ -413,8 +413,14 @@ struct LCTweakFolderView : View {
             // 整个文件夹导出直接 abort（已收集的也一并丢掉）；重名
             // 加 -2/-3 去重。单条导出与已启用 dylib 不走临时目录，
             // 不受影响。
-            var usedCleanNames = Set<String>()
-            for case let entryURL as URL in enumerator {
+            // 3.8.567（L98）：先收全表、去重池先装已启用的 dylib
+            // 名——原来只记已停用的干净名，`subA/X.dylib`（启用）+
+            // `subB/X.dylib.disabled`（停用）同夹导出时会出两个
+            // 都叫 `X.dylib` 的分享项；启用名先进池，停用的同名
+            // 干净名就走 -2/-3。启用项本身直接给原文件，不动。
+            let entries = enumerator.compactMap { $0 as? URL }
+            var usedCleanNames = Set(entries.filter { $0.lastPathComponent.hasSuffix(".dylib") }.map { $0.lastPathComponent })
+            for entryURL in entries {
                 let last = entryURL.lastPathComponent
                 if last.hasSuffix(".dylib") {
                     urls.append(entryURL)
