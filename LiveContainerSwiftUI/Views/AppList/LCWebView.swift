@@ -631,6 +631,14 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
     private var universalLinkHandler: (URL , [String]) async -> Void // url, [String] of all apps that can open this web page
     private var downloadedFileHandler: (URL) async -> Void
     var domainBundleIdDict : [String:[String]] = [:]
+    // 3.8.528（L55）：最近一次主 frame https 导航的 URL——L54
+    // 用 webView.url 校验“用户已跳走就不再弹”是错的：decidePolicyFor
+    // 时 webView.url 还是上一个已提交页面的 URL（新导航要到 didCommit
+    // 才更新），association 已缓存时 loadDomainAssociations 立即返
+    // 回、Task 在提交前就跑到 guard，webView.url != url 恒成立，
+    // 重访已知站点时“用 App 打开”再也不弹。用本字段记最新导航，
+    // 后一次 decidePolicyFor 会覆盖它，同样能拦住过期提示。
+    private var czfLatestMainFrameURL: URL?
     // 进行中的下载各放哪个目的地：按下载对象分键——两次下载
     // 并行时单变量会被后一次盖掉，下完会拿错文件（装错包）。
     // 用 static 存：最小化再恢复时会新建 delegate（onViewAppear
@@ -671,12 +679,11 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
         }
         if(scheme == "https") {
             decisionHandler(.allow)
-            // 3.8.527（L54）：原来不分主 frame——iframe 里每个
-            // https 导航也拉 association、还可能弹“用 App 打开”。
-            // 只认主 frame（新窗口导航的 targetFrame 是 nil，
-            // 也不拉）；进 handler 前校验 webView.url 仍是这个
-            // url（用户已跳走就不再弹）。
+            // 3.8.528（L55）：L54 的 webView.url 校验改记最新导航
+            // URL（见 czfLatestMainFrameURL 声明处注释）——
+            // webView.url 在 decidePolicyFor 时还是旧页。
             guard navigationAction.targetFrame?.isMainFrame == true else { return }
+            self.czfLatestMainFrameURL = url
             // 3.8.506（L28）：WebViewDelegate 不是 @MainActor，
             // 裸 Task 跑在全局执行器上——后面的 universalLink
             // 会写 @State（弹确认框、跳 App），离主线程可能
@@ -685,7 +692,7 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
             // （await 会挂起，不堵主线程；内层 Task 继承）。
             Task { @MainActor in
                 await self.loadDomainAssociations(url: url)
-                guard webView.url == url,
+                guard self.czfLatestMainFrameURL == url,
                       let host = url.host, let appIDs = self.domainBundleIdDict[host] else { return }
                 await self.universalLinkHandler(url, appIDs)
             }

@@ -165,9 +165,16 @@ struct LCSettingsView: View {
         components.queryItems = [URLQueryItem(name: "url", value: info.downloadURL.absoluteString)]
         guard let url = components.url else { return }
         UIApplication.shared.open(url, options: [:]) { success in
+            // 3.8.528（L55）：open 的 completion 不保证回主线程
+            //（LCAppListView:4111/:4156 同款已写“回调里回主线
+            // 程写提示”），errorInfo/errorShow 是 @State，回调
+            // 里直接写会报 Publishing changes、提示可能不弹；
+            // 本函数是同步函数不能 await，用 main.async。
             if !success {
-                errorInfo = "没能打开 SideInstaller 🅥，请确认它已安装"
-                errorShow = true
+                DispatchQueue.main.async {
+                    errorInfo = "没能打开 SideInstaller 🅥，请确认它已安装"
+                    errorShow = true
+                }
             }
         }
     }
@@ -182,9 +189,13 @@ struct LCSettingsView: View {
         components.queryItems = [URLQueryItem(name: "url", value: info.downloadURL.absoluteString)]
         guard let url = components.url else { return }
         UIApplication.shared.open(url, options: [:]) { success in
+            // 3.8.528（L55）：同 openSideInstallerInstall，
+            // completion 不保证回主线程，@State 写放 main.async。
             if !success {
-                errorInfo = "没能打开 Seal，请确认它已安装"
-                errorShow = true
+                DispatchQueue.main.async {
+                    errorInfo = "没能打开 Seal，请确认它已安装"
+                    errorShow = true
+                }
             }
         }
     }
@@ -1296,8 +1307,14 @@ struct LCSettingsView: View {
         }
         
         guard let url = URL(string: "\(storeScheme.lowercased())://certificate?callback_template=livecontainer%3A%2F%2Fcertificate%3Fcert%3D%24%28BASE64_CERT%29%26password%3D%24%28PASSWORD%29") else {
-            errorInfo = "Failed to initialize certificate import URL."
-            errorShow = true
+            // 3.8.528（L55）：本函数从按钮的裸 Task 调来、不在主
+            // actor 上（L40 同款），@State 写回主线程再写；这
+            // 个 URL 是常量、实际走不到这支，顺手与同函数其余
+            // 路口径一致。
+            await MainActor.run {
+                errorInfo = "Failed to initialize certificate import URL."
+                errorShow = true
+            }
             return
         }
         // 商店 App 没装时 open 回 false，原来静默无事、用户以为点了没反应。
