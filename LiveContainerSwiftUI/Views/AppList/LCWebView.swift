@@ -403,6 +403,19 @@ struct LCWebView: View {
             }
             return
         }
+        // 3.8.541（L71）：网页已关/已最小化时分享 sheet 再也弹不出来——
+        // 下载保活（L13）让旧 delegate 仍跑到这里，但旧 LCWebView 结构体
+        // 已离树（恢复重建时 @State 全是新的），showShareSheet 置 true
+        // 也没人呈现，文件既没分享、tmp 子目录又没人清（只剩 onDismiss
+        // 与分享 completion 两条清理路，都走不到）；直接清掉本次下载
+        // 独占的 tmp 子目录，不留残留。只看 window：最小化时窗口同
+        // 样已离树，恢复后同样是新结构体、sheet 同样弹不出来。
+        if webView.webView.window == nil {
+            if url.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") {
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            }
+            return
+        }
         // 3.8.506（L28）：sheet 已开着在分享上一个时，先排队——
         // 直接改 shareFileURL 会被 onDismiss 清掉，第二个既没分
         // 享、tmp 子目录又没人清（completion 只认创建时抓的那一
