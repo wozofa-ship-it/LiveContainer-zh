@@ -1137,11 +1137,19 @@ class LCAppModel: ObservableObject, Hashable {
         // Record the launch time
         // JIT 确认取消时不盖（czfDidLaunch 为 false），免得“最近启动”
         // 排一个根本没启动的 App；其它路照常盖。
-        if czfDidLaunch {
-            appInfo.lastLaunched = Date()
-        }
-
+        // 3.8.542（L72）：原来这行写在裸 Task 执行器上——lastLaunched
+        // 的 setter 改的是 LCAppInfo 的 NSMutableDictionary（_info，
+        // LCAppInfo.m:1022-1023），NSMutableDictionary 不是线程安全
+        // 的；主线程正同时读同一份字典（最近启动排序
+        // LCAppSortManager:292、设置页显示、MultitaskAppWindow:279
+        // 的 MainActor.run 内读），读-写并发可能崩。runApp 里另两
+        // 处 appInfo 写（containers/dataUUID）早已在 L32 的
+        // MainActor.run 块内，只剩这一处漏网；并进下面已有的
+        // MainActor.run，一行不增、语义不变。
         await MainActor.run {
+            if czfDidLaunch {
+                appInfo.lastLaunched = Date()
+            }
             isAppRunning = false
         }
     }

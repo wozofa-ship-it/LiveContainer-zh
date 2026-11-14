@@ -911,9 +911,25 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
         // 即使目的地条目丢了（decideDestinationUsing 没跑到），
         // 也不让 static 一直漏着。
         let key = ObjectIdentifier(download)
+        let liveWebView = Self.czfLiveWebViews[key]
         Self.czfLiveWebViews.removeValue(forKey: key)
         Self.czfLiveDelegates.removeValue(forKey: key)
         guard let dest = Self.downloadDestinations.removeValue(forKey: key) else { return }
+        // 3.8.542（L72）：L71 漏的半条——下载中途最小化再恢复，
+        // onViewAppear 已建新 delegate 并接管 navigationDelegate，
+        // 但下载的 delegate 在 didBecome 时就定死是旧的，下完仍
+        // 跑到旧 delegate；旧 delegate 再调自己的 handler 只会
+        // 写离树旧结构体的 @State（恢复重建时 @State 全是新的），
+        // 分享弹不出来、tmp 还漏——L71 的 window 守卫拦不住这条
+        // （恢复后 window 已非 nil）。转给当前 navigationDelegate
+        // 的 handler（新结构体的 onDownloadedFile，window 在、
+        // 分享正常弹；.ipa 也同款——新结构体的 handler 走同一安
+        // 装路）。页已关/仍最小化时 navigationDelegate 仍是自己，
+        // 走下面 window 守卫那条路。private 同文件内实例间可访。
+        if let live = liveWebView?.navigationDelegate as? WebViewDelegate, live !== self {
+            Task { @MainActor in await live.downloadedFileHandler(dest) }
+            return
+        }
         // 3.8.506（L28）：WebViewDelegate 不是 @MainActor，裸
         // Task 跑在全局执行器上——onDownloadedFile 写 @State
         //（shareFileURL、showShareSheet）、调 close（）（改
