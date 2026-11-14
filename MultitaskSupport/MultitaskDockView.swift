@@ -3679,15 +3679,21 @@ struct AllAppsListView: View {
             // （不新起）；现与 banner/网格一致，带回失败走 runApp 新起——
             // 带回失败时窗口顶不回来，静默关面板等于“点了没反应”，
             // 新起至少能把 App 打开。
-            if LCAppModel.czfBringRunningAppToFront(app, maximize: true) {
-                closePanel()
+            // 3.8.537（L64）：czfBringRunningAppToFront 是纯 UIKit 活
+            //（LCAppModel:97/:300，带回/拉满），本 Task 在按钮的
+            // 裸闭包里、认证 await 之后走全局执行器；带回 + 关面
+            // 板回主线程再做（L38-3 同款，漏掉的第六处；L62-1
+            // 只包了最小化/小窗口两助手，没包这里的直接调用）。
+            let broughtToFront = await MainActor.run(body: { LCAppModel.czfBringRunningAppToFront(app, maximize: true) })
+            if broughtToFront {
+                await MainActor.run { closePanel() }
                 return
             }
             // 跳错修复：非运行实例不再走只带包名的 URL（那边按包名
             // 取首个模型，点第 2 个实例必开第 1 个），改走模型直启，
             // 与 smallWindowOpenApp 同款；上面运行中实例的顶回
             // 前台路径一字不动。
-            closePanel()
+            await MainActor.run { closePanel() }
             do {
                 // F-4：runApp 的容器与带回查 dock 用同一 uuid（选中
                 // 容器优先），与 banner 的 launchForAux 一致。
@@ -4002,9 +4008,12 @@ struct SourcesPanelView: View {
         Task {
             // 坞源面板固定区图标：先认证、通过再关面板跑 App。
             guard await app.czfAuthenticateIfLocked() else { return }
-            closePanel()
+            // 3.8.537（L64）：本 Task 在按钮的裸闭包里、认证 await
+            // 之后走全局执行器；closePanel 关面板动 UIView/dismiss，
+            // 回主线程再调（launchApp 同款；L62-3 只包了报错路）。
+            await MainActor.run { closePanel() }
             // 3.8.535（L62-3）：原来 try? 把启动失败整个吞掉——签名失败/
-            // 证书缺失时点了毫无反应；同文件 App 面板 launchApp（:3696）
+            // 证书缺失时点了毫无反应；同文件 App 面板 launchApp（:3702）
             // 是 do/catch + reportLaunchError，源面板这里是唯一吞掉的口子。
             // 本视图没有 reportLaunchError，用自己的 errorMessage + alert
             //（:4561，安装/下载报错同款宿主）；面板已关仍可报，与 launchApp
@@ -4335,8 +4344,14 @@ struct SourcesPanelView: View {
                                     // 未通过不打开。
                                     Task {
                                         guard await app.czfAuthenticateIfLocked() else { return }
-                                        settingsApp = app
-                                        showAppSettings = true
+                                        // 3.8.537（L64）：本 Task 在按钮的裸闭包里、
+                                        // 认证 await 之后走全局执行器；settingsApp/
+                                        // showAppSettings 是 @State，回主线程再写
+                                        //（L64-1 同款）。
+                                        await MainActor.run {
+                                            settingsApp = app
+                                            showAppSettings = true
+                                        }
                                     }
                                 }
                             } label: {

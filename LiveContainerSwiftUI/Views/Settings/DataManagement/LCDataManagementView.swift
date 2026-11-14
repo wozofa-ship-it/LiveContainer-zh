@@ -2536,9 +2536,17 @@ struct LCDataManagementView : View {
                 showBackupPreview = true
                 Task {
                     let items = await Self.previewItems(for: folderURL)
-                    if previewFolderURL == folderURL {
-                        previewItems = items
-                        previewLoading = false
+                    // 3.8.537（L64）：本 Task 在 onTapGesture 的裸
+                    // 闭包里、Swift 5 下不继承 body 的 @MainActor，
+                    // await 之后走全局执行器；previewFolderURL/
+                    // previewItems/previewLoading 全是 @State，回
+                    // 主线程再读再写（L44/L61-4 同款）。读也在
+                    // 同一跳里，“只认最后一次”的时序逻辑不变。
+                    await MainActor.run {
+                        if previewFolderURL == folderURL {
+                            previewItems = items
+                            previewLoading = false
+                        }
                     }
                 }
             }
