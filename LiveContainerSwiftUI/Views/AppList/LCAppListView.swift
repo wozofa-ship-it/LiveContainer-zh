@@ -1354,7 +1354,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         guard !q.isEmpty else { return nil }
         // L61-1：L60-1 同款——urlQueryAllowed 会放行 &（query 分隔符），
         // 搜 “H&M” 会拼成 wd=H&M、百度侧只认 wd=H；改走 czfQueryValueAllowed。
-        let encoded = q.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? q
+        // L63-1：czfQueryValueAllowed 只减了 &，+ 仍放行；百度按表单
+        // 编码把 query 里的 + 解成空格，搜 “C++” 会变成搜 “C  ”。
+        // 只在这一处再减 +（拼成 %2B），不动共用的 helper——交接路
+        // 走 URLComponents，不把 + 当空格，8 处调用点无此问题。
+        var allowed = CharacterSet.czfQueryValueAllowed
+        allowed.remove(charactersIn: "+")
+        let encoded = q.addingPercentEncoding(withAllowedCharacters: allowed) ?? q
         return URL(string: "https://www.baidu.com/s?wd=" + encoded)
     }
 
