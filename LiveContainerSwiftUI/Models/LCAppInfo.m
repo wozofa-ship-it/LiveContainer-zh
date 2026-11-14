@@ -103,17 +103,30 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     // find all url schemes
     NSMutableArray* urlSchemes = [[NSMutableArray alloc] init];
     int nowSchemeCount = 0;
-    if (_infoPlist[@"CFBundleURLTypes"]) {
-        NSMutableArray* urlTypes = _infoPlist[@"CFBundleURLTypes"];
+    // 坏包兜底：CFBundleURLTypes 里混进非数组/非字典/非字符串时，
+    // 原来直接发消息给错误类型（unrecognized selector）或在
+    // Swift 侧 as! 闪退，且每次冷启动都崩；逐层验类型，坏的跳过。
+    if ([_infoPlist[@"CFBundleURLTypes"] isKindOfClass:[NSArray class]]) {
+        NSArray* urlTypes = _infoPlist[@"CFBundleURLTypes"];
 
         for(int i = 0; i < [urlTypes count]; ++i) {
-            NSMutableDictionary* nowUrlType = [urlTypes objectAtIndex:i];
+            NSDictionary* nowUrlType = [urlTypes objectAtIndex:i];
+            if (![nowUrlType isKindOfClass:[NSDictionary class]]) {
+                continue;
+            }
             if (!nowUrlType[@"CFBundleURLSchemes"]){
                 continue;
             }
-            NSMutableArray *schemes = nowUrlType[@"CFBundleURLSchemes"];
+            NSArray *schemes = nowUrlType[@"CFBundleURLSchemes"];
+            if (![schemes isKindOfClass:[NSArray class]]) {
+                continue;
+            }
             for(int j = 0; j < [schemes count]; ++j) {
-                [urlSchemes insertObject:[schemes objectAtIndex:j] atIndex:nowSchemeCount];
+                NSString *scheme = [schemes objectAtIndex:j];
+                if (![scheme isKindOfClass:[NSString class]]) {
+                    continue;
+                }
+                [urlSchemes insertObject:scheme atIndex:nowSchemeCount];
                 ++nowSchemeCount;
             }
         }

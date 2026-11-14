@@ -6065,7 +6065,9 @@ struct LCDataManagementView : View {
         let now = Date()
         let cal = Calendar.current
         if cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now) < hour * 60 + minute { return }
-        for app in DataManager.shared.model.apps {
+        // 隐藏 App 也清：原来只扫 apps，隐藏 App 的图标缓存
+        // 永远不清，手动清理与定时清理都漏。
+        for app in DataManager.shared.model.apps + DataManager.shared.model.hiddenApps {
             app.appInfo.clearIconCache()
         }
         defaults.set(today, forKey: "LCScheduleCacheLastDate")
@@ -6184,7 +6186,8 @@ struct LCDataManagementView : View {
     }
     
     func clearIconCache() async {
-        for app in sharedModel.apps {
+        // 隐藏 App 也清（同 runScheduledCacheIfDue 的漏项）。
+        for app in sharedModel.apps + sharedModel.hiddenApps {
             app.appInfo.clearIconCache()
         }
     }

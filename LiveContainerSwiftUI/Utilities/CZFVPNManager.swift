@@ -1439,10 +1439,13 @@ public final class CZFVPNManager {
     }
 
     /// 按节点内容从落盘缓存重建下标结果 + 旧结果下标集。
-    static func restorePingResults(nodes: [String]) -> (results: [Int: CZFNodePingResult], stale: Set<Int>) {
+    static func restorePingResults(nodes: [String]) -> (results: [Int: CZFNodePingResult], stale: Set<Int>, oldestTime: TimeInterval?) {
         let cache = readPingCache()
         var map: [Int: CZFNodePingResult] = [:]
         var stale: Set<Int> = []
+        // 新鲜条目里最旧的测量时间（供 App 页“切最快”判断内存数
+        // 有没有超 24h；旧条目不计入，免得把新鲜数也算老）。
+        var oldestTime: TimeInterval? = nil
         let now = Date().timeIntervalSince1970
         for (index, link) in nodes.enumerated() {
             guard let entry = cache[link] else { continue }
@@ -1458,9 +1461,13 @@ public final class CZFVPNManager {
             }
             if entry.time == 0 || now - entry.time > pingCacheStaleAfter {
                 stale.insert(index)
+            } else if let t = oldestTime {
+                oldestTime = min(t, entry.time)
+            } else {
+                oldestTime = entry.time
             }
         }
-        return (map, stale)
+        return (map, stale, oldestTime)
     }
 
     /// 测延迟前停核心（用户 2026-11-03 定的“停止测速启动”）：

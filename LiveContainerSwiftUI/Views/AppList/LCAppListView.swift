@@ -226,6 +226,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 核心在跑时可能被拒，见 toolbarPingNodes 的 rejected 处理）
     @State private var vpnPinging = false
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    // 内存测速结果的测量时间（恢复时取缓存里新鲜条目最旧的时间，
+    // 现测时取当时）：切最快只认 24h 内的内存数，超了现场重测。
+    @State private var vpnPingResultsFetchedAt: Date?
     @State private var vpnPingMessage: String?
     @State private var batchSelectedIDs: Set<String> = []
     @State private var batchDeleteConfirm = false
@@ -388,6 +391,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let fresh = restored.results.filter { !restored.stale.contains($0.key) }
         guard !fresh.isEmpty else { return }
         vpnPingResults = fresh
+        vpnPingResultsFetchedAt = restored.oldestTime.map { Date(timeIntervalSince1970: $0) }
     }
 
     // 3.8.282：长按菜单的测延迟——直接调 manager 的只读测速
@@ -424,6 +428,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (idx, r) in results.enumerated() { stored[idx] = r }
                 self.vpnPingResults = stored
+                self.vpnPingResultsFetchedAt = Date()
                 // R-3：结果写共用缓存（与 VPN 页同一份
                 // CZFVPNPingCache），VPN 页测完切到 App 页，
                 // 盾牌菜单不再显示"未测速"。
@@ -460,7 +465,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 越界（setActiveNode 自带守卫，但下标取名字会崩）
     private func switchToFastestNode() {
         let links = CZFVPNManager.shared.nodeLinks
-        if let best = vpnPingResults.filter({ $0.value.success && $0.key < links.count }).min(by: { $0.value.delay < $1.value.delay }) {
+        // 内存结果也会过期：LiveContainer 连续活过 24h 不重启时，
+        // 恢复/测得的旧数仍在内存里，按旧数切会切到次优节点。
+        // 有测量时间且在 24h 内才走内存快路，否则现场重测。
+        let memoryFresh = vpnPingResultsFetchedAt.map { Date().timeIntervalSince($0) <= CZFVPNManager.pingCacheStaleAfter } ?? false
+        if memoryFresh, let best = vpnPingResults.filter({ $0.value.success && $0.key < links.count }).min(by: { $0.value.delay < $1.value.delay }) {
             CZFVPNManager.shared.setActiveNode(at: best.key)
             let name = CZFVPNManager.nodeDisplay(for: links[best.key]).name
             vpnPingMessage = "已切到最快节点：\(name)（\(best.value.delay)ms）"

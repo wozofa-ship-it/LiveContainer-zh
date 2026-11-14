@@ -1248,9 +1248,22 @@ struct LCSettingsView: View {
             errorShow = true
             return
         }
-        await UIApplication.shared.open(url)
+        // 商店 App 没装时 open 回 false，原来静默无事、用户以为点了没反应。
+        let opened = await UIApplication.shared.open(url)
+        if !opened {
+            errorInfo = "没能打开 \(storeName)，请确认它已安装"
+            errorShow = true
+        }
     }
     func onSideStoreCertificateCallback(certificateData: Data, password: String) {
+        // 与文件导入同款校验：证书坏了或密码不对就别存，否则静默存下、
+        // 签名时才报错，用户根本不知道是导入这步坏的。钥匙串那路密
+        // 码读不到时传的是 ""，错密码同样在这里拦住。
+        guard LCUtils.getCertTeamId(withKeyData: certificateData, password: password) != nil else {
+            errorInfo = "lc.settings.invalidCertError".loc
+            errorShow = true
+            return
+        }
         LCUtils.appGroupUserDefault.set(certificateData, forKey: "LCCertificateData")
         LCUtils.appGroupUserDefault.set(password, forKey: "LCCertificatePassword")
         LCUtils.appGroupUserDefault.set(NSDate.now, forKey: "LCCertificateUpdateDate")

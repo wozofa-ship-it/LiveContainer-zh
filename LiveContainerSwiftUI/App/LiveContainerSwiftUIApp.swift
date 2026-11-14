@@ -84,7 +84,10 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
                 // 隐藏 App 的 URL schemes 也要进集合（原来只在 else
                 // 里 formUnion，冷启动会丢掉隐藏 App 的 schemes，
                 // 客 App 里点隐藏 App 链接回不了宿主）。
-                tempURLSchemes?.formUnion(newApp.urlSchemes() as! [String])
+                // 坏包兜底：CFBundleURLSchemes 里混进非字符串时 as!
+                // 会在冷启动扫描里直接闪退，且每次启动都崩、用户
+                // 删不掉坏包；as? 失败只跳过它的 schemes。
+                tempURLSchemes?.formUnion(newApp.urlSchemes() as? [String] ?? [])
                 if newApp.is32bitEmulator {
                     tempArm32EmuApps.append(model)
                 }
@@ -106,7 +109,8 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
                         tempApps.append(model)
                     }
                     // 隐藏 App 的 URL schemes 也要进集合（同上）。
-                    tempURLSchemes?.formUnion(newApp.urlSchemes() as! [String])
+                    // 坏包兜底：同上，as? 失败只跳过它的 schemes。
+                    tempURLSchemes?.formUnion(newApp.urlSchemes() as? [String] ?? [])
                     if newApp.is32bitEmulator {
                         tempArm32EmuApps.append(model)
                     }
