@@ -4848,10 +4848,17 @@ struct LCDataManagementView : View {
             try await Self.replaceContainerOffMain(from: containerFolder, to: destURL)
             let restoredName = (NSDictionary(contentsOf: destURL.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["name"] as? String ?? folderName
             let restored = LCContainer(infoDict: ["folderName": folderName, "name": restoredName], isShared: app.appInfo.isShared)
-            var containers = app.uiContainers
-            containers.append(restored)
-            app.uiContainers = containers
-            app.appInfo.containers = containers
+            // 3.8.513（L37）：restoreOneApp 是非隔离 static async，
+            // 全程跑全局执行器；uiContainers/uiSelectedContainer/
+            // uiDefaultDataFolder 是 @Published，离主线程写报
+            // Publishing changes from background threads、界面
+            // 不刷新（L31/L32 同款）。读改写包进 MainActor.run。
+            await MainActor.run {
+                var containers = app.uiContainers
+                containers.append(restored)
+                app.uiContainers = containers
+                app.appInfo.containers = containers
+            }
             restoredContainers += 1
             restoredFolderNames.insert(folderName)
             if newDefaultContainer == nil || folderName == manifestDataUUID {
@@ -4865,10 +4872,13 @@ struct LCDataManagementView : View {
             // 首个新容器不得占位，否则下次打开进的是备份里的非
             // 默认容器、毫无提示；只有 manifest 默认容器不在机上
             // 时，才用首个新容器作默认（原有回落）。
-            let finalDefault = app.uiContainers.first { $0.folderName == manifestDataUUID } ?? newDefaultContainer
-            app.uiSelectedContainer = finalDefault
-            app.uiDefaultDataFolder = finalDefault.folderName
-            app.appInfo.dataUUID = finalDefault.folderName
+            // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
+            await MainActor.run {
+                let finalDefault = app.uiContainers.first { $0.folderName == manifestDataUUID } ?? newDefaultContainer
+                app.uiSelectedContainer = finalDefault
+                app.uiDefaultDataFolder = finalDefault.folderName
+                app.appInfo.dataUUID = finalDefault.folderName
+            }
         }
         // 恢复模块选择：manifest 记着备份时的模块夹，写回；
         // 老备份没有这字段就不动（保持新装默认）
@@ -4927,13 +4937,16 @@ struct LCDataManagementView : View {
             if app.uiContainers.isEmpty, loginMergeFolderCount > 0 {
                 let newName = manifestDataUUID.isEmpty ? NSUUID().uuidString : manifestDataUUID
                 let newContainer = LCContainer(folderName: newName, name: newName, isShared: app.appInfo.isShared)
-                var containers = app.uiContainers
-                containers.append(newContainer)
-                app.uiContainers = containers
-                app.appInfo.containers = containers
-                app.uiSelectedContainer = newContainer
-                app.uiDefaultDataFolder = newName
-                app.appInfo.dataUUID = newName
+                // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
+                await MainActor.run {
+                    var containers = app.uiContainers
+                    containers.append(newContainer)
+                    app.uiContainers = containers
+                    app.appInfo.containers = containers
+                    app.uiSelectedContainer = newContainer
+                    app.uiDefaultDataFolder = newName
+                    app.appInfo.dataUUID = newName
+                }
                 if let bundleID = app.appInfo.bundleIdentifier() {
                     newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
                 }
@@ -4954,14 +4967,17 @@ struct LCDataManagementView : View {
                     target = matched
                 } else {
                     let newContainer = LCContainer(folderName: n, name: n, isShared: app.appInfo.isShared)
-                    var containers = app.uiContainers
-                    containers.append(newContainer)
-                    app.uiContainers = containers
-                    app.appInfo.containers = containers
-                    if n == manifestDataUUID {
-                        app.uiSelectedContainer = newContainer
-                        app.uiDefaultDataFolder = n
-                        app.appInfo.dataUUID = n
+                    // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
+                    await MainActor.run {
+                        var containers = app.uiContainers
+                        containers.append(newContainer)
+                        app.uiContainers = containers
+                        app.appInfo.containers = containers
+                        if n == manifestDataUUID {
+                            app.uiSelectedContainer = newContainer
+                            app.uiDefaultDataFolder = n
+                            app.appInfo.dataUUID = n
+                        }
                     }
                     target = newContainer
                 }
@@ -5010,19 +5026,22 @@ struct LCDataManagementView : View {
             // 手动恢复报 0 个）。照 runApp 首启的建法补一个默认
             // 容器，登录态才有着落
             if app.uiContainers.isEmpty && !plistFiles.isEmpty {
+                // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
                 // 容器名直接用备份时的原名（manifest 的
                 // dataUUID）：快照文件名、别名都按原名记账，
                 // 同名对上目标容器是第一优先落点，不用再靠
                 // 默认容器兜底猜；组号同样照备份时的建
                 let newName = manifestDataUUID.isEmpty ? NSUUID().uuidString : manifestDataUUID
                 let newContainer = LCContainer(folderName: newName, name: newName, isShared: app.appInfo.isShared)
-                var containers = app.uiContainers
-                containers.append(newContainer)
-                app.uiContainers = containers
-                app.appInfo.containers = containers
-                app.uiSelectedContainer = newContainer
-                app.uiDefaultDataFolder = newName
-                app.appInfo.dataUUID = newName
+                await MainActor.run {
+                    var containers = app.uiContainers
+                    containers.append(newContainer)
+                    app.uiContainers = containers
+                    app.appInfo.containers = containers
+                    app.uiSelectedContainer = newContainer
+                    app.uiDefaultDataFolder = newName
+                    app.appInfo.dataUUID = newName
+                }
                 if let bundleID = app.appInfo.bundleIdentifier() {
                     newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
                 }
@@ -5119,14 +5138,17 @@ struct LCDataManagementView : View {
         // 进空容器。放关窗口之前，让关窗口也按纠正后的 dataUUID 走。
         let existingContainers = app.uiContainers.filter { fm.fileExists(atPath: $0.containerURL.path) }
         if existingContainers.count != app.uiContainers.count {
-            app.uiContainers = existingContainers
-            app.appInfo.containers = existingContainers
-            if let selected = app.uiSelectedContainer, !existingContainers.contains(selected) {
-                let fallback = newDefaultContainer ?? existingContainers.first
-                app.uiSelectedContainer = fallback
-                if let fallback {
-                    app.uiDefaultDataFolder = fallback.folderName
-                    app.appInfo.dataUUID = fallback.folderName
+            // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
+            await MainActor.run {
+                app.uiContainers = existingContainers
+                app.appInfo.containers = existingContainers
+                if let selected = app.uiSelectedContainer, !existingContainers.contains(selected) {
+                    let fallback = newDefaultContainer ?? existingContainers.first
+                    app.uiSelectedContainer = fallback
+                    if let fallback {
+                        app.uiDefaultDataFolder = fallback.folderName
+                        app.appInfo.dataUUID = fallback.folderName
+                    }
                 }
             }
         }

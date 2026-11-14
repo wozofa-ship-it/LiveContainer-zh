@@ -680,7 +680,16 @@ extension LCUtils {
                     return false
                 }
                 
-                let launchURL = URL(string: "\(freeScheme)://open-url?url=\(encodedStr)")!
+                // 3.8.513（L37）：freeScheme 来自容器锁 plist 里
+                // 的 runningLC（getContainerUsingLCScheme），plist
+                // 损坏时可能是空串/非法 scheme，URL(string:) 返
+                // nil、这里强解包即闪退——L13 在 LCAppModel:838
+                // 修过同一值的同款（url!）。guard-let 拦下，
+                // 报一句人话返 false（上层 jitLog 可见）。
+                guard let launchURL = URL(string: "\(freeScheme)://open-url?url=\(encodedStr)") else {
+                    onServerMessage?("中转链接拼不出来（容器记录损坏），请重试或改用其他 JIT 方式")
+                    return false
+                }
                 LCUtils.appGroupUserDefault.set(freeScheme, forKey: "LCLaunchExtensionScheme")
                 LCUtils.appGroupUserDefault.set(appToLaunch.appInfo.relativeBundlePath, forKey: "LCLaunchExtensionBundleID")
                 LCUtils.appGroupUserDefault.set(Date.now, forKey: "LCLaunchExtensionLaunchDate")
@@ -753,7 +762,14 @@ extension LCUtils {
                     return false
                 }
                 
-                launchURL = URL(string: "\(freeScheme)://open-url?url=\(encodedStr)")!
+                // 3.8.513（L37）：同上，freeScheme 来自容器锁
+                // plist 的 runningLC，损坏时拼不出 URL；强解
+                // 包即闪退，guard-let 拦下报一句返 false。
+                guard let builtURL = URL(string: "\(freeScheme)://open-url?url=\(encodedStr)") else {
+                    onServerMessage?("中转链接拼不出来（容器记录损坏），请重试或改用其他 JIT 方式")
+                    return false
+                }
+                launchURL = builtURL
                 LCUtils.appGroupUserDefault.set(freeScheme, forKey: "LCLaunchExtensionScheme")
                 LCUtils.appGroupUserDefault.set(appToLaunch.appInfo.relativeBundlePath, forKey: "LCLaunchExtensionBundleID")
                 LCUtils.appGroupUserDefault.set(Date.now, forKey: "LCLaunchExtensionLaunchDate")
