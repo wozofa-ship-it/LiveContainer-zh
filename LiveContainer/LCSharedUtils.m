@@ -116,10 +116,14 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
         }
         CFErrorRef error = NULL;
         void* taskSelf = SecTaskCreateFromSelf(NULL);
-        CFTypeRef value = SecTaskCopyValueForEntitlement(taskSelf, CFSTR("com.apple.security.application-groups"), &error);
-        CFRelease(taskSelf);
+        // L10-14：3.8.412 同款——扩展进程里 SecTaskCreateFromSelf 可能返回
+        // NULL，未判空就调 SecTaskCopyValueForEntitlement / CFRelease(NULL)
+        // 会崩；同文件上方 teamIdentifier 已守，这里补齐。另 value 须是
+        // NSArray 才能调 .count（entitlement 正常恒为数组，防脏数据）。
+        CFTypeRef value = taskSelf ? SecTaskCopyValueForEntitlement(taskSelf, CFSTR("com.apple.security.application-groups"), &error) : NULL;
+        if (taskSelf) CFRelease(taskSelf);
         
-        if(!value) {
+        if(!value || CFGetTypeID(value) != CFArrayGetTypeID()) {
             return;
         }
         NSArray* appGroups = (__bridge NSArray *)value;
@@ -246,7 +250,18 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
         
         // Attempt to restart LiveContainer with the selected guest app
         [lcUserDefaults setObject:launchBundleId forKey:@"selected"];
-        [lcUserDefaults setObject:containerFolderName forKey:@"selectedContainer"];
+        // L10-13：链接不带 container-folder-name 时 containerFolderName
+        // 为 nil（横幅/网格“复制启动链接”在 App 未选容器时就是不带
+        // 容器参数的，见 LCAppBannerViewController:660 / CZFAppGridView:716
+        // 的 else 分支；LCBootstrap 交接的无容器分支同款），直接
+        // setObject:nil 会抛 NSInvalidArgumentException、客端进程当场
+        // 崩掉。删掉旧键：留着上次启动的旧容器会用错容器；删掉后
+        // LiveContainerMain 会走 findDefaultContainerWithBundleId 补默认容器。
+        if (containerFolderName) {
+            [lcUserDefaults setObject:containerFolderName forKey:@"selectedContainer"];
+        } else {
+            [lcUserDefaults removeObjectForKey:@"selectedContainer"];
+        }
         bool isSharedApp = false;
         NSBundle *appBundle = [self findBundleWithBundleId:launchBundleId isSharedAppOut:&isSharedApp];
         NSDictionary *appInfo = [NSDictionary dictionaryWithContentsOfFile:

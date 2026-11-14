@@ -179,7 +179,15 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         // 首次扫顺手做一次磁盘缓存 LRU 清理（O-16）。
         _ = Self.czfCachePruneOnce
         Task {
-            didStartAccessing = folderURL.startAccessingSecurityScopedResource()
+            // 3.8.492（L10）：startAccessing 只起一次——scan() 在
+            // 列表为空时可重跑（onAppear 再进），原来每次 Task 都
+            // 起一次，deinit 只停一次，多起的访问权一直挂着。
+            // 首次起过（didStartAccessing 已真）就不再起；首次
+            // 起失败（沙盒内目录返 false）时仍为 false，下次重扫
+            // 会重试，行为不变。
+            if !didStartAccessing {
+                didStartAccessing = folderURL.startAccessingSecurityScopedResource()
+            }
             let fm = FileManager.default
             // 安装审计 #17：打不开要分原因，不许再用一句笼统的
             // “打不开这个文件夹”盖住所有情况。startAccessing
@@ -246,7 +254,11 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             if values?.isDirectory == true {
                 let ext = url.pathExtension.lowercased()
                 if ext == "app" || ext == "ipa" { continue }
-                try collectIpaURLs(in: url, into: &out)
+                // 3.8.492（L10）：子文件夹读失败只跳过它——原来
+                // try 会把错误一路抛回 scan() 的 do/catch，整个
+                // 文件夹直接报“读取文件夹失败”，顶层已扫到的 IPA
+                // 也全丢；一个无权限的子文件夹不该毁掉整份列表。
+                try? collectIpaURLs(in: url, into: &out)
             } else if url.pathExtension.lowercased() == "ipa"
                         || url.pathExtension.lowercased() == "tipa" {
                 // 安装审计 #10 / App #13：扫描加上 .tipa，

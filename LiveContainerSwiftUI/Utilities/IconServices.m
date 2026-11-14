@@ -187,7 +187,17 @@ NSMutableSet<ISBundleIcon*>* iconsNeedToGenerateOriginalIcon;
     NSURL* url = [(ISBundleIcon*)self url];
     NSBundle* bundle = [[NSBundle alloc] initWithURL:url];
     
-    if([iconsNeedToGenerateOriginalIcon containsObject:(ISBundleIcon *)self]) {
+    // 3.8.492（L10）：iconsNeedToGenerateOriginalIcon 是全局
+    // NSMutableSet，读（containsObject，走 swizzled 的
+    // makeResourceProvider）与写（下面 add/remove）可能分处
+    // 主线程（Original 风格保存图标）与后台全局队列
+    // （CZFAppIconLoader.loadIconAsync 并发生成）——NSMutableSet
+    // 非线程安全，并发读写会崩；三处访问都包 @synchronized。
+    BOOL czfGenerateOriginal = NO;
+    @synchronized(iconsNeedToGenerateOriginalIcon) {
+        czfGenerateOriginal = [iconsNeedToGenerateOriginalIcon containsObject:(ISBundleIcon *)self];
+    }
+    if (czfGenerateOriginal) {
 //        return [[PrivClass(ISBundleResourceProvider) alloc] initWithBundle:bundle options:0];
         return [self makeResourceProviderOrignal];
     }
@@ -225,6 +235,13 @@ NSMutableSet<ISBundleIcon*>* iconsNeedToGenerateOriginalIcon;
 @end
 
 BOOL saveCGImage(CGImageRef image, NSURL *url) {
+    // 3.8.492（L10）：空图/空地址直接返 NO——两处调用方
+    // （LCAppInfo.m:269、BuiltInSideStoreAppInfo.swift:55）
+    // 都在生成失败时可能传 nil CGImage，CGImageDestinationAddImage
+    // 接 NULL 图是未定义行为；在这里拦住，别靠调用方。
+    if (!image || !url) {
+        return NO;
+    }
     // 1. Define the file type (PNG is lossless)
     // For older systems, use kUTTypePNG
     CFStringRef type = (__bridge CFStringRef)(UTTypePNG.identifier);
@@ -336,14 +353,18 @@ CGImageRef loadCGImageFromURL(NSURL *url) {
     descriptor.shouldApplyMask = hasBorder;
     
     if(style == Original) {
-        [iconsNeedToGenerateOriginalIcon addObject:icon];
+        @synchronized(iconsNeedToGenerateOriginalIcon) {
+            [iconsNeedToGenerateOriginalIcon addObject:icon];
+        }
     }
     
     IFImage* ifImage = [request generateImageReturningRecordIdentifiers:nil];
     CGImageRef imageRef = [ifImage CGImage];
     
     if(style == Original) {
-        [iconsNeedToGenerateOriginalIcon removeObject:icon];
+        @synchronized(iconsNeedToGenerateOriginalIcon) {
+            [iconsNeedToGenerateOriginalIcon removeObject:icon];
+        }
     }
 
     return [UIImage imageWithCGImage:imageRef];

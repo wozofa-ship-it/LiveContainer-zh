@@ -104,9 +104,46 @@ static void insertRPathCommand(const char *path, struct mach_header_64 *header) 
     header->sizeofcmds += rpath->cmdsize;
 }
 
+// 第一个有文件内容的 section 的文件偏移（通常是 __text；
+// __DATA 的 __bss/__common 偏移为 0、不占文件，不计入）。
+// L10-15 用：rpath 插在 load commands 末尾，不能盖住它。
+static uint32_t czfFirstContentSectionOffset(struct mach_header_64 *header) {
+    uint32_t ans = 0;
+    struct load_command *command = (struct load_command *)(header + 1);
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (command->cmd == LC_SEGMENT_64) {
+            struct segment_command_64 *seg = (struct segment_command_64 *)command;
+            struct section_64 *sect = (struct section_64 *)(seg + 1);
+            for (uint32_t j = 0; j < seg->nsects; j++) {
+                if (sect->offset != 0 && (ans == 0 || sect->offset < ans)) {
+                    ans = sect->offset;
+                }
+                sect++;
+            }
+        }
+        command = (struct load_command *)((void *)command + command->cmdsize);
+    }
+    return ans;
+}
+
 void LCPatchAddRPath(const char *path, struct mach_header_64 *header) {
-    insertRPathCommand("@executable_path/../../Tweaks", header);
-    insertRPathCommand("@loader_path", header);
+    // L10-15：两个 rpath 命令直接写在 load commands 末尾、section 内容之前，
+    // 原来不查空闲空间。ld64 编出的二进制第一个 section（__text）对齐到页
+    // 边界、空闲通常 12KB+（实测 TweakLoader.dylib 12624、LiveContainer
+    // 15080 字节，只需 96），但手填/别家链接器打出的 dylib 可能把 section
+    // 贴得很紧，写进去会盖掉 section 开头、把 dylib 打坏。先算空闲，
+    // 不够就跳过不写，宁可少两个 rpath、也不损坏文件。
+    const char *rpath1 = "@executable_path/../../Tweaks";
+    const char *rpath2 = "@loader_path";
+    uint32_t need = (uint32_t)sizeof(struct rpath_command) + rnd32((uint32_t)strlen(rpath1) + 1, 8)
+                  + (uint32_t)sizeof(struct rpath_command) + rnd32((uint32_t)strlen(rpath2) + 1, 8);
+    uint32_t firstSection = czfFirstContentSectionOffset(header);
+    uint32_t endOfCommands = (uint32_t)sizeof(struct mach_header_64) + header->sizeofcmds;
+    if (firstSection == 0 || firstSection <= endOfCommands || firstSection - endOfCommands < need) {
+        return;
+    }
+    insertRPathCommand(rpath1, header);
+    insertRPathCommand(rpath2, header);
 }
 
 int LCPatchExecSlice(const char *path, struct mach_header_64 *header, bool doInject) {
@@ -311,7 +348,11 @@ void LCPatchAppBundleFixupARM64eSlice(NSURL *bundleURL) {
         } else if ([fileURL.pathExtension isEqualToString:@"framework"]) {
             NSDictionary *info = [NSDictionary dictionaryWithContentsOfURL:[fileURL URLByAppendingPathComponent:@"Info.plist"]];
             NSString *executableName = info[@"CFBundleExecutable"];
-            if(!executableName) {
+            // L10-16：任意 IPA 的 framework Info.plist 里 CFBundleExecutable
+            // 若不是字符串（如 NSNumber），下面 URLByAppendingPathComponent:
+            // 会因 unrecognized selector 闪退；非字符串一律回落到文件名
+            //（LCAppInfo patchGuestExtensions 同款，L10-10）。
+            if(![executableName isKindOfClass:[NSString class]]) {
                 executableName = fileURL.lastPathComponent.stringByDeletingPathExtension;
             }
             NSURL *executableURL = [fileURL URLByAppendingPathComponent:executableName];

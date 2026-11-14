@@ -235,7 +235,7 @@
         io_registry_entry_t memory_map = IORegistryEntryFromPath(0, "IODeviceTree:/chosen/memory-map");
         if (memory_map == IO_OBJECT_NULL)
             return NO;
-        NSArray *keys = (__bridge NSArray *)IORegistryEntryCreateCFProperty(memory_map, CFSTR(kIORegistryEntryPropertyKeysKey), 0, 0);
+        NSArray *keys = (__bridge_transfer NSArray *)IORegistryEntryCreateCFProperty(memory_map, CFSTR(kIORegistryEntryPropertyKeysKey), 0, 0);
         IOObjectRelease(memory_map);
         return keys && [keys containsObject:@"TXM"];
     }
@@ -476,6 +476,11 @@
     }
     
     [infoDict writeToURL:infoPath error:error];
+    // 3.8.492（L10）：写盘失败必须当时拦——原来不查 *error
+    // 就继续打包，Info.plist 写失败（磁盘满）时 zip 里是旧
+    // 名字/旧 Bundle ID 的陈旧 plist，装出来的分身名字和
+    // Bundle ID 全是旧的；与本函数其余步骤“写完即查”同款。
+    if (*error) return nil;
     
     dlopen("/System/Library/PrivateFrameworks/PassKitCore.framework/PassKitCore", RTLD_GLOBAL);
     NSData *zipData = [[NSClassFromString(@"PKZipArchiver") new] zippedDataForURL:tmpPayloadPath.URLByDeletingLastPathComponent];

@@ -900,12 +900,19 @@ int LiveContainerMain(int argc, char *argv[]) {
         selectedApp = nil;
         dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC));
         dispatch_after(delay, dispatch_get_main_queue(), ^{
-            // Base64 encode the data
+            // L10-12：bundle-name 是 .app 文件夹名（如 relativeBundlePath），
+            // 带空格的 App（如 "Pokémon GO.app"）裸插进 URL 会让
+            // [NSURL URLWithString:] 返 nil，canOpenURL 判 NO、交接静默
+            // 失败，用户留在 LC 列表、跑着的 App 切不过来。Swift 侧三处
+            // 同款 URL（LCAppBannerViewController:666、CZFAppGridView:722、
+            // LCUtilsExtensions:582）都用 .urlQueryAllowed 编码，这里补齐；
+            // 接收侧 LCAppListView:3979 用 URLComponents 解析，会自动解码。
+            NSString *encodedApp = [selectedAppBackUp stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: selectedAppBackUp;
             NSString* urlStr;
             if(selectedContainer) {
-                urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@&container-folder-name=%@", runningLC, selectedAppBackUp, selectedContainer];
+                urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@&container-folder-name=%@", runningLC, encodedApp, selectedContainer];
             } else {
-                urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@", runningLC, selectedAppBackUp];
+                urlStr = [NSString stringWithFormat:@"%@://livecontainer-launch?bundle-name=%@", runningLC, encodedApp];
             }
             
             NSURL* url = [NSURL URLWithString:urlStr];

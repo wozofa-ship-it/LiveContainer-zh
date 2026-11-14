@@ -140,15 +140,20 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     // 多开自定义名：优先于包内原名。列表、备份文件夹、恢复匹配
     // 全走 displayName，所以一个自定义名就同时分清了 App 和备份，
     // 不用各处另起一套名字；没设时原样走包内名，老 App 不变。
+    // 3.8.492（L10）：坏包兜底（urlSchemes 同款，L0 只修了那
+    // 处）：CFBundleDisplayName/CFBundleName/CFBundleExecutable
+    // 若不是字符串（手改过的 Info.plist），直接 return 会把
+    // NSNumber 交给 Swift 的 String 桥接当场闪退，且冷启动扫
+    // 包每次都崩；逐层验类型，非字符串就往下一档落。
     NSString* custom = _info[@"LCCustomDisplayName"];
-    if (custom && ![custom isEqualToString:@""]) {
+    if ([custom isKindOfClass:[NSString class]] && ![custom isEqualToString:@""]) {
         return custom;
     }
-    if (_infoPlist[@"CFBundleDisplayName"]) {
+    if ([_infoPlist[@"CFBundleDisplayName"] isKindOfClass:[NSString class]]) {
         return _infoPlist[@"CFBundleDisplayName"];
-    } else if (_infoPlist[@"CFBundleName"]) {
+    } else if ([_infoPlist[@"CFBundleName"] isKindOfClass:[NSString class]]) {
         return _infoPlist[@"CFBundleName"];
-    } else if (_infoPlist[@"CFBundleExecutable"]) {
+    } else if ([_infoPlist[@"CFBundleExecutable"] isKindOfClass:[NSString class]]) {
         return _infoPlist[@"CFBundleExecutable"];
     } else {
         return @"App Corrupted, Please Reinstall This App";
@@ -156,11 +161,13 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
 }
 
 - (NSString*)version {
+    // 3.8.492（L10）：同 displayName 的坏包兜底——非字符串
+    // 的版本号不直接返回，落到 CFBundleVersion 再落 Unknown。
     NSString* version = _infoPlist[@"CFBundleShortVersionString"];
-    if (!version) {
+    if (![version isKindOfClass:[NSString class]]) {
         version = _infoPlist[@"CFBundleVersion"];
     }
-    if(version) {
+    if([version isKindOfClass:[NSString class]]) {
         return version;
     } else {
         return @"Unknown";
@@ -171,7 +178,7 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
 // 缺省按 0（比较时缺 build 即 0，与 czfIsNewerVersion 对齐）。
 - (NSString*)buildVersion {
     NSString* build = _infoPlist[@"CFBundleVersion"];
-    if (build) {
+    if ([build isKindOfClass:[NSString class]]) {
         return build;
     } else {
         return @"0";
@@ -185,7 +192,10 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     } else {
         ans = _infoPlist[@"CFBundleIdentifier"];
     }
-    if(ans) {
+    // 3.8.492（L10）：同 displayName 的坏包兜底——非字符串
+    // 的 Bundle ID 不直接返回，落 Unknown（Swift 侧 String
+    // 桥接非字符串对象会闪退；原来只判了 nil）。
+    if([ans isKindOfClass:[NSString class]]) {
         return ans;
     } else {
         return @"Unknown";
@@ -260,7 +270,14 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     
     if([NSFileManager.defaultManager fileExistsAtPath:cachedIconPath]) {
         CGImageRef imageRef = loadCGImageFromURL(cachedIconUrl);
-        uiIcon = [UIImage imageWithCGImage:imageRef];
+        // 3.8.492（L10）：loadCGImageFromURL 返 retained 的
+        // CGImageRef（头注释写明调用方负责 CFRelease），
+        // UIImage 只 retain 不接管——原来从不释放，每次磁盘
+        // 命中漏一张 CGImage。建完 UIImage 立刻放掉。
+        if (imageRef) {
+            uiIcon = [UIImage imageWithCGImage:imageRef];
+            CFRelease(imageRef);
+        }
     }
     
     // generate and save icon cache to disk
@@ -330,10 +347,19 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     }
     
     UIImage* icon = [self generateLiveContainerWrappedIconWithStyle:style];
+    // 3.8.492（L10）：图标生成失败时 icon 为 nil（坏包调不通
+    // IconServices），UIImagePNGRepresentation(nil) 得 nil，
+    // 下面字典字面量里 @"Icon": nil 直接抛异常闪退；调用方
+    // （banner/grid 两处 guard let）拦不住方法内部的 crash。
+    // 生成失败就给空数据，Web Clip 照常建，图标缺失而已。
+    NSData *iconData = UIImagePNGRepresentation(icon);
+    if (!iconData) {
+        iconData = [NSData data];
+    }
     
     NSDictionary *payload = @{
         @"FullScreen": @YES,
-        @"Icon": UIImagePNGRepresentation(icon),
+        @"Icon": iconData,
         @"IgnoreManifestScope": @YES,
         @"IsRemovable": @YES,
         @"Label": self.displayName,
@@ -563,6 +589,13 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
 
         // copy remove rename
         NSString *executable = plist[@"CFBundleExecutable"];
+        // 3.8.492（L10）：坏包兜底——appex 的 Info.plist 缺失
+        // 或 CFBundleExecutable 不是字符串时，下面
+        // stringByAppendingPathComponent: 接非字符串对象会闪退；
+        // 与本函数其余失败路同款，直接返回错误串，不继续。
+        if (![executable isKindOfClass:[NSString class]] || executable.length == 0) {
+            return [NSString stringWithFormat:@"%@ is missing its executable name", name];
+        }
         NSString *path = [bundlePath stringByAppendingPathComponent:executable];
         NSString *temporaryPath = [path stringByAppendingString:@".lcpatch"];
         NSError *fileError = nil;
@@ -833,7 +866,12 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     } else {
         NSError* error;
         NSData *colorData = [NSKeyedArchiver archivedDataWithRootObject:color requiringSecureCoding:YES error:&error];
-        [_info setObject:colorData forKey:@"cachedColor"];
+        // 3.8.492（L10）：归档失败时 colorData 为 nil——原来
+        // 先 setObject(nil) 再查 error，setObject:forKey: 接
+        // nil 直接抛异常；失败时不写（旧色保留），只记日志。
+        if (colorData) {
+            [_info setObject:colorData forKey:@"cachedColor"];
+        }
         if(error) {
             NSLog(@"[LC] failed to set color %@", error);
         }
@@ -864,7 +902,11 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     } else {
         NSError* error;
         NSData *colorData = [NSKeyedArchiver archivedDataWithRootObject:color requiringSecureCoding:YES error:&error];
-        [_info setObject:colorData forKey:@"cachedColorDark"];
+        // 3.8.492（L10）：同 setCachedColor——归档失败时不
+        // setObject(nil)，旧色保留，只记日志。
+        if (colorData) {
+            [_info setObject:colorData forKey:@"cachedColorDark"];
+        }
         if(error) {
             NSLog(@"[LC] failed to set color %@", error);
         }
