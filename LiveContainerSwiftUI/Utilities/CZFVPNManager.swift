@@ -1362,7 +1362,17 @@ public final class CZFVPNManager {
                 if let appInfo = appInfo, Self.nodeOverride(for: appInfo) != nil {
                     Self.setNodeOverride(cand.link, for: appInfo)
                 } else {
-                    UserDefaults.standard.set(cand.idx, forKey: Self.activeNodeKey)
+                    // 3.8.529（L56）：下标按当前列表现查——cand.idx
+                    // 是函数入口快照里的下标，start(withLink:) 同步
+                    // 阻塞几秒里用户可能在设置页增删/重排节点（测速
+                    // 后补跑的 deferred ensure 那路用户正坐在 VPN
+                    // 设置页里），旧下标会指错行、核心跑的节点与界
+                    // 面“在用”行对不上（L51-12 在 waitUntilNodeReady
+                    // 里修过同款，这里漏了）；链接已不在列表里时不
+                    // 写下标，核心照常跑这条链接。
+                    if let idx = nodeLinks.firstIndex(of: cand.link) {
+                        UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+                    }
                 }
                 claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
                 return
