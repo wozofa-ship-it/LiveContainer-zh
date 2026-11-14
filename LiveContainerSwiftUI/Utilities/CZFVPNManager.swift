@@ -1302,6 +1302,17 @@ public final class CZFVPNManager {
         guard let appInfo = coreOwnerAppInfo else { return }
         let links = nodeLinks
         guard links.count >= 2 else { return }
+        // 3.8.520（L46）：每轮轮换从空 tried 集开始——上一轮
+        // 试过的节点只对上一轮有意义，留到下一轮会把还能用的
+        // 节点也排除掉。两节点时必中：上一轮 A→B 成功后
+        // tried={A,B}，下一轮再要轮换时 nextSupportedNode 把
+        // A、B 全排除、直接判“一圈都不通”并停掉整个轮换巡检
+        // （cancelRotateCheck），明明一个节点都没试过；三节点
+        // 以上同样会跳过上一轮试过、60 秒冷却后可能已恢复的
+        // 节点。循环内照常 insert，本轮内不重复试；成功路的
+        // baseline 重置（rotateCheck 里 link 变了即清）仍在，
+        // 不动它。
+        rotateTriedLinks = []
         var current = effectiveLink(for: appInfo)
         for _ in 0..<links.count {
             guard let target = nextSupportedNode(after: current, links: links) else {

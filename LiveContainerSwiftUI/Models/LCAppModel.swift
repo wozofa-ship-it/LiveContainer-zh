@@ -632,6 +632,15 @@ class LCAppModel: ObservableObject, Hashable {
     // 容器并切过去：旧容器留在列表里不删，旧数据归原来那
     // 个条目，新条目从空数据起，之后各用各的。只拆选中
     // 的那一个，不动别的容器。
+    /// 3.8.520（L46）：克隆包文件夹名里的毫秒时间戳（`包名_<毫秒>.app`，
+    /// 见 LCAppListView:2538）；不是克隆名（无 `_数字.app` 尾巴）返 nil。
+    /// 毫秒时间戳约 7.8e11，Int（64 位）装得下。
+    private static func czfCloneTimestamp(from path: String) -> Int? {
+        guard let range = path.range(of: "_\\d+\\.app$", options: .regularExpression) else { return nil }
+        let digits = path[range].dropFirst().dropLast(4) // 去掉 "_" 与 ".app"
+        return Int(digits)
+    }
+
     private func czfSplitSharedContainerIfNeeded() {
         guard !czfOtherSameBundleApps().isEmpty else { return }
         guard let selected = uiSelectedContainer else { return }
@@ -665,9 +674,21 @@ class LCAppModel: ObservableObject, Hashable {
             } else {
                 let myPath = appInfo.relativeBundlePath ?? ""
                 let otherPath = other.appInfo.relativeBundlePath ?? ""
-                let myStamped = myPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
-                let otherStamped = otherPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
-                if !myStamped && otherStamped { return }
+                // 3.8.520（L46）：两个都是克隆时光凭“带不带时间戳”
+                // 分不出先后——克隆名是 包名_毫秒时间戳.app
+                // （LCAppListView:2538），先装的克隆时间戳小。
+                // 只比有没有戳会让先装的克隆也拆走，旧数据反而归
+                // 后装的那个，与上面“旧数据归先装的”正好反了。
+                // 先比数字时间戳，都能解析出来时小的那个不拆；
+                // 有一边解析不出来才回落到有戳/无戳判。
+                if let myStamp = Self.czfCloneTimestamp(from: myPath),
+                   let otherStamp = Self.czfCloneTimestamp(from: otherPath) {
+                    if myStamp < otherStamp { return }
+                } else {
+                    let myStamped = myPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
+                    let otherStamped = otherPath.range(of: "_\\d+\\.app$", options: .regularExpression) != nil
+                    if !myStamped && otherStamped { return }
+                }
             }
         }
         // 已有不共享的容器时直接切过去，不再新建（容器越生越多根因之二）：
@@ -1282,6 +1303,14 @@ class LCAppModel: ObservableObject, Hashable {
         
         if newLockState {
             appInfo.isLocked = true
+            // 3.8.520（L46）：成功加锁也要同步 uiIsLocked——横幅卡
+            // 菜单（BannerVC:450）与网格（CZFAppGridView:725）直接调
+            // setLocked，不经过设置页 Toggle 的绑定写点；不同步时
+            // uiIsLocked 一直是旧值，横幅锁徽标（BannerVC:232）与
+            // 设置页开关（LCAppSettingsView:592/602/625）都显示错，
+            // 直到下次 dock 变化或卡片重建才刷回来。设置页那路
+            // Toggle 已先写过同值，再写一次无害。
+            await MainActor.run { uiIsLocked = true }
         } else {
             // authenticate before cancelling locked state
             // 3.8.441：解锁必须每次都弹人脸识别——原来调
@@ -1303,6 +1332,9 @@ class LCAppModel: ObservableObject, Hashable {
             
             // auth pass, we need to cancel app's lock and hidden state
             appInfo.isLocked = false
+            // 3.8.520（L46）：成功解锁同款同步 uiIsLocked，理由同上
+            // （横幅卡/网格调 setLocked 时不走 Toggle 绑定）。
+            await MainActor.run { uiIsLocked = false }
             if appInfo.isHidden {
                 await toggleHidden()
             }
