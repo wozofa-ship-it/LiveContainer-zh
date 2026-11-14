@@ -5,6 +5,10 @@ struct LCAppStorageItem: Identifiable {
     let id: UUID
 
     let appModel: LCAppModel
+    /// 3.8.557（L87）：显示名快照——排序在后台任务组里跑，原来
+    /// 直接读 appModel.displayName（_info），离主线程读是 L70
+    /// 同款；快照在主线程上取，见下面的 CZFStorageAppSnapshot。
+    let displayName: String
     let bundleSize: Int64?
     let containersSize: Int64
 
@@ -48,10 +52,57 @@ final class LCStorageManagementModel: ObservableObject {
         errorInfo = nil
         breakdown = nil
 
+        // 3.8.557（L87）：快照在主线程上取——calculateBreakdown 是
+        // nonisolated，后台任务组并发跑；直接读 isHiddenAppUnlocked /
+        // uiContainers / 容器 @Published / displayName（_info）是 L70
+        // 同款离主线程读，读-写并发可能崩；SideStore 那个现建模型
+        // 的 init 也读二十多项 _info，不能在后台建（早先一轮只验
+        // 了“calculateBreakdown 是 nonisolated 纯算数、不碰
+        // @Published”，漏了这三处）。快照只含纯数据，model 仅供
+        // UI 持有显示，计算不读它。
+        let snapshots = Self.czfSnapshots(apps: apps, hiddenApps: hiddenApps)
         do {
-            breakdown = try await Self.calculateBreakdown(apps: apps, hiddenApps: hiddenApps)
+            breakdown = try await Self.calculateBreakdown(snapshots: snapshots)
         } catch {
             errorInfo = error.localizedDescription
+        }
+    }
+
+    // 3.8.557（L87）：存储统计快照（L73 CZFBackupAppSnapshot
+    // 同款）——后台任务组只读这份纯数据，不碰 LCAppModel /
+    // LCContainer 的 @Published 与 LCAppInfo 的 _info。
+    private struct CZFStorageContainerSnapshot {
+        let name: String
+        let containerURL: URL
+        let storageBookMark: Data?
+        let bookmarkResolved: Bool
+    }
+    private struct CZFStorageAppSnapshot {
+        let model: LCAppModel
+        let containers: [CZFStorageContainerSnapshot]
+        let bundlePath: String?
+        let displayName: String
+        let isSideStore: Bool
+    }
+
+    private static func czfSnapshots(apps: [LCAppModel], hiddenApps: [LCAppModel]) -> [CZFStorageAppSnapshot] {
+        var allApps = DataManager.shared.model.isHiddenAppUnlocked ? apps + hiddenApps : apps
+        if UserDefaults.sideStoreExist() {
+            // 现建模型也在主线程上建：init 读二十多项 _info，
+            // 单例的 _info 主线程正读着（设置页/锁守卫），后台
+            // 建就是读-写并发。
+            allApps.append(LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared))
+        }
+        return allApps.map { model in
+            CZFStorageAppSnapshot(
+                model: model,
+                containers: model.uiContainers.map {
+                    CZFStorageContainerSnapshot(name: $0.name, containerURL: $0.containerURL, storageBookMark: $0.storageBookMark, bookmarkResolved: $0.bookmarkResolved)
+                },
+                bundlePath: model.appInfo.bundlePath(),
+                displayName: model.displayName,
+                isSideStore: model.appInfo is BuiltInSideStoreAppInfo
+            )
         }
     }
 
@@ -63,21 +114,9 @@ final class LCStorageManagementModel: ObservableObject {
         case tweaks
     }
 
-    nonisolated private static func calculateBreakdown(apps: [LCAppModel], hiddenApps: [LCAppModel]) async throws -> LCStorageBreakdown {
-        var allApps: [LCAppModel]
-        if DataManager.shared.model.isHiddenAppUnlocked {
-            allApps = apps + hiddenApps
-        } else {
-            allApps = apps
-        }
-        
-        if UserDefaults.sideStoreExist() {
-            allApps.append(LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared))
-        }
-
-        // Show per-app bundle usage only when every installed app has a reliable bundle path.
+    nonisolated private static func calculateBreakdown(snapshots: [CZFStorageAppSnapshot]) async throws -> LCStorageBreakdown {
         let appItems = try await calculateAppItems(
-            from: allApps
+            from: snapshots
         )
 
         var sizesByCategory: [StorageCategory: Int64] = [:]
@@ -155,13 +194,13 @@ final class LCStorageManagementModel: ObservableObject {
     }
 
     nonisolated private static func calculateAppItem(
-        from input: LCAppModel,
+        from input: CZFStorageAppSnapshot,
     ) async throws -> LCAppStorageItem {
         var containerDetails: [LCAppStorageContainerItem] = []
-        containerDetails.reserveCapacity(input.uiContainers.count)
+        containerDetails.reserveCapacity(input.containers.count)
 
         var containersSize: Int64 = 0
-        for container in input.uiContainers {
+        for container in input.containers {
             // 扫一半取消/抛错时也要停访问，不然这次的安全域访问就漏了；
             // defer 在本轮循环结束时跑，抛错路径也一样停。
             let didAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
@@ -188,14 +227,14 @@ final class LCStorageManagementModel: ObservableObject {
 
 
         let bundleSize: Int64?
-        if let bundlePath = input.appInfo.bundlePath() {
+        if let bundlePath = input.bundlePath {
             bundleSize = try await calculateSize(at: URL(fileURLWithPath: bundlePath))
         } else {
             bundleSize = nil
         }
         
         let totalSize: Int64
-        if input.appInfo is BuiltInSideStoreAppInfo {
+        if input.isSideStore {
             totalSize = containersSize
         } else {
             totalSize = (bundleSize ?? 0) + containersSize
@@ -203,7 +242,8 @@ final class LCStorageManagementModel: ObservableObject {
 
         return LCAppStorageItem(
             id: UUID(),
-            appModel: input,
+            appModel: input.model,
+            displayName: input.displayName,
             bundleSize: bundleSize,
             containersSize: containersSize,
             totalSize: totalSize,
@@ -212,7 +252,7 @@ final class LCStorageManagementModel: ObservableObject {
     }
 
     nonisolated private static func calculateAppItems(
-        from inputs: [LCAppModel]
+        from inputs: [CZFStorageAppSnapshot]
     ) async throws -> [LCAppStorageItem] {
         var appItems: [LCAppStorageItem] = []
         appItems.reserveCapacity(inputs.count)
@@ -233,7 +273,7 @@ final class LCStorageManagementModel: ObservableObject {
 
         return appItems.sorted {
             if $0.totalSize == $1.totalSize {
-                return ($0.appModel.displayName).localizedCaseInsensitiveCompare($1.appModel.displayName) == .orderedAscending
+                return ($0.displayName).localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
             }
             return $0.totalSize > $1.totalSize
         }

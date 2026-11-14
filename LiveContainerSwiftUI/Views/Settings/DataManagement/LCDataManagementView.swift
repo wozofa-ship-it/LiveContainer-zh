@@ -2093,9 +2093,16 @@ struct LCDataManagementView : View {
         // app.uiContainers 是 @Published，循环里离主线程读是 L70
         // 漏掉的一层；快照里一次取齐（SideStore 那个现建的模型
         // 也一起取，它的 uiContainers 读在主线程上）。
-        var allApps = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
-        if UserDefaults.sideStoreExist() {
-            allApps.append(LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared))
+        // 3.8.557（L87）：现建模型本身也要在主线程上建——原来
+        // append 在两个 MainActor.run 跳之间、还在裸执行器上，
+        // LCAppModel init 读二十多项 _info，单例的 _info 主线程
+        // 正读着，读-写并发；挪进同一跳里。
+        let allApps = await MainActor.run {
+            var apps = sharedModel.apps + sharedModel.hiddenApps
+            if UserDefaults.sideStoreExist() {
+                apps.append(LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared))
+            }
+            return apps
         }
         let appContainers = await MainActor.run { allApps.map { ($0, $0.uiContainers) } }
 
