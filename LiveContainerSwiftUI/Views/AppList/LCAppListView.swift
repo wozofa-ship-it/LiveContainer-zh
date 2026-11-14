@@ -2332,7 +2332,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         do {
             self.installprogressVisible = true
             try await installIpaFile(fileUrl)
-            try FileManager.default.removeItem(at: fileUrl)
+            // L50-3：fileUrl 是文件选择器 asCopy: true 拷出来
+            // 的临时副本，装完删它是清 tmp；删失败（极少）不该
+            // 让已装好的这次报“安装失败”——改 try?，与
+            // installFromUrl 远程段删临时包同款。
+            try? FileManager.default.removeItem(at: fileUrl)
             // installIpaFile 成功路不一定清 flag，这里先清再出队，
             // 否则队里那个撞上正忙会重新排队、一直等不到
             self.installprogressVisible = false
@@ -3746,8 +3750,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfLastInstallWasCancelled = true
             try? fileManager.removeItem(at: destinationURL)
         } catch {
-            errorInfo = LCUtils.czfFriendlyError(error)
-            errorShow = true
+            // L50-2：下载弹窗点了取消时 download() 是抛错出来
+            // （URLErrorCancelled），不是正常返回——上面那个
+            // `if downloadHelper.cancelled` 检查走不到。走到这
+            // 里且 cancelled 为真就是取消，照 3.8.428 安装#2 的
+            // 本意：不弹错、记取消（源页 czfDownloadVersionTo
+            // 同款：cancelled 就不报 errorMessage）；只有真
+            // 失败才弹错。
+            if downloadHelper.cancelled {
+                czfLastInstallWasCancelled = true
+                try? fileManager.removeItem(at: destinationURL)
+            } else {
+                errorInfo = LCUtils.czfFriendlyError(error)
+                errorShow = true
+            }
         }
         if czfRemoteInstallOK {
             try? fileManager.removeItem(at: destinationURL)

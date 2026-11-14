@@ -28,8 +28,29 @@ public final class DownloadHelper : ObservableObject {
     private var savedResumeData: Data?
     private var savedResumeURL: URL?
     private var currentURL: URL?
+    // L50-1：同一 helper 同时只能下一个——源页下载
+    // （czfDownloadVersionTo）与安装下载（installFromUrl）
+    // 共用 LCTabView 注入的这一个实例，而 downloadOnce 的
+    // continuation / downloadTask / savedResumeData 都是单
+    // 槽；两路重叠会把槽盖掉，后完成的那路 completeCallback
+    // 见 continuation 已空、永远不恢复，await 永久挂起
+    // （安装卡死、队列停摆，只能杀 App）。download() 全程
+    // 占住本标志（含 2 秒重试间隙——isDownloading 在间隙里
+    // 是 false，不能拿它当判据），后到的等在途的走完再下
+    // 自己的。
+    private var czfDownloadInFlight = false
 
     func download(url: URL, to: URL) async throws {
+        // L50-1：等在途的下载走完再下自己的；检查与置位都
+        // 在主线程做，防两路同时读到空闲。defer 里不能 await，
+        // 清标志放主线程 Task，只晚半个轮询周期。
+        while await MainActor.run(body: { czfDownloadInFlight }) {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        await MainActor.run { czfDownloadInFlight = true }
+        defer {
+            Task { @MainActor in czfDownloadInFlight = false }
+        }
         currentURL = url
         // 失败自动重试：最多 3 次（首次 + 2 次重试），网络抖
         // 一下不用用户再点一次。每次优先用上次留下的续传数
