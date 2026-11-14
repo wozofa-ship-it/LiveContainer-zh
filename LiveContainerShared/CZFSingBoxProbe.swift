@@ -242,11 +242,20 @@ public enum CZFSingBoxProbe {
         do {
             let request = "GET / HTTP/1.0\r\nHost: \(host)\r\nConnection: close\r\n\r\n"
             try send(conn: conn, bytes: Array(request.utf8), deadline: deadline)
-            let response = try recv(conn: conn, minimum: 1, maximum: 4096, deadline: deadline)
-            guard let text = String(data: response, encoding: .utf8) else {
+            // 3.8.501（L21）：状态行可能分段到达——recv(minimum: 1)
+            // 只要 1 字节就返回，首段刚好在状态行中间断开时，旧代码
+            // 拿半行去解析、节点被误判死亡。攒到 "\r\n" 再解析；
+            // 整个 probe 共用同一个绝对 deadline，不会多等。
+            var accumulated = Data()
+            let crlf = Data("\r\n".utf8)
+            while accumulated.count < 4096, accumulated.range(of: crlf) == nil {
+                let chunk = try recv(conn: conn, minimum: 1, maximum: 4096 - accumulated.count, deadline: deadline)
+                accumulated.append(chunk)
+            }
+            guard let crlfRange = accumulated.range(of: crlf),
+                  let firstLine = String(data: Data(accumulated[..<crlfRange.lowerBound]), encoding: .utf8) else {
                 throw CZFSingBoxProbeError.httpFailed("http")
             }
-            let firstLine = text.components(separatedBy: "\r\n").first ?? ""
             let parts = firstLine.split(separator: " ")
             guard parts.count >= 2, let code = Int(parts[1]) else {
                 throw CZFSingBoxProbeError.httpFailed("http")

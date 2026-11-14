@@ -540,8 +540,13 @@ extension Notification.Name {
         guard isDockEnabled() else { return }
         
         DispatchQueue.main.async {
-            if let bid = self.apps.first(where: { $0.appUUID == appUUID })?.appInfo?.bundleIdentifier() {
-                self.czfUnregisterTouchRaiseObserver(bundleId: bid)
+            // 3.8.501（L22）：摘掉本分身的 uuid 名；bid 名只在没有
+            // 别的分身共用它时才摘——原来不管有没有共用都摘，关掉
+            // 第 1 个分身就把第 2 个的点按置顶也断了。
+            self.czfUnregisterTouchRaiseObserver(identifier: appUUID)
+            if let bid = self.apps.first(where: { $0.appUUID == appUUID })?.appInfo?.bundleIdentifier(),
+               !self.apps.contains(where: { $0.appUUID != appUUID && $0.appInfo?.bundleIdentifier() == bid }) {
+                self.czfUnregisterTouchRaiseObserver(identifier: bid)
             }
             self.apps.removeAll { $0.appUUID == appUUID }
 
@@ -801,11 +806,16 @@ extension Notification.Name {
         return false
     }
 
-    // 游客点按信号到达：按 bundleId 找到窗口，只调层级、不做脉冲动画。
+    // 游客点按信号到达：按标识找到窗口，只调层级、不做脉冲动画。
     // 游客里每次点按都会发信号，带动画会点一下闪一下，故必须静默。
-    @objc public func czfRaiseWindowForTouch(bundleId: String) {
+    // 3.8.501（L22）：标识优先按 appUUID（容器 id）查——两个分身
+    // 共用同一个 bundleId，按 bid 只能 first 命中第一个分身，点
+    // 第 2 个分身也顶第 1 个（点中间也切换、再点不切换的根因）；
+    // 查不到 uuid 才回落 bid（老游客信号与 HOME 取不到的兜底）。
+    @objc public func czfRaiseWindowForTouch(identifier: String) {
         DispatchQueue.main.async {
-            guard let app = self.apps.first(where: { $0.appInfo?.bundleIdentifier() == bundleId }),
+            guard let app = self.apps.first(where: { $0.appUUID == identifier })
+                    ?? self.apps.first(where: { $0.appInfo?.bundleIdentifier() == identifier }),
                   let view = app.view,
                   let window = view.window ?? view.superview?.window else { return }
             self.bringViewToFront(view, in: window)
@@ -937,8 +947,11 @@ extension Notification.Name {
             // C6：窗口出现信号（条目真正追加时才发，调用方凭
             // appUUID 过滤；串行门轮询的也是这个 apps 信号）。
             NotificationCenter.default.post(name: .czfMultitaskWindowAppeared, object: nil, userInfo: ["appUUID": appUUID])
+            // 3.8.501（L22）：点按置顶按 uuid 注册（分身各一个名），
+            // bid 名留一个当回落（HOME 取不到的老信号才走它）。
+            self.czfRegisterTouchRaiseObserver(identifier: appUUID)
             if let bid = appInfo?.bundleIdentifier() {
-                self.czfRegisterTouchRaiseObserver(bundleId: bid)
+                self.czfRegisterTouchRaiseObserver(identifier: bid)
             }
 
             if self.apps.count == 1 {
@@ -1679,7 +1692,7 @@ extension Notification.Name {
             czfEdgeSwipeLatched = false
         case .changed:
             guard globalSwipeStartEdge == 0 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
-            if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width) {
+            if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width, velocityX: gesture.velocity(in: gesture.view).x) {
                 czfEdgeSwipeLatched = true
                 // 3.8.284：认领了面板手势（开 App 面板/切 App/
                 // 藏栏），客 App 的触摸到此为止
@@ -1720,7 +1733,11 @@ extension Notification.Name {
             }
         } else if startEdge == 2 {
             // 右边缘不放宽：两个方向都只认普通带。
-            if dx >= 8 * s, endX >= width - 12, abs(dx) > 0.4 * abs(dy), startInBand {
+            // 3.8.501（L22）：往外终结门槛 8*s→>12——点按位移 ≤12pt，
+            // 8*s（灵敏档才 4.8）会把点按抖动当终结滑放进来；12 是
+            // 点按的物理上界，不乘灵敏度系数。往里（-44*s）本来就
+            // 在点按 bound 之上，不动。
+            if dx > 12, endX >= width - 12, abs(dx) > 0.4 * abs(dy), startInBand {
                 fireDockAction { self.czfEdgeRightOutward() }
             } else if dx <= -44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
                 fireDockAction { self.czfEdgeRightInward() }
@@ -1734,7 +1751,7 @@ extension Notification.Name {
     // 才触发（2026-11-01 用户定：右边跟左边一样，只认带内）。
     // 返回 true 表示本次判定触发了动作（边条 handler 据此做一次性触发）
     @discardableResult
-    private func processGlobalSwipe(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat) -> Bool {
+    private func processGlobalSwipe(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat, velocityX: CGFloat) -> Bool {
         let draggingRight = translation.x > 0
         // 往外弹（左缘左移/右缘右移）物理行程就只有起手那几十
         // 点：手指几毫米就出屏，拇指走的还是弧线、纵向分量大，
@@ -1750,9 +1767,15 @@ extension Notification.Name {
             // 放宽后，往外弹带起手的右边缘滑动到这里照样不触发）。
             guard startInBand else { return false }
             // 右边缘改派：往左/往右的动作在入口判定（切换已打开
-            // App：往左上一个、往右下一个）；门槛乘灵敏度系数（设置页三档）
+            // App：往左上一个、往右下一个）。
+            // 3.8.501（L22）：往外点按不能切 App——点按位移 ≤12pt
+            // （漏斗同款定义）、速度也低；往外弹行程短，单靠位移
+            // 门槛会把真 flick 判掉，故双臂：位移 >12 或快扫
+            // （dx≥2 且速度 ≥300pt/s，客侧同款镜像）。12 不乘灵
+            // 敏度系数：12 是点按的物理上界，乘 0.6 会放点按进来。
             if draggingRight {
-                guard translation.x > 6 * s else { return false }
+                let czfRightOutwardFlick = translation.x >= 2 && velocityX >= 300
+                guard czfRightOutwardFlick || translation.x > 12 else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
             } else {
                 guard abs(translation.x) > 24 * s else { return false }
@@ -2576,32 +2599,35 @@ extension Notification.Name {
     // 静态方法：宿主一启动（AppDelegate）就调，赶在任何游客 App 启动之前。
     // 管理器初始化时也会再调一次（幂等）。
     // 游客 App 是独立进程，插件的手势信号通过 Darwin 跨进程通知送达这里
-    // 游客点按置顶的宿主侧观察者：游客每次触摸按下发 czf.window.touch.<bid>，
-    // 宿主按名找到窗口静默置顶。注册记账防重复（同 bid 重装不重复注册；
-    // 残留观察者也无害：触发时按 bid 现查，找不到就空操作）。
-    private var czfTouchRaiseRegisteredBids: Set<String> = []
-    private func czfRegisterTouchRaiseObserver(bundleId: String) {
-        guard !czfTouchRaiseRegisteredBids.contains(bundleId) else { return }
-        czfTouchRaiseRegisteredBids.insert(bundleId)
+    // 游客点按置顶的宿主侧观察者：游客每次点按发 czf.window.touch.<id>，
+    // 宿主按名找到窗口静默置顶。id 优先是 appUUID（容器 id，分身各
+    // 一个名），bid 名留一个当回落。注册按通知名全名记账防重复（同
+    // 名重装不重复注册；残留观察者也无害：触发时按名现查，找不到就空操作）。
+    // 3.8.501（L22）：原来只按 bid 注册/查，两个分身共用 bid 时只能
+    // 顶第一个分身，改按 uuid 注册、uuid 优先查。
+    private var czfTouchRaiseRegisteredNames: Set<String> = []
+    private func czfRegisterTouchRaiseObserver(identifier: String) {
+        guard !czfTouchRaiseRegisteredNames.contains(identifier) else { return }
+        czfTouchRaiseRegisteredNames.insert(identifier)
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
-        let name = "czf.window.touch.\(bundleId)"
+        let name = "czf.window.touch.\(identifier)"
         CFNotificationCenterAddObserver(center, observer, { _, observerPtr, cfName, _, _ in
             guard let observerPtr = observerPtr, let cfName = cfName else { return }
             let manager = Unmanaged<MultitaskDockManager>.fromOpaque(observerPtr).takeUnretainedValue()
             let notificationName = cfName.rawValue as String
             guard notificationName.hasPrefix("czf.window.touch.") else { return }
-            let bid = String(notificationName.dropFirst("czf.window.touch.".count))
+            let identifier = String(notificationName.dropFirst("czf.window.touch.".count))
             DispatchQueue.main.async {
-                manager.czfRaiseWindowForTouch(bundleId: bid)
+                manager.czfRaiseWindowForTouch(identifier: identifier)
             }
         }, name as CFString, nil, .deliverImmediately)
     }
-    private func czfUnregisterTouchRaiseObserver(bundleId: String) {
-        guard czfTouchRaiseRegisteredBids.remove(bundleId) != nil else { return }
+    private func czfUnregisterTouchRaiseObserver(identifier: String) {
+        guard czfTouchRaiseRegisteredNames.remove(identifier) != nil else { return }
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
-        CFNotificationCenterRemoveObserver(center, observer, CFNotificationName(rawValue: "czf.window.touch.\(bundleId)" as CFString), nil)
+        CFNotificationCenterRemoveObserver(center, observer, CFNotificationName(rawValue: "czf.window.touch.\(identifier)" as CFString), nil)
     }
 
     // 边缘手势信号观察者：游客边缘手势的 Darwin 信号（czf.dock.*）送达这里

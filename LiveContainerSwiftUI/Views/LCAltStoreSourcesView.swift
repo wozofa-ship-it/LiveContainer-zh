@@ -872,6 +872,11 @@ struct LCSourcesView: View {
             .pickerStyle(.segmented)
             .padding(.horizontal)
             .padding(.top, 8)
+            // 3.8.501（L22）：分段下方补 8pt 白，与上方搜索框到分段
+            // 的 8pt（同款 .padding(.top, 8)）一样大；白在 Picker
+            // 外（页面底色），不在壁纸 ScrollView 里——放 ScrollView
+            // 顶 padding 的话是壁纸不是白。文件夹分支同款受益。
+            .padding(.bottom, 8)
             if czfSourcesTab == 1 {
                 ScrollView {
                     CZFInlineIpaFolderSection(

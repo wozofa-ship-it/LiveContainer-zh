@@ -388,7 +388,10 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
             return YES;
         }
     } else if (startEdge == 2) {
-        if (startInBand && dx >= 8 && endX >= width - 12 && fabs(dx) > 0.4 * fabs(dy)) {
+        // 3.8.501（L22）：往外终结门槛 8→>12——点按按漏斗定义位移
+        // ≤12pt，8 会把点按抖动当终结滑放进来；终结态无速度可
+        // 用，只验位移。往里（-44）本来就在点按 bound 之上，不动。
+        if (startInBand && dx > 12 && endX >= width - 12 && fabs(dx) > 0.4 * fabs(dy)) {
             *outName = @"czf.dock.rightOutward";
             *outSelector = @"czfEdgeRightOutward";
             return YES;
@@ -572,7 +575,13 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         // 右边缘不放宽：往外弹带起手的右边缘滑动到这里直接返回。
         if (!gCZFStartInBand) return;
         if (draggingRight) {
-            if (absX <= 6) return;
+            // 3.8.501（L22）：点按不能切 App——点按按漏斗定义位移
+            // ≤12pt、速度也低；往外弹行程短，位移门槛提到 12 以上
+            // 会把真 flick 也判掉，故双臂：位移 >12 或快扫（dx≥2
+            // 且速度 ≥300pt/s，左缘 CZFIsOutwardFlick 同款镜像）。
+            // 点按两臂都不中。往里（24pt）本来就在点按 bound 之上，不动。
+            BOOL czfRightOutwardFlick = (translation.x >= 2 && czfVelocity.x >= 300);
+            if (!czfRightOutwardFlick && absX <= 12) return;
             notificationName = @"czf.dock.rightOutward";
             selectorName = @"czfEdgeRightOutward";
         } else {
@@ -785,9 +794,21 @@ static void CZFFunnelObserve(UIWindow *window, UIEvent *event) {
                         }
                     } else if (touch.phase == UITouchPhaseEnded) {
                         if (fabs(tapDx) <= 12 && fabs(tapDy) <= 12) {
-                            NSString *touchBid = [[NSBundle mainBundle] bundleIdentifier];
-                            if (touchBid.length > 0) {
-                                NSString *touchName = [NSString stringWithFormat:@"czf.window.touch.%@", touchBid];
+                            // 3.8.501（L22）：点按置顶信号必须带分身身份，
+                            // 不能只带 bundleId——两个分身共用同一个
+                            // bundleId，宿主按 bid 只能 first 命中第
+                            // 一个分身，点第 2 个分身也顶第 1 个（点
+                            // 中间也切换、再点不切换的根因）。改发
+                            // 容器 id：HOME 末段就是 dataUUID
+                            // （LCBootstrap invokeAppMain 设 HOME=
+                            // <容器>/Data/Application/<dataUUID>；
+                            // SecItem.m 同款取法）；HOME 取不到才
+                            // 回落 bid（宿主按 uuid 查不到时同款回落）。
+                            NSString *touchHome = [NSString stringWithUTF8String:getenv("HOME")];
+                            NSString *touchId = touchHome.lastPathComponent;
+                            if (touchId.length == 0) touchId = [[NSBundle mainBundle] bundleIdentifier];
+                            if (touchId.length > 0) {
+                                NSString *touchName = [NSString stringWithFormat:@"czf.window.touch.%@", touchId];
                                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge CFStringRef)touchName, NULL, NULL, YES);
                             }
                         }

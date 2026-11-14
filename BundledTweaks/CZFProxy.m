@@ -560,6 +560,12 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
         int flags2 = fcntl(s, F_GETFL, 0);
         BOOL wasNB2 = (flags2 >= 0) && (flags2 & O_NONBLOCK);
         if (wasNB2) fcntl(s, F_SETFL, flags2 & ~O_NONBLOCK);
+        // 3.8.501（L21）：SO_SNDTIMEO 用完必须恢复——这是 App 的
+        // socket，CZFDoSocksTCPConnect（:341）同款先存后恢，这里漏了；
+        // 不恢复会把 App 原来的发送超时永久改成 10 秒。
+        struct timeval oldSnd2;
+        socklen_t optLen2 = sizeof(struct timeval);
+        BOOL hasOldSnd2 = getsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &oldSnd2, &optLen2) == 0;
         struct timeval tv2 = { .tv_sec = 10, .tv_usec = 0 };
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv2, sizeof(tv2));
         size_t written = 0;
@@ -583,6 +589,7 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
             if (writeErrno != 0) break;
         }
         if (wasNB2) fcntl(s, F_SETFL, flags2);
+        if (hasOldSnd2) setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &oldSnd2, sizeof(oldSnd2));
         if (len) *len = written;
         if (written == 0) {
             errno = writeErrno ? writeErrno : ECONNREFUSED;
