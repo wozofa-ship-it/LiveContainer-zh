@@ -2790,6 +2790,8 @@ struct LCDataManagementView : View {
         // 本地+iCloud 同一份备份（同名）只算一次：两边各删一份
         // 是对的，但计数按 URL 涨两次，用户看到的“已删除 N 个”虚高。
         var countedNames: Set<String> = []
+        // 3.8.559（L90）：真删掉的名（下面重载后按名硬剔幽灵行用；锁了跳过的还在盘上、不进这里）。
+        var deletedNames: Set<String> = []
         for url in backupFolderList + externalBackupFolderList {
             let name = url.lastPathComponent
             if lockedBackupNames.contains(name) {
@@ -2799,6 +2801,7 @@ struct LCDataManagementView : View {
                 continue
             }
             if (try? fm.removeItem(at: url)) != nil {
+                deletedNames.insert(name)
                 if countedNames.insert(name).inserted {
                     deleted += 1
                 }
@@ -2808,6 +2811,9 @@ struct LCDataManagementView : View {
         externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
         // 3.8.335：同 deleteBackup，List 重建、不走 diff。
         backupListVersion += 1
+        // 3.8.559（L90）：同 deleteBackupUnlocked 的 3.8.335 第二道保险——重载后 iCloud 枚举滞后仍会列出刚删的文件夹，单删路按名硬剔，批量删原来没剔，幽灵行留在当前打开的恢复 sheet 里（列表只在 onAppear 重载），与底部“已删除 N 个”自相矛盾；只剔真删掉的名。
+        backupFolderList.removeAll { deletedNames.contains($0.lastPathComponent) }
+        externalBackupFolderList.removeAll { deletedNames.contains($0.lastPathComponent) }
         // 3.8.527（L54）：删完重算大小（同 deleteBackupUnlocked）。
         refreshBackupSizes()
         restoreSheetNotice = "已删除 \(deleted) 个备份" + (lockedSkipped > 0 ? "，\(lockedSkipped) 个已锁定未删" : "")
@@ -2822,6 +2828,8 @@ struct LCDataManagementView : View {
         let fm = FileManager.default
         var deleted = 0
         var lockedSkipped = 0
+        // 3.8.559（L90）：真删掉的名（下面重载后按名硬剔幽灵行用；锁了跳过的还在盘上、不进这里）。
+        var deletedNames: Set<String> = []
         for url in selected {
             if lockedBackupNames.contains(url.lastPathComponent) {
                 lockedSkipped += 1
@@ -2829,6 +2837,7 @@ struct LCDataManagementView : View {
             }
             if (try? fm.removeItem(at: url)) != nil {
                 deleted += 1
+                deletedNames.insert(url.lastPathComponent)
                 // 3.8.306：多选删也清 iCloud 份——合并列表本地优先，
                 // 同名备份只留本地那条 URL，删本地不删 iCloud 的话
                 // 外部那份下次刷新又冒出来。deleteAllBackups 早就
@@ -2842,6 +2851,9 @@ struct LCDataManagementView : View {
         externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
         // 3.8.335：同 deleteBackup，List 重建、不走 diff。
         backupListVersion += 1
+        // 3.8.559（L90）：同 deleteAllBackups——重载后 iCloud 枚举滞后仍会列出刚删的文件夹，单删路按名硬剔，多选删原来没剔，幽灵行留在当前打开的恢复 sheet 里；只剔真删掉的名。
+        backupFolderList.removeAll { deletedNames.contains($0.lastPathComponent) }
+        externalBackupFolderList.removeAll { deletedNames.contains($0.lastPathComponent) }
         selectedBackupFolderURLs.removeAll()
         showSelectBackups = false
         // 3.8.527（L54）：删完重算大小（同 deleteBackupUnlocked）。

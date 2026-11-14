@@ -531,7 +531,8 @@ struct LCTweakFolderView : View {
     }
     
     func createNewFolder() async {
-        guard let newName = await renameFileInput.open(), newName != "" else {
+        // 3.8.559（L90）：原来调的是 renameFileInput——新建文件夹弹的是改名框（标题“输入新名称”），newFolderInput 专用的新建框（标题“输入新文件夹名称”）从来没人打开；改调它。两 helper 的 open() 都是无参清 initVal 再弹，行为除标题外不变。
+        guard let newName = await newFolderInput.open(), newName != "" else {
             return
         }
         // 3.8.534（L61-2）：本函数从菜单按钮的裸 Task 调来、不在

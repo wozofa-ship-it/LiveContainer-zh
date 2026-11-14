@@ -5572,11 +5572,13 @@ struct AppIconView: View {
             loadAppIcon()
         }
         .onPressGesture(
-            onPress: { 
+            onPress: {
                 isPressed = true
             },
-            onRelease: { location in 
+            onRelease: { location, translation in
                 isPressed = false
+                // 3.8.559（L90）：手指落在图标上拖坞时也收到 onEnded——位移 ≥ 10pt 就是拖坞，只复位按下态，不带回、不震动；点按（位移 < 10pt）才走下面带回。坞拖动 minimumDistance 是 5pt，10pt 干净分开点按与拖动。
+                guard abs(translation.width) < 10, abs(translation.height) < 10 else { return }
                 let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
                 impactFeedback.impactOccurred()
                 // F-2：带回前过锁守卫（此处只有 LCAppInfo，走静态守卫）。
@@ -5628,7 +5630,8 @@ struct AppIconView: View {
 
 // MARK: - Press Gesture Helper
 extension View {
-    func onPressGesture(onPress: @escaping () -> Void, onRelease: @escaping (_ location: CGPoint) -> Void) -> some View {
+    // 3.8.559（L90）：onRelease 原来只给 startLocation、不给位移——图标的按压手势（minimumDistance: 0，simultaneous）与坞的拖动手势（minimumDistance: 5）会同时识别：手指落在图标上拖坞，松手时 onRelease 也跑、把该 App 顶到前台（拖坞不应切 App；拖动中图标还一直保持 1.15 放大）。位移也传出来，调用方只在点按（位移 < 10pt）时才做抬起动作；全仓唯一调用方是 AppIconView。
+    func onPressGesture(onPress: @escaping () -> Void, onRelease: @escaping (_ location: CGPoint, _ translation: CGSize) -> Void) -> some View {
         self.simultaneousGesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
@@ -5637,7 +5640,7 @@ extension View {
                     }
                 }
                 .onEnded { value in
-                    onRelease(value.startLocation)
+                    onRelease(value.startLocation, value.translation)
                 }
         )
     }
