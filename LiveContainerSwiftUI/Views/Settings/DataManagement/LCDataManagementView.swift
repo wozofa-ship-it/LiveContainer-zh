@@ -32,6 +32,8 @@ struct NoDataFolderEntry: Identifiable {
 private final class RestoreIPAPickerCoordinator: NSObject, UIDocumentPickerDelegate {
     private let onDone: (URL?) -> Void
     private var done = false
+    /// 恢复 Task 的兜底检查用：delegate 回调跑过即 true（见 pickIPAForRestore）。
+    var didFinish: Bool { done }
     private var selfRetain: RestoreIPAPickerCoordinator?
     init(onDone: @escaping (URL?) -> Void) {
         self.onDone = onDone
@@ -2530,21 +2532,46 @@ struct LCDataManagementView : View {
     // 3.8.281：恢复列表里锁/解锁一个备份（写 UserDefaults + 同步
     // 界面用的 @State 集合；锁本身按文件夹名记）。
     func toggleBackupLock(folderName: String) {
-        let locked = !lockedBackupNames.contains(folderName)
-        Self.setBackupLocked(folderName, locked: locked)
-        if locked {
-            lockedBackupNames.insert(folderName)
-        } else {
-            lockedBackupNames.remove(folderName)
+        // 解锁要人脸识别（用户 13:16 令“锁住备份要人脸识别才能解开”）：
+        // 加锁不用认证（随手就能锁），解锁必须过人脸；鉴权失败/取消
+        // 保持锁定不动。3.8.441 锁定 App 解锁同款（authenticateUserForced，
+        // 每次都弹，不走 isHiddenAppUnlocked 短路）。
+        if lockedBackupNames.contains(folderName) {
+            Task {
+                let ok = (try? await LCUtils.authenticateUserForced()) ?? false
+                guard ok else { return }
+                Self.setBackupLocked(folderName, locked: false)
+                self.lockedBackupNames.remove(folderName)
+            }
+            return
         }
+        Self.setBackupLocked(folderName, locked: true)
+        lockedBackupNames.insert(folderName)
     }
 
     func deleteBackup(at backupURL: URL) {
-        // 3.8.281：锁了的备份不删，先解锁（恢复列表左滑锁/解锁）。
+        // 锁了的备份删除前要先解锁（用户 13:16 令“要解锁才能删除”）：
+        // 人脸识别通过后直接删除，并清掉已不存在的备份的锁记录；
+        // 鉴权失败/取消不删。3.8.441 锁定 App 解锁同款
+        //（authenticateUserForced，每次都弹人脸）。
         if lockedBackupNames.contains(backupURL.lastPathComponent) {
-            restoreSheetNotice = "已锁定，先解锁才能删除：\(backupURL.lastPathComponent)"
+            Task {
+                let ok = (try? await LCUtils.authenticateUserForced()) ?? false
+                guard ok else {
+                    self.restoreSheetNotice = "人脸识别未通过，未删除：\(backupURL.lastPathComponent)"
+                    return
+                }
+                Self.setBackupLocked(backupURL.lastPathComponent, locked: false)
+                self.lockedBackupNames.remove(backupURL.lastPathComponent)
+                self.deleteBackupUnlocked(at: backupURL)
+            }
             return
         }
+        deleteBackupUnlocked(at: backupURL)
+    }
+
+    /// deleteBackup 的实际删除部分（调用方已保证：未锁定，或已过人脸识别）。
+    private func deleteBackupUnlocked(at backupURL: URL) {
         do {
             try FileManager.default.removeItem(at: backupURL)
             // 3.8.306：单删也清 iCloud 份——合并列表本地优先，
@@ -3386,6 +3413,33 @@ struct LCDataManagementView : View {
     }
     private func doRestoreScope(loginOnly: Bool) {
         UserDefaults.standard.set(loginOnly, forKey: "LCRestoreLastLoginOnly")
+        // 锁了的备份恢复前要人脸识别才能解开（用户 13:16 令）：
+        // 行恢复/预览恢复/多选恢复/一键恢复全部都走这里，集中
+        // 在这一处 gate；自动恢复与换机向导不走这里，不弹人脸。
+        // 文件夹集合与 startPendingRestore 同款优先级（先全部、
+        // 再单个、再多选），免得残留的 pending 值错 gate。
+        // 鉴权失败/取消：不关页、不开始恢复，进度不置位、不卡死。
+        let folders: [URL]
+        if pendingRestoreAll {
+            folders = mergedBackupFolders()
+        } else if let url = pendingRestoreURL {
+            folders = [url]
+        } else {
+            folders = pendingRestoreFolders
+        }
+        if folders.contains(where: { lockedBackupNames.contains($0.lastPathComponent) }) {
+            Task {
+                let ok = (try? await LCUtils.authenticateUserForced()) ?? false
+                guard ok else { return }
+                self.closeRestoreSheetsAndStart(loginOnly: loginOnly)
+            }
+            return
+        }
+        closeRestoreSheetsAndStart(loginOnly: loginOnly)
+    }
+
+    /// doRestoreScope 的后半段：关掉上面盖着的几层页，再开始恢复。
+    private func closeRestoreSheetsAndStart(loginOnly: Bool) {
         // 用户选了范围才把上面盖着的几层页一起关掉
         // （恢复页/预览页/多选页，没开的关了也没事），再开始恢复。
         showRestoreSelect = false
@@ -3465,7 +3519,7 @@ struct LCDataManagementView : View {
             return "恢复全部备份。\n"
         }
         if let url = url {
-            if let info = Self.manifestInfo(of: url) {
+            if let info = Self.czfDownloadedManifestInfo(of: url) {
                 let name = info.displayName.isEmpty ? url.lastPathComponent : info.displayName
                 let scopeText: String
                 switch info.scope {
@@ -3480,7 +3534,7 @@ struct LCDataManagementView : View {
         }
         if !folders.isEmpty {
             let names = folders.map { url in
-                Self.manifestInfo(of: url)?.displayName ?? url.lastPathComponent
+                Self.czfDownloadedManifestInfo(of: url)?.displayName ?? url.lastPathComponent
             }.filter { !$0.isEmpty }
             if names.count > 3 {
                 return "恢复 \(names.count) 个备份：\(names.prefix(3).joined(separator: "、"))等。\n"
@@ -5571,13 +5625,21 @@ struct LCDataManagementView : View {
     private func pickIPAForRestore(appName: String) async -> URL? {
         await withCheckedContinuation { continuation in
             Task { @MainActor in
-                // 先确认能弹 picker 再建 coordinator：没窗口时直接
-                // resume nil，不建 coordinator（建了又没回调，selfRetain
-                // 会一直挂着不释放）。
+                // 恢复流程卡死的兜底（用户 13:09 报点恢复锁住的备份直接卡死、重启也卡死）：
+                // withCheckedContinuation 只在 delegate 回调里 resume；present 被系统
+                // 吞掉（直接从 rootViewController 弹、上面已有恢复 sheet）时 delegate
+                // 永不回调，恢复 Task 永远挂起、进度条永不清除、入口全灰，看着就是卡死。
+                // 修法两件：① 照 presentExportPicker 同款，从最顶层 VC 弹；② 2 秒兜底——
+                // picker 没弹出来就 resume nil 走“未选 IPA”路；已弹出来时不碰它
+                //（delegate 会回调）；didFinish 在前，绝不双 resume（双 resume 会 trap）。
                 guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                      let rootViewController = windowScene.windows.first?.rootViewController else {
+                      let window = windowScene.windows.first,
+                      var topVC = window.rootViewController else {
                     continuation.resume(returning: nil)
                     return
+                }
+                while let presented = topVC.presentedViewController {
+                    topVC = presented
                 }
                 let coordinator = RestoreIPAPickerCoordinator { url in
                     continuation.resume(returning: url)
@@ -5588,7 +5650,13 @@ struct LCDataManagementView : View {
                 // picker 标题写清是给哪个 App 选安装包，免得用户
                 // 对着文件列表不知道在选谁的 IPA
                 picker.title = "为「\(appName)」选择 IPA"
-                rootViewController.present(picker, animated: true)
+                topVC.present(picker, animated: true)
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    if !coordinator.didFinish && picker.presentingViewController == nil {
+                        continuation.resume(returning: nil)
+                    }
+                }
             }
         }
     }
@@ -5759,6 +5827,20 @@ struct LCDataManagementView : View {
         guard let data = try? Data(contentsOf: folderURL.appendingPathComponent("manifest.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return nil }
         return (json["displayName"] ?? "", json["bundleIdentifier"] ?? "", json["dataUUID"] ?? "", json["scope"] ?? "", json["backupDate"] ?? "")
+    }
+
+    /// 选页文案用的 manifest：只读已下载到本机的。iCloud 外部备份的
+    /// manifest 没下完时返回 nil、调用方回落文件夹名——绝不在主线程
+    /// 为了一行文案触发隐式下载（Data(contentsOf:) 会同步堵住主线程，
+    /// 点恢复就卡死，用户 13:09 报）。previewItem（:5997）同款守卫。
+    static func czfDownloadedManifestInfo(of folderURL: URL) -> (displayName: String, bundleID: String, dataUUID: String, scope: String, backupDate: String)? {
+        let manifestURL = folderURL.appendingPathComponent("manifest.json")
+        let underExternal: Bool = {
+            guard let extURL = Self.externalBackupFolderURL() else { return false }
+            return folderURL.path.hasPrefix(extURL.path + "/")
+        }()
+        guard Self.isFileDownloaded(manifestURL, underExternal: underExternal) else { return nil }
+        return Self.manifestInfo(of: folderURL)
     }
 
     // 3.8.281：锁定备份——锁了的备份文件夹不参与覆盖（备份时跳过，
