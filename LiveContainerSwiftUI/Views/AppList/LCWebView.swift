@@ -334,7 +334,7 @@ struct LCWebView: View {
         var appListsToConsider = [sharedModel.apps]
         
         if url.scheme == "itms-services", let handler = itmsServicesHandler {
-            installAppAlertMsg = "lc.webView.installAppDesc"
+            installAppAlertMsg = "lc.webView.installAppDesc".loc
             
             if let doInstall = await installAppAlert.open(), !doInstall {
                 return
