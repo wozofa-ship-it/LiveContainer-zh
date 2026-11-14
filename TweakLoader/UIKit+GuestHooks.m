@@ -657,11 +657,19 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
 - (void)hook_setDelegate:(id<UIApplicationDelegate>)delegate {
     if(![delegate respondsToSelector:@selector(application:configurationForConnectingSceneSession:options:)]) {
         // Fix old apps black screen when UIApplicationSupportsMultipleScenes is YES
-        swizzle(UIWindow.class, @selector(makeKeyAndVisible), @selector(hook_makeKeyAndVisible));
-        swizzle(UIWindow.class, @selector(makeKeyWindow), @selector(hook_makeKeyWindow));
-        swizzle(UIWindow.class, @selector(setHidden:), @selector(hook_setHidden:));
-        // Fix apps that do not support UISceneDelegate getting 0 status bar frame
-        swizzle(UIApplication.class, @selector(statusBarFrame), @selector(hook_statusBarFrame));
+        // L57-3：swizzle 是裸 method_exchangeImplementations（utils.h:30），
+        // 二次调 setDelegate:（老 App 手动再设一次 delegate）会把四处钩子
+        // 换回去，黑屏修法静默丢失；只换一次。首个 delegate 若是新版（走
+        // respondsToSelector 分支），标志不动，后来的老 delegate 照样换。
+        static BOOL czfWindowHooksInstalled = NO;
+        if (!czfWindowHooksInstalled) {
+            czfWindowHooksInstalled = YES;
+            swizzle(UIWindow.class, @selector(makeKeyAndVisible), @selector(hook_makeKeyAndVisible));
+            swizzle(UIWindow.class, @selector(makeKeyWindow), @selector(hook_makeKeyWindow));
+            swizzle(UIWindow.class, @selector(setHidden:), @selector(hook_setHidden:));
+            // Fix apps that do not support UISceneDelegate getting 0 status bar frame
+            swizzle(UIApplication.class, @selector(statusBarFrame), @selector(hook_statusBarFrame));
+        }
     }
     [self hook_setDelegate:delegate];
 }

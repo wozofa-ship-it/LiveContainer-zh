@@ -119,6 +119,12 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // L57-1：回调只认当前会话——startPiPWithVC 切新会话后旧控制器的
+    // 迟到 WillStart 会把新会话的 contentView 挪走、把新窗口最小化；
+    // 新控制器的 WillStart 恒过（startPiPWithVC 先赋值 self.pipController
+    // 再调 startPictureInPicture，见该函数）。KVO 登记按控制器 key
+    // 记，错会话的重复 WillStart 不重复注册（L15），守卫与它不冲突。
+    if (pictureInPictureController != self.pipController) return;
     [self.displayingDecoratedVC minimizeWindowPiP];
     if(self.displayingVC.usesHostingControllerAPI) {
         self.pipVideoCallContentView.frame = CGRectMake(0, 0, self.displayingVC.view.bounds.size.width, self.displayingVC.view.bounds.size.height);
@@ -154,12 +160,25 @@ static PiPManager* sharedInstance = nil;
     // 否则 LCAutoEndPiP 开着时 DidStop 把 VC 置 nil、layer 释放时观察者还
     // 在册，KVO 释放异常崩溃。L15 改按会话登记拆（见 helper 注释），
     // 错位的 WillStop 不会误拆新会话的 layer。3.8.495（L14）/3.8.496（L15）
+    // L57-1：KVO 注销无条件跑（只拆该控制器的登记），但其余工作只认
+    // 当前会话——旧控制器的迟到 WillStop 会清新会话的 shouldIgnoreSceneUpdates、
+    // 把新画中画的窗口取消最小化。
     [self czfRemoveBoundsObserverForController:pictureInPictureController];
+    if (pictureInPictureController != self.pipController) return;
     self.displayingVC.shouldIgnoreSceneUpdates = NO;
     [self.displayingDecoratedVC unminimizeWindowPiP];
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // 3.8.496（L15）：直接调 DidStop 切会话时（startPiPWithVC）WillStop
+    // 未必跑过，这里兜底拆掉该会话的登记；正常流程里 WillStop 已拆，
+    // 这里是空操作。
+    [self czfRemoveBoundsObserverForController:pictureInPictureController];
+    // L57-1：只认当前会话——旧控制器的迟到 DidStop 会把新会话的
+    // contentView 插回旧 VC、把新 pipController 置 nil（LCAutoEndPiP
+    // 开着时），画中画直接丢了。注销放最前、守卫放其后，错会话的
+    // 登记照样拆干净。
+    if (pictureInPictureController != self.pipController) return;
     [self.displayingVC.view insertSubview:self.displayingVC.contentView atIndex:0];
     [self.displayingVC setBackgroundNotificationEnabled:true];
     // resize if needed (eg orientation differs)
@@ -170,10 +189,6 @@ static PiPManager* sharedInstance = nil;
         self.pipController = nil;
         self.pipVideoCallViewController = nil;
     }
-    // 3.8.496（L15）：直接调 DidStop 切会话时（startPiPWithVC）WillStop
-    // 未必跑过，这里兜底拆掉该会话的登记；正常流程里 WillStop 已拆，
-    // 这里是空操作。
-    [self czfRemoveBoundsObserverForController:pictureInPictureController];
     // FIXME: HostingController path causes a tiny flicker during transition to and from PiP.
 }
 
@@ -192,7 +207,15 @@ static PiPManager* sharedInstance = nil;
     if (!self.displayingVC) return;
     CGRect rect = [change[@"new"] CGRectValue];
     CGFloat scale = self.displayingVC.usesHostingControllerAPI ? self.displayingVC.scaleRatio : 1;
-    CGAffineTransform transform1 = CGAffineTransformScale(CGAffineTransformIdentity, rect.size.width / self.displayingVC.contentView.bounds.size.width/scale,rect.size.height /self.displayingVC.contentView.bounds.size.height/scale);
+    // L57-2：contentView 尚未布局时 bounds 是零宽（view 刚建、窗口还没
+    // 上屏就进 PiP），零除会把 transform 算成 inf/NaN，画中画内容缩没
+    // 或渲染异常；scaleRatio 是滑条值，同样守 0。L15 只守了 displayingVC
+    // 为 nil 一半（那时 nil.contentView 的 bounds 也是零宽），VC 在但
+    // contentView 零宽这一半没守。
+    CGFloat contentW = self.displayingVC.contentView.bounds.size.width;
+    CGFloat contentH = self.displayingVC.contentView.bounds.size.height;
+    if (contentW == 0 || contentH == 0 || scale == 0) return;
+    CGAffineTransform transform1 = CGAffineTransformScale(CGAffineTransformIdentity, rect.size.width / contentW / scale, rect.size.height / contentH / scale);
     self.pipVideoCallContentView.transform = transform1;
 }
 
