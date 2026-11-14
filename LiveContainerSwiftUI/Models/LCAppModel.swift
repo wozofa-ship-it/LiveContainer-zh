@@ -1189,7 +1189,43 @@ class LCAppModel: ObservableObject, Hashable {
                 }
             }
         } else if multitask, #available(iOS 16.0, *) {
-            try await LCUtils.launchMultitaskGuestApp(launchDisplayName)
+            // 3.8.570（L101）：L12 只给 JIT 分支加了 30 秒超时兜底，
+            // 非 JIT 多任务分支还是裸 try await——启动窗在客端初始
+            // 化完成前被关掉时 pid 回调同样永不触发（同款机制：
+            // terminate 在未运行时是空操作，不走 delegate；
+            // pidCallbacks 只在 onAppInitialize 里取走调一次），
+            // runApp 永远挂起、isAppRunning 与启动锁一直占着，
+            // App 再也点不开，只能重启 LiveContainer。照 JIT 分支
+            // 同款包一层 continuation + CZFOnceBox + 30 秒超时。
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let czfPidBox = CZFOnceBox()
+                let czfPidTimeout = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 30_000_000_000)
+                    if czfPidBox.take() {
+                        continuation.resume(throwing: "Guest app did not initialize in 30 seconds")
+                    }
+                }
+                LCUtils.launchMultitaskGuestApp(launchDisplayName) { pidNumber, error in
+                    if let error {
+                        czfPidTimeout.cancel()
+                        if czfPidBox.take() {
+                            continuation.resume(throwing: error)
+                        }
+                        return
+                    }
+                    guard pidNumber != nil else {
+                        czfPidTimeout.cancel()
+                        if czfPidBox.take() {
+                            continuation.resume(throwing: "Failed to obtain PID from LiveProcess")
+                        }
+                        return
+                    }
+                    czfPidTimeout.cancel()
+                    if czfPidBox.take() {
+                        continuation.resume()
+                    }
+                }
+            }
         } else {
             if #available(iOS 26.0, *), FileManager.default.fileExists(atPath: "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE") {
                 let fileContents = "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE".data(using: .utf8)
