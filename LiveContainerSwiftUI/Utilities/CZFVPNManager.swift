@@ -497,8 +497,21 @@ public final class CZFVPNManager {
         guard links.indices.contains(index) else { return false }
         if links[index] != trimmed && links.contains(trimmed) { return false }
         let wasActive = index == activeNodeIndex
+        // 3.8.564（L95）：改链接别把自定义别名弄丢——别名按链接原文存
+        // 字典，链接一换键就对不上，亲手起的名字当场掉回地址显示，
+        // 旧键还留一条死记录；先记下旧链接的别名，写完列表挪到新
+        // 链接上（同文重存是空操作；新链接已有同名死记录时以这次
+        // 改动的为准）。删节点那路死记录无害，照旧不清理。
+        let oldLink = links[index]
+        let oldAlias = Self.nodeAlias(for: oldLink)
         links[index] = trimmed
         UserDefaults.standard.set(links, forKey: Self.nodeListKey)
+        if let oldAlias {
+            Self.setNodeAlias(oldAlias, for: trimmed)
+            if trimmed != oldLink {
+                Self.setNodeAlias(nil, for: oldLink)
+            }
+        }
         if wasActive {
             UserDefaults.standard.set(index, forKey: Self.activeNodeKey)
         } else if let idx = links.firstIndex(of: nodeLink) {
