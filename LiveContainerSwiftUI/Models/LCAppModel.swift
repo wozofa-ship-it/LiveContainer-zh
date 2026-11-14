@@ -767,8 +767,8 @@ class LCAppModel: ObservableObject, Hashable {
 
     // You should let LCAppModel.runApp to decide whether to run in multitask mode, but you may override the multitask parameter if necessary
     func runApp(multitask: Bool? = nil, containerFolderName : String? = nil, bundleIdOverride : String? = nil, urlStr : String? = nil, forceJIT: Bool? = nil) async throws{
-        // 先抢同步锁再读 isAppRunning：forceResign 也置
-        // isAppRunning（不走这把锁），两重守卫各拦一侧。
+        // 先抢同步锁再读 isAppRunning：forceResign 也抢同一把
+        // 锁（3.8.526/L53），两重守卫各拦一侧。
         guard czfClaimLaunch() else {
             return
         }
@@ -1126,6 +1126,22 @@ class LCAppModel: ObservableObject, Hashable {
     }
     
     func forceResign() async throws {
+        // 3.8.526（L53）：跟 runApp 抢同一把启动锁——原来只凭
+        // isAppRunning 守卫，置位在 await MainActor.run 之后、
+        // 检查与置位之间有 await 间隙：连点两次“强制重新签名”
+        // 会双双越过守卫、两个 signApp(force: true) 并发跑
+        // patchExecAndSignIfNeed（3.8.459 审计修 runApp 双起
+        // 用的就是这把锁，forceResign 没走它）；runApp 起手
+        // 容器准备段还没置 isAppRunning 时点强制重签也会撞上。
+        // 两路并发改同一份可执行文件（先拷备份、删主程序、挪
+        // 回、再 zsign），后起的那路可能拷到半签的二进制、删
+        // 掉正在签的文件，签出来是坏签名、App 点不开，只能再
+        // 签一次。抢锁失败就静默返回，与原来 isAppRunning 守
+        // 卫的行为一致（按钮本身也按 isAppRunning 置灰）。
+        guard czfClaimLaunch() else {
+            return
+        }
+        defer { czfReleaseLaunch() }
         if isAppRunning {
             return
         }
