@@ -1752,13 +1752,22 @@ struct LCSourcesView: View {
     private func shareFile(at url: URL) {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let rootVC = windowScene.windows.first?.rootViewController else { return }
+        // 3.8.555（L85）：从 rootVC 直弹会被已有弹窗静默顶掉——下载是异步的，
+        // 完成时用户可能正开着管理源/全部更新/网格设置 sheet（rootVC 上已有
+        // presentedVC），UIKit 直接丢掉这次 present，分享表不出、也不报错，
+        // 文件已落盘在 Documents、用户无从得知（L82-1 面板下载同款，修法同款：
+        // present 前先走到最顶层）。正常路 rootVC 上没弹窗，走到顶就是它自己，行为不变。
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
         let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
         if let popover = activityVC.popoverPresentationController {
-            popover.sourceView = rootVC.view
-            popover.sourceRect = CGRect(x: rootVC.view.bounds.midX, y: rootVC.view.bounds.midY, width: 0, height: 0)
+            popover.sourceView = topVC.view
+            popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
             popover.permittedArrowDirections = []
         }
-        rootVC.present(activityVC, animated: true)
+        topVC.present(activityVC, animated: true)
     }
     
     private func toggleExpansion(for id: URL) {
@@ -1792,7 +1801,16 @@ struct LCSourcesView: View {
                     // 先关 sheet，等它关完再弹错误。
                     Task {
                         if let error = await handleAddSource(sourceUrl) {
-                            if isManagingSources {
+                            // 3.8.555（L85）：本 Task 是裸 Task，isManagingSources 是
+                            // @State——上面注释只把“写”包进 MainActor.run，读还留在
+                            // 裸执行器上；读到过期值时 sheet 开着也被判成没开，错误
+                            // 直接写父级 errorMessage、被 sheet 盖住静默丢掉，正是
+                            // B-11 要防的那一下。读也回主线程（先取再判的两行写法；
+                            // if await MainActor.run { ... } { 的双大括号是没编过的新
+                            // 形状，不用；MainActor.run({ ... }) 带括号会把闭包当成
+                            // resultType，457 红字教训）。
+                            let czfManagingSources = await MainActor.run { isManagingSources }
+                            if czfManagingSources {
                                 // 3.8.519（L44）：本 Task 是裸 Task、不在主
                                 // actor 上（L40 同款），isManagingSources/
                                 // errorMessage 是 @State，回主线程再写；
@@ -2954,7 +2972,11 @@ private final class CZFSourceIconCache {
             return newTask
         }
         let result = await task.value
-        ioQueue.sync { inFlight.removeValue(forKey: url.absoluteString) }
+        // 3.8.555（L85）：只清自己那一项——原来无条件 removeValue：A、B 两路
+        // 等同一个在途任务时，A 先跑完就把表项清掉，C 随后新建任务 T2 登记，
+        // B 跑完又清一次、把 T2 也清掉，D 再来就认不出 T2 在途、又另起一次
+        // 下载。只多下一次图标，不坏数据；按身份比对再清，零行为变化。
+        ioQueue.sync { if inFlight[url.absoluteString] === task { inFlight.removeValue(forKey: url.absoluteString) } }
         return result
     }
 
