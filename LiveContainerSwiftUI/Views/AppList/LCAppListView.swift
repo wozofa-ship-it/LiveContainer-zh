@@ -120,6 +120,12 @@ enum CZFSourcePendingInstall {
     static func append(_ item: CZFSourcePendingInstallItem) {
         guard !items.contains(where: { $0.url == item.url && $0.autoReplace == item.autoReplace && $0.preview == item.preview && $0.forceAsNew == item.forceAsNew }) else { return }
         items.append(item)
+        // 3.8.508（L30）：App 页已在前台时只靠 onAppear 排空会
+        // 漏——批量更新循环里 dylib 的 await 让出主线程后 App 页
+        // 已出现并排空过一次，之后再入队的就一直躺在这里（无报
+        // 错、无进度，直到下次进 App 页）。入队即发通知，在前
+        // 台的 App 页当场排空；不在前台时没人收，等 onAppear 排空。
+        NotificationCenter.default.post(name: NSNotification.CZFSourcePendingInstallAppended, object: nil)
     }
 }
 
@@ -2043,15 +2049,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             refreshBackupStatus()
             // 3.8.428 设置#25：源页同事往 CZFSourcePendingInstall.items
             // 里写的待装队列，App 页出现时排空、逐个进安装队列；
-            // 消费完清空，避免重复装。下面的安装通知 onReceive
+            // 消费完清空，避免重复装。3.8.508（L30）：排空抽到
+            // czfDrainSourcePendingInstalls，下面 onReceive 里
+            // 入队通知来了也走同一份（App 页已在前台时后到的
+            // 入队不能等下次出现）。下面的安装通知 onReceive
             // 原样保留，不动。
-            if !CZFSourcePendingInstall.items.isEmpty {
-                let czfQueued = CZFSourcePendingInstall.items
-                CZFSourcePendingInstall.items.removeAll()
-                for item in czfQueued {
-                    enqueueInstall(url: item.url, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew)
-                }
-            }
+            czfDrainSourcePendingInstalls()
             if !isViewAppeared {
                 if let webpageUrlStr = UserDefaults.standard.string(forKey: "webPageToOpen") {
                     Task { await openWebView(urlString: webpageUrlStr) }
@@ -2092,6 +2095,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 直接丢掉，批量安装实际只装得上第一个
                 enqueueInstall(url: installUrl, autoReplace: (obj2["autoReplace"] as? Bool) ?? false, preview: (obj2["preview"] as? Bool) ?? false, forceAsNew: (obj2["forceAsNew"] as? Bool) ?? false, customDisplayName: obj2["customDisplayName"] as? String)
             }
+        }
+        // 3.8.508（L30）：源页待装队列新入队时当场排空——只靠
+        // onAppear 排空时，批量更新里 dylib 后面的 App 会漏
+        // （App 页已出现并排空过一次，后到的入队无人消费，
+        // 无报错、无进度，直到下次进 App 页）。onReceive 只
+        // 在视图在层级里时才触发，不在前台的入队等 onAppear
+        // 排空；排空本身先取后清，通知重入也不会重复装。
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.CZFSourcePendingInstallAppended)) { _ in
+            czfDrainSourcePendingInstalls()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.LaunchAppNotification)) { obj in
             if let obj2 = obj.object as? [String: Any], let bundleId = obj2["bundleId"] as? String {
@@ -2960,6 +2972,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
     
+    /// 源页待装队列排空（3.8.428 设置#25 建、3.8.508 L30 抽共用）：
+    /// 先取后清再逐个进安装队列——onAppear 与入队通知两路共用，
+    /// 通知重入（排空里不再写共享数组，不会重入）与并发（主线程
+    /// 两路串行）都不会重复装。
+    func czfDrainSourcePendingInstalls() {
+        guard !CZFSourcePendingInstall.items.isEmpty else { return }
+        let czfQueued = CZFSourcePendingInstall.items
+        CZFSourcePendingInstall.items.removeAll()
+        for item in czfQueued {
+            enqueueInstall(url: item.url, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew)
+        }
+    }
+
     /// 安装请求队列：下载器全局只有一个、安装器同时只能装
     /// 一个，源页的批量安装必须一个一个排队来，不然忙着装
     /// 别的时新请求会被直接丢掉、批量只装得上第一个。单个

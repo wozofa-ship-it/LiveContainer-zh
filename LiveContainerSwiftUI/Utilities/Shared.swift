@@ -371,6 +371,9 @@ struct JITStreamerEBMountResponse : Codable {
 extension NSNotification {
     static let InstallAppNotification = Notification.Name.init("InstallAppNotification")
     static let LaunchAppNotification = Notification.Name.init("LaunchAppNotification")
+    // 3.8.508（L30）：源页待装队列有新入队时通知 App 页排空（见
+    // CZFSourcePendingInstall.append 与 LCAppListView 的 onReceive）。
+    static let CZFSourcePendingInstallAppended = Notification.Name.init("CZFSourcePendingInstallAppended")
 }
 
 public enum LCTabIdentifier: Hashable {
