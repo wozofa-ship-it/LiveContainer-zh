@@ -420,10 +420,44 @@ struct LCTweakFolderView : View {
             // 干净名就走 -2/-3。启用项本身直接给原文件，不动。
             let entries = enumerator.compactMap { $0 as? URL }
             var usedCleanNames = Set(entries.filter { $0.lastPathComponent.hasSuffix(".dylib") }.map { $0.lastPathComponent })
+            // 3.8.568（L99）：已启用同名也记一本账——`subA/X.dylib` +
+            // `subB/X.dylib` 两个都启用时上面只给原文件，分享表里
+            // 出两个都叫 `X.dylib` 的项（L98 只修了启用-停用撞名）；
+            // 第一个照旧给原文件，重复出现的才拷临时目录改 -2 名。
+            var seenEnabledNames = Set<String>()
             for entryURL in entries {
                 let last = entryURL.lastPathComponent
                 if last.hasSuffix(".dylib") {
-                    urls.append(entryURL)
+                    if seenEnabledNames.contains(last) {
+                        do {
+                            if tmpDir == nil {
+                                tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                                try fm.createDirectory(at: tmpDir!, withIntermediateDirectories: true)
+                            }
+                            var cleanName = last
+                            if usedCleanNames.contains(cleanName) {
+                                let base = String(cleanName.dropLast(".dylib".count))
+                                var n = 2
+                                var cand = cleanName
+                                while usedCleanNames.contains(cand) {
+                                    cand = "\(base)-\(n).dylib"
+                                    n += 1
+                                }
+                                cleanName = cand
+                            }
+                            usedCleanNames.insert(cleanName)
+                            let cleanUrl = tmpDir!.appendingPathComponent(cleanName)
+                            try fm.copyItem(at: entryURL, to: cleanUrl)
+                            urls.append(cleanUrl)
+                        } catch {
+                            errorShow = true
+                            errorInfo = error.localizedDescription
+                            return
+                        }
+                    } else {
+                        seenEnabledNames.insert(last)
+                        urls.append(entryURL)
+                    }
                 } else if last.hasSuffix(".dylib" + LCTweakItem.disabledSuffix) {
                     do {
                         if tmpDir == nil {
