@@ -1957,17 +1957,24 @@ struct LCDataManagementView : View {
         // sharedModel.apps/hiddenApps/appDataFolderNames 是 @Published，
         // 直接读是跨线程读（L54 restoreFromBackup 同款已修）；三表经
         // MainActor.run 一次取齐再算，删文件/清钥匙串仍在外面。
-        let (allApps, hiddenApps, allDataFolderNames) = await MainActor.run {
-            (sharedModel.apps, sharedModel.hiddenApps, sharedModel.appDataFolderNames)
+        // 3.8.543（L73）：元素级也要快照——数组快照只定了数组本身，
+        // appInfo.containers 的 getter 读 _info（dataUUID/
+        // containerInfo，老格式还会写回升级 + 落盘，见
+        // LCContainer.swift:401），循环里离主线程读是 L70 漏掉
+        // 的一层；快照里一次取齐。
+        let (appContainers, hiddenAppContainers, allDataFolderNames) = await MainActor.run {
+            (sharedModel.apps.map { ($0, $0.appInfo.containers) },
+             sharedModel.hiddenApps.map { ($0, $0.appInfo.containers) },
+             sharedModel.appDataFolderNames)
         }
         var folderNameToAppDict : [String:LCAppModel] = [:]
-        for app in allApps {
-            for container in app.appInfo.containers {
+        for (app, containers) in appContainers {
+            for container in containers {
                 folderNameToAppDict[container.folderName] = app;
             }
         }
-        for app in hiddenApps {
-            for container in app.appInfo.containers {
+        for (app, containers) in hiddenAppContainers {
+            for container in containers {
                 folderNameToAppDict[container.folderName] = app;
             }
         }
@@ -2082,16 +2089,21 @@ struct LCDataManagementView : View {
         // 3.8.540（L70）：本函数从按钮的裸 Task 调来（:933），
         // sharedModel.apps/hiddenApps 是 @Published，直接读是跨线
         // 程读；经 MainActor.run 取快照，清缓存仍在外面。
+        // 3.8.543（L73）：元素级也要快照——数组快照只定了数组本身，
+        // app.uiContainers 是 @Published，循环里离主线程读是 L70
+        // 漏掉的一层；快照里一次取齐（SideStore 那个现建的模型
+        // 也一起取，它的 uiContainers 读在主线程上）。
         var allApps = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
         if UserDefaults.sideStoreExist() {
             allApps.append(LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared))
         }
-        
+        let appContainers = await MainActor.run { allApps.map { ($0, $0.uiContainers) } }
+
         var cleanedCount = 0
 
         do {
-            for app in allApps {
-                for container in app.uiContainers {
+            for (_, containers) in appContainers {
+                for container in containers {
                     let containerPath = container.containerURL
                     // 3.8.515（L39）：外部容器（bookmark）须先
                     // startAccessing 才能读到——存储统计那路
@@ -2675,8 +2687,8 @@ struct LCDataManagementView : View {
 
     func deleteBackup(at backupURL: URL) {
         // 锁了的备份删除前要先解锁（用户 13:16 令“要解锁才能删除”）：
-        // 人脸识别通过后直接删除，并清掉已不存在的备份的锁记录；
-        // 鉴权失败/取消不删。3.8.441 锁定 App 解锁同款
+        // 人脸识别通过后直接删除，删干净了才清锁记录；鉴权失败/
+        // 取消不删。3.8.441 锁定 App 解锁同款
         //（authenticateUserForced，每次都弹人脸）。
         if lockedBackupNames.contains(backupURL.lastPathComponent) {
             Task {
@@ -2691,10 +2703,27 @@ struct LCDataManagementView : View {
                     }
                     return
                 }
-                Self.setBackupLocked(backupURL.lastPathComponent, locked: false)
                 await MainActor.run {
-                    self.lockedBackupNames.remove(backupURL.lastPathComponent)
                     self.deleteBackupUnlocked(at: backupURL)
+                    // 3.8.543（L73）：锁不能先清再删——原来先清锁
+                    // 再调删除，删失败（磁盘错、iCloud 占位）时备份
+                    // 还在盘上，锁已没了，等于没过人脸就解锁，违背
+                    // “锁住备份要人脸才能解开”。锁按名记、本地与
+                    // iCloud 同名共用一把（见 setBackupLocked
+                    // 注释），两边都确认没了才清锁记录；任一边还
+                    // 在就留着锁，失败提示已由 deleteBackupUnlocked
+                    // 写进 restoreSheetNotice。
+                    let name = backupURL.lastPathComponent
+                    let fm = FileManager.default
+                    let localGone: Bool = {
+                        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+                        return !fm.fileExists(atPath: docsURL.appendingPathComponent("Backups").appendingPathComponent(name).path)
+                    }()
+                    let externalGone: Bool = Self.externalBackupFolderURL().map { !fm.fileExists(atPath: $0.appendingPathComponent(name).path) } ?? true
+                    if localGone && externalGone {
+                        Self.setBackupLocked(name, locked: false)
+                        self.lockedBackupNames.remove(name)
+                    }
                 }
             }
             return
@@ -2832,19 +2861,59 @@ struct LCDataManagementView : View {
     /// 数据容器 + 组容器 + 钥匙串快照。backupApps 的批量循环
     /// 和覆盖安装前的自动备份都走这里。同步执行，调用方自己
     /// 挪到后台队列
+    /// 3.8.543（L73）：备份用的 App 快照——displayName/
+    /// bundleIdentifier/dataUUID/tweakFolder 读 _info
+    /// NSMutableDictionary（LCAppInfo.m）、uiContainers 是
+    /// @Published；四路备份调用全在后台队列（批量/定时/覆盖前
+    /// 自动/手动批量），后台直读与主线程写竞态（启动写
+    /// lastLaunched、改名写 customDisplayName、恢复写
+    /// dataUUID/tweakFolder；切容器/加容器改 uiContainers）——
+    /// L70/L72-2 同款。version 只读 _infoPlist（不可变）、
+    /// bundlePath 是 init 后不变的 ivar、appGroupIDs 只读
+    /// bundlePath + 签名文件，都不用快照。快照还保证一次备
+    /// 份内 manifest 与容器清单对得上（中途切容器不会备出
+    /// 一半新一半旧）。
+    private struct CZFBackupAppSnapshot {
+        let appName: String
+        let bundleIdentifier: String
+        let displayName: String
+        let dataUUID: String
+        let tweakFolder: String
+        let uiContainers: [LCContainer]
+    }
+
     @discardableResult
     // B-5：四路备份互斥入口（手动/批量/定时/覆盖前自动都走这里）：
     // 真身在 backupOneAppSyncLocked，这里只过串行队列，保证同一
     // 时刻只有一个备份在写临时目录。队列只在本函数里用，不存在
     // 重入（backupOneAppSyncLocked 不调自己、不回头调本函数）。
     static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
-        try czfBackupSerialQueue.sync {
-            try Self.backupOneAppSyncLocked(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
+        // 3.8.543（L73）：进串行队列前先取快照（见
+        // CZFBackupAppSnapshot 注释）；主线程直读、后台经
+        // main.sync 取（L70 同款，Thread.isMainThread 防主线
+        // 程自死锁；main.sync 只拷模型值，极快，不把慢 I/O
+        // 搬回主线程）。
+        let snapshot: CZFBackupAppSnapshot = {
+            let read = {
+                CZFBackupAppSnapshot(
+                    appName: app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown",
+                    bundleIdentifier: app.appInfo.bundleIdentifier() ?? "",
+                    displayName: app.appInfo.displayName() ?? "",
+                    dataUUID: app.appInfo.dataUUID ?? "",
+                    tweakFolder: app.appInfo.tweakFolder ?? "",
+                    uiContainers: app.uiContainers
+                )
+            }
+            if Thread.isMainThread { return read() }
+            return DispatchQueue.main.sync(execute: read)
+        }()
+        return try czfBackupSerialQueue.sync {
+            try Self.backupOneAppSyncLocked(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, snapshot: snapshot)
         }
     }
 
-    private static func backupOneAppSyncLocked(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
-        let appName = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+    private static func backupOneAppSyncLocked(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, snapshot: CZFBackupAppSnapshot) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
+        let appName = snapshot.appName
         // v216：同款多开各写各的文件夹（见 backupFolderName：
         // 同实例沿用旧名、新实例加实例后缀；老文件夹不改名）。
         // appName 仍是显示名（报告文案用），落盘用 folderName。
@@ -2880,22 +2949,22 @@ struct LCDataManagementView : View {
         // 默认容器的钥匙串组号也记下：删后重装恢复时新建的
         // 兜底容器照这个组号建，写回的条目 agrp 和快照里
         // 原样对齐，不用等桥二次改写
-        let defaultContainer = app.uiContainers.first(where: { $0.folderName == (app.appInfo.dataUUID ?? "") }) ?? app.uiContainers.first
+        let defaultContainer = snapshot.uiContainers.first(where: { $0.folderName == snapshot.dataUUID }) ?? snapshot.uiContainers.first
         let manifest: [String: String] = [
-            "bundleIdentifier": app.appInfo.bundleIdentifier() ?? "",
-            "displayName": app.appInfo.displayName() ?? "",
+            "bundleIdentifier": snapshot.bundleIdentifier,
+            "displayName": snapshot.displayName,
             "version": app.appInfo.version() ?? "",
             "backupDate": dateFmt.string(from: Date()),
             // 恢复时靠它认出哪个是默认容器：容器文件夹名
             // 是随机 UUID，删后重装会换号，不能靠名字猜
-            "dataUUID": app.appInfo.dataUUID ?? "",
+            "dataUUID": snapshot.dataUUID,
             "keychainGroupId": defaultContainer.map { String($0.keychainGroupId) } ?? "",
             // 备份范围：login = 登录态档（钥匙串快照 + 会话文件，
             // 没有 .app 本体和整套数据）；full = 整套都备。恢复
             // 列表据此打标；旧备份的 keychain（纯钥匙串）照旧认
             "scope": loginOnly ? "login" : "full",
             // 模块选择：删后恢复时写回，免得手动选的模块夹丢了重选
-            "tweakFolder": app.appInfo.tweakFolder ?? ""
+            "tweakFolder": snapshot.tweakFolder
         ]
         if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
             try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
@@ -2922,7 +2991,7 @@ struct LCDataManagementView : View {
                 try? fm.removeItem(at: destAppURL)
             }
         }
-        for container in app.uiContainers {
+        for container in snapshot.uiContainers {
             let srcURL = container.containerURL
             let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
             // v216：成功拷回的数据容器数（健康分与预览共用；
@@ -2951,7 +3020,7 @@ struct LCDataManagementView : View {
         // 停在当前，两边对不上，App 里信息就错乱（版本更新
         // 后恢复最常见）。隔离组容器的 App 数据在容器内已备，
         // 不重复
-        if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
+        if snapshot.uiContainers.contains(where: { !$0.isolateAppGroup }) {
             let groupRoot = appBackupURL.appendingPathComponent("AppGroup")
             for groupID in Self.appGroupIDs(for: app) {
                 let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
@@ -2973,7 +3042,7 @@ struct LCDataManagementView : View {
             // 不计预算，其余文件按大小升序、单容器封顶 300MB
             // （见 copyLoginStateFiles）；组容器同规则；钥匙串
             // 快照在下面照旧备
-            for container in app.uiContainers {
+            for container in snapshot.uiContainers {
                 let srcURL = container.containerURL
                 if fm.fileExists(atPath: srcURL.path) {
                     let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
@@ -2987,7 +3056,7 @@ struct LCDataManagementView : View {
                     for (k, v) in r.breakdown { loginBreakdown[k, default: 0] += v }
                 }
             }
-            if app.uiContainers.contains(where: { !$0.isolateAppGroup }) {
+            if snapshot.uiContainers.contains(where: { !$0.isolateAppGroup }) {
                 let groupRoot = appBackupURL.appendingPathComponent("AppGroup")
                 for groupID in Self.appGroupIDs(for: app) {
                     let src = LCPath.lcGroupAppGroupPath.appendingPathComponent(groupID)
@@ -3020,7 +3089,7 @@ struct LCDataManagementView : View {
         // 码），游客自己导的才作数。快照文件不存在 = 这个 App
         // 装上钥匙串桥之后还没被打开过
         var bridgeStatus: String? = nil
-        for container in app.uiContainers {
+        for container in snapshot.uiContainers {
             // 桥的状态回执：备份弹窗要带出来定案（桥跑没跑、
             // 组对不对、条目在不在），取第一个有的容器那份
             if bridgeStatus == nil,
@@ -3137,7 +3206,7 @@ struct LCDataManagementView : View {
                         // 丢了；自动备份静默跳过不挡安装，记一条
                         // 日志留痕（App 名 + 失败数 + 前 3 条路径）。
                         if one.loginFailed > 0 {
-                            let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                            let name = Self.czfAppDisplayName(for: app)
                             print("[AutoBackup] \(name) 覆盖安装前自动备份有 \(one.loginFailed) 个文件拷贝失败：\(one.loginFailedPaths.prefix(3).joined(separator: "、"))")
                         }
                     }
@@ -3189,6 +3258,11 @@ struct LCDataManagementView : View {
     /// 重写 dump，轮询 mtime 至多等 5 秒，前进即新鲜，超时按旧值继续（回执已报
     /// 快照时间，用户看得见）。同时解决文件侧滞后（关窗时 App 落盘再拷）。
     static func refreshKeychainSnapshot(for app: LCAppModel) async {
+        // 3.8.543（L73）：uiContainers/isAppRunning 是 @Published，
+        // 本函数被 backupApps/覆盖前自动备份在裸 Task 上调，离主
+        // 线程读是 L70 同款漏网；一次取齐再用（轮询段只读 before，
+        // 不再碰 app）。
+        let (containers, isRunning) = await MainActor.run { (app.uiContainers, app.isAppRunning) }
         // 3.8.517（L42）：零容器直接返——下面轮询只认
         // before[] 里有记录的 dump，没容器时 before 为空、
         // refreshed 永远成不了 true，会白等满 5 秒。没启动过
@@ -3197,10 +3271,10 @@ struct LCDataManagementView : View {
         // 零容器这一档——App 没在跑但 dump 已存在时也可能等
         // 满 5 秒，那是客端写盘时机 host 侧看不见，不能拿
         // isAppRunning 一刀切（关窗竞态会读到旧 dump），不动。
-        guard !app.uiContainers.isEmpty else { return }
+        guard !containers.isEmpty else { return }
         let fm = FileManager.default
         var before: [URL: Date] = [:]
-        for container in app.uiContainers {
+        for container in containers {
             let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
             if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
                let mdate = attrs[.modificationDate] as? Date {
@@ -3212,16 +3286,16 @@ struct LCDataManagementView : View {
         // 时 refreshed 永远成不了 true；App 没跑时关窗是空操
         // 作、没有任何一方会新建 dump，白等满 5 秒。只敢省这
         // 一档：dump 已存在时保留等待（L42 注释的关窗竞态）。
-        if before.isEmpty && !app.isAppRunning { return }
+        if before.isEmpty && !isRunning { return }
         if #available(iOS 16.0, *) {
-            for container in app.uiContainers {
+            for container in containers {
                 MultitaskDockManager.shared.closeAppWindow(uuid: container.folderName)
             }
         }
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             var refreshed = false
-            for container in app.uiContainers {
+            for container in containers {
                 let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
                 if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
                    let mdate = attrs[.modificationDate] as? Date {
@@ -3304,7 +3378,7 @@ struct LCDataManagementView : View {
                     let dateFmt = DateFormatter()
                     dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
                     for (index, app) in apps.enumerated() {
-                        let name = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+                        let name = Self.czfAppDisplayName(for: app)
                         // 进度回主线程刷新：备到第几个、当前哪个
                         DispatchQueue.main.async {
                             self.backupRestoreProgress = "正在备份 \(name)（\(index + 1)/\(apps.count)）"
@@ -4214,6 +4288,20 @@ struct LCDataManagementView : View {
             // 直接读是跨线程读；经 MainActor.run 取快照（匹配只读
             // 快照，语义不变）。
             let allApps = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
+            // 3.8.543（L73）：元素级也要快照——数组快照只定了数组
+            // 本身，下面匹配读的 dataUUID/displayName/
+            // bundleIdentifier 是 _info 读、uiContainers.first 是
+            // @Published 读，离主线程读是 L70 漏掉的一层；匹配
+            // 只读快照里的身份字段，命中的 App 仍取原模型。
+            let allAppIdentities = await MainActor.run {
+                allApps.map { app in
+                    (app: app,
+                     dataUUID: app.appInfo.dataUUID ?? "",
+                     displayName: app.appInfo.displayName() ?? "",
+                     bundleIdentifier: app.appInfo.bundleIdentifier() ?? "",
+                     firstContainerFolder: app.uiContainers.first?.folderName ?? "")
+                }
+            }
             for (index, appFolder) in appFolders.enumerated() {
                 let folderName = appFolder.lastPathComponent
                 if presentResult {
@@ -4230,7 +4318,7 @@ struct LCDataManagementView : View {
                 var app: LCAppModel? = nil
                 if let json = await Self.manifestDict(appFolder: appFolder),
                    let du = json["dataUUID"], !du.isEmpty {
-                    app = allApps.first(where: { ($0.appInfo.dataUUID ?? "") == du })
+                    app = allAppIdentities.first(where: { $0.dataUUID == du })?.app
                 }
                 // 再按显示名匹配，再按 Bundle ID 匹配
                 // 多开同名不猜首个：同款多开未改名时两个实例显示名
@@ -4239,16 +4327,16 @@ struct LCDataManagementView : View {
                 // 里的实例后缀“（xxxxxxxx）”（dataUUID 前 8 位）
                 // 精确认，认不出就不猜、留给后面阶段处理。
                 if app == nil {
-                    let nameCandidates = allApps.filter {
-                        ($0.appInfo.displayName() ?? "") == folderName ||
-                        ($0.appInfo.bundleIdentifier() ?? "") == folderName
+                    let nameCandidates = allAppIdentities.filter {
+                        $0.displayName == folderName ||
+                        $0.bundleIdentifier == folderName
                     }
                     if nameCandidates.count == 1 {
-                        app = nameCandidates[0]
+                        app = nameCandidates[0].app
                     } else if nameCandidates.count > 1,
                               let suffix = Self.czfInstanceSuffix(fromFolderName: folderName) {
-                        app = nameCandidates.first(where: { ($0.appInfo.dataUUID ?? "").hasPrefix(suffix) })
-                            ?? nameCandidates.first(where: { ($0.uiContainers.first?.folderName ?? "").hasPrefix(suffix) })
+                        app = nameCandidates.first(where: { $0.dataUUID.hasPrefix(suffix) })?.app
+                            ?? nameCandidates.first(where: { $0.firstContainerFolder.hasPrefix(suffix) })?.app
                     }
                 }
                 // 改名后旧备份兜底：显示名对不上了，看 manifest 的
@@ -4257,7 +4345,7 @@ struct LCDataManagementView : View {
                 if app == nil,
                    let json = await Self.manifestDict(appFolder: appFolder),
                    let bid = json["bundleIdentifier"], !bid.isEmpty {
-                    let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
+                    let matches = allAppIdentities.filter { $0.bundleIdentifier == bid }
                     if matches.count == 1 {
                         // 显示名一致校验：manifest 记的显示名必须和
                         // 唯一候选的显示名对上，否则可能是同款多开
@@ -4267,9 +4355,9 @@ struct LCDataManagementView : View {
                         // 宁可恢复失败也不错位。manifest 没写显示名
                         // 的老备份沿用旧行为（count==1 即认）。
                         let manifestName = json["displayName"] ?? ""
-                        let candidateName = matches[0].appInfo.displayName() ?? ""
+                        let candidateName = matches[0].displayName
                         if manifestName.isEmpty || manifestName == candidateName {
-                            app = matches[0]
+                            app = matches[0].app
                         }
                     }
                 }
@@ -4293,7 +4381,7 @@ struct LCDataManagementView : View {
                 if app == nil,
                    let json = await Self.manifestDict(appFolder: appFolder),
                    let bid = json["bundleIdentifier"], !bid.isEmpty {
-                    let matches = allApps.filter { ($0.appInfo.bundleIdentifier() ?? "") == bid }
+                    let matches = allAppIdentities.filter { $0.bundleIdentifier == bid }
                     if matches.count == 1 {
                         // 名字对不上不配：多开兄弟的备份不能盖进现存
                         // 实例（间歇串号的主路——只剩 muse 时恢复
@@ -4302,9 +4390,9 @@ struct LCDataManagementView : View {
                         // 显示名时必须与候选一致，否则走下面“未安
                         // 装”流程自动新建该名字的实例再恢复。
                         let manifestName = json["displayName"] ?? ""
-                        let candidateName = matches[0].appInfo.displayName() ?? ""
+                        let candidateName = matches[0].displayName
                         if manifestName.isEmpty || manifestName == candidateName {
-                            app = matches[0]
+                            app = matches[0].app
                             fallbackNote = "按 Bundle ID 兜底"
                         }
                     } else if matches.count > 1 {
@@ -4320,12 +4408,12 @@ struct LCDataManagementView : View {
                    let json = await Self.manifestDict(appFolder: appFolder),
                    let manifestName = json["displayName"], !manifestName.isEmpty {
                     let manifestBid = json["bundleIdentifier"] ?? ""
-                    let matches = allApps.filter {
-                        ($0.appInfo.displayName() ?? "") == manifestName &&
-                        (manifestBid.isEmpty || ($0.appInfo.bundleIdentifier() ?? "") == manifestBid)
+                    let matches = allAppIdentities.filter {
+                        $0.displayName == manifestName &&
+                        (manifestBid.isEmpty || $0.bundleIdentifier == manifestBid)
                     }
                     if matches.count == 1 {
-                        app = matches[0]
+                        app = matches[0].app
                         fallbackNote = "按显示名兜底"
                     } else if matches.count > 1 {
                         ambiguousNote = "同名 \(matches.count) 个，无法唯一确定"
@@ -5182,8 +5270,16 @@ struct LCDataManagementView : View {
         }
         // 恢复模块选择：manifest 记着备份时的模块夹，写回；
         // 老备份没有这字段就不动（保持新装默认）
+        // 3.8.543（L73）：tweakFolder 的 setter 写 _info
+        // NSMutableDictionary + [self save]（LCAppInfo.m:218），
+        // 本函数走 startPendingRestore 的裸 Task、不在主 actor
+        // 上（见 restoreFromBackup 注释），离主线程写与主线程
+        // 读（LCAppModel:582/1274/1301/1313）竞态——L72-2
+        // lastLaunched 同款，包进 MainActor.run。
         if !manifestTweakFolder.isEmpty {
-            app.appInfo.tweakFolder = manifestTweakFolder
+            await MainActor.run {
+                app.appInfo.tweakFolder = manifestTweakFolder
+            }
         }
         var restoredExtras = false
         // 3.8.286：组容器恢复失败的组名（P0-3 原子替换后失败
@@ -6047,21 +6143,29 @@ struct LCDataManagementView : View {
             // sharedModel.apps/hiddenApps 是 @Published，直接读是跨
             // 线程读（L54 restoreFromBackup 同款已修）；两表经
             // MainActor.run 一次取齐再遍历，搬文件仍在外面。
-            let (appsSnapshot, hiddenAppsSnapshot) = await MainActor.run {
-                (sharedModel.apps, sharedModel.hiddenApps)
+            // 3.8.543（L73）：元素级也要快照——数组快照只定了数组
+            // 本身，appInfo.containers/tweakFolder 是 _info 读
+            // （containers 的 getter 老格式还会写回升级，见
+            // LCContainer.swift:401），循环里离主线程读是 L70
+            // 漏掉的一层；isShared 是 plain ivar，顺手一起取。
+            // 两段循环体一字相同（隐藏 App 同款），合并成一段，
+            // 顺序与原来一致（先全部、后隐藏）。
+            let appSnapshots = await MainActor.run {
+                (sharedModel.apps + sharedModel.hiddenApps).map { app in
+                    (app: app, isShared: app.appInfo.isShared, containers: app.appInfo.containers, tweakFolder: app.appInfo.tweakFolder)
+                }
             }
             var appDataFoldersInUse : Set<String> = Set();
             var tweakFoldersInUse : Set<String> = Set();
-            for app in appsSnapshot {
-                if !app.appInfo.isShared {
+            for snap in appSnapshots {
+                if !snap.isShared {
                     continue
                 }
-                for container in app.appInfo.containers {
+                for container in snap.containers {
                     appDataFoldersInUse.update(with: container.folderName);
                 }
 
-                
-                if let folder = app.appInfo.tweakFolder {
+                if let folder = snap.tweakFolder {
                     // L59-1：tweakFolder 是 "|" 拼接的多选串（LCAppModel
                     // czfSplitTweakFolders），整串塞进在用集合永远比
                     // 不上磁盘上的单个夹名——共享 App 的多选模块夹
@@ -6070,24 +6174,6 @@ struct LCDataManagementView : View {
                     // 停用改名发生在共享路径，见 LCTweaksView），
                     // 与 moveToAppGroup/moveToPrivateDoc 的候选
                     // [name, name + ".disabled"] 同款。
-                    for name in LCAppModel.czfSplitTweakFolders(folder) {
-                        tweakFoldersInUse.update(with: name)
-                        tweakFoldersInUse.update(with: name + ".disabled")
-                    }
-                }
-
-            }
-            
-            for app in hiddenAppsSnapshot {
-                if !app.appInfo.isShared {
-                    continue
-                }
-                for container in app.appInfo.containers {
-                    appDataFoldersInUse.update(with: container.folderName);
-                }
-                if let folder = app.appInfo.tweakFolder {
-                    // L59-1：同上，隐藏 App 的共享模块夹也先拆 "|"
-                    // 再登记，".disabled" 停用态一起算在用。
                     for name in LCAppModel.czfSplitTweakFolders(folder) {
                         tweakFoldersInUse.update(with: name)
                         tweakFoldersInUse.update(with: name + ".disabled")
@@ -6286,6 +6372,19 @@ struct LCDataManagementView : View {
         return info.backupDate.hasPrefix(fmt.string(from: Date()))
     }
 
+    /// 3.8.543（L73）：后台队列读 App 显示名（displayName/
+    /// bundleIdentifier 是 _info 读；备份 GCD 块里的进度文案/
+    /// 失败清单/日志用）。主线程直读、后台经 main.sync
+    /// （L70 同款，isMainThread 防自死锁）。
+    static func czfAppDisplayName(for app: LCAppModel) -> String {
+        if Thread.isMainThread {
+            return app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+        }
+        return DispatchQueue.main.sync {
+            app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
+        }
+    }
+
     /// v216：多开实例的备份文件夹名。同款多开（同显示名、不同
     /// dataUUID）以前都写 Backups/<显示名>，后备的把先备的整
     /// 文件夹删掉重写——同款两个实例只能留一个备份。规则：
@@ -6300,9 +6399,24 @@ struct LCDataManagementView : View {
     ///    生效），恢复时新旧两种命名都要认（见恢复匹配的
     ///    dataUUID 优先分支）。
     static func backupFolderName(for app: LCAppModel, backupRoot: URL, fm: FileManager) -> String {
-        let base = app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown"
-        let myUUID = app.appInfo.dataUUID ?? ""
-        let myBid = app.appInfo.bundleIdentifier() ?? ""
+        // 3.8.543（L73）：模型读回主线程取快照（displayName/
+        // bundleIdentifier/dataUUID 是 _info 读，installedUUIDs
+        // 读 @Published apps/hiddenApps、firstFolder 读 @Published
+        // uiContainers；本函数被四路备份的后台队列直接调，见
+        // backupOneAppSync 注释）；磁盘枚举仍在调用方线程。
+        // 主线程直读、后台经 main.sync（L70 同款，isMainThread
+        // 防自死锁）。
+        let (base, myUUID, myBid, installedUUIDs, firstFolder): (String, String, String, Set<String>, String) = {
+            let read = {
+                (app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown",
+                 app.appInfo.dataUUID ?? "",
+                 app.appInfo.bundleIdentifier() ?? "",
+                 Set((DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).compactMap { $0.appInfo.dataUUID }),
+                 app.uiContainers.first?.folderName ?? "")
+            }
+            if Thread.isMainThread { return read() }
+            return DispatchQueue.main.sync(execute: read)
+        }()
         guard let folders = try? fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil) else { return base }
         let dirs = folders.filter { !$0.lastPathComponent.hasPrefix(".") && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
         // 1. 同实例已有文件夹：dataUUID 对上就沿用
@@ -6319,7 +6433,6 @@ struct LCDataManagementView : View {
         // 时 dataUUID 自然更新成新的。已锁定的不认领；孤儿有
         // 多个时认备份日期最新的那个。
         do {
-            let installedUUIDs = Set((DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).compactMap { $0.appInfo.dataUUID })
             var orphanCandidates: [(name: String, date: String)] = []
             for folder in dirs {
                 let name = folder.lastPathComponent
@@ -6345,7 +6458,7 @@ struct LCDataManagementView : View {
             let short: String
             if !myUUID.isEmpty {
                 short = String(myUUID.prefix(8))
-            } else if let firstFolder = app.uiContainers.first?.folderName, !firstFolder.isEmpty {
+            } else if !firstFolder.isEmpty {
                 short = String(firstFolder.prefix(8))
             } else {
                 short = "2"
@@ -6737,10 +6850,10 @@ struct LCDataManagementView : View {
                             let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
                             backedUpFolderNames.append(one.folderName)
                             if one.loginFailed > 0 {
-                                copyFailedNames.append("\(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")（\(one.loginFailed) 个文件拷贝失败）")
+                                copyFailedNames.append("\(Self.czfAppDisplayName(for: app))（\(one.loginFailed) 个文件拷贝失败）")
                             }
                         } catch {
-                            failedNames.append(app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "Unknown")
+                            failedNames.append(Self.czfAppDisplayName(for: app))
                         }
                     }
                     if !backedUpFolderNames.isEmpty {

@@ -92,22 +92,34 @@ class AppInfoProvider {
         // 跨线程读（L69 同款）；主线程直读，后台线程经 main.sync 取
         // 快照（磁盘兜底仍在后台跑，不把慢 I/O 搬回主线程；main.sync
         // 只拷数组，极快）。addRunningApp 两路调用方都在主线程。
-        let allApps: [LCAppModel]
-        if Thread.isMainThread {
-            allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
-        } else {
-            allApps = DispatchQueue.main.sync { DataManager.shared.model.apps + DataManager.shared.model.hiddenApps }
-        }
-        
-        for appModel in allApps {
-            if appModel.appInfo.containers.contains(where: { $0.folderName == dataUUID }) {
-                return appModel.appInfo
+        // 3.8.543（L73）：元素级也要快照——数组快照只定了数组本身，
+        // 下面两段循环读的 appInfo.containers/displayName 是 _info
+        // 读（containers 的 getter 老格式还会写回升级，见
+        // LCContainer.swift:401），后台队里读是 L70 漏掉的一层；
+        // 身份字段随数组一次取齐。
+        let readIdentities = {
+            (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).map { appModel in
+                (info: appModel.appInfo,
+                 containerFolders: appModel.appInfo.containers.map { $0.folderName },
+                 displayName: appModel.appInfo.displayName() ?? "")
             }
         }
-        
-        for appModel in allApps {
-            if appModel.appInfo.displayName() == appName {
-                return appModel.appInfo
+        let appIdentities: [(info: LCAppInfo, containerFolders: [String], displayName: String)]
+        if Thread.isMainThread {
+            appIdentities = readIdentities()
+        } else {
+            appIdentities = DispatchQueue.main.sync(execute: readIdentities)
+        }
+
+        for entry in appIdentities {
+            if entry.containerFolders.contains(dataUUID) {
+                return entry.info
+            }
+        }
+
+        for entry in appIdentities {
+            if entry.displayName == appName {
+                return entry.info
             }
         }
         return nil
