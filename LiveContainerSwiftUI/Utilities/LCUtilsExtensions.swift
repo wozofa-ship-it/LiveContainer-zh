@@ -57,6 +57,17 @@ extension LCUtils {
         verifiedTweakFoldersLock.unlock()
     }
 
+    // 证书换了（不同团队）后内存里的“已验过”要作废：指纹表是按
+    // 团队分键的，下次冷启动会重签；但同进程内 isTweakFolderVerified
+    // 会直接短路跳过，插件还留着旧团队的签名、游客里 dlopen 报
+    // 签名无效，直到重启 App 才自愈。导入证书成功后调这里清掉。
+    // 同团队重导也清，无非多签一轮，不亏。
+    static func czfInvalidateVerifiedTweakFolders() {
+        verifiedTweakFoldersLock.lock()
+        verifiedTweakFolders.removeAll()
+        verifiedTweakFoldersLock.unlock()
+    }
+
     // 验签指纹：文件大小+修改时间。文件被换掉/重签都会变，变了就重验。
     private static func tweakFingerprint(of attributes: [FileAttributeKey: Any]) -> String {
         let size = attributes[.size] as? NSNumber ?? 0

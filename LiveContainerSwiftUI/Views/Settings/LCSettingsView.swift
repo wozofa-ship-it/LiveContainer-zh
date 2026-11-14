@@ -1176,6 +1176,10 @@ struct LCSettingsView: View {
         LCUtils.appGroupUserDefault.set(certificatePassword, forKey: "LCCertificatePassword")
         LCUtils.appGroupUserDefault.set(NSDate.now, forKey: "LCCertificateUpdateDate")
         certificateDataFound = true
+        // 证书换了团队：内存里“已验过”的插件夹要作废，否则同进程
+        // 内下次启动直接短路跳过重签，插件留着旧团队签名、游客里
+        // dlopen 报签名无效（直到重启 App 才自愈）。
+        LCUtils.czfInvalidateVerifiedTweakFolders()
 
         UserDefaults.standard.set(LCSharedUtils.appGroupID(), forKey: "LCAppGroupID")
     }
@@ -1268,6 +1272,9 @@ struct LCSettingsView: View {
         LCUtils.appGroupUserDefault.set(password, forKey: "LCCertificatePassword")
         LCUtils.appGroupUserDefault.set(NSDate.now, forKey: "LCCertificateUpdateDate")
         certificateDataFound = true
+        // 与文件导入同款：证书换了团队就作废内存里“已验过”的插件夹，
+        // 否则同进程内下次启动直接短路跳过重签（见 importCertificate）。
+        LCUtils.czfInvalidateVerifiedTweakFolders()
     }
     
     func removeCertificate() async {

@@ -390,10 +390,25 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     if (needPatch || forceSign) {
         // copy-delete-move to avoid EXC_BAD_ACCESS (SIGKILL - CODESIGNING)
         NSString *backupPath = [NSString stringWithFormat:@"%@/%@_LiveContainerPatchBackUp", appPath, _infoPlist[@"CFBundleExecutable"]];
-        NSError *err;
-        [fm copyItemAtPath:execPath toPath:backupPath error:&err];
-        [fm removeItemAtPath:execPath error:&err];
-        [fm moveItemAtPath:backupPath toPath:execPath error:&err];
+        NSError *err = nil;
+        // 三步原来都不查错：上次在这三步之间崩溃会留下旧备份，
+        // 下次 copy 因目标已存在直接失败，接着 remove 照样把
+        // 可执行文件删掉、move 再把旧备份（可能是旧版二进制）
+        // 挪回来；磁盘满时 copy 失败同款——删完主程序就没了，
+        // 只能重装 IPA。先清残留备份，任何一步失败都直接报错，
+        // 删过的尽量把备份挪回来。
+        [fm removeItemAtPath:backupPath error:nil];
+        if (![fm copyItemAtPath:execPath toPath:backupPath error:&err]) {
+            [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
+            completetionHandler(NO, err.localizedDescription ?: @"签名失败：无法备份可执行文件");
+            return;
+        }
+        if (![fm removeItemAtPath:execPath error:&err] || ![fm moveItemAtPath:backupPath toPath:execPath error:&err]) {
+            [fm moveItemAtPath:backupPath toPath:execPath error:nil];
+            [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
+            completetionHandler(NO, err.localizedDescription ?: @"签名失败：无法替换可执行文件");
+            return;
+        }
     }
     
     bool is32bit = false;
