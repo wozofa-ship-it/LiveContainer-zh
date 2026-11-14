@@ -110,10 +110,12 @@ public final class CZFVPNManager {
     // 跑时不写，测完不启动。一次性的，restart 读完即清。
     private var pingStoppedLink: String?
     private var pingStoppedOwner: LCAppInfo?
-    // 测速窗口内被挡下的开 App 请求：只记最后一个，测速完
-    // 再给它 ensureRunning（游客启动时等核心，见 LCAppModel
-    // 的 vpnCoreTask；挡下不等于丢掉）。
-    private var deferredEnsureApp: LCAppInfo?
+    // 测速窗口内被挡下的开 App 请求：全记下来，测速完按启
+    // 动顺序挨个补跑 ensureRunning。只记最后一个会丢掉先启
+    // 动的那个——它 fail-open 起了、之后一直跑在后启动那个
+    // App 的节点上，钉死节点的养号 App 会悄悄换 IP（游客启
+    // 动时等核心，见 LCAppModel 的 vpnCoreTask；挡下不等于丢掉）。
+    private var deferredEnsureApps: [LCAppInfo] = []
     // 旧测速收尾写过的延迟重试链接：只读版测速不再写它，
     // 仅 stop() 在非测速窗口内清掉它作兼容；用户亲手停核
     // 心时同样清掉，不留事后起回来的尾巴。
@@ -156,7 +158,7 @@ public final class CZFVPNManager {
         set { UserDefaults.standard.set(newValue, forKey: "CZFVPNCoreWasRunning") }
     }
     // 测速窗口内被挡下的源下载开关起核心请求：与
-    // deferredEnsureApp 同理，测速收尾再补跑一次。
+    // 与 deferredEnsureApps 同理，测速收尾再补跑一次。
     private var deferredHostEnsure = false
     // 核心关闭后自动停时长（CZF，可调）：设置页“单App VPN”里
     // 选 5 / 10 / 30 分钟，默认 10 分钟（以前写死 30 分钟）。
@@ -820,8 +822,8 @@ public final class CZFVPNManager {
         // 挡下影响。
         vpnCoreLock.lock()
         let pinging = isPinging
-        if pinging, let appInfo {
-            deferredEnsureApp = appInfo
+        if pinging, let appInfo, !deferredEnsureApps.contains(where: { $0 === appInfo }) {
+            deferredEnsureApps.append(appInfo)
         }
         vpnCoreLock.unlock()
         if pinging { return }
@@ -1767,7 +1769,7 @@ public final class CZFVPNManager {
             //    这些是用户/App 自己的动作，不是测速在动核心；
             // 3) 把结果和被拒标志交给 completion，界面据此
             //    决定要不要提示“核心占用”以及要不要禁清理。
-            var deferredApp: LCAppInfo?
+            var deferredApps: [LCAppInfo] = []
             var deferredHost = false
             var postPingActiveLink = prePingActiveLink
             self.vpnCoreLock.lock()
@@ -1784,15 +1786,17 @@ public final class CZFVPNManager {
                     self.pingRetryLink = nil
                 }
                 postPingActiveLink = self.nodeLink
-                deferredApp = self.deferredEnsureApp
-                self.deferredEnsureApp = nil
+                deferredApps = self.deferredEnsureApps
+                self.deferredEnsureApps = []
                 deferredHost = self.deferredHostEnsure
                 self.deferredHostEnsure = false
                 self.isPinging = false
             }
             self.vpnCoreLock.unlock()
-            if let deferredApp {
-                self.ensureRunning(for: deferredApp)
+            if !deferredApps.isEmpty {
+                for app in deferredApps {
+                    self.ensureRunning(for: app)
+                }
             } else if postPingActiveLink != prePingActiveLink {
                 self.applyActiveNodeChange()
             }
@@ -1847,7 +1851,7 @@ public final class CZFVPNManager {
                     }
                 }
             }
-            var deferredApp: LCAppInfo?
+            var deferredApps: [LCAppInfo] = []
             var deferredHost = false
             var postPingActiveLink = prePingActiveLink
             self.vpnCoreLock.lock()
@@ -1862,15 +1866,17 @@ public final class CZFVPNManager {
                     self.pingRetryLink = nil
                 }
                 postPingActiveLink = self.nodeLink
-                deferredApp = self.deferredEnsureApp
-                self.deferredEnsureApp = nil
+                deferredApps = self.deferredEnsureApps
+                self.deferredEnsureApps = []
                 deferredHost = self.deferredHostEnsure
                 self.deferredHostEnsure = false
                 self.isPinging = false
             }
             self.vpnCoreLock.unlock()
-            if let deferredApp {
-                self.ensureRunning(for: deferredApp)
+            if !deferredApps.isEmpty {
+                for app in deferredApps {
+                    self.ensureRunning(for: app)
+                }
             } else if postPingActiveLink != prePingActiveLink {
                 self.applyActiveNodeChange()
             }
