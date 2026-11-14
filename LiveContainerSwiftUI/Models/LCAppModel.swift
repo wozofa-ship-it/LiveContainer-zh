@@ -802,7 +802,8 @@ class LCAppModel: ObservableObject, Hashable {
             return
         }
         defer { czfReleaseLaunch() }
-        if isAppRunning {
+        // 3.8.547（L77）：isAppRunning 是 @Published，runApp 是非隔离 async、裸 Task 执行器上读是 L69/L70 同款；回主线程读（锁已抢到手，读与置位之间别的启动进不来）。
+        if await MainActor.run(body: { isAppRunning }) {
             return
         }
 
@@ -967,10 +968,13 @@ class LCAppModel: ObservableObject, Hashable {
         await MainActor.run {
             isAppRunning = true
         }
+        // 3.8.547（L77）：复位必须在放启动锁之前同步完成——原来 defer 里是 Task { await MainActor.run }：锁的 defer 注册在先、后执行，先放了，复位 Task 可能还没跑到；这时用户立刻再点启动，新 runApp 抢到锁、入口读到仍为 true 的 isAppRunning 就静默返回，点了没反应、再点一次才行（启动失败/取消后立刻重点的真窗口）。同步复位（主线程直写、后台 main.sync，isMainThread 防自死锁，L70/L73 同款）；defer 按注册逆序跑，本 defer 先跑、放锁后跑，放锁时 isAppRunning 已是 false。正常走完时末尾 MainActor.run 已复位过一次，再写一次 false 无害。
         defer {
-            Task { await MainActor.run {
+            if Thread.isMainThread {
                 isAppRunning = false
-            }}
+            } else {
+                DispatchQueue.main.sync { isAppRunning = false }
+            }
         }
         // 单 App VPN 快开（小火箭式）：核心启动与签名并行——
         // 两者无依赖（签名动插件文件、核心只碰 libXray），串
@@ -1196,7 +1200,8 @@ class LCAppModel: ObservableObject, Hashable {
             return
         }
         defer { czfReleaseLaunch() }
-        if isAppRunning {
+        // 3.8.547（L77）：同 runApp 入口——isAppRunning 是 @Published，裸 Task 执行器上读是 L69/L70 同款；回主线程读。
+        if await MainActor.run(body: { isAppRunning }) {
             return
         }
         // 3.8.509（L31）：forceResign 是非隔离 async 方法，await 进来
@@ -1207,11 +1212,13 @@ class LCAppModel: ObservableObject, Hashable {
         await MainActor.run {
             isAppRunning = true
         }
+        // 3.8.547（L77）：同 runApp——复位必须在放启动锁之前同步完成（见 runApp 处注释）；signApp 抛错时走同一窗口。
         defer {
-            Task{ await MainActor.run {
+            if Thread.isMainThread {
                 self.isAppRunning = false
-            }}
-
+            } else {
+                DispatchQueue.main.sync { self.isAppRunning = false }
+            }
         }
         try await signApp(force: true)
     }
