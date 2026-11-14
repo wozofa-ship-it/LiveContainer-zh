@@ -1134,8 +1134,12 @@ extension Notification.Name {
     @objc public func restartApp(uuid: String) {
         guard let app = self.apps.first(where: { $0.appUUID == uuid }) else { return }
         let bundlePath = app.appInfo?.relativeBundlePath ?? ""
-        closeAppWindow(uuid: uuid)
+        // 3.8.561（L92）：空包名守卫原来在关窗之后——appInfo 取不到
+        //（冷启动模型还没扫完、或 App 已删，条目就是 "Unknown App"）
+        // 时 bundlePath 是空串：窗已关、守卫才 return，重启变只关
+        // 不开，用户得手动再拉起。先判空再关窗，判空时窗不动。
         guard !bundlePath.isEmpty else { return }
+        closeAppWindow(uuid: uuid)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             // 跳错修复：重启不再走只带包名的 URL（那边按包名
             // 取首个模型，重启第 2 个实例会拉起第 1 个）；但
