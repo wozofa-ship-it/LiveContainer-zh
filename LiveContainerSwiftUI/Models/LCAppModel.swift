@@ -257,7 +257,11 @@ class LCAppModel: ObservableObject, Hashable {
     ) async {
         guard #available(iOS 16.0, *) else { return }
         guard app.czfInstanceUUID != nil else { return }
-        onProceed()
+        // 3.8.535（L62-1）：本函数从横幅卡/面板的裸 Task 调来、不在主
+        // actor 上，onProceed 是面板的 closePanel（dismissPanelOverlay
+        // 直接动 UIView/dismiss），必须回主线程再调；横幅卡传默认
+        // 空闭包，无行为变化。L38 只包了小窗口路的带回，没包这里。
+        await MainActor.run { onProceed() }
         if czfMinimizeRunningWindow(app) { return }
         let expectedPath = app.appInfo.relativeBundlePath
         let dockManager = MultitaskDockManager.shared
@@ -288,7 +292,10 @@ class LCAppModel: ObservableObject, Hashable {
     ) async {
         guard #available(iOS 16.0, *) else { return }
         guard app.czfInstanceUUID != nil else { return }
-        onProceed()
+        // 3.8.535（L62-1）：同 czfMinimizeApp——onProceed 是面板的
+        // closePanel（dismissPanelOverlay 直接动 UIView/dismiss），
+        // 裸 Task 执行器上调会离主线程动 UI；回主线程再调。
+        await MainActor.run { onProceed() }
         // 3.8.514（L38）：本函数从横幅卡裸 Task 调来、不在主 actor
         // 上，czfBringRunningAppToFront 是纯 UIKit 活（带回/拉满），
         // 必须回主线程再调（横幅卡 :202 与面板 :1510 两处调用方
@@ -338,7 +345,14 @@ class LCAppModel: ObservableObject, Hashable {
         do {
             try await app.runApp(multitask: multitask, containerFolderName: uuid)
         } catch {
-            onError(error.localizedDescription)
+            // 3.8.535（L62-1）：catch 跑在调用方裸 Task 的执行器上
+            // （非隔离 async），onError 是面板的 reportLaunchError
+            // （写 @State launchError）/横幅卡的 showError——前者
+            // 离主线程写 @State 会丢更新、启动失败提示弹不出来
+            // （“点了没反应”同款；超时那路已是 Task @MainActor）。
+            // 回主线程再报。showError 自身已包主线程 dispatch，
+            // 再包一层无害。
+            await MainActor.run { onError(error.localizedDescription) }
             return
         }
         if let freshUUID = app.czfInstanceUUID, freshUUID != uuid, Date() < deadline {

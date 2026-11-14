@@ -3638,7 +3638,13 @@ struct AllAppsListView: View {
                                         do {
                                             _ = try await LCUtils.authenticateUser()
                                         } catch {
-                                            launchError = error.localizedDescription
+                                            // 3.8.535（L62-1）：裸 Task 里 catch
+                                            // 后写 @State launchError——await
+                                            // 回来已在全局执行器上，离主线程
+                                            // 写会丢更新、人脸报错弹不出来；
+                                            // 回主线程再写（同文件 reportLaunchError
+                                            // 的 onError 路同款）。
+                                            await MainActor.run { launchError = error.localizedDescription }
                                         }
                                     }
                                 }
@@ -3997,7 +4003,17 @@ struct SourcesPanelView: View {
             // 坞源面板固定区图标：先认证、通过再关面板跑 App。
             guard await app.czfAuthenticateIfLocked() else { return }
             closePanel()
-            try? await app.runApp()
+            // 3.8.535（L62-3）：原来 try? 把启动失败整个吞掉——签名失败/
+            // 证书缺失时点了毫无反应；同文件 App 面板 launchApp（:3696）
+            // 是 do/catch + reportLaunchError，源面板这里是唯一吞掉的口子。
+            // 本视图没有 reportLaunchError，用自己的 errorMessage + alert
+            //（:4561，安装/下载报错同款宿主）；面板已关仍可报，与 launchApp
+            // 先关面板再报同款。
+            do {
+                try await app.runApp()
+            } catch {
+                await MainActor.run { errorMessage = error.localizedDescription }
+            }
         }
     }
 
@@ -4522,7 +4538,7 @@ struct SourcesPanelView: View {
                                     // “解剖自我 🅥”那行不要，App 直接列出来，
                                     // 照他发的截图那样）。
                                     ForEach(matchedApps(for: source)) { app in
-                                        SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) }, onDownloadVersion: { version in downloadFromPanel(url: version.downloadURL) })
+                                        SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) }, onDownloadVersion: { version in downloadFromPanel(url: version.downloadURL) }, onLaunchError: { errorMessage = $0 })
                                             .padding(.horizontal)
                                     }
                                 }
@@ -4673,6 +4689,10 @@ private struct SourcePanelRow: View {
     let onDownload: () -> Void
     // 3.8.291：历史版本下载——点版本行下载该版本的 URL。
     let onDownloadVersion: (AltStoreSourceAppVersion) -> Void
+    // 3.8.535（L62-3）：启动失败回调——父级 SourcesPanelView 的
+    // errorMessage（已有 alert，安装/下载报错同款宿主）；行里自己
+    // 没有 error 态，不另起 alert。
+    let onLaunchError: (String) -> Void
     @ObservedObject private var sharedModel = DataManager.shared.model
     @ObservedObject private var pinnedStore = CZFPinnedAppsStore.shared
     @State private var copied = false
@@ -4817,7 +4837,16 @@ private struct SourcePanelRow: View {
                     Task {
                         // 坞源面板行「打开」：先过锁守卫，认证未通过直接 return。
                         guard await only.czfAuthenticateIfLocked() else { return }
-                        try? await only.runApp()
+                        // 3.8.535（L62-3）：原来 try? 把启动失败整个吞掉——
+                        // 签名失败/证书缺失时点了毫无反应；App 页三路全是
+                        // do/catch + 弹错。父级已有 errorMessage + alert
+                        //（安装/下载报错同款宿主），走 onLaunchError 回去
+                        //（裸 Task，回主线程再调）。
+                        do {
+                            try await only.runApp()
+                        } catch {
+                            await MainActor.run { onLaunchError(error.localizedDescription) }
+                        }
                     }
                 } else if matches.count > 1 {
                     // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
@@ -4862,7 +4891,14 @@ private struct SourcePanelRow: View {
                         Task {
                             // 坞源面板实例选择器：先过锁守卫，认证未通过直接 return。
                             guard await model.czfAuthenticateIfLocked() else { return }
-                            try? await model.runApp()
+                            // 3.8.535（L62-3）：同款——try? 吞启动失败，do/catch 后
+                            // 走 onLaunchError 回父级 errorMessage 弹（裸 Task，
+                            // 回主线程再调；单已先关完）。
+                            do {
+                                try await model.runApp()
+                            } catch {
+                                await MainActor.run { onLaunchError(error.localizedDescription) }
+                            }
                         }
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {

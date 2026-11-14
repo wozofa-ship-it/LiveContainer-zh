@@ -1418,7 +1418,18 @@ public final class CZFVPNManager {
                 // 起成功才写的形状，这里照它。
                 if Self.nodeOverride(for: appInfo) != nil {
                     Self.setNodeOverride(target, for: appInfo)
-                } else if let idx = links.firstIndex(of: target) {
+                } else if let idx = nodeLinks.firstIndex(of: target) {
+                    // 3.8.535（L62-2）：下标按当前列表现查——上面
+                    // links 是函数入口快照，start(withLink:) 同步
+                    // 阻塞几秒里列表可能已变：L56 注“整函数在主队
+                    // 列 work item 里同步跑完、设置页改不了表”
+                    // 只对了设置页那半——设置备份恢复在后台任务
+                    // 里直接写 CZFVPNNodeLinks（LCDataManagementView
+                    // applySettingsDictionary，注释自认“恢复在后
+                    // 台任务里”），旧下标会指错行、还把恢复写回
+                    // 的活动下标又盖掉（L56 startFallback 同款，
+                    // L51-12 waitUntilNodeReady 同款）；链接已不
+                    // 在列表里时不写下标，核心照常跑这条链接。
                     UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
                 }
                 vpnCoreLock.lock()

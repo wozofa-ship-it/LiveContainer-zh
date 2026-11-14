@@ -2161,6 +2161,8 @@ struct LCSourceAppBanner: View {
     @State private var ignoreRefresh = false
     // 机制 2：多开时“打开”绝不静默取首个，多个实例弹实例选择
     @State private var showInstancePicker = false
+    // 3.8.535（L62-3）：启动失败本地报错——见下面「打开」两处注释。
+    @State private var launchError: String?
     
     private var isInstalled: Bool {
         (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
@@ -2375,7 +2377,17 @@ struct LCSourceAppBanner: View {
                                 Task {
                                     // S-1：源页「打开」先过锁守卫，认证未通过直接 return。
                                     guard await only.czfAuthenticateIfLocked() else { return }
-                                    try? await only.runApp()
+                                    // 3.8.535（L62-3）：原来 try? 把启动失败整个吞掉——
+                                    // 签名失败/证书缺失/签名超时时点了毫无反应，用户只能
+                                    // 当“没点上”再点一次。App 页三路（网格 launchAppWithBundleId、
+                                    // 多任务 czfGridLaunchMultitask、横幅 runApp）全是
+                                    // do/catch + 弹错，源页这里是唯一吞掉的口子；do/catch
+                                    // 后写本行本地 launchError 弹（裸 Task，回主线程再写）。
+                                    do {
+                                        try await only.runApp()
+                                    } catch {
+                                        await MainActor.run { launchError = error.localizedDescription }
+                                    }
                                 }
                             } else if matches.count > 1 {
                                 showInstancePicker = true
@@ -2484,7 +2496,13 @@ struct LCSourceAppBanner: View {
                         Task {
                             // S-1：实例选择器「打开」先过锁守卫，认证未通过直接 return。
                             guard await model.czfAuthenticateIfLocked() else { return }
-                            try? await model.runApp()
+                            // 3.8.535（L62-3）：同款——try? 吞启动失败，do/catch 后
+                            // 写本行本地 launchError 弹（裸 Task，回主线程再写）。
+                            do {
+                                try await model.runApp()
+                            } catch {
+                                await MainActor.run { launchError = error.localizedDescription }
+                            }
                         }
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
@@ -2503,6 +2521,14 @@ struct LCSourceAppBanner: View {
                     }
                 }
             }
+        }
+        // 3.8.535（L62-3）：启动失败本地弹——挂在本行上，列表/网格两
+        // 个宿主都能弹（父级 LCSourcesView 的 errorMessage 在行里够不着，
+        // 也不经过它）；实例选择器那路先关单再启动，出错时单已关完。
+        .alert("lc.common.error".loc, isPresented: Binding(get: { launchError != nil }, set: { if !$0 { launchError = nil } })) {
+            Button("lc.common.ok".loc, role: .cancel) { launchError = nil }
+        } message: {
+            Text(launchError ?? "")
         }
     }
 }
