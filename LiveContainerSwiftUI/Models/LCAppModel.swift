@@ -870,10 +870,12 @@ class LCAppModel: ObservableObject, Hashable {
             // 用旧的 containerFolderName，否则拆了也白拆。
             czfSplitSharedContainerIfNeeded()
         }
-        let currentDataFolder = uiSelectedContainer?.folderName
+        // 3.8.545（L75）：本函数是非隔离 async，横幅卡/面板/App 页的裸 Task 调来（L32 注释）；下面各点读 @Published/_info 全在裸 Task 执行器上，L32 只包了容器准备段——逐点回主线程取当前值（L74-1 同款）。
+        let currentDataFolder = await MainActor.run { uiSelectedContainer?.folderName }
         
-        let classicMode = appInfo.defaultClassicMode
-        let multitask = classicMode == 0 ? (multitask ?? shouldLaunchInMultitaskMode) : false
+        // 3.8.545（L75）：defaultClassicMode 读 _info 缓存、未命中还写 _info + save（LCAppInfo.m:672），shouldLaunchInMultitaskMode 读 @Published uiIsMultitaskModeSpecificed；逐点取。
+        let classicMode = await MainActor.run { appInfo.defaultClassicMode }
+        let multitask = classicMode == 0 ? (multitask ?? await MainActor.run { shouldLaunchInMultitaskMode }) : false
         
         if MultitaskManager.isMultitasking() || multitask,
            let currentDataFolder {
@@ -889,8 +891,10 @@ class LCAppModel: ObservableObject, Hashable {
 //        }
         
         // if the selected container is in use (either other lc or multitask), open the host lc associated with it
+        // 3.8.545（L75）：逐点取当前值（同 :873 注释）。
+        let launchContainerFolderName = await MainActor.run { uiSelectedContainer?.folderName }
         if
-            let fn = uiSelectedContainer?.folderName,
+            let fn = launchContainerFolderName,
             var runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: fn)
         {
             runningLC = (runningLC as NSString).deletingPathExtension
@@ -915,16 +919,20 @@ class LCAppModel: ObservableObject, Hashable {
         
         // find a free lc to run non-multitasking shared app. If none, ask user if they want to terminate all multitasking apps
         if MultitaskManager.isMultitasking() && !multitask {
-            if self.uiIsShared {
+            // 3.8.545（L75）：uiIsShared 是 @Published，逐点取当前值。
+            let launchIsShared = await MainActor.run { self.uiIsShared }
+            if launchIsShared {
                 var freeScheme: String? = nil
                 LCUtils.forEachInstalledLC(isFree: true) { scheme, shouldBreak in
                     freeScheme = scheme
                     shouldBreak = true
                 }
                 if let freeScheme {
+                    // 3.8.545（L75）：同 :873；本块内两处读的是同一次交接的同一个容器，一次取齐（中间无 await）。
+                    let handoverFolderName = await MainActor.run { uiSelectedContainer?.folderName }
                     LCUtils.appGroupUserDefault.set(freeScheme, forKey: "LCLaunchExtensionScheme")
                     LCUtils.appGroupUserDefault.set(self.appInfo.relativeBundlePath, forKey: "LCLaunchExtensionBundleID")
-                    LCUtils.appGroupUserDefault.set(uiSelectedContainer?.folderName, forKey: "LCLaunchExtensionContainerName")
+                    LCUtils.appGroupUserDefault.set(handoverFolderName, forKey: "LCLaunchExtensionContainerName")
                     if let urlStr {
                         LCUtils.appGroupUserDefault.set(urlStr, forKey: "LCLaunchExtensionLaunchURL")
                     }
@@ -936,7 +944,7 @@ class LCAppModel: ObservableObject, Hashable {
                     if let bundlePath = self.appInfo.relativeBundlePath {
                         queryItems.append(URLQueryItem(name: "bundle-name", value: bundlePath))
                     }
-                    if let folderName = uiSelectedContainer?.folderName {
+                    if let folderName = handoverFolderName {
                         queryItems.append(URLQueryItem(name: "container-folder-name", value: folderName))
                     }
                     
@@ -991,7 +999,8 @@ class LCAppModel: ObservableObject, Hashable {
             }
         }
 
-        var jitNeeded = appInfo.isJITNeeded || appInfo.is32bit
+        // 3.8.545（L75）：isJITNeeded 读 _info（LCAppInfo.m:634）；is32bit 是 init 后不变的 bool ivar，顺手同跳取。
+        var jitNeeded = await MainActor.run { appInfo.isJITNeeded || appInfo.is32bit }
         if let forceJIT {
             jitNeeded = forceJIT
         }
@@ -1032,7 +1041,9 @@ class LCAppModel: ObservableObject, Hashable {
         }
         var czfGateHeld = false
         var czfGateUUID: String?
-        if czfMultitaskLaunchHere, let folderName = uiSelectedContainer?.folderName {
+        // 3.8.545（L75）：逐点取当前值——门按这个容器号认，取号与持门之间无 await，不会错位。
+        let gateFolderName = await MainActor.run { uiSelectedContainer?.folderName }
+        if czfMultitaskLaunchHere, let folderName = gateFolderName {
             czfGateHeld = try await CZFMultitaskLaunchGate.shared.acquire(for: folderName)
             if czfGateHeld {
                 czfGateUUID = folderName
@@ -1057,9 +1068,15 @@ class LCAppModel: ObservableObject, Hashable {
             if let urlStr {
                 UserDefaults.standard.setValue(urlStr, forKey: "launchAppUrlScheme")
             }
-            UserDefaults.standard.set(uiSelectedContainer?.folderName, forKey: "selectedContainer")
+            // 3.8.545（L75）：逐点取当前值。
+            let keyContainerFolder = await MainActor.run { uiSelectedContainer?.folderName }
+            UserDefaults.standard.set(keyContainerFolder, forKey: "selectedContainer")
         }
 
+        // 3.8.545（L75）：下面三路 launch 用的名字、脚本、容器是“本次启动”的身份——delegate 回调与门（:1035 已按容器号持门）都按启动时定下的那一份走，中途改名/切容器不应让同一路启动前后用两份身份；启动决策点一次取齐（displayName 读 _info，jitLaunchScriptJs 与 uiSelectedContainer 是 @Published）。
+        let launchDisplayName = await MainActor.run { appInfo.displayName() }
+        let launchJITScript = await MainActor.run { jitLaunchScriptJs }
+        let launchContainerFolder = await MainActor.run { uiSelectedContainer?.folderName }
         // JIT 确认取消时不盖“最近启动”：delegate 的 jitLaunch 返 Bool，
         // 取消返 false；其它路（多任务/直接启动）照常盖戳。
         var czfDidLaunch = true
@@ -1082,7 +1099,7 @@ class LCAppModel: ObservableObject, Hashable {
                             continuation.resume(throwing: "Guest app did not initialize in 30 seconds")
                         }
                     }
-                    LCUtils.launchMultitaskGuestApp(appInfo.displayName()) { pidNumber, error in
+                    LCUtils.launchMultitaskGuestApp(launchDisplayName) { pidNumber, error in
                         if let error {
                             czfPidTimeout.cancel()
                             if czfPidBox.take() {
@@ -1098,10 +1115,10 @@ class LCAppModel: ObservableObject, Hashable {
                             return
                         }
                         Task {
-                            if let scriptData = self.jitLaunchScriptJs, !scriptData.isEmpty {
-                                await self.delegate?.jitLaunch(withPID: pidNumber.intValue, withScript: scriptData, appName: self.appInfo.displayName())
+                            if let scriptData = launchJITScript, !scriptData.isEmpty {
+                                await self.delegate?.jitLaunch(withPID: pidNumber.intValue, withScript: scriptData, appName: launchDisplayName)
                             } else {
-                                await self.delegate?.jitLaunch(withPID: pidNumber.intValue, withScript: nil, appName: self.appInfo.displayName())
+                                await self.delegate?.jitLaunch(withPID: pidNumber.intValue, withScript: nil, appName: launchDisplayName)
                             }
                             czfPidTimeout.cancel()
                             await MainActor.run {
@@ -1116,14 +1133,14 @@ class LCAppModel: ObservableObject, Hashable {
                 // Non-multitask JIT：启动键由 delegate 在 JIT 确认后写
                 // （见 jitLaunch(withScript:)），这里只传值不写键；
                 // bundleIdOverride 为空时退回自身包路径，与旧写键一致。
-                if let scriptData = jitLaunchScriptJs, !scriptData.isEmpty {
-                    czfDidLaunch = await delegate?.jitLaunch(withScript: scriptData, appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr) ?? false
+                if let scriptData = launchJITScript, !scriptData.isEmpty {
+                    czfDidLaunch = await delegate?.jitLaunch(withScript: scriptData, appName: launchDisplayName, classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: launchContainerFolder, launchURL: urlStr) ?? false
                 } else {
-                    czfDidLaunch = await delegate?.jitLaunch(appName: self.appInfo.displayName(), classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: uiSelectedContainer?.folderName, launchURL: urlStr) ?? false
+                    czfDidLaunch = await delegate?.jitLaunch(appName: launchDisplayName, classicMode: classicMode, selectedBundlePath: bundleIdOverride ?? self.appInfo.relativeBundlePath, selectedContainerFolder: launchContainerFolder, launchURL: urlStr) ?? false
                 }
             }
         } else if multitask, #available(iOS 16.0, *) {
-            try await LCUtils.launchMultitaskGuestApp(appInfo.displayName())
+            try await LCUtils.launchMultitaskGuestApp(launchDisplayName)
         } else {
             if #available(iOS 26.0, *), FileManager.default.fileExists(atPath: "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE") {
                 let fileContents = "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE".data(using: .utf8)
@@ -1278,11 +1295,14 @@ class LCAppModel: ObservableObject, Hashable {
 
         // 单 App VPN（验证版）：开着 VPN 又没选 CZFVPN 目录的，
         // 把它加进模块文件夹列表，重定向插件才有地方部署
+        // 3.8.545（L75）：signApp 走 runApp/forceResign 的裸 Task 执行器；tweakFolder 读/写 _info（LCAppInfo.m:218），isEnabled 那路经 L75-2 的 helper 已回主线程取 bundleId；读-改-写合进同一跳，中间插不进别的写。
         if CZFVPNManager.isEnabled(for: appInfo) {
-            var folders = Self.czfSplitTweakFolders(appInfo.tweakFolder)
-            if !folders.contains("CZFVPN") {
-                folders.append("CZFVPN")
-                appInfo.tweakFolder = Self.czfJoinTweakFolders(folders)
+            await MainActor.run {
+                var folders = Self.czfSplitTweakFolders(appInfo.tweakFolder)
+                if !folders.contains("CZFVPN") {
+                    folders.append("CZFVPN")
+                    appInfo.tweakFolder = Self.czfJoinTweakFolders(folders)
+                }
             }
         }
 
@@ -1294,7 +1314,11 @@ class LCAppModel: ObservableObject, Hashable {
         // 根本没跑过）。有插件要签却没证书时直接报错，让用户
         // 去设置里重导证书，而不是放进游客弹看不懂的错。
         // 没插件的游客、禁注入的游客不受影响，照常启动。
-        if !appInfo.dontInjectTweakLoader,
+        // 3.8.545（L75）：dontInjectTweakLoader/tweakFolder 读 _info，isShared 是设置页可改的 plain 属性（L74-1 同款）；本块一次取齐。
+        let (certDontInject, certTweakFolders, certIsShared) = await MainActor.run {
+            (appInfo.dontInjectTweakLoader, Self.czfSplitTweakFolders(appInfo.tweakFolder), appInfo.isShared)
+        }
+        if !certDontInject,
            LCSharedUtils.certificatePassword() == nil || LCUtils.certificateData() == nil {
             let fm = FileManager.default
             func folderHasTweak(_ url: URL) -> Bool {
@@ -1306,8 +1330,8 @@ class LCAppModel: ObservableObject, Hashable {
             }
             var hasTweaks = folderHasTweak(LCPath.tweakPath)
             if !hasTweaks {
-                for f in Self.czfSplitTweakFolders(appInfo.tweakFolder) {
-                    let u = appInfo.isShared ? LCPath.lcGroupTweakPath.appendingPathComponent(f) : LCPath.tweakPath.appendingPathComponent(f)
+                for f in certTweakFolders {
+                    let u = certIsShared ? LCPath.lcGroupTweakPath.appendingPathComponent(f) : LCPath.tweakPath.appendingPathComponent(f)
                     if folderHasTweak(u) { hasTweaks = true; break }
                 }
             }
@@ -1318,9 +1342,13 @@ class LCAppModel: ObservableObject, Hashable {
 
         // 逐个签所选的模块文件夹（多选；一个没选就直接收尾，
         // 和旧版 guard 返回等价）
-        for tweakFolder in Self.czfSplitTweakFolders(appInfo.tweakFolder) {
+        // 3.8.545（L75）：上面全局插件签名是 await，tweakFolder 可能已变；进循环前现取（L74-1 逐点取当前值同款）。
+        let (signTweakFolders, signIsShared) = await MainActor.run {
+            (Self.czfSplitTweakFolders(appInfo.tweakFolder), appInfo.isShared)
+        }
+        for tweakFolder in signTweakFolders {
             let tweakFolderUrl: URL
-            if appInfo.isShared {
+            if signIsShared {
                 tweakFolderUrl = LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolder)
             } else {
                 tweakFolderUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
@@ -1328,7 +1356,7 @@ class LCAppModel: ObservableObject, Hashable {
             // 自愈：转共享时没搬过来的旧文件夹（以前整串当一个路径搬，
             // 多选时直接失败），重开 App 时顺手搬过去，不然共享 App
             // 永远读不到它，重新开也没用。目标已存在时不动，不覆盖。
-            if appInfo.isShared {
+            if signIsShared {
                 let privateUrl = LCPath.tweakPath.appendingPathComponent(tweakFolder)
                 let fm = FileManager.default
                 if !fm.fileExists(atPath: tweakFolderUrl.path),

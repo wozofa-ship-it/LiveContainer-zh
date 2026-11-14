@@ -623,13 +623,19 @@ public final class CZFVPNManager {
         ["vmess", "vless", "hysteria2", "hy2", "ss", "socks", "socks5", "trojan", "json", "tuic"].contains(scheme)
     }
 
+    /// 3.8.545（L75）：bundleIdentifier() 读 _info（doUseLCBundleId 时读 LCOrignalBundleIdentifier，见 LCAppInfo.m:188）；下面五处 helper 被 signApp/runApp/ensureRunning/waitUntilNodeReady/startFallback 的后台任务调，离主线程读与主线程写竞态（L70/L72-2 同款）。主线程直读、后台经 main.sync 取（L70/L73 同款，isMainThread 防自死锁；只拷一个字符串，极快，不把文件 I/O 搬回主线程）。注意：绝不在持 vpnCoreLock 时调它——主线程可能正等这把锁，会死锁；claim 那处先在锁外取（见该函数注释）。
+    private static func czfBundleId(for appInfo: LCAppInfo) -> String? {
+        if Thread.isMainThread { return appInfo.bundleIdentifier() }
+        return DispatchQueue.main.sync { appInfo.bundleIdentifier() }
+    }
+
     public static func isEnabled(for appInfo: LCAppInfo) -> Bool {
-        guard let bundleId = appInfo.bundleIdentifier() else { return false }
+        guard let bundleId = czfBundleId(for: appInfo) else { return false }
         return UserDefaults.standard.bool(forKey: enabledKeyPrefix + bundleId)
     }
 
     public static func setEnabled(_ enabled: Bool, for appInfo: LCAppInfo) {
-        guard let bundleId = appInfo.bundleIdentifier() else { return }
+        guard let bundleId = czfBundleId(for: appInfo) else { return }
         UserDefaults.standard.set(enabled, forKey: enabledKeyPrefix + bundleId)
         // 养号锁定（1）：刚打开 VPN 且还没钉过节点、也没亲手选
         // 过跟随全局时，立刻把当前全局节点钉成这个 App 的专属
@@ -647,7 +653,7 @@ public final class CZFVPNManager {
 
     // 用户是否在 App 设置里亲手选过"跟随全局"（缺省 false）
     public static func isFollowGlobalExplicit(for appInfo: LCAppInfo) -> Bool {
-        guard let bundleId = appInfo.bundleIdentifier() else { return false }
+        guard let bundleId = czfBundleId(for: appInfo) else { return false }
         return UserDefaults.standard.bool(forKey: followGlobalKeyPrefix + bundleId)
     }
 
@@ -657,13 +663,13 @@ public final class CZFVPNManager {
     // App 的 IP 归属；删了菜单项就悄悄换 IP，正是养号最忌
     // 讳的。亲手选跟随全局时才回落全局
     public static func nodeOverride(for appInfo: LCAppInfo) -> String? {
-        guard let bundleId = appInfo.bundleIdentifier() else { return nil }
+        guard let bundleId = czfBundleId(for: appInfo) else { return nil }
         let saved = UserDefaults.standard.string(forKey: nodeOverrideKeyPrefix + bundleId)
         return (saved?.isEmpty == false) ? saved : nil
     }
 
     public static func setNodeOverride(_ link: String?, for appInfo: LCAppInfo) {
-        guard let bundleId = appInfo.bundleIdentifier() else { return }
+        guard let bundleId = czfBundleId(for: appInfo) else { return }
         if let link, !link.isEmpty {
             UserDefaults.standard.set(link, forKey: nodeOverrideKeyPrefix + bundleId)
             UserDefaults.standard.removeObject(forKey: followGlobalKeyPrefix + bundleId)
@@ -846,9 +852,10 @@ public final class CZFVPNManager {
         // 必须有 bundleId，nil 调用方直接跳过守卫——测速中途
         // 别的 App 刚起了核心，收尾会把它抢回旧节点、还把归属
         // 写成 bundleId/空 appInfo 不同步的一对。
+        // 3.8.545（L75）：bundleIdentifier() 读 _info，离主线程读竞态；经 helper 取（此处未持锁，main.sync 安全）。
         if isRunning,
            let owner = coreOwnerBundleId,
-           appInfo?.bundleIdentifier() != owner {
+           appInfo.flatMap({ Self.czfBundleId(for: $0) }) != owner {
             lastError = "核心正被另一个已钉死节点的 App 占用，暂不切换（手动在设置里切节点可强制切换）"
             return
         }
@@ -871,10 +878,12 @@ public final class CZFVPNManager {
     /// 归属写成自己——归属与在跑链接对不上，轮换巡检会按错
     /// App 读统计。没认领时不排轮换，归属方自己的那路会排。
     private func claimCoreOwnershipIfRunning(link: String, for appInfo: LCAppInfo?) {
+        // 3.8.545（L75）：bundleIdentifier() 读 _info，离主线程读竞态；先在锁外取——main.sync 绝不能在持锁时调（主线程可能正等这把锁，会死锁），bundleId 不会变，锁外取与锁内取同一值。
+        let claimBid = appInfo.flatMap { Self.czfBundleId(for: $0) }
         vpnCoreLock.lock()
         let claimed = isRunning && runningLink == link
         if claimed {
-            if let bid = appInfo?.bundleIdentifier() {
+            if let bid = claimBid {
                 coreOwnerBundleId = bid
             }
             // appInfo 为 nil 时不动归属：上面只在有值时改
