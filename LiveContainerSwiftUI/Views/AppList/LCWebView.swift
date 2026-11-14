@@ -402,7 +402,16 @@ struct LCWebView: View {
         // 享、tmp 子目录又没人清（completion 只认创建时抓的那一
         // 个）。排队非空也进队：onDismiss 已弹出下一个、正等下
         // 一跳主线程再弹 sheet 的窗口里，新来的直接覆盖又会丢。
-        if showShareSheet || !pendingShareFileURLs.isEmpty {
+        // 3.8.507（L29）：那一跳窗口里排队已空、showShareSheet
+        // 仍是 false，旧条件（只看 sheet/排队）会把又下完的一
+        // 个走直接分支、盖掉 onDismiss 刚弹出的那一个：被盖的
+        // 既没分享、tmp 子目录又没人清。shareFileURL 非 nil
+        // 当且仅当下载分享 sheet 正开着或正等重弹：直接分支
+        // 里它与 showShareSheet=true 在同一同步块；onDismiss
+        // 里先置 nil、同一同步块内又换成下一个并已排好下一跳
+        // 重弹，中间无挂起、别的任务插不进来。把它也算进排
+        // 队条件；平时分享当前页时 shareFileURL 是 nil，不影响。
+        if showShareSheet || shareFileURL != nil || !pendingShareFileURLs.isEmpty {
             pendingShareFileURLs.append(url)
         } else {
             shareFileURL = url
