@@ -3332,6 +3332,8 @@ private struct CZFPinnedReorderDelegate: DropDelegate {
 struct PinnedAppsStripView: View {
     @ObservedObject var sortManager = LCAppSortManager.shared
     @ObservedObject var pinnedStore = CZFPinnedAppsStore.shared
+    // 3.8.563（L94）：固定区要认刷脸解锁态——隐藏 App 只在解锁后才进固定区（见下面 pinnedItems），解锁翻转时条带要跟着重算。
+    @ObservedObject private var sharedModel = DataManager.shared.model
     let onLaunch: (LCAppModel) -> Void
     // 3.8.284：空态提示文案可改——App 面板用默认句，源面板
     // 下面没有可固定的行，默认句会误导，调用方传自己的
@@ -3384,6 +3386,8 @@ struct PinnedAppsStripView: View {
     // 固定区顺序跟固定顺序走（不再跟列表排序走）：按住拖动
     // 换位改的就是这个顺序；已删 App 的残留键自然掉。
     private var pinnedItems: [PinnedStripItem] {
+        // 3.8.563（L94）：隐藏 App 只在刷脸解锁后才进固定区——排序管理器照常维护 sortedHiddenApps（没解锁时里面也有模型），直接查会把隐藏 App 的图标露在面板顶部，人脸白设了；与下面列表隐藏区同款守卫。没解锁时只查可见表，固定过的隐藏 App 解锁后才出现（不是固定丢了）。
+        let czfVisibleModels = sortManager.sortedApps + (sharedModel.isHiddenAppUnlocked ? sortManager.sortedHiddenApps : [])
         // 3.8.295：按 pinKey 去重（保留第一项）——同一 App 可能同
         // 时以 pinKey 与 src: 键固定；src: 的已装项 295 后也解成
         // .installed，pinKey 与普通固定项相同，ForEach(id: pinKey)
@@ -3397,17 +3401,18 @@ struct PinnedAppsStripView: View {
                 // 器也能显示（之前只走 resolver，App 面板直接跳
                 // 过，源 App 在 App 面板永远固定不上；源面板里远
                 // 程图标下不来时也只剩灰块，看着像没固定上）。没
-                // 装的才走源解析（点按走安装）。已装查找含隐藏
-                // App（sortedApps 只有可见 App，隐藏的在另一份
-                // sortedHiddenApps；源行 isInstalled 查的是两者之和）。
-                if let app = (sortManager.sortedApps + sortManager.sortedHiddenApps).first(where: { $0.appInfo.bundleIdentifier() == bundleID }) {
+                // 装的才走源解析（点按走安装）。已装查找含解锁后
+                // 的隐藏 App（sortedApps 只有可见 App，隐藏的在
+                // 另一份 sortedHiddenApps，上面已按解锁态拼进
+                // czfVisibleModels；源行 isInstalled 查的是两者之和）。
+                if let app = czfVisibleModels.first(where: { $0.appInfo.bundleIdentifier() == bundleID }) {
                     return .installed(app)
                 }
                 guard let resolver = sourceAppResolver else { return nil }
                 guard let app = resolver(bundleID) else { return nil }
                 return .source(app)
             }
-            if let app = sortManager.sortedApps.first(where: { CZFPinnedAppsStore.pinKey(for: $0) == id }) {
+            if let app = czfVisibleModels.first(where: { CZFPinnedAppsStore.pinKey(for: $0) == id }) {
                 return .installed(app)
             }
             return nil
@@ -3513,8 +3518,9 @@ struct PinnedAppsStripView: View {
         // 旧版按包名存的固定项迁移：面板打开时跑一次（模型到了
         // 才跑，模型没到不记完成、下次打开再跑；跑过一次就不再跑）。
         // 任务绑模型数：模型表从空变有也触发，不会卡在空表上。
+        // 3.8.563（L94）：迁移的模型表也带上隐藏 App——只传可见表时，隐藏 App 的旧包名键永远对不上号（多实例也断不定），固定丢了还找不回来；冷启动两表在同一个 MainActor.run 块里一次赋值，任务触发时两表都已到了。
         .task(id: sortManager.sortedApps.count) {
-            pinnedStore.migrateLegacyPins(models: sortManager.sortedApps)
+            pinnedStore.migrateLegacyPins(models: sortManager.sortedApps + sortManager.sortedHiddenApps)
         }
     }
 }

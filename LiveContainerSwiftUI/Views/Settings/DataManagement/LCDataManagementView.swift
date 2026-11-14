@@ -5471,11 +5471,7 @@ struct LCDataManagementView : View {
         if let files = try? fm.contentsOfDirectory(at: keychainBackup, includingPropertiesForKeys: nil) {
             let plistFiles = files.filter { $0.pathExtension == "plist" }
             outcome.keychainPlistFiles = plistFiles.count
-            for file in plistFiles {
-                if let plist = await Self.readKeychainPlist(file: file) {
-                    outcome.keychainFound += plist.items.count
-                }
-            }
+            // 3.8.563（L94）：条数不在这里计——这一遍读没有触发下载/重试，iCloud 占位文件第一遍读不出、下面第二遍下载重试后才读出来，条数会少算，报告“备份含 0 条”/登录态“没有钥匙串快照”就与实际已排队/已直写的条数对不上；条数移到下面真正读出来那处计。
             // 没容器可落先补一个：刚装完还没打开过的 App 一个
             // 容器都没有（列表里标"数据文件夹未创建"），仅密匙
             // 备份又没有容器文件夹可借道恢复，钥匙串整份落空
@@ -5542,6 +5538,8 @@ struct LCDataManagementView : View {
                 }
                 let data = plist.data
                 let items = plist.items
+                // 3.8.563（L94）：条数在这里计（见上面第一遍处的注）——只计真正读出来的那份，下载重试后才读出来的也算上；重试 5 秒仍读不出的不计，报告里的“有快照文件但读出 0 条”诊断才对得上。
+                outcome.keychainFound += items.count
                 let writeResult = await Self.importKeychainItems(items, container: target)
                 outcome.keychainImported += writeResult.imported
                 if writeResult.imported == 0 && writeResult.lastStatus != errSecSuccess {
