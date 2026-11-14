@@ -30,11 +30,17 @@ struct LCWebView: View {
     // 那一个）。onDismiss 里按队弹出下一个再弹 sheet。
     @State private var pendingShareFileURLs: [URL] = []
     
-    @State private var runAppAlert = YesNoHelper()
+    @StateObject private var runAppAlert = YesNoHelper()
     @State private var runAppAlertMsg = ""
     
-    @State private var installAppAlert = YesNoHelper()
+    @StateObject private var installAppAlert = YesNoHelper()
     @State private var installAppAlertMsg = ""
+    // 3.8.527（L54）：本次会话内已拒绝过的“用 App 打开”提示
+    // 不再重复弹——拒绝记下来，命中就静默留网页。Universal
+    // Link 按 (host, bundleID) 记，自定义 scheme 按 scheme 记；
+    // 只记本次会话（@State），下次打开网页重新问。
+    @State private var czfDeclinedUniversalLinks: Set<String> = []
+    @State private var czfDeclinedSchemes: Set<String> = []
     
     @State private var errorShow = false
     @State private var errorInfo = ""
@@ -226,12 +232,12 @@ struct LCWebView: View {
         // WKWebView 自带 window，装着弹窗的就是那扇窗。
         guard let window = webView.webView.window,
               let rootVC = window.rootViewController else { return }
-        var topVC = rootVC
-        while let presented = topVC.presentedViewController {
-            topVC = presented
-        }
-        if topVC.presentingViewController != nil {
-            topVC.dismiss(animated: true)
+        // 3.8.527（L54）：原来沿链走到最顶层、只关那一层——分享
+        // sheet/alert 开着时关/最小化只关那层、网页本体留着。
+        // 改从 rootVC 关整条呈现链：rootVC.dismiss 会把链上所有
+        // 已呈现的控制器一起关掉；链上没东西时是空操作。
+        if rootVC.presentedViewController != nil {
+            rootVC.dismiss(animated: true)
         }
     }
 
@@ -441,6 +447,20 @@ struct LCWebView: View {
     }
     
     public func onURLSchemeDetected(url: URL) async {
+        // 3.8.527（L54）：系统 scheme（mailto/tel/sms/facetime）
+        // 原来走到下面按已装 App 的自定义 scheme 找，找不到就
+        // 弹“打不开”假错——系统应用根本不在那张表里。先认白名
+        // 单、直接外部打开；打不开（没装电话/邮件）才报真错。
+        if let scheme = url.scheme?.lowercased(),
+           ["mailto", "tel", "sms", "facetime"].contains(scheme) {
+            if UIApplication.shared.canOpenURL(url) {
+                await UIApplication.shared.open(url)
+            } else {
+                errorInfo = "lc.appList.schemeCannotOpenError %@".localizeWithFormat(url.scheme!)
+                errorShow = true
+            }
+            return
+        }
         var appToLaunch : LCAppModel? = nil
         var appListsToConsider = [sharedModel.apps]
         
@@ -494,7 +514,13 @@ struct LCWebView: View {
         
         runAppAlertMsg = "lc.webView.pageLaunch %@".localizeWithFormat(appToLaunch.appInfo.displayName()!)
         
+        // 3.8.527（L54）：本次会话内已拒绝过这个 scheme 的“用 App
+        // 打开”，不再重复弹、静默留网页（见 czfDeclinedSchemes）。
+        if let scheme = url.scheme, czfDeclinedSchemes.contains(scheme) {
+            return
+        }
         if let doRunApp = await runAppAlert.open(), !doRunApp {
+            if let scheme = url.scheme { czfDeclinedSchemes.insert(scheme) }
             return
         }
         
@@ -537,7 +563,15 @@ struct LCWebView: View {
         }
         
         runAppAlertMsg = "lc.webView.pageCanBeOpenIn %@".localizeWithFormat(appToLaunch.appInfo.displayName()!)
+        // 3.8.527（L54）：本次会话内已拒绝过这个 (host, bundleID)
+        // 的“用 App 打开”，不再重复弹、静默留网页（见
+        // czfDeclinedUniversalLinks）。
+        let czfDeclineKey = "\(url.host ?? "")|\(appToLaunch.appInfo.bundleIdentifier() ?? "")"
+        if czfDeclinedUniversalLinks.contains(czfDeclineKey) {
+            return
+        }
         if let doRunApp = await runAppAlert.open(), !doRunApp {
+            czfDeclinedUniversalLinks.insert(czfDeclineKey)
             return
         }
         await launchToApp(app: appToLaunch, url: url)
@@ -588,7 +622,7 @@ class WebViewLoadObserver: NSObject {
     }
 }
 
-class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
+class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUIDelegate {
     private var pageTitle: Binding<String>
     private var errorShow: Binding<Bool>
     private var errorInfo: Binding<String>
@@ -637,6 +671,12 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         }
         if(scheme == "https") {
             decisionHandler(.allow)
+            // 3.8.527（L54）：原来不分主 frame——iframe 里每个
+            // https 导航也拉 association、还可能弹“用 App 打开”。
+            // 只认主 frame（新窗口导航的 targetFrame 是 nil，
+            // 也不拉）；进 handler 前校验 webView.url 仍是这个
+            // url（用户已跳走就不再弹）。
+            guard navigationAction.targetFrame?.isMainFrame == true else { return }
             // 3.8.506（L28）：WebViewDelegate 不是 @MainActor，
             // 裸 Task 跑在全局执行器上——后面的 universalLink
             // 会写 @State（弹确认框、跳 App），离主线程可能
@@ -645,15 +685,30 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
             // （await 会挂起，不堵主线程；内层 Task 继承）。
             Task { @MainActor in
                 await self.loadDomainAssociations(url: url)
-                if let host = url.host, let appIDs = self.domainBundleIdDict[host] {
-                    Task { @MainActor in await self.universalLinkHandler(url, appIDs) }
-                }
+                guard webView.url == url,
+                      let host = url.host, let appIDs = self.domainBundleIdDict[host] else { return }
+                await self.universalLinkHandler(url, appIDs)
             }
             return
         }
-        if(scheme == "http" || scheme == "about" || scheme == "itms-apps") {
+        if(scheme == "http" || scheme == "about") {
             decisionHandler(.allow)
             return;
+        }
+        // 3.8.527（L54）：itms-apps 原来放行、WKWebView 载不动
+        // 报 -1002 假错——它和 itms-services 一样是跳 App Store
+        // 的 scheme，得 cancel + 外部打开（打不开才报真错）。
+        if scheme == "itms-apps" {
+            decisionHandler(.cancel)
+            Task { @MainActor in
+                if UIApplication.shared.canOpenURL(url) {
+                    await UIApplication.shared.open(url)
+                } else {
+                    self.errorInfo.wrappedValue = "lc.appList.schemeCannotOpenError %@".localizeWithFormat("itms-apps")
+                    self.errorShow.wrappedValue = true
+                }
+            }
+            return
         }
         // 自定义协议（weixin:// 等）WKWebView 载不了：放行会以
         // NSURLErrorUnsupportedURL（-1002）失败、再弹一个假错误框。
@@ -665,6 +720,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
 
     }
     
+    // 3.8.527（L54）：新导航开始不清旧标题——didFinish 才写新
+    // 标题，导航中途顶栏还顶着上一个页面的标题。didCommit 时
+    // 先清空，didFinish 再写新标题。
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        self.pageTitle.wrappedValue = ""
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         // WKWebView.title 是 String?，无标题页（空白页、纯文件页）
         // 时为 nil，强解包直接闪退。
@@ -689,6 +751,75 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         if (error as NSError).code == NSURLErrorCancelled { return }
         self.errorInfo.wrappedValue = error.localizedDescription
         self.errorShow.wrappedValue = true
+    }
+
+    // 3.8.527（L54）：原来没实现 webViewWebContentProcessDidTerminate——
+    // Web 内容进程被系统杀掉（内存压力）后页面白屏、进度条也不动，
+    // 只能手动点 ↻。进程死后 webView.url 还在，直接 reload 恢复
+    // （WKWebView 会重建进程）；url 已空（还没载过页）时不 reload，
+    // 免得白刷 about:blank。
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if webView.url != nil {
+            webView.reload()
+        }
+    }
+
+    // 3.8.527（L54）：原来全文件无 WKUIDelegate——target=_blank
+    // 点了没反应（没人接 createWebViewWith）、JS alert 被吞、
+    // confirm 恒 false。WebViewDelegate 兼 WKUIDelegate：新窗口
+    // 请求直接在本 WKWebView 内加载（不另开窗口）；三个 JS 面板
+    // 用 UIAlertController 实现，completion 恰好调一次（无呈现
+    // 方时走默认值、不挂起 JS）。
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
+    }
+
+    private func czfTopmostViewController(for webView: WKWebView) -> UIViewController? {
+        guard var topVC = webView.window?.rootViewController else { return nil }
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+        return topVC
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        guard let topVC = czfTopmostViewController(for: webView) else {
+            completionHandler()
+            return
+        }
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "lc.common.ok".loc, style: .default) { _ in completionHandler() })
+        topVC.present(alert, animated: true)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        guard let topVC = czfTopmostViewController(for: webView) else {
+            completionHandler(false)
+            return
+        }
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "lc.common.ok".loc, style: .default) { _ in completionHandler(true) })
+        alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in completionHandler(false) })
+        topVC.present(alert, animated: true)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+        guard let topVC = czfTopmostViewController(for: webView) else {
+            completionHandler(nil)
+            return
+        }
+        let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+        alert.addTextField { textField in
+            textField.text = defaultText
+        }
+        alert.addAction(UIAlertAction(title: "lc.common.ok".loc, style: .default) { _ in
+            completionHandler(alert.textFields?.first?.text)
+        })
+        alert.addAction(UIAlertAction(title: "lc.common.cancel".loc, style: .cancel) { _ in completionHandler(nil) })
+        topVC.present(alert, animated: true)
     }
 
     // 网页里的文件直链（.ipa 等二进制）原来没有下载路：导航
@@ -732,7 +863,11 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         // 带路径）；空名给个默认名；同名文件先清掉再写（与
         // installFromUrl 落盘同款），免得撞上残留。
         var name = (suggestedFilename as NSString).lastPathComponent
-        if name.isEmpty {
+        // 3.8.527（L54）：lastPathComponent 后仍可能剩 ".." / "."
+        // / "/"（建议文件名本身就是这几个时），拼进 dest 会越出
+        // 本次下载的独占子目录、写到 tmp 根上甚至父目录。直接
+        // fallback 默认名。
+        if name.isEmpty || name == ".." || name == "." || name == "/" {
             name = "download"
         }
         // 3.8.502（L24）：同名文件两次并行下载会撞同一个 tmp 目标——
@@ -815,7 +950,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
             for siteAssociationURL in appleAppSiteAssociationURLs {
                 group.addTask {
                     await withUnsafeContinuation { c in
-                        let task = URLSession.shared.dataTask(with: siteAssociationURL) { data, response, error in
+                        // 3.8.527（L54）：association 请求原来走
+                        // URLSession 默认 60 秒超时，用户白等；
+                        // 改 10 秒（association 只是 best-effort，
+                        // 拉不到就当没有、不弹错）。
+                        var request = URLRequest(url: siteAssociationURL)
+                        request.timeoutInterval = 10
+                        let task = URLSession.shared.dataTask(with: request) { data, response, error in
                             do {
                                 guard let data = data else {
                                     c.resume(returning: [])
@@ -871,6 +1012,10 @@ struct WebView: UIViewRepresentable {
     mutating func setDelegate(delegete: WKNavigationDelegate) {
         self.delegate = delegete
         self.webView.navigationDelegate = delegete
+        // 3.8.527（L54）：同对象兼 WKUIDelegate（target=_blank
+        // 与 JS 面板），这里一起挂上；不是 WKUIDelegate 的
+        // 调用方（若有）不挂、不改行为。
+        self.webView.uiDelegate = delegete as? WKUIDelegate
     }
     
     mutating func setObserver(observer: WebViewLoadObserver) {

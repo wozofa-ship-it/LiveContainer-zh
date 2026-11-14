@@ -1681,6 +1681,9 @@ struct LCDataManagementView : View {
     // 静态化：函数体只用 externalBackupFolderURL 和 FileManager，不碰
     // 视图状态，静态后可从后台线程直接调（备份重活整体挪后台用）。
     static func syncBackupsToExternalFolder(appNames: [String], backupRoot: URL) {
+        // 3.8.527（L54）：与兜底同步串行（见 czfExternalSyncLock）。
+        czfExternalSyncLock.lock()
+        defer { czfExternalSyncLock.unlock() }
         guard let extURL = Self.externalBackupFolderURL() else { return }
         let fm = FileManager.default
         for name in appNames {
@@ -1875,6 +1878,15 @@ struct LCDataManagementView : View {
     // 队列只排队、不堵主线程。
     private static let czfBackupSerialQueue = DispatchQueue(label: "com.livecontainer.backup.serial", qos: .userInitiated)
 
+    // 3.8.527（L54）：外部同步专用锁——syncBackupsToExternalFolder
+    // 与 syncAllLocalBackupsToExternalFolder 两路都写同一个外部
+    // 文件夹（同名 dest），一路上在 removeItem+copyItem、另一
+    // 路 tmp+move，并发会把对方刚拷好的 dest 删掉或拷一半。
+    // 不复用 czfBackupSerialQueue：syncBackupsToExternalFolder
+    // 在 backupOneAppSyncLocked 内调（:3076），那路已占着串行
+    // 队列，复用会自锁死锁；独立锁只包这两函数、两者互不调用。
+    private static let czfExternalSyncLock = NSLock()
+
     static func writeCZFSettingsBackupDebounced() {
         DispatchQueue.main.async {
             LCDataManagementView.settingsBackupWorkItem?.cancel()
@@ -1907,6 +1919,9 @@ struct LCDataManagementView : View {
 
     // 兜底同步：把本地备份里外部文件夹还缺的/过期的补过去（选文件夹后、打开数据管理页时调用）
     static func syncAllLocalBackupsToExternalFolder() {
+        // 3.8.527（L54）：与备份结束同步串行（见 czfExternalSyncLock）。
+        czfExternalSyncLock.lock()
+        defer { czfExternalSyncLock.unlock() }
         guard let extURL = Self.externalBackupFolderURL() else { return }
         let fm = FileManager.default
         guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
@@ -2449,15 +2464,22 @@ struct LCDataManagementView : View {
     // 时间序）；名字按文件夹名不区分大小写；只看登录态按
     // manifest scope == "login"。每行 manifest 只读一次，
     // 列表几十个以内，现场读够用。
+    // 3.8.527（L54）：排序/筛选改读 czfDownloadedManifestInfo——
+    // 原来直接调 manifestInfo（Data(contentsOf:) 无已下载守
+    // 卫），iCloud 外部备份的 manifest 没同步到本机时，body
+    // 求值会在主线程同步触发隐式下载、排序还是 O(n log n)
+    // 次重复读，点恢复就卡界面；未下载的按无 manifest 处理
+    //（日期空排最后、登录态筛选不过滤出它），与日期行/
+    // 预览的回落口径一致。
     private func applyBackupSortFilter(to folders: [URL]) -> [URL] {
         var list = folders
         if backupLoginOnlyFilter {
-            list = list.filter { Self.manifestInfo(of: $0)?.scope == "login" }
+            list = list.filter { Self.czfDownloadedManifestInfo(of: $0)?.scope == "login" }
         }
         if backupSortMode == 1 {
             list.sort { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
         } else {
-            list.sort { (Self.manifestInfo(of: $0)?.backupDate ?? "") > (Self.manifestInfo(of: $1)?.backupDate ?? "") }
+            list.sort { (Self.czfDownloadedManifestInfo(of: $0)?.backupDate ?? "") > (Self.czfDownloadedManifestInfo(of: $1)?.backupDate ?? "") }
         }
         return list
     }
@@ -2623,7 +2645,10 @@ struct LCDataManagementView : View {
                 let ok = (try? await LCUtils.authenticateUserForced()) ?? false
                 guard ok else { return }
                 Self.setBackupLocked(folderName, locked: false)
-                self.lockedBackupNames.remove(folderName)
+                // 3.8.527（L54）：裸 Task 里 @State 回主线程再写。
+                await MainActor.run {
+                    self.lockedBackupNames.remove(folderName)
+                }
             }
             return
         }
@@ -2640,12 +2665,20 @@ struct LCDataManagementView : View {
             Task {
                 let ok = (try? await LCUtils.authenticateUserForced()) ?? false
                 guard ok else {
-                    self.restoreSheetNotice = "人脸识别未通过，未删除：\(backupURL.lastPathComponent)"
+                    // 3.8.527（L54）：裸 Task 里 @State 回主线程
+                    // 再写；删动作本身也放同一跳——deleteBackupUnlocked
+                    // 内含 @State 写（列表重载/提示行），放主线程
+                    // 跑与未锁定直调那路（按钮主线程）一致。
+                    await MainActor.run {
+                        self.restoreSheetNotice = "人脸识别未通过，未删除：\(backupURL.lastPathComponent)"
+                    }
                     return
                 }
                 Self.setBackupLocked(backupURL.lastPathComponent, locked: false)
-                self.lockedBackupNames.remove(backupURL.lastPathComponent)
-                self.deleteBackupUnlocked(at: backupURL)
+                await MainActor.run {
+                    self.lockedBackupNames.remove(backupURL.lastPathComponent)
+                    self.deleteBackupUnlocked(at: backupURL)
+                }
             }
             return
         }
@@ -2683,6 +2716,10 @@ struct LCDataManagementView : View {
             backupFolderList.removeAll { $0.lastPathComponent == deletedName }
             externalBackupFolderList.removeAll { $0.lastPathComponent == deletedName }
             backupListVersion += 1
+            // 3.8.527（L54）：删完重算大小——backupSizes 里还留
+            // 着已删 URL 的旧条目，toolbar 总占用行的 count
+            // 对不上就直接不显示，直到下次重进恢复 sheet。
+            refreshBackupSizes()
             // 反馈只写 sheet 底部的提示行：不关 sheet、不弹外
             // 层提示——删完留在列表里继续操作，跨层弹提示是
             // 前两版按钮点不动的根源
@@ -2718,6 +2755,8 @@ struct LCDataManagementView : View {
         externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
         // 3.8.335：同 deleteBackup，List 重建、不走 diff。
         backupListVersion += 1
+        // 3.8.527（L54）：删完重算大小（同 deleteBackupUnlocked）。
+        refreshBackupSizes()
         restoreSheetNotice = "已删除 \(deleted) 个备份" + (lockedSkipped > 0 ? "，\(lockedSkipped) 个已锁定未删" : "")
     }
 
@@ -2752,6 +2791,8 @@ struct LCDataManagementView : View {
         backupListVersion += 1
         selectedBackupFolderURLs.removeAll()
         showSelectBackups = false
+        // 3.8.527（L54）：删完重算大小（同 deleteBackupUnlocked）。
+        refreshBackupSizes()
         restoreSheetNotice = "已删除 \(deleted) 个备份" + (lockedSkipped > 0 ? "，\(lockedSkipped) 个已锁定未删" : "")
     }
 
@@ -3149,6 +3190,12 @@ struct LCDataManagementView : View {
                 before[dumpURL] = mdate
             }
         }
+        // 3.8.527（L54）：before 为空且 App 没在跑时直接返——
+        // 下面轮询只认“已存在且 mtime 前进”的 dump，没 dump
+        // 时 refreshed 永远成不了 true；App 没跑时关窗是空操
+        // 作、没有任何一方会新建 dump，白等满 5 秒。只敢省这
+        // 一档：dump 已存在时保留等待（L42 注释的关窗竞态）。
+        if before.isEmpty && !app.isAppRunning { return }
         if #available(iOS 16.0, *) {
             for container in app.uiContainers {
                 MultitaskDockManager.shared.closeAppWindow(uuid: container.folderName)
@@ -3185,9 +3232,13 @@ struct LCDataManagementView : View {
             // 备份…”，且 czfDismissIfDirectEntryDone 的 guard
             // 永远拦住、直进页关不掉。几乎不可达（iOS 文稿目录
             // 恒在），记为防御性缺口。
-            backupRestoreProgress = nil
-            errorInfo = "lc.settings.backupFail".loc
-            errorShow = true
+            // 3.8.527（L54）：本函数从 doBackupScope 的裸 Task
+            // 调来、不在主 actor 上，@State 回主线程再写。
+            await MainActor.run {
+                backupRestoreProgress = nil
+                errorInfo = "lc.settings.backupFail".loc
+                errorShow = true
+            }
             return
         }
         // 3.8.374：备份前先刷快照（见 refreshKeychainSnapshot），别读旧 dump
@@ -3197,11 +3248,14 @@ struct LCDataManagementView : View {
         let backupRoot = docsURL.appendingPathComponent("Backups")
         // 初始进度也写清第一个 App 的名字（循环里每 App 都会
         // 刷新，0/N 那个空名只闪一下也别留）
-        if let first = apps.first {
-            let firstName = first.appInfo.displayName() ?? first.appInfo.bundleIdentifier() ?? "Unknown"
-            backupRestoreProgress = "正在备份 \(firstName)（1/\(apps.count)）"
-        } else {
-            backupRestoreProgress = "正在备份（0/\(apps.count)）…"
+        // 3.8.527（L54）：同上，@State 回主线程再写。
+        await MainActor.run {
+            if let first = apps.first {
+                let firstName = first.appInfo.displayName() ?? first.appInfo.bundleIdentifier() ?? "Unknown"
+                backupRestoreProgress = "正在备份 \(firstName)（1/\(apps.count)）"
+            } else {
+                backupRestoreProgress = "正在备份（0/\(apps.count)）…"
+            }
         }
         // 拷贝重活整体挪到后台队列：原来这段在打开页面触发定时备份时
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
@@ -3296,55 +3350,66 @@ struct LCDataManagementView : View {
                 }
             }
         }
-        backupRestoreProgress = nil
+        // 3.8.527（L54）：回执三路 @State 回主线程再写（本函数
+        // 从 doBackupScope 的裸 Task 调来）；失败/空分支各包一
+        // 跳，成功分支先攒本地变量、最后一次回主线程写（见下）。
+        await MainActor.run {
+            backupRestoreProgress = nil
+        }
         if let failure {
             // B-7：失败路径也拼用时（原来只有成功回执里有），
             // 定位“备份跑了多久才失败”才有数据。
-            errorInfo = LCUtils.czfFriendlyError(failure) + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
-            errorShow = true
+            await MainActor.run {
+                errorInfo = LCUtils.czfFriendlyError(failure) + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+                errorShow = true
+            }
         } else if count == 0, !failedNames.isEmpty {
             // 一个都没成：别报“成功 0 个”，直接报失败清单
-            errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n") + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "备份失败，一个都没备份上：\n" + failedNames.joined(separator: "\n") + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+                errorShow = true
+            }
         } else if count == 0 {
             // 一个都没备上、失败清单也是空的：剩下的只有全部
             // 跳过（锁了/今日已备过）或根本没传 App——别报
             // “备份完成 0 个”假成功，跳过的明说，没传的直说。
-            if skippedNames.isEmpty {
-                errorInfo = "没有要备份的 App\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
-            } else {
-                errorInfo = "没有备份上任何 App（全部已跳过）：\n" + skippedNames.joined(separator: "\n") + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+            await MainActor.run {
+                if skippedNames.isEmpty {
+                    errorInfo = "没有要备份的 App\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+                } else {
+                    errorInfo = "没有备份上任何 App（全部已跳过）：\n" + skippedNames.joined(separator: "\n") + "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+                }
+                errorShow = true
             }
-            errorShow = true
         } else {
             // 钥匙串导了几条必须报出来：以前恒为 0 也照报"备份
             // 完成"，用户拿着空备份去恢复才发现没数据。快照是
             // 游客进程内的钥匙串桥在 App 打开时写的；0 条时按
             // 有没有快照分两种说法：没快照 = 装上这版后还没打
             // 开过那个 App；有快照还空 = 桥确认它没存令牌
-            successInfo = String(format: "lc.settings.backupComplete".loc, count) + "\n钥匙串令牌共导出 \(keychainTotal) 条"
+            var czfSuccessText = String(format: "lc.settings.backupComplete".loc, count) + "\n钥匙串令牌共导出 \(keychainTotal) 条"
             if keychainTotal == 0 {
-                successInfo += snapshotMissing ? "（还没有密匙快照：先打开一次要备份的 App，再回来备份）" : "（密匙快照是空的）"
+                czfSuccessText += snapshotMissing ? "（还没有密匙快照：先打开一次要备份的 App，再回来备份）" : "（密匙快照是空的）"
             }
             if loginOnly {
                 if loginFileTotal > 0 {
                     let dist = loginBreakdownTotal.keys.sorted().map { "\($0) \(loginBreakdownTotal[$0] ?? 0)" }.joined(separator: " · ")
-                    successInfo += "\n会话文件共 \(loginFileTotal) 个（\(dist)）"
+                    czfSuccessText += "\n会话文件共 \(loginFileTotal) 个（\(dist)）"
                 } else {
                     // 0 也要明说：以前 0 时整行消失，空备份和
                     // 完整备份在弹窗里长得一样，误导人去恢复
-                    successInfo += "\n会话文件共 0 个"
+                    czfSuccessText += "\n会话文件共 0 个"
                 }
                 if loginSkippedTotal > 0 {
-                    successInfo += "\n超 300MB 预算跳过 \(loginSkippedTotal) 个文件"
+                    czfSuccessText += "\n超 300MB 预算跳过 \(loginSkippedTotal) 个文件"
                     // 只列前 10 条相对路径（弹窗塞不下 2985 条）：
                     // 下次看到“登录态没回来”时，先对一下会话文件
                     // 在不在这张跳过清单里，再定是预算问题还是
                     // 钥匙串问题。
                     if !loginSkippedPathsTotal.isEmpty {
-                        successInfo += "（前 \(loginSkippedPathsTotal.count) 条：\n" + loginSkippedPathsTotal.joined(separator: "\n") + "）"
+                        czfSuccessText += "（前 \(loginSkippedPathsTotal.count) 条：\n" + loginSkippedPathsTotal.joined(separator: "\n") + "）"
                         if loginSkippedTotal > loginSkippedPathsTotal.count {
-                            successInfo += "\n另有 \(loginSkippedTotal - loginSkippedPathsTotal.count) 个未列出"
+                            czfSuccessText += "\n另有 \(loginSkippedTotal - loginSkippedPathsTotal.count) 个未列出"
                         }
                     }
                 }
@@ -3357,41 +3422,44 @@ struct LCDataManagementView : View {
             // 都报——完整备份列容器/组容器名，登录态档列会
             // 话文件相对路径。
             if loginFailedTotal > 0 {
-                successInfo += "\n⚠️ 拷贝失败 \(loginFailedTotal) 个文件"
+                czfSuccessText += "\n⚠️ 拷贝失败 \(loginFailedTotal) 个文件"
                 if !loginFailedPathsTotal.isEmpty {
-                    successInfo += "（前 \(loginFailedPathsTotal.count) 条：\n" + loginFailedPathsTotal.joined(separator: "\n") + "）"
+                    czfSuccessText += "（前 \(loginFailedPathsTotal.count) 条：\n" + loginFailedPathsTotal.joined(separator: "\n") + "）"
                     if loginFailedTotal > loginFailedPathsTotal.count {
-                        successInfo += "\n另有 \(loginFailedTotal - loginFailedPathsTotal.count) 个未列出"
+                        czfSuccessText += "\n另有 \(loginFailedTotal - loginFailedPathsTotal.count) 个未列出"
                     }
                 }
             }
             if !bridgeStatuses.isEmpty {
-                successInfo += "\n—— 桥回执 ——\n" + bridgeStatuses.joined(separator: "\n")
+                czfSuccessText += "\n—— 桥回执 ——\n" + bridgeStatuses.joined(separator: "\n")
             }
             if !snapshotDates.isEmpty {
-                successInfo += "\n—— 钥匙串快照时间 ——\n" + snapshotDates.joined(separator: "\n")
-                successInfo += "\n（快照是 App 打开/切后台时由桥写的；若之后登录过，先打开 App 切一次后台再备份）"
+                czfSuccessText += "\n—— 钥匙串快照时间 ——\n" + snapshotDates.joined(separator: "\n")
+                czfSuccessText += "\n（快照是 App 打开/切后台时由桥写的；若之后登录过，先打开 App 切一次后台再备份）"
             }
             if !failedNames.isEmpty {
-                successInfo += "\n—— 以下 App 备份失败（已跳过，继续备了后面的）——\n" + failedNames.joined(separator: "\n")
+                czfSuccessText += "\n—— 以下 App 备份失败（已跳过，继续备了后面的）——\n" + failedNames.joined(separator: "\n")
             }
             if !skippedNames.isEmpty {
-                successInfo += "\n—— 以下跳过（未重复备份）——\n" + skippedNames.joined(separator: "\n")
+                czfSuccessText += "\n—— 以下跳过（未重复备份）——\n" + skippedNames.joined(separator: "\n")
             }
             // v216：备份健康分——每个成功 App 一行，缺哪项标 ❌
             //（弹窗是纯文本，不能着色；红字版在恢复前清单预览里）。
             // 失败的 App 已在上面失败清单里，这里只列成功的。
             if !healthLines.isEmpty {
-                successInfo += "\n—— 备份健康（缺项标 ❌）——\n" + healthLines.joined(separator: "\n")
+                czfSuccessText += "\n—— 备份健康（缺项标 ❌）——\n" + healthLines.joined(separator: "\n")
             }
             // 6 计时：整批总耗时（从 backupApps 开始到回执）。
             // B-8：秒数用 Int 截断（59.9 秒显示“59 秒”，不再
             // 四舍五入成“60 秒”）；≥ 60 分钟加小时段（“2 小时
             // 0 分”而不是“120 分 0 秒”）。三处回执共用同一
             // 个格式化函数（见 czfFormatElapsed）。
-            successInfo += "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
-            successInfo += "\n" + backupRoot.path
-            successShow = true
+            czfSuccessText += "\n" + Self.czfFormatElapsed(Date().timeIntervalSince(czfBackupStart))
+            czfSuccessText += "\n" + backupRoot.path
+            await MainActor.run {
+                successInfo = czfSuccessText
+                successShow = true
+            }
         }
     }
 
@@ -3537,7 +3605,11 @@ struct LCDataManagementView : View {
             Task {
                 let ok = (try? await LCUtils.authenticateUserForced()) ?? false
                 guard ok else { return }
-                self.closeRestoreSheetsAndStart(loginOnly: loginOnly)
+                // 3.8.527（L54）：关页 + 起恢复含 @State 写，放
+                // 主线程跑——未锁定直调那路本来就在按钮主线程上。
+                await MainActor.run {
+                    self.closeRestoreSheetsAndStart(loginOnly: loginOnly)
+                }
             }
             return
         }
@@ -3687,10 +3759,16 @@ struct LCDataManagementView : View {
         let merged = mergedBackupFolders()
         // v216：一键恢复前清空无数据文件夹（逐个恢复时追加，
         // 汇总弹窗里一次全给出来；不清空会把上次残留带进来）
-        pendingNoDataFolders = []
+        // 3.8.527（L54）：本函数从 startPendingRestore 的裸
+        // Task 调来、不在主 actor 上，@State 回主线程再写。
+        await MainActor.run {
+            pendingNoDataFolders = []
+        }
         var lines: [String] = []
         for (index, folderURL) in merged.enumerated() {
-            backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(merged.count)）"
+            await MainActor.run {
+                backupRestoreProgress = "正在恢复全部备份：\(folderURL.lastPathComponent)（\(index + 1)/\(merged.count)）"
+            }
             lines.append(await restoreFromBackup(at: folderURL, presentResult: false, loginOnly: loginOnly))
         }
         // 一键恢复全部：设置只做一次（单个恢复在各自报告里做，
@@ -3707,7 +3785,6 @@ struct LCDataManagementView : View {
                 lines.append("设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入")
             }
         }
-        backupRestoreProgress = nil
         // 恢复完成：清 AppInfo 缓存与 dock 残留条目（恢复会改
         // 模型容器/换实例，旧缓存与旧条目会指错 App）。
         if #available(iOS 16.0, *) {
@@ -3716,8 +3793,12 @@ struct LCDataManagementView : View {
         // 注意：头数只认备份数（merged.count），不照抄下面
         // lines.count——settings 行也算进去了，设置恢复成功
         // 时头数会多算 1 个（restoreSelectedBackups 同款修法）。
-        successInfo = "一键恢复全部完成（共 \(merged.count) 个备份）：\n\n" + lines.joined(separator: "\n")
-        successShow = true
+        // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+        await MainActor.run {
+            backupRestoreProgress = nil
+            successInfo = "一键恢复全部完成（共 \(merged.count) 个备份）：\n\n" + lines.joined(separator: "\n")
+            successShow = true
+        }
     }
 
     /// 恢复已选：与一键恢复全部同一套聚合（逐个静默恢复、
@@ -3729,10 +3810,17 @@ struct LCDataManagementView : View {
         // v216 同款：一键恢复前清空无数据文件夹（逐个恢复时
         // 追加，汇总弹窗里一次全给出来；不清空会把上次残留
         // 带进来）
-        pendingNoDataFolders = []
+        // 3.8.527（L54）：本函数从 startPendingRestore /
+        // startMigrationRestore 的裸 Task 调来、不在主 actor
+        // 上，@State 回主线程再写。
+        await MainActor.run {
+            pendingNoDataFolders = []
+        }
         var lines: [String] = []
         for (index, folderURL) in folders.enumerated() {
-            backupRestoreProgress = "正在恢复已选备份：\(folderURL.lastPathComponent)（\(index + 1)/\(folders.count)）"
+            await MainActor.run {
+                backupRestoreProgress = "正在恢复已选备份：\(folderURL.lastPathComponent)（\(index + 1)/\(folders.count)）"
+            }
             lines.append(await restoreFromBackup(at: folderURL, presentResult: false, loginOnly: loginOnly))
         }
         // 设置只做一次（与一键恢复全部同款：单个恢复在各自
@@ -3750,7 +3838,6 @@ struct LCDataManagementView : View {
                 lines.append("设置：未找到设置备份（CZFSettingsBackup.json），开关需手动重设或用设置页导入")
             }
         }
-        backupRestoreProgress = nil
         // 恢复完成：同款清缓存与 dock 残留（见一键恢复全部）。
         if #available(iOS 16.0, *) {
             MultitaskDockManager.refreshAfterAppChanged()
@@ -3758,8 +3845,12 @@ struct LCDataManagementView : View {
         // 注意：这里用 folders.count，不照抄一键恢复全部的
         // lines.count——后者把 settings 行也算进去了，设置
         // 恢复成功时会把头数多算 1 个；已选报头只认勾中数
-        successInfo = "恢复已选完成（共 \(folders.count) 个备份）：\n\n" + lines.joined(separator: "\n")
-        successShow = true
+        // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+        await MainActor.run {
+            backupRestoreProgress = nil
+            successInfo = "恢复已选完成（共 \(folders.count) 个备份）：\n\n" + lines.joined(separator: "\n")
+            successShow = true
+        }
     }
 
     // 新5（3.8.277）：换机迁移向导——读所选来源里有什么。
@@ -3981,10 +4072,16 @@ struct LCDataManagementView : View {
     func restoreFromBackup(at backupURL: URL, presentResult: Bool = true, loginOnly: Bool = false) async -> String {
         let fm = FileManager.default
         if presentResult {
-            backupRestoreProgress = "正在恢复 \(backupURL.lastPathComponent)…"
-            // v216：单个恢复先清无数据文件夹（结果弹窗按钮点过
-            // 也清，双保险，不漏到下一次无关弹窗里）
-            pendingNoDataFolders = []
+            // 3.8.527（L54）：本函数从 startPendingRestore /
+            // 一键/已选恢复的裸 Task 调来、不在主 actor 上，
+            // @State 回主线程再写（restoreOneApp 的 @Published
+            // 写已按 L37 包过，同链的 @State 写是漏网）。
+            await MainActor.run {
+                backupRestoreProgress = "正在恢复 \(backupURL.lastPathComponent)…"
+                // v216：单个恢复先清无数据文件夹（结果弹窗按钮点过
+                // 也清，双保险，不漏到下一次无关弹窗里）
+                pendingNoDataFolders = []
+            }
         }
         do {
             // 新结构：backupURL 直接是单个 App 的备份文件夹（如 Backups/GitHub/）
@@ -4006,7 +4103,10 @@ struct LCDataManagementView : View {
                     if fm.fileExists(atPath: manifestURL.path),
                        let children = try? fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil),
                        children.contains(where: { $0.lastPathComponent != "manifest.json" }) { break }
-                    backupRestoreProgress = "正在从 iCloud 下载 \(folderName)…"
+                    // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+                    await MainActor.run {
+                        backupRestoreProgress = "正在从 iCloud 下载 \(folderName)…"
+                    }
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             }
@@ -4016,16 +4116,25 @@ struct LCDataManagementView : View {
             if isSingleAppFolder {
                 appFolders = [backupURL]
             } else {
-                appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: nil)
+                // 3.8.527（L54）：同 restoreOneApp 的容器枚举——
+                // 只认目录，时间戳文件夹里的杂散文件不再被当成
+                // 一个 App 进恢复（原来会多一条失败记录）；单个
+                // 失败本就按 App 隔离，这里只是不让杂散文件占
+                // 一个失败名额。
+                appFolders = try fm.contentsOfDirectory(at: backupURL, includingPropertiesForKeys: [.isDirectoryKey])
+                    .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             }
             // 空文件夹：直接报失败，不再走“成功 / 恢复完成：0 个 App”误导人。
             // iCloud 内容没同步到时上面已等过 15 秒，还空就是真空。
             if appFolders.isEmpty {
                 let msg = "这个备份文件夹是空的，没有可恢复的数据（iCloud 内容可能还没同步到本机，稍后再试；或文件夹里确实没有备份）"
                 if presentResult {
-                    backupRestoreProgress = nil
-                    errorInfo = msg
-                    errorShow = true
+                    // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+                    await MainActor.run {
+                        backupRestoreProgress = nil
+                        errorInfo = msg
+                        errorShow = true
+                    }
                 }
                 return "\(folderName)：\(msg)"
             }
@@ -4073,7 +4182,10 @@ struct LCDataManagementView : View {
             for (index, appFolder) in appFolders.enumerated() {
                 let folderName = appFolder.lastPathComponent
                 if presentResult {
-                    backupRestoreProgress = "正在恢复 \(folderName)（\(index + 1)/\(appFolders.count)）"
+                    // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+                    await MainActor.run {
+                        backupRestoreProgress = "正在恢复 \(folderName)（\(index + 1)/\(appFolders.count)）"
+                    }
                 }
                 // v216：先按 manifest dataUUID 精确匹配实例——
                 // 同款多开的新备份文件夹名带实例后缀（Muse /
@@ -4295,10 +4407,25 @@ struct LCDataManagementView : View {
             // 出现，总等待取最长 5 分钟而不是叠加；③ 装好的
             // 逐个串行恢复（restoreOneApp 涉钥匙串/容器，不并
             // 行）。每路结果先收数组，合并时再碰共享计数。
+            // 3.8.527（L54）：已装快照移到定地址循环之前取——原
+            // 来在循环后取，用户给第一个缺 App 选 IPA 的几分钟
+            // 里若顺手在 App 页手动装好了另一个缺 App，它会被
+            // 含进快照，等待循环要求“快照里没有且显示名对上”，
+            // 永远对不上、空等 5 分钟报安装失败、数据也不恢复。
+            // 快照必须在发安装通知前取，移到循环前正好满足；
+            // 且经 MainActor.run 取（sharedModel.apps/
+            // hiddenApps 是 @Published，本函数跑在裸 Task 上、
+            // 轮询子任务在 withTaskGroup 里，直接读是跨线程读）。
+            let czfMissingBeforeApps = await MainActor.run {
+                Set((sharedModel.apps + sharedModel.hiddenApps).map { ObjectIdentifier($0) })
+            }
             var missingPlan: [(folder: URL, name: String, bundleID: String, url: URL)] = []
             for item in missing {
                 if presentResult {
-                    backupRestoreProgress = "正在安装并恢复 \(item.name)（等安装完成）…"
+                    // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+                    await MainActor.run {
+                        backupRestoreProgress = "正在安装并恢复 \(item.name)（等安装完成）…"
+                    }
                 }
                 // 3.8.299：源里没有待恢复的 App 时，别直接报“未在源中
                 // 找到”了事（用户得自己退出恢复、去 App 页导 IPA、装
@@ -4319,7 +4446,8 @@ struct LCDataManagementView : View {
             // 了”，Muse5 的数据就盖进 Muse。只等新出现（快照里
             // 没有）且显示名对上的那一个；显示名对不上宁可超时
             // 报安装失败，也不错位恢复。
-            let czfMissingBeforeApps = Set((sharedModel.apps + sharedModel.hiddenApps).map { ObjectIdentifier($0) })
+            // 快照已移到定地址循环之前取（见上，3.8.527/L54），
+            // 这里不再重复取。
             struct CZFMissingWaitResult {
                 let name: String
                 let folder: URL
@@ -4351,7 +4479,12 @@ struct LCDataManagementView : View {
                             if Task.isCancelled { waitCancelled = true; break }
                             try? await Task.sleep(nanoseconds: 2_000_000_000)
                             if Task.isCancelled { waitCancelled = true; break }
-                            let currentApps = sharedModel.apps + sharedModel.hiddenApps
+                            // 3.8.527（L54）：轮询经主线程取快照——
+                            // 子任务跑在全局执行器上，sharedModel.apps/
+                            // hiddenApps 是 @Published，主线程在安装
+                            // 完成时改它、这里每 2 秒读它，跨线程读
+                            // 写会读到不一致的中间态。
+                            let currentApps = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
                             installedApp = currentApps.first(where: {
                                 !czfMissingBeforeApps.contains(ObjectIdentifier($0)) &&
                                 // 显示名认预设名或 manifest 名任一：安装时
@@ -4540,12 +4673,15 @@ struct LCDataManagementView : View {
             // 里各类失败清单照旧列出，只是换成错误弹窗。
             if presentResult {
                 let totalRestored = restoredCount + installRestoredCount
-                if totalRestored == 0 && (!restoreFailedApps.isEmpty || !noDataApps.isEmpty || !ambiguousApps.isEmpty || !installFailed.isEmpty || !installNotFound.isEmpty || !groupFailedApps.isEmpty) {
-                    errorInfo = msg
-                    errorShow = true
-                } else {
-                    successInfo = msg
-                    successShow = true
+                // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+                await MainActor.run {
+                    if totalRestored == 0 && (!restoreFailedApps.isEmpty || !noDataApps.isEmpty || !ambiguousApps.isEmpty || !installFailed.isEmpty || !installNotFound.isEmpty || !groupFailedApps.isEmpty) {
+                        errorInfo = msg
+                        errorShow = true
+                    } else {
+                        successInfo = msg
+                        successShow = true
+                    }
                 }
                 // 单个恢复完成：同款清缓存与 dock 残留。只在
                 // presentResult 时跑一次；一键/已选逐个调时
@@ -4588,20 +4724,26 @@ struct LCDataManagementView : View {
             // v216：无数据文件夹交给结果弹窗的“在文件 App 里
             // 打开”按钮（单个恢复先清后记；一键恢复逐个追加，
             // 汇总弹窗里一次全给出来）。
-            if presentResult {
-                pendingNoDataFolders = noDataFolders
-            } else {
-                pendingNoDataFolders += noDataFolders
-            }
-            if presentResult {
-                backupRestoreProgress = nil
+            // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+            await MainActor.run {
+                if presentResult {
+                    pendingNoDataFolders = noDataFolders
+                } else {
+                    pendingNoDataFolders += noDataFolders
+                }
+                if presentResult {
+                    backupRestoreProgress = nil
+                }
             }
             return line
         } catch {
             if presentResult {
-                backupRestoreProgress = nil
-                errorInfo = LCUtils.czfFriendlyError(error)
-                errorShow = true
+                // 3.8.527（L54）：@State 回主线程再写（同本函数头）。
+                await MainActor.run {
+                    backupRestoreProgress = nil
+                    errorInfo = LCUtils.czfFriendlyError(error)
+                    errorShow = true
+                }
             }
             return "\(backupURL.lastPathComponent)：恢复失败（\(LCUtils.czfFriendlyError(error))）"
         }
@@ -4847,8 +4989,14 @@ struct LCDataManagementView : View {
         // 以及组容器和钥匙串两个附属目录——它们在下面单独恢复）
         var containerFolders: [URL] = []
         if !loginOnly || isLoginBackup {
-            containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)
-                .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }
+            // 3.8.527（L54）：只认目录——备份文件夹里一旦出现杂
+            // 散文件（.DS_Store、同步残留），原来按名排除后仍
+            // 会把它当容器进 replaceContainerOffMain，copyItem
+            // 文件→容器路径失败抛错、整个 restoreOneApp 抛掉，
+            // 该 App 一点数据都恢复不了。备份写入方从不写杂散
+            // 文件，正常备份行为不变。
+            containerFolders = try fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: [.isDirectoryKey])
+                .filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
         }
         // manifest 记着备份时的默认容器名，多个容器时靠它定默认；
         // 组号记着备份时的钥匙串组，恢复补容器时照它建
@@ -5992,8 +6140,11 @@ struct LCDataManagementView : View {
                 guard await filza.czfAuthenticateIfLocked() else { return }
                 try await filza.runApp(urlStr: launchURLStr)
             } catch {
-                successInfo = error.localizedDescription
-                successShow = true
+                // 3.8.527（L54）：裸 Task 里 @State 回主线程再写。
+                await MainActor.run {
+                    successInfo = error.localizedDescription
+                    successShow = true
+                }
             }
         }
     }
@@ -6602,7 +6753,12 @@ struct LCDataManagementView : View {
 
     func presentExportPickerForAll() {
         let urls = mergedBackupFolders()
-        guard !urls.isEmpty else { return }
+        // 3.8.527（L54）：一个备份都没有时原来静默返回，按钮
+        // 常驻可点、用户以为按钮坏了；给一句 sheet 底部提示。
+        guard !urls.isEmpty else {
+            restoreSheetNotice = "没有可导出的备份"
+            return
+        }
         let picker = UIDocumentPickerViewController(forExporting: urls, asCopy: true)
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = windowScene.windows.first,

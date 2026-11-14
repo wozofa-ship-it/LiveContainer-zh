@@ -176,6 +176,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 安装排队：进行中再点安装不再静默丢掉，排进队、当前装完
     // 接着装（defer 里出队一个）；同地址重复点只排一次
     @State private var pendingInstalls: [CZFPendingInstall] = []
+    // 3.8.527（L54）：startInstallApp 忙时排队进来的 asCopy
+    // 临时副本地址（absoluteString）。排空走 installFromUrl
+    // 的 file 分支不删它（只删 Inbox / LCWebDownload-），drain
+    // 里装完（或起跑即取消）后按这张表删，免得 tmp 漏一个 IPA。
+    // static：排队与排空之间视图可能重建，实例 @State 靠不住。
+    private static var czfFileImporterTmpToDelete: Set<String> = []
     @State var installProgressPercentage : Float = 0.0
     @State var installObserver : NSKeyValueObservation?
     
@@ -2329,6 +2335,30 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 与 443/447 的教训一致，别改）。安装取权仍调它。
 
     func startInstallApp(_ fileUrl:URL) async {
+        // 3.8.527（L54）：进行中再点“从 IPA 安装”要排队——原来
+        // 直接调 installIpaFile，与在途安装并发跑：共用
+        // installObserver/installProgressPercentage/
+        // installReplaceAlert（单 continuation 会被第二路覆盖、
+        // 第一路挂死），还可能算出同一 outputFolder 与同一
+        // .czf-old 备份名、moveItem 互抢。照 installFromUrl
+        // :3490 同款忙时进 pendingInstalls（五字段去重），轮
+        // 到时 drainPendingInstalls 走 installFromUrl 的 file
+        // 分支装；“+”常驻、进度圈只跟在后面（:591-600），用户
+        // 随时能再点，排队提示在 :1843 一带已现成。
+        if self.installprogressVisible {
+            let urlStr = fileUrl.absoluteString
+            let alreadyQueued = installQueue.contains(where: { $0.url == fileUrl && $0.autoReplace == false && $0.preview == false && $0.forceAsNew == false && $0.customDisplayName == nil })
+            let alreadyInFlight = czfInFlightInstall.map { $0.url == fileUrl && $0.autoReplace == false && $0.preview == false && $0.forceAsNew == false && $0.customDisplayName == nil } ?? false
+            let alreadyPending = pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: urlStr, autoReplace: false, preview: false, forceAsNew: false, customDisplayName: nil, as: $0) })
+            if !alreadyQueued && !alreadyInFlight && !alreadyPending {
+                pendingInstalls.append(.url(urlStr, false, false, false, nil))
+                // asCopy 临时副本：排空走 installFromUrl 不删它
+                // （只删 Inbox / LCWebDownload-），记一笔，drain
+                // 里装完（或起跑即取消）后删，免得 tmp 漏一个 IPA。
+                Self.czfFileImporterTmpToDelete.insert(urlStr)
+            }
+            return
+        }
         do {
             self.installprogressVisible = true
             try await installIpaFile(fileUrl)
@@ -2383,6 +2413,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             do {
                 try await Task.sleep(nanoseconds: 500_000_000)
             } catch is CancellationError {
+                throw CZFInstallCancelled()
+            }
+            // 3.8.527（L54）：这 120×0.5 秒循环只认 Task 取消，
+            // 不查 czfInstallCancelRequested——进度条旁点了取消，
+            // 这里还要白等满 60 秒才走到后面的取消检查点。每次
+            // sleep 后查一次，命中就按取消抛（与同款检查点一致）。
+            if czfTakeInstallCancel() {
                 throw CZFInstallCancelled()
             }
             if let v = try? url.resourceValues(forKeys: keys), czfIsDownloaded(v) {
@@ -2647,15 +2684,27 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 throw error
             }
-            // ③ 新包落盘了，删旧包备份。
-            try? fm.removeItem(at: czfOldBackup)
+            // ③ 旧包备份留到成功尾部再删（3.8.527 L54：删完
+            // 仍有四处抛错点——落盘后取消、LCAppInfo 初始化
+            // 失败、签名取消两处，旧包已无可回滚）。
         } catch {
             try? fm.removeItem(at: czfOldBackup)
             throw error
         }
 
+        // 3.8.527（L54）：③ 之后四处抛错点的旧包回滚——新包
+        // 已落盘在 outputFolder，不先挪走搬不回来；备份不
+        // 在就什么都不做。成功尾部（函数末尾）再删备份。
+        let czfRestoreOldBackup = {
+            if fm.fileExists(atPath: czfOldBackup.path) {
+                try? fm.removeItem(at: outputFolder)
+                try? fm.moveItem(at: czfOldBackup, to: outputFolder)
+            }
+        }
+
         // O-9：落盘后取消检查点（与解包后、签名等待里同款）。
         if czfTakeInstallCancel() {
+            czfRestoreOldBackup()
             throw CZFInstallCancelled()
         }
 
@@ -2666,6 +2715,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 以为成功：批量计成功、远程下载的 IPA 还被删掉）。与函数内其
         // 他失败路径一致，调用方的 catch 按原有方式弹错。
         guard let finalNewApp else {
+            // 3.8.527（L54）：新包 LCAppInfo 初始化失败，旧包搬回来再抛错。
+            czfRestoreOldBackup()
             throw "lc.appList.appInfoInitError".loc
         }
 
@@ -2727,6 +2778,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // O-9：签名等待被取消（取消轮询抢到了 resume）：抛取消，
             // 不走下面的签名失败路径；顺手取走取消标志，记取消数。
             _ = czfTakeInstallCancel()
+            // 3.8.527（L54）：签名取消，旧包搬回来再抛错。
+            czfRestoreOldBackup()
             throw CZFInstallCancelled()
         }
         // 3.8.499（L18）：签名轮询 0.5 秒一查，取消点在两次检查之间、
@@ -2735,6 +2788,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 下次安装入口 :3409 直接取走当取消、白白记一次失败。签名刚完
         // 在这里再取一次，抢到就按取消抛（与上面 cancelled 分支同款）。
         if czfTakeInstallCancel() {
+            // 3.8.527（L54）：签名刚完被取消，旧包搬回来再抛错。
+            czfRestoreOldBackup()
             throw CZFInstallCancelled()
         }
         if czfSignResumeOnce.timedOut {
@@ -2803,6 +2858,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 由它自己清）；原来这里在 installIpaFile return 之后才跑，
             // defer 已清过一次并已 drain 下一项，延迟再清会放行并发。
         }
+        // 3.8.527（L54）：成功尾部才删旧包备份（原在③处删，删完
+        // 仍有四处抛错点、旧包已无可回滚）。走到这里安装已成，
+        // 模型追加在上面已排队进主线程，旧备份可以清了；下次
+        // 安装开头也会清残留 .czf-old，删失败（极少）不报错。
+        try? fm.removeItem(at: czfOldBackup)
     }
 
     /// 全新安装完成后自动查备份记录（数据管理里备的）：
@@ -2845,6 +2905,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 逐个文件夹等会把总时间拉长，共用一个预算；用完后剩下的外
         // 部文件夹直接跳过（循环内守卫）。
         var czfExtWaitBudget = 15
+        // 3.8.527（L54）：他实例备份排除——dataUUID 只在首次启动
+        // 容器准备时才写（LCAppModel :716/:728/:824），安装刚完
+        // 还没启动时 appUUID 恒空，第一档精确匹配永远走不到；
+        // 不改名多开第二实例时，第二/三档（文件夹名 == 显示名 +
+        // Bundle ID）会把原实例的备份当成自己的、自动恢复串实例。
+        // 先快照列表里其他实例的 dataUUID（经主线程取，@Published
+        // 数组；本函数在裸 Task 里跑，见 C3 同款），循环里 manifest
+        // 的 dataUUID 若属于另一仍在列表里的实例，直接跳过该文件夹。
+        // 删掉重装那路：原实例已不在列表，快照里没有它的 dataUUID，
+        // 不排除、照旧恢复自己的数据。无 manifest 的老备份没有
+        // dataUUID 可认，维持原行为。
+        let czfOtherDataUUIDs: Set<String> = await MainActor.run {
+            Set((sharedModel.apps + sharedModel.hiddenApps).filter { $0 !== app }.compactMap { $0.appInfo.dataUUID }.filter { !$0.isEmpty })
+        }
         // 3.8.283：自动恢复改严格配对（照手动恢复 restoreFromBackup
         // 的三档）：dataUUID 精确匹配直接认；否则显示名 + Bundle ID
         // 都对上才算候选；多个候选不猜（多开分身同 bundleID，取第
@@ -2879,6 +2953,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if let du = json?["dataUUID"], !du.isEmpty, !appUUID.isEmpty, du == appUUID {
                 found = folder
                 break
+            }
+            // 3.8.527（L54）：这份备份的 dataUUID 属于列表里另一
+            // 实例（仍在用），不是本 App 的——二/三档别认它。
+            // 放在第一档之后：第一档是本实例精确匹配，优先认。
+            if let du = json?["dataUUID"], !du.isEmpty, czfOtherDataUUIDs.contains(du) {
+                continue
             }
             let mBid = json?["bundleIdentifier"] ?? ""
             let mName = json?["displayName"] ?? ""
@@ -3293,16 +3373,33 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 在此批动——那一项本就是要取消的，残留只是续排晚
             // 一步。
             if czfTakeInstallCancel() {
+                // 3.8.527（L54）：起跑即取消的这一项若是
+                // startInstallApp 排进来的 asCopy 临时副本，
+                // 也按表删掉——不装就不留 tmp。
+                Self.czfDeleteFileImporterTmp(next.urlStr)
                 drainPendingInstalls()
                 return
             }
             switch next {
             case .url(let s, let r, let p, let f, let n):
                 await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f, customDisplayName: n)
+                // 3.8.527（L54）：排空装完，按表删 asCopy 临时
+                // 副本（installFromUrl 的 file 分支不删它）；不
+                // 在表里的地址（源页/收件箱/直链）原样不动。
+                Self.czfDeleteFileImporterTmp(s)
             case .plist(let s):
                 await installFromPlist(urlStr: s)
             }
         }
+    }
+
+    // 3.8.527（L54）：czfFileImporterTmpToDelete 的取删合一——
+    // 在表里才删，不在表里不动；删失败（极少）不报错，tmp 由
+    // 系统清。URL(string:) 解不出时只把表项清掉、不删文件。
+    private static func czfDeleteFileImporterTmp(_ urlStr: String) {
+        guard czfFileImporterTmpToDelete.remove(urlStr) != nil,
+              let tmpURL = URL(string: urlStr) else { return }
+        try? FileManager.default.removeItem(at: tmpURL)
     }
 
     // MARK: - 分享收件箱认领（3.8.404）
@@ -3642,12 +3739,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 3.8.503（L25）：网页下载的 .ipa 落在本次下载独占的
                     // tmp 子目录 LCWebDownload-<UUID>/（L24），装完整个
                     // 子目录没人清——每个成功下载留一个目录 + 一个 IPA
-                    // 在 tmp 里（失败的按 I2 同款留着）。只成功才删，
-                    // 且只认 LCWebDownload- 前缀（用户从“文件”挑的
-                    // IPA 不在这个目录里，不会误删）；排队路径在
-                    // installIpaFile 之前就 return false，走到这里
-                    // 的一定是本次真正执行完的安装，删了不影响重试。
-                    if installUrl.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") {
+                    // 在 tmp 里（失败的按 I2 同款留着）。只成功才删；
+                    // 排队路径在 installIpaFile 之前就 return false，
+                    // 走到这里的一定是本次真正执行完的安装，删了不
+                    // 影响重试。
+                    // 3.8.527（L54）：只认名字不够——用户在“文件”
+                    // 里建个同名 LCWebDownload-xxx 文件夹、里面放
+                    // IPA，装完也会被整目录删掉。再认位置：父目录
+                    // 必须是 tmp 下的直接子目录（L24 的下载目的地
+                    // 就是 tmp/LCWebDownload-<UUID>/）；标准化后比，
+                    // /var 与 /private/var 两种写法都对得上。
+                    var czfTmpPath = fm.temporaryDirectory.standardizedFileURL.path
+                    if czfTmpPath.hasSuffix("/") { czfTmpPath.removeLast() }
+                    let czfParentPath = installUrl.deletingLastPathComponent().standardizedFileURL.path
+                    if installUrl.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-"),
+                       czfParentPath.hasPrefix(czfTmpPath + "/") {
                         try fm.removeItem(at: installUrl.deletingLastPathComponent())
                     }
                 } catch {
@@ -3742,7 +3848,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     return false
                 }
             }
-            try await installIpaFile(destinationURL, autoReplace: autoReplace, forceAsNew: forceAsNew)
+            // 3.8.527（L54）：远程分支原来没传 customDisplayName，
+            // 本地分支 :3665 完整传入——恢复缺失分身的远程路
+            // （带 forceAsNew + 预设名）会走到这里弹输名框、
+            // 等待循环等满 5 分钟报失败；补传，与本地同款。
+            try await installIpaFile(destinationURL, autoReplace: autoReplace, forceAsNew: forceAsNew, customDisplayName: customDisplayName)
             czfRemoteInstallOK = true
         } catch is CZFInstallCancelled {
             // 3.8.428 安装#2：安装中途取消（替换选择/输名/运行中
