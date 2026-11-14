@@ -2008,8 +2008,14 @@ struct LCDataManagementView : View {
             let tmpItems = try fm.contentsOfDirectory(at: tmpDirectory, includingPropertiesForKeys: nil)
 
             if tmpItems.isEmpty {
-                successInfo = "lc.settings.noTmpToClean".loc
-                successShow = true
+                // 3.8.515（L39）：本函数从按钮的裸 Task 调来、不在
+                // 主 actor 上（L32/L38 同款），successInfo/successShow
+                // 是 @State，离主线程写报 Publishing changes、成功
+                // 提示可能不弹；回主线程再写。
+                await MainActor.run {
+                    successInfo = "lc.settings.noTmpToClean".loc
+                    successShow = true
+                }
                 return
             }
 
@@ -2017,11 +2023,15 @@ struct LCDataManagementView : View {
                 try fm.removeItem(at: item)
             }
 
-            successInfo = "lc.settings.cleanTmpComplete".loc
-            successShow = true
+            await MainActor.run {
+                successInfo = "lc.settings.cleanTmpComplete".loc
+                successShow = true
+            }
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
 
@@ -2043,6 +2053,19 @@ struct LCDataManagementView : View {
             for app in allApps {
                 for container in app.uiContainers {
                     let containerPath = container.containerURL
+                    // 3.8.515（L39）：外部容器（bookmark）须先
+                    // startAccessing 才能读到——存储统计那路
+                    //（LCStorageManagementModel）已是这么括着
+                    // 的，这里原来没括，外部容器的缓存静默跳过、
+                    // 清理完还报“已完成”。只认 bookmarkResolved
+                    // 的，本机容器不碰；defer 在本轮循环结束时
+                    // 跑，抛错路径也一样停（存储统计同款写法）。
+                    let didAccess = container.bookmarkResolved && containerPath.startAccessingSecurityScopedResource()
+                    defer {
+                        if didAccess {
+                            containerPath.stopAccessingSecurityScopedResource()
+                        }
+                    }
                     let guestCachePath = containerPath.appendingPathComponent("Library/Caches")
                     
                     if fm.fileExists(atPath: guestCachePath.path) {
@@ -2064,14 +2087,22 @@ struct LCDataManagementView : View {
             }
 
             if cleanedCount == 0 {
-                successInfo = "lc.settings.noCacheToClean".loc
+                // 3.8.515（L39）：同上，@State 写回主线程再写。
+                await MainActor.run {
+                    successInfo = "lc.settings.noCacheToClean".loc
+                    successShow = true
+                }
             } else {
-                successInfo = "lc.settings.cleanCacheComplete".loc
+                await MainActor.run {
+                    successInfo = "lc.settings.cleanCacheComplete".loc
+                    successShow = true
+                }
             }
-            successShow = true
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
 

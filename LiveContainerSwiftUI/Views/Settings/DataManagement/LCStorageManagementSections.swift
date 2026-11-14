@@ -253,7 +253,11 @@ struct LCInstalledAppsSection: View {
             LCAppStorageDetailView(appItem: appItem)
         } label: {
             HStack(spacing: 12) {
-                IconImageView(icon: appItem.appModel.appInfo.iconIsDarkIcon(darkModeIcon))
+                // 3.8.515（L39）：iconIsDarkIcon 生成失败时返 nil
+                //（无图标的包），IconImageView 要求非空 UIImage，
+                // 直接传 nil 会在隐式解包处闪退——网格/排序页在
+                // 3.8.428 已补 ?? UIImage()，存储页这两处漏了。
+                IconImageView(icon: appItem.appModel.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage())
                     .frame(width: 28, height: 28)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -290,7 +294,9 @@ private struct LCAppStorageSummaryHeaderView: View {
     
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            IconImageView(icon: appItem.appModel.appInfo.iconIsDarkIcon(darkModeIcon))
+            // 3.8.515（L39）：同上，无图标的包 iconIsDarkIcon
+            // 返 nil，直接传给 IconImageView 会闪退，补兜底。
+            IconImageView(icon: appItem.appModel.appInfo.iconIsDarkIcon(darkModeIcon) ?? UIImage())
                 .frame(width: iconSize, height: iconSize)
 
             VStack(alignment: .leading) {
