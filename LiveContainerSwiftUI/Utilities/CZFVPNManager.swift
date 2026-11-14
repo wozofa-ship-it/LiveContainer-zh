@@ -855,13 +855,17 @@ public final class CZFVPNManager {
         // 别的 App 刚起了核心，收尾会把它抢回旧节点、还把归属
         // 写成 bundleId/空 appInfo 不同步的一对。
         // 3.8.545（L75）：bundleIdentifier() 读 _info，离主线程读竞态；经 helper 取（此处未持锁，main.sync 安全）。
+        // 3.8.562（L93）：bid 在锁外取好（L75，绝不在持锁时调
+        // czfBundleId），传进 start(withLink:)——锁下再认归属
+        // 才是终审（见该函数注释）；这里的无锁守卫只作快拒。
+        let czfBid = appInfo.flatMap { Self.czfBundleId(for: $0) }
         if isRunning,
            let owner = coreOwnerBundleId,
-           appInfo.flatMap({ Self.czfBundleId(for: $0) }) != owner {
+           czfBid != owner {
             lastError = "核心正被另一个已钉死节点的 App 占用，暂不切换（手动在设置里切节点可强制切换）"
             return
         }
-        if start(withLink: link) {
+        if start(withLink: link, ownerBid: czfBid, ownerAppInfo: appInfo) {
             claimCoreOwnershipIfRunning(link: link, for: appInfo)
         } else {
             // 启动时节点起不来就地往下一个切：之前是起不来
@@ -943,6 +947,8 @@ public final class CZFVPNManager {
         let links = nodeLinks
         guard links.count >= 2 else { return false }
         let cands = Self.sortedSupportedCandidates(links: links, excluding: [link])
+        // 3.8.562（L93）：bid 锁外取好传进 start（同 ensureRunning）。
+        let czfBid = Self.czfBundleId(for: appInfo)
         for cand in cands.prefix(2) {
             // 测速窗口内不切节点起核心：这轮探针是 runApp 派的，
             // 用户此时点“测延迟”会先停核心再测；这里中途起核心
@@ -954,7 +960,7 @@ public final class CZFVPNManager {
             guard !pinging else { return false }
             // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，
             // 不冻调用方的协作线程（runApp 侧同款做法）。
-            let started = await Task.detached(priority: .userInitiated) { CZFVPNManager.shared.start(withLink: cand.link) }.value
+            let started = await Task.detached(priority: .userInitiated) { CZFVPNManager.shared.start(withLink: cand.link, ownerBid: czfBid, ownerAppInfo: appInfo) }.value
             guard started else { continue }
             claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
             if await probeNodeThroughCore(timeout: timeout) {
@@ -1096,7 +1102,20 @@ public final class CZFVPNManager {
 
     // 用指定链接起核心：已在跑且正是这条链接就直接成功；
     // 在跑的是别的节点先停再按这条起
-    private func start(withLink rawLink: String) -> Bool {
+    // 3.8.562（L93）：ownerBid/ownerAppInfo 是调用方的归属（锁外
+    // 取好传进来，绝不在持锁时调 czfBundleId，L75）——归属守卫
+    // 必须在同一把锁下与停旧核心原子完成：原来守卫只在
+    // ensureRunning 里无锁读，两个 App 在同一轮阻塞式 start
+    //（CGo invoke 几百毫秒到数秒，期间 isRunning 仍是 false）
+    // 里先后越过守卫，后起的 start 会停掉先起的核心、换成自己
+    // 的节点，先起的 App fail-open 跑在别人的节点上（钉死节点
+    // 的养号 App 悄悄换 IP，与 L91 同款症状、另一条路）。这里
+    // 在锁下再认一次归属：核心正跑在别人的节点上就拒绝起，
+    // 不动别人的核心；起成功后也在同一把锁下认领归属（只写
+    // 字段，不排轮换——轮换仍由调用方事后的认领排），起完与
+    // 认领之间不再有窗口。nil = 手动/无归属起核心（start()、
+    // ensureRunningForHost），不拒绝、不认领，原语义不动。
+    private func start(withLink rawLink: String, ownerBid: String? = nil, ownerAppInfo: LCAppInfo? = nil) -> Bool {
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
         let link = rawLink.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1105,6 +1124,11 @@ public final class CZFVPNManager {
             return false
         }
         if isRunning && runningLink == link { return true }
+        // 锁下再认归属：已被别的 App 钉死占住时拒绝，不停它的核心。
+        if isRunning, let owner = coreOwnerBundleId, let bid = ownerBid, bid != owner {
+            lastError = "核心正被另一个已钉死节点的 App 占用，暂不切换（手动在设置里切节点可强制切换）"
+            return false
+        }
         // B1（重启不丢恢复意图）：下面的 stop() 会把 coreWasRunning
         // 写成 false，但这只是换节点的中间态，不是用户关核心——
         // 成功后按停之前的原值恢复；失败则保持 false（核心确实停了）。
@@ -1126,7 +1150,13 @@ public final class CZFVPNManager {
         // （先停后起，同一时刻只活一个核心，端口复用）。
         if CZFSingBoxRouting.coreKind(for: link) == .singBox {
             let ok = startSingBox(withLink: link)
-            if ok { coreWasRunning = wasRunningFlag }
+            if ok {
+                coreWasRunning = wasRunningFlag
+                // 3.8.562（L93）：起成功当场认领（同锁下，后面
+                // 再无窗口可抢；轮换仍由调用方事后认领排）。
+                if let ownerBid { coreOwnerBundleId = ownerBid }
+                if let ownerAppInfo { coreOwnerAppInfo = ownerAppInfo }
+            }
             return ok
         }
 
@@ -1212,6 +1242,9 @@ public final class CZFVPNManager {
         runningCore = .xray
         lastError = nil
         coreWasRunning = wasRunningFlag
+        // 3.8.562（L93）：起成功当场认领（同上）。
+        if let ownerBid { coreOwnerBundleId = ownerBid }
+        if let ownerAppInfo { coreOwnerAppInfo = ownerAppInfo }
         return true
     }
 
@@ -1367,9 +1400,11 @@ public final class CZFVPNManager {
     private func startFallback(from failedLink: String, for appInfo: LCAppInfo?) {
         let links = nodeLinks
         guard links.count >= 2 else { return }
+        // 3.8.562（L93）：bid 锁外取好传进 start（同 ensureRunning）。
+        let czfBid = appInfo.flatMap { Self.czfBundleId(for: $0) }
         let cands = Self.sortedSupportedCandidates(links: links, excluding: [failedLink])
         for cand in cands {
-            if start(withLink: cand.link) {
+            if start(withLink: cand.link, ownerBid: czfBid, ownerAppInfo: appInfo) {
                 if let appInfo = appInfo, Self.nodeOverride(for: appInfo) != nil {
                     Self.setNodeOverride(cand.link, for: appInfo)
                 } else {
@@ -1407,6 +1442,9 @@ public final class CZFVPNManager {
         // 不动它。
         rotateTriedLinks = []
         var current = effectiveLink(for: appInfo)
+        // 3.8.562（L93）：bid 传进 start（主队列上，bundleIdentifier()
+        // 直读安全；start 里锁下认领，轮换起完不再留窗口）。
+        let czfBid = appInfo.bundleIdentifier()
         for _ in 0..<links.count {
             guard let target = nextSupportedNode(after: current, links: links) else {
                 cancelRotateCheck()
@@ -1418,7 +1456,7 @@ public final class CZFVPNManager {
             vpnCoreLock.lock()
             coreOwnerBundleId = nil
             vpnCoreLock.unlock()
-            if start(withLink: target) {
+            if start(withLink: target, ownerBid: czfBid, ownerAppInfo: appInfo) {
                 // 3.8.523（L51）：起成功了才把目标节点写进钉死/
                 // 全局——原来先写再起，起失败继续试下一个，一圈
                 // 都起不来时钉死/全局已指着最后一个起失败的节

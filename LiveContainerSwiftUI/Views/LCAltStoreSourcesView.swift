@@ -647,7 +647,14 @@ enum CZFSkippedUpdate {
         dict = dict.filter { stableID, skippedVersion in
             let bundleId = String(stableID.split(separator: "|", maxSplits: 1).first ?? Substring(stableID))
             guard let installed = installedVersions[bundleId], !installed.isEmpty else { return true }
-            return czfIsVersion(skippedVersion, newerThan: installed)
+            // 3.8.562（L93）：原来只留“跳过版本比已装新”的条目——
+            // 已装与跳过版本号相等时（只升 build 的更新：已装
+            // 2.0/build 50、源最新 2.0/build 100，用户跳过 2.0）
+            // 也删条目，下次刷新更新又冒出来，跳过等于没点。
+            // 跳过是按版本号记的，与 CZFUpdateIgnore 同款语义：
+            // 只有已装版本号严格新于跳过版本（已更新过去了）
+            // 才删；相等留着，源出了更新的版本号再提醒。
+            return !czfIsVersion(installed, newerThan: skippedVersion)
         }
         if dict.count != before {
             UserDefaults.standard.set(dict, forKey: key)

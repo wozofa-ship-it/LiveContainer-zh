@@ -873,12 +873,29 @@ class LCAppModel: ObservableObject, Hashable {
                     let dst = newContainer.containerURL.appendingPathComponent("CZFKeychainImport.plist")
                     if !FileManager.default.fileExists(atPath: dst.path),
                        let entries = try? FileManager.default.contentsOfDirectory(at: containerDir, includingPropertiesForKeys: nil) {
+                        // 3.8.562（L93）：先找本 App 旧容器（dataUUID
+                        // 还是旧值，下面才改成 newName）里的排队文件
+                        // 再拷——Data/Application 是全部 App 的容器
+                        // 共用目录，原来取目录序第一个带 plist 的文件
+                        // 夹，可能是别的 App 的排队文件，拷过来本 App
+                        // 自己的那份就被 break 跳过、登录回不来；
+                        // 旧 dataUUID 对不上（全新安装等）时才回落
+                        // 到原来的第一个，3.8.377 的覆盖面不变。
+                        let oldUUID = appInfo.dataUUID ?? ""
+                        var fallbackSrc: URL?
+                        var copied = false
                         for entry in entries where entry.lastPathComponent != newName {
                             let src = entry.appendingPathComponent("CZFKeychainImport.plist")
-                            if FileManager.default.fileExists(atPath: src.path) {
+                            guard FileManager.default.fileExists(atPath: src.path) else { continue }
+                            if !oldUUID.isEmpty, entry.lastPathComponent == oldUUID {
                                 try? FileManager.default.copyItem(at: src, to: dst)
+                                copied = true
                                 break
                             }
+                            if fallbackSrc == nil { fallbackSrc = src }
+                        }
+                        if !copied, let fallbackSrc {
+                            try? FileManager.default.copyItem(at: fallbackSrc, to: dst)
                         }
                     }
                 }
