@@ -3126,6 +3126,15 @@ struct LCDataManagementView : View {
     /// 重写 dump，轮询 mtime 至多等 5 秒，前进即新鲜，超时按旧值继续（回执已报
     /// 快照时间，用户看得见）。同时解决文件侧滞后（关窗时 App 落盘再拷）。
     static func refreshKeychainSnapshot(for app: LCAppModel) async {
+        // 3.8.517（L42）：零容器直接返——下面轮询只认
+        // before[] 里有记录的 dump，没容器时 before 为空、
+        // refreshed 永远成不了 true，会白等满 5 秒。没启动过
+        // 的 App（容器在首次启动时才建，LCAppModel:760）每
+        // 次备份都白交这 5 秒，几个就是几十秒。注意：只敢省
+        // 零容器这一档——App 没在跑但 dump 已存在时也可能等
+        // 满 5 秒，那是客端写盘时机 host 侧看不见，不能拿
+        // isAppRunning 一刀切（关窗竞态会读到旧 dump），不动。
+        guard !app.uiContainers.isEmpty else { return }
         let fm = FileManager.default
         var before: [URL: Date] = [:]
         for container in app.uiContainers {

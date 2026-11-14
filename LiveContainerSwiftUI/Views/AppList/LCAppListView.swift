@@ -3226,6 +3226,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         guard !pendingInstalls.isEmpty else { return }
         let next = pendingInstalls.removeFirst()
         Task {
+            // 3.8.517（L42）：取消点在排水 Task 起跑前——正在装的
+            // 那一项刚结束、defer 已把这一项出队并起了 Task，用户
+            // 此时点进度条旁的取消：标志立起来后，下面
+            // installFromUrl 的入口检查取走它、直接 return false，
+            // 此时 defer 还没注册、链就断了——这一项静默丢掉不说，
+            // 剩下排队的要等下一次安装才接着排（“排队中”一直挂
+            // 着）。起跑时先取一次：取到就把这一项当取消、继续排
+            // 下一项；取不到再正常装。起跑到入口检查之间没有挂起
+            // 点，残留窗口只剩主线程点按与本 Task 读标志之间的竞
+            // 态，可忽略。注意：.plist 项下载 plist 的几秒窗口里
+            // 点取消仍走老路（内层 installFromUrl 入口取走标志、
+            // 该项按取消丢掉、其余排队等下一次安装才续上），不
+            // 在此批动——那一项本就是要取消的，残留只是续排晚
+            // 一步。
+            if czfTakeInstallCancel() {
+                drainPendingInstalls()
+                return
+            }
             switch next {
             case .url(let s, let r, let p, let f, let n):
                 await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f, customDisplayName: n)
