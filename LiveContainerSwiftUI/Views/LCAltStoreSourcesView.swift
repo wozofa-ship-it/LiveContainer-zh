@@ -3038,7 +3038,13 @@ struct SourceIconView: View {
         }
         .task(id: url) {
             guard let url else { image = nil; return }
-            image = await CZFSourceIconCache.shared.load(url: url)
+            let loaded = await CZFSourceIconCache.shared.load(url: url)
+            // 3.8.566（L97）：url 换了会取消旧任务，但 load 里等在途
+            // 下载的 await 不因调用方取消而提前返回——旧任务跑完仍会
+            // 把旧图标写进 image，格子就顶着别人的图标（快滑未缓存
+            // 图标的网格时能撞上）；取消了就别写，让新任务的图留着。
+            guard !Task.isCancelled else { return }
+            image = loaded
         }
     }
 

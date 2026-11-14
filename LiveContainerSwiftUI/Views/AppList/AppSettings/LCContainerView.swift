@@ -58,8 +58,16 @@ struct LCContainerView : View {
                         TextField("lc.container.containerName".loc, text: $typingContainerName)
                             .multilineTextAlignment(.trailing)
                             .onSubmit {
+                                // 3.8.566（L97）：在用时 saveContainer 拒存，
+                                // 但名字已在上面改了内存——提示报错的同时
+                                // 列表却显示新名，重启又变回旧名；存失败
+                                // 时把内存名字与输入框都还原，拒存就是没改。
+                                let oldName = container.name
                                 container.name = typingContainerName
-                                saveContainer()
+                                if !saveContainer() {
+                                    container.name = oldName
+                                    typingContainerName = oldName
+                                }
                             }
                     }
                     HStack {
@@ -315,8 +323,14 @@ struct LCContainerView : View {
             // 视图上弹 alert；在用容器时 saveContainer 会拒存，
             // 报错 alert 同样可能弹不出，改动丢弃，与原来一致。
             if typingContainerName != container.name {
+                // 3.8.566（L97）：同 onSubmit——在用时拒存，内存名字
+                // 却已改了，离开页面后列表显示新名、重启变回旧名，
+                // 注释说的“改动丢弃”并没有丢弃；存失败时还原内存名。
+                let oldName = container.name
                 container.name = typingContainerName
-                saveContainer()
+                if !saveContainer() {
+                    container.name = oldName
+                }
             }
             if !typingIDFV.isEmpty, typingIDFV != (container.spoofedIdentifier ?? ""), UUID(uuidString: typingIDFV) != nil {
                 saveIDFV()
@@ -355,14 +369,19 @@ struct LCContainerView : View {
         delegate.saveContainer(container: container)
     }
 
-    func saveContainer() {
+    // 3.8.566（L97）：拒存时返回 false——名字先改内存再调保存，
+    // 在用时保存被拒、内存里的名字却已改了，列表当场显示新名、
+    // 重启又变回旧名，拒存等于没拒；调用方存失败时把名字还原。
+    @discardableResult
+    func saveContainer() -> Bool {
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
             errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
             errorShow = true
-            return
+            return false
         }
         
         delegate.saveContainer(container: container)
+        return true
     }
     
     func openDataFolder() {
