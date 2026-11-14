@@ -6742,7 +6742,8 @@ struct LCDataManagementView : View {
         // 是空的，循环一次没清也照常记了今天，当天就再也不会
         // 清（定时备份同款是选空直接 return 不记日期；这里原来
         // 无条件记）。零 App 的用户每次打开都重查一次，无害。
-        let appsToClear = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        // 3.8.546（L76）：本函数三路触发全是裸 Task（LCTabView onAppear/scenePhase.active、数据管理页 onAppear），不在主 actor 上；model.apps/hiddenApps 是 @Published，离主线程读是 L70 同款漏网（L70 只修了恢复/清理四处）。先回主线程取快照，清缓存本身仍在外面做。
+        let appsToClear = await MainActor.run { DataManager.shared.model.apps + DataManager.shared.model.hiddenApps }
         guard !appsToClear.isEmpty else { return }
         for app in appsToClear {
             app.appInfo.clearIconCache()
@@ -6794,10 +6795,11 @@ struct LCDataManagementView : View {
         let now = Date()
         if calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now) < hour * 60 + minute { return }
         let loginOnly = defaults.bool(forKey: "LCScheduleBackupKeychainOnly")
-        let model = DataManager.shared.model
-        let migrated = Self.migratedScheduleIDs(from: ids, apps: model.apps + model.hiddenApps)
-        let selected = (model.apps + model.hiddenApps).filter {
-            migrated.contains(Self.instanceKey(for: $0))
+        // 3.8.546（L76）：同 runScheduledCacheIfDue——三路触发全是裸 Task；model.apps/hiddenApps 是 @Published，instanceKey/migratedScheduleIDs 还逐个读 _info（dataUUID/bundleIdentifier/displayName）；选 App 整段回主线程一次算完，备份循环仍在外面。
+        let selected = await MainActor.run {
+            let all = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+            let migrated = Self.migratedScheduleIDs(from: ids, apps: all)
+            return all.filter { migrated.contains(Self.instanceKey(for: $0)) }
         }
         guard !selected.isEmpty else { return }
         // 3.8.503（L25）：先刷快照前，先把“本轮一定会跳过”的 App
@@ -6923,7 +6925,9 @@ struct LCDataManagementView : View {
     
     func clearIconCache() async {
         // 隐藏 App 也清（同 runScheduledCacheIfDue 的漏项）。
-        for app in sharedModel.apps + sharedModel.hiddenApps {
+        // 3.8.546（L76）：本函数从按钮的裸 Task 调来（:1025），sharedModel.apps/hiddenApps 是 @Published，离主线程读是 L70 同款；先回主线程取快照，清缓存本身仍在外面做。
+        let appsToClear = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
+        for app in appsToClear {
             app.appInfo.clearIconCache()
         }
     }

@@ -958,6 +958,7 @@ extension Notification.Name {
     @objc public func addRunningAppWithInfo(_ appInfo: LCAppInfo?, appUUID: String, view: UIView?) {
         guard isDockEnabled() else { return }
         
+        // 外层这道只当快路径：真正的去重判在下面 main.async 块里。
         if apps.contains(where: { $0.appUUID == appUUID }) {
             return
         }
@@ -966,6 +967,8 @@ extension Notification.Name {
         let appModel = DockAppModel(appName: appName, appUUID: appUUID, appInfo: appInfo, view: view)
 
         DispatchQueue.main.async {
+            // 3.8.546（L76）：去重必须在这里判——原来只在调用线程上判一次，append 却排进 main.async；同一轮里两次同 UUID 调用都会通过外层检查、追加两次，坞里出现两个同 App 条目、窗口出现通知也发两遍、apps.count==1 的 showDock 判断跟着错。调用方全在主线程也救不了：两次调用之间 main 队列还没跑到 append。块内再判一次，第二个直接丢掉。
+            guard !self.apps.contains(where: { $0.appUUID == appUUID }) else { return }
             self.apps.append(appModel)
             // C6：窗口出现信号（条目真正追加时才发，调用方凭
             // appUUID 过滤；串行门轮询的也是这个 apps 信号）。
