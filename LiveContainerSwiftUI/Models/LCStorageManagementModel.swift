@@ -276,7 +276,9 @@ final class LCStorageManagementModel: ObservableObject {
             .isRegularFileKey,
             .totalFileAllocatedSizeKey,
             .fileAllocatedSizeKey,
-            .fileSizeKey
+            .fileSizeKey,
+            .isSymbolicLinkKey,
+            .isDirectoryKey
         ]
         guard let enumerator = fileManager.enumerator(
             at: url,
@@ -291,11 +293,30 @@ final class LCStorageManagementModel: ObservableObject {
         while let fileURL = enumerator.nextObject() as? URL {
             try Task.checkCancellation()
 
+            guard let resourceValues = try? fileURL.resourceValues(forKeys: resourceKeys) else {
+                continue
+            }
+
+            // 3.8.522（L49）：软链目录不跟进——枚举器默认会钻进软链指向
+            // 的目录，同款已在 LCDataManagementView.folderSize 修过
+            //（3.8.317，用户真机实证：统计永远算不完）。客端容器
+            // 里的 tmp 是指到共享 TMPDIR 的软链（LCBootstrap.m:513），
+            // 不拦会把整个共享 tmp 算进每个容器里：各容器大小虚高且
+            // 彼此雷同，容器总和虚增 N 倍 tmp，Other 残差也被压低
+            //（tmp 不在已知根里）；TMPDIR 里的 <bid>-Inbox 软链还
+            // 会把各容器 Inbox 再算一遍。软链本身不计大小（目标在
+            // 树内由实路径计一次，树外本就不该计）。
+            if resourceValues.isSymbolicLink == true {
+                if resourceValues.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+
             // 客端容器是活的：文件在扫描中途被客端删掉/改名时
             // resourceValues 会抛错——跳过这个文件即可，不能让
             // 一次瞬时错误把整轮存储统计都报成失败。
-            guard let resourceValues = try? fileURL.resourceValues(forKeys: resourceKeys),
-                  resourceValues.isRegularFile == true else {
+            guard resourceValues.isRegularFile == true else {
                 continue
             }
 
