@@ -322,7 +322,18 @@
         dispatch_semaphore_signal(sema);
     }];
 
-    dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+    // 3.8.500（L19）：等 ZSigner 回调不能无限等——zsign.mm 的
+    // dispatch_group_wait 是 DISPATCH_TIME_FOREVER，单个文件签名
+    // 卡住时回调永远不来，这里跟着永远等、诊断页转圈永远不停
+    // （后台线程，不冻主界面，但测试永远没结果）。5 分钟超时
+    // 按失败走（与 Swift 侧签名超时同款）；迟来的回调只 signal
+    // 一个没人等的信号量，无害。
+    if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC))) != 0) {
+        signSuccess = NO;
+        signError = [NSError errorWithDomain:NSBundle.mainBundle.bundleIdentifier code:-1 userInfo:@{
+            NSLocalizedDescriptionKey: @"签名超时（已等待 5 分钟），请重试"
+        }];
+    }
     
     dispatch_async(dispatch_get_main_queue(), ^{
         if(!signSuccess) {

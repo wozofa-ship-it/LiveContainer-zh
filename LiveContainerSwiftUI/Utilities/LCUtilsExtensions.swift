@@ -263,23 +263,42 @@ extension LCUtils {
                 LCPatchAppBundleFixupARM64eSlice(fileURL)
             }
 
+            // 3.8.500（L19）：顶层插件签名 continuation 加 5 分钟超时兜底——
+            // 与启动路签名（LCAppModel signApp，L18）同款：ZSigner 回调
+            // 一直不来时原来永远挂起（zsign.mm 的 dispatch_group_wait
+            // 是 DISPATCH_TIME_FOREVER，单个文件签名卡住就永远等不到
+            // 回调），runApp 永不返、isAppRunning 一直 true、App 再也
+            // 点不开。超时与正常完成用 CZFOnceFlag 互斥，resume 只调
+            // 一次；超时后抛错走原有失败路径（文件夹不记已验，下次
+            // 启动重试）。
+            let czfTopResumeOnce = CZFOnceFlag()
+            var czfTopTimeoutTask: Task<Void, Never>?
             try await withUnsafeThrowingContinuation({ c in
+                czfTopTimeoutTask = Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000_000)
+                    if czfTopResumeOnce.claimTimeout() {
+                        c.resume(throwing: "插件签名超时（已等待 5 分钟），请重试")
+                    }
+                }
                 let progress = signFilesWithZSign(with: topFiles) { success, error in
-                    if(success) {
-                        c.resume()
-                        return
-                    }
+                    if czfTopResumeOnce.claim() {
+                        if(success) {
+                            c.resume()
+                            return
+                        }
 
-                    guard let error else {
-                        c.resume()
-                        return
+                        guard let error else {
+                            c.resume()
+                            return
+                        }
+                        c.resume(throwing: error)
                     }
-                    c.resume(throwing: error)
                 }
                 if let progress {
                     progressHandler?(progress)
                 }
             })
+            czfTopTimeoutTask?.cancel()
             // 刚签完的文件把指纹刷新成签后状态，下次冷启动直接跳过校验
             if let fingerprintKey {
                 for fileURL in topFiles {
@@ -296,14 +315,28 @@ extension LCUtils {
                 LCPatchAppBundleFixupARM64eSlice(fileURL)
             }
 
+            // 3.8.500（L19）：嵌套插件签名同款 5 分钟超时兜底（与上面
+            // 顶层同根因）；超时按失败返回 false，启动继续走（与嵌套
+            // 签失败同款：不记指纹、不拦启动）。
+            let czfNestedResumeOnce = CZFOnceFlag()
+            var czfNestedTimeoutTask: Task<Void, Never>?
             let nestedOK = await withUnsafeContinuation({ c in
+                czfNestedTimeoutTask = Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000_000)
+                    if czfNestedResumeOnce.claimTimeout() {
+                        c.resume(returning: false)
+                    }
+                }
                 let progress = signFilesWithZSign(with: nestedFiles) { success, _ in
-                    c.resume(returning: success)
+                    if czfNestedResumeOnce.claim() {
+                        c.resume(returning: success)
+                    }
                 }
                 if let progress {
                     progressHandler?(progress)
                 }
             })
+            czfNestedTimeoutTask?.cancel()
             if nestedOK, let fingerprintKey {
                 for fileURL in nestedFiles {
                     if let attributes = try? fm.attributesOfItem(atPath: fileURL.path) {
@@ -335,19 +368,32 @@ extension LCUtils {
             return
         }
         LCPatchAppBundleFixupARM64eSlice(fileURL)
+        // 3.8.500（L19）：单文件签名同款 5 分钟超时兜底（与上面顶层
+        // 同根因）；超时后抛错走调用方原有失败路径。
+        let czfSingleResumeOnce = CZFOnceFlag()
+        var czfSingleTimeoutTask: Task<Void, Never>?
         try await withUnsafeThrowingContinuation { c in
+            czfSingleTimeoutTask = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                if czfSingleResumeOnce.claimTimeout() {
+                    c.resume(throwing: "插件签名超时（已等待 5 分钟），请重试")
+                }
+            }
             let _ = signFilesWithZSign(with: [fileURL]) { success, error in
-                if success {
-                    c.resume()
-                    return
+                if czfSingleResumeOnce.claim() {
+                    if success {
+                        c.resume()
+                        return
+                    }
+                    guard let error else {
+                        c.resume()
+                        return
+                    }
+                    c.resume(throwing: error)
                 }
-                guard let error else {
-                    c.resume()
-                    return
-                }
-                c.resume(throwing: error)
             }
         }
+        czfSingleTimeoutTask?.cancel()
     }
 
     private static func authenticateUser(completion: @escaping (Bool, Error?) -> Void) {
