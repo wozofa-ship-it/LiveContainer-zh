@@ -606,7 +606,23 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         }
     }
 
-    func webView(_ webView: WKWebView, download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, decisionHandler: @escaping (URL?) -> Void) {
+    // WKWebView 没有 downloadDelegate 成员，下载的 delegate 在
+    // 这里接：decisionHandler(.download) 后 WebKit 建 WKDownload，
+    // 经 didBecome 交出来，挂上 self 才收到后面的三个回调。
+    // 响应路与动作路各一处（一个下载只走其中一条，重复挂同一
+    // 对象无害）。iOS 14.5+，部署目标 15，不用 #available。
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    // WKDownloadDelegate 的方法名是 download(...)，不是
+    // webView(_:download:...)——之前写错了名字，编译器报不
+    // conform；回调参数叫 completionHandler，不是 decisionHandler。
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
         // 建议文件名只留最后一段（Content-Disposition 里可能
         // 带路径）；空名给个默认名；同名文件先清掉再写（与
         // installFromUrl 落盘同款），免得撞上残留。
@@ -617,15 +633,15 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent(name)
         try? FileManager.default.removeItem(at: dest)
         Self.downloadDestinations[ObjectIdentifier(download)] = dest
-        decisionHandler(dest)
+        completionHandler(dest)
     }
 
-    func webView(_ webView: WKWebView, downloadDidFinish download: WKDownload) {
+    func downloadDidFinish(_ download: WKDownload) {
         guard let dest = Self.downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else { return }
         Task { await self.downloadedFileHandler(dest) }
     }
 
-    func webView(_ webView: WKWebView, download: WKDownload, didFailWithError error: Error, shouldResume resumeData: Data?) {
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         if let dest = Self.downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) {
             try? FileManager.default.removeItem(at: dest)
         }
@@ -728,9 +744,6 @@ struct WebView: UIViewRepresentable {
     mutating func setDelegate(delegete: WKNavigationDelegate) {
         self.delegate = delegete
         self.webView.navigationDelegate = delegete
-        // 下载走同一份 delegate（WKDownloadDelegate，iOS 14.5+；
-        // 部署目标 15，不用 #available）。
-        self.webView.downloadDelegate = delegete as? WKDownloadDelegate
     }
     
     mutating func setObserver(observer: WebViewLoadObserver) {

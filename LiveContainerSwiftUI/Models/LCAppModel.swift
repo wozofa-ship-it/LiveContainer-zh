@@ -989,13 +989,35 @@ class LCAppModel: ObservableObject, Hashable {
         if jitNeeded {
             if multitask, #available(iOS 17.4, *) {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    // 3.8.496（L12）：启动窗在客端初始化完成前被关掉时 pid
+                    // 回调永不触发——terminate 在未运行时是空操作，不走
+                    // delegate；pidCallbacks 只在 onAppInitialize 里取走
+                    // 调一次，无超时、无清理。continuation 永远挂起、
+                    // isAppRunning 一直 true、App 再也点不开，只能重启
+                    // LiveContainer。30 秒超时兜底，只恢复一次
+                    //（CZFOnceBox，czfWaitForWindowAndRelease 同款；
+                    // 回调两路都在主线程、超时任务也跑主线程，take
+                    // 全在 MainActor 上串行，不会双恢复）。
+                    let czfPidBox = CZFOnceBox()
+                    let czfPidTimeout = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 30_000_000_000)
+                        if czfPidBox.take() {
+                            continuation.resume(throwing: "Guest app did not initialize in 30 seconds")
+                        }
+                    }
                     LCUtils.launchMultitaskGuestApp(appInfo.displayName()) { pidNumber, error in
                         if let error {
-                            continuation.resume(throwing: error)
+                            czfPidTimeout.cancel()
+                            if czfPidBox.take() {
+                                continuation.resume(throwing: error)
+                            }
                             return
                         }
                         guard let pidNumber = pidNumber else {
-                            continuation.resume(throwing: "Failed to obtain PID from LiveProcess")
+                            czfPidTimeout.cancel()
+                            if czfPidBox.take() {
+                                continuation.resume(throwing: "Failed to obtain PID from LiveProcess")
+                            }
                             return
                         }
                         Task {
@@ -1004,7 +1026,12 @@ class LCAppModel: ObservableObject, Hashable {
                             } else {
                                 await self.delegate?.jitLaunch(withPID: pidNumber.intValue, withScript: nil, appName: self.appInfo.displayName())
                             }
-                            continuation.resume()
+                            czfPidTimeout.cancel()
+                            await MainActor.run {
+                                if czfPidBox.take() {
+                                    continuation.resume()
+                                }
+                            }
                         }
                     }
                 }

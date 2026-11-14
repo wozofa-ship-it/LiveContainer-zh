@@ -130,7 +130,7 @@ void LCPatchAddRPath(const char *path, struct mach_header_64 *header) {
     // L10-15：两个 rpath 命令直接写在 load commands 末尾、section 内容之前，
     // 原来不查空闲空间。ld64 编出的二进制第一个 section（__text）对齐到页
     // 边界、空闲通常 12KB+（实测 TweakLoader.dylib 12624、LiveContainer
-    // 15080 字节，只需 96），但手填/别家链接器打出的 dylib 可能把 section
+    // 15080 字节，只需 72），但手填/别家链接器打出的 dylib 可能把 section
     // 贴得很紧，写进去会盖掉 section 开头、把 dylib 打坏。先算空闲，
     // 不够就跳过不写，宁可少两个 rpath、也不损坏文件。
     const char *rpath1 = "@executable_path/../../Tweaks";
