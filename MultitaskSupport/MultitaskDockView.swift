@@ -423,6 +423,8 @@ extension Notification.Name {
             if self.isVisible {
                 self.updateDockFrame()
             }
+            // 3.8.554（L84）：转屏时已打开的面板也要重排（见下）。
+            self.czfRelayoutOpenPanelsForRotation()
         }
     }
     
@@ -2230,6 +2232,26 @@ extension Notification.Name {
             UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut]) {
                 host.view.frame.origin.y = targetY
             }
+        }
+    }
+
+    // 3.8.554（L84）：转屏时已打开的面板帧还是旧尺寸——
+    // deviceOrientationDidChange 只调 updateDockFrame，不管两个
+    // 面板覆盖层；面板宿主 view 没有 autoresizingMask、frame 是
+    // 打开时按旧 window.bounds 手算的。转屏后面板宽/高错位、
+    // 遮罩盖不满（遮罩外点按关不掉、也没变暗）。键盘移位助手
+    // （上面）只动 Y，不管宽/高/遮罩。转屏时对已打开的面板全量
+    // 重算：遮罩铺满当前 bounds、面板高 = 当前高 * 0.45 + 48、
+    // 顶沿走 czfPanelOpenY（已含键盘高度）；没打开的不动，下次
+    // 弹出时 present* 本来就会按当前 bounds 算。方向通知本身
+    // 不改 bounds 也无害：同值重算一遍，肉眼无变化。
+    private func czfRelayoutOpenPanelsForRotation() {
+        for (host, backdrop) in [(czfPanelOverlayHost, czfPanelOverlayBackdrop), (czfSourcesOverlayHost, czfSourcesOverlayBackdrop)] {
+            guard let host, let backdrop, !host.view.isHidden, let window = host.view.superview else { continue }
+            let b = window.bounds
+            let panelHeight = b.height * 0.45 + 48
+            backdrop.frame = b
+            host.view.frame = CGRect(x: 0, y: czfPanelOpenY(panelHeight: panelHeight, in: b), width: b.width, height: panelHeight)
         }
     }
 
