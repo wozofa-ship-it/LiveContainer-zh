@@ -30,6 +30,10 @@ struct CZFVPNSettingsView: View {
     @AppStorage("CZFVPNAutoStopMinutes") var vpnAutoStopMinutes = 10
     @State var vpnActiveIndex = 0
     @State var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    // 3.8.518（L43）：内存测速结果是按下标记的，vpnPingResultNodes
+    // 是记结果时那份节点列表快照；列表在外边被换过时下标已不对号，
+    // refreshVPNState 与单测收尾先对快照、不对就清掉重建。
+    @State var vpnPingResultNodes: [String] = []
     @State var vpnPingStaleIndices: Set<Int> = []
     @State var vpnSinglePinging = false
     @State var vpnSinglePingIndex: Int?
@@ -763,7 +767,17 @@ struct CZFVPNSettingsView: View {
         vpnPingDone = 0
         vpnPingTotal = vpnNodes.count
         vpnPingPhase = "测速"
+        // 3.8.518（L43）：测速量的是调用时的节点列表；测速中途
+        // 订阅替换确认框可能弹出并换掉整个列表（导入请求在测速
+        // 前已发出、回包恰撞上测速窗口，确认框按钮没禁测速中），
+        // 完成时按原下标合结果、按原下标自动切最快都会对错行——
+        // 最坏切错节点重启核心，还把错延迟写进落盘缓存（按内容
+        // 存，下次进页“切到最快”继续认错）。起跑时快照列表，
+        // 部分结果与完成时先对快照。
+        let pingNodes = CZFVPNManager.shared.nodeLinks
         CZFVPNManager.shared.pingAllNodes(onPartial: { partial in
+            // 列表中途被换过就别按下标合部分结果（见起跑时快照）。
+            guard CZFVPNManager.shared.nodeLinks == pingNodes else { return }
             // 通的先显示：只合并通的节点，不通的
             // 留空继续显示“测速中”，等最终结果；
             // 不在这里 save，最终结果才落盘。
@@ -779,6 +793,11 @@ struct CZFVPNSettingsView: View {
             vpnPingTotal = total
             vpnPingPhase = phase
         }) { results, rejected in
+            // 3.8.518（L43）：列表中途被换过时下标结果已不对号——
+            // 不覆写界面、不落盘、不自动切最快（旧结果已由替换方
+            // 清掉，收尾 refresh 会按内容从缓存重建）；停过的核心
+            // 照常重启。列表没变时与原来一模一样。
+            let listUnchanged = CZFVPNManager.shared.nodeLinks == pingNodes
             if rejected {
                 // 被拒那批全是失败，不是节点真不通：
                 // 不覆写界面结果、不落盘，免得污染上次
@@ -787,10 +806,11 @@ struct CZFVPNSettingsView: View {
                 // 时已不再清空旧表，这里也不清空，直接
                 // 保留旧结果即可，不用再靠缓存恢复。
                 vpnPingRejected = true
-            } else {
+            } else if listUnchanged {
                 var map: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (i, r) in results.enumerated() { map[i] = r }
                 vpnPingResults = map
+                vpnPingResultNodes = pingNodes
                 vpnPingStaleIndices = []
                 vpnSingleRejectedLinks = []
                 vpnPingRejected = false
@@ -806,7 +826,9 @@ struct CZFVPNSettingsView: View {
             // （省一次重启）；切了就明示，不静默换节点。
             // 被拒那批全是失败，filter 自然找不到最快，不切。
             // 手动"切到最快"按钮还在（按缓存切，不用重测）。
-            if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }),
+            // 3.8.518（L43）：列表中途被换过时 results 的下标
+            // 已不对号，不自动切（见本函数起跑时快照）。
+            if listUnchanged, let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }),
                best.offset != CZFVPNManager.shared.activeNodeIndex,
                best.offset < CZFVPNManager.shared.nodeLinks.count {
                 CZFVPNManager.shared.setActiveNode(at: best.offset)
@@ -846,12 +868,25 @@ struct CZFVPNSettingsView: View {
             if rejected {
                 vpnPingRejected = true
                 vpnSingleRejectedLinks.insert(link)
-            } else if let result, let currentIndex = vpnNodes.firstIndex(of: link) {
-                vpnPingResults[currentIndex] = result
-                vpnPingStaleIndices.remove(currentIndex)
-                vpnSingleRejectedLinks.remove(link)
-                // 只写该条缓存，别刷全表时间戳（见 savePingResult）。
-                CZFVPNManager.savePingResult(link: link, result: result, nodes: vpnNodes)
+            } else if let result {
+                // 3.8.518（L43）：单测按链接内容对回下标；列表在外边
+                // （设置导入/恢复）被换过时旧下标结果已不对号，先清
+                // 掉再写这一条（批量测速同款，见 startVPNPing 的
+                // pingNodes 快照）；链接已被删就没处可写，直接跳过。
+                let currentLinks = CZFVPNManager.shared.nodeLinks
+                if !vpnPingResultNodes.isEmpty && vpnPingResultNodes != currentLinks {
+                    vpnPingResults = [:]
+                    vpnPingStaleIndices = []
+                    vpnPingResultNodes = []
+                }
+                if let currentIndex = currentLinks.firstIndex(of: link) {
+                    vpnPingResults[currentIndex] = result
+                    vpnPingStaleIndices.remove(currentIndex)
+                    vpnSingleRejectedLinks.remove(link)
+                    vpnPingResultNodes = currentLinks
+                    // 只写该条缓存，别刷全表时间戳（见 savePingResult）。
+                    CZFVPNManager.savePingResult(link: link, result: result, nodes: currentLinks)
+                }
             }
             // 停过的核心测完重启原来那条（没停过就不启动）；
             // 放 refresh 之前，状态行直接显示重启后的状态。
@@ -921,6 +956,16 @@ struct CZFVPNSettingsView: View {
 
     func refreshVPNState() {
         vpnNodes = CZFVPNManager.shared.nodeLinks
+        // 3.8.518（L43）：内存测速结果是按下标记的，列表在外边
+        // （设置导入/恢复）被换过时下标已不对号——清掉，下面的
+        // restore 会按内容从缓存重建（行上不再显示错行的延迟，
+        // “切到最快/清理不通/按延迟排序”也不会按错下标走）；
+        // 列表没变、或测速进行中时不动（测速收尾自己对快照）。
+        if !vpnPingResults.isEmpty && !vpnPinging && !vpnPingResultNodes.isEmpty && vpnPingResultNodes != vpnNodes {
+            vpnPingResults = [:]
+            vpnPingStaleIndices = []
+            vpnPingResultNodes = []
+        }
         // 核心占用标记按当前列表剪枝：删节点/订阅替换后孤儿标记
         // 自动掉，删掉重加同一条不会没测过就显示“核心占用”。
         // 链接集合标记，删/排/导都不错位，剪枝只删不在列表的。
@@ -942,6 +987,7 @@ struct CZFVPNSettingsView: View {
             if !restored.results.isEmpty {
                 vpnPingResults = restored.results
                 vpnPingStaleIndices = restored.stale
+                vpnPingResultNodes = vpnNodes
             }
         }
     }
