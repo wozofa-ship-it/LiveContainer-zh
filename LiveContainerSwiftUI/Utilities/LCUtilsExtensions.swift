@@ -273,7 +273,7 @@ extension LCUtils {
             // 启动重试）。
             let czfTopResumeOnce = CZFOnceFlag()
             var czfTopTimeoutTask: Task<Void, Never>?
-            try await withUnsafeThrowingContinuation({ c in
+            try await withUnsafeThrowingContinuation({ (c: UnsafeThrowingContinuation<Void, Error>) in
                 czfTopTimeoutTask = Task {
                     try? await Task.sleep(nanoseconds: 300_000_000_000)
                     if czfTopResumeOnce.claimTimeout() {
@@ -372,7 +372,7 @@ extension LCUtils {
         // 同根因）；超时后抛错走调用方原有失败路径。
         let czfSingleResumeOnce = CZFOnceFlag()
         var czfSingleTimeoutTask: Task<Void, Never>?
-        try await withUnsafeThrowingContinuation { c in
+        try await withUnsafeThrowingContinuation { (c: UnsafeThrowingContinuation<Void, Error>) in
             czfSingleTimeoutTask = Task {
                 try? await Task.sleep(nanoseconds: 300_000_000_000)
                 if czfSingleResumeOnce.claimTimeout() {
