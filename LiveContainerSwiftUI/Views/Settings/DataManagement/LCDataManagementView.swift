@@ -6015,7 +6015,18 @@ struct LCDataManagementView : View {
 
                 
                 if let folder = app.appInfo.tweakFolder {
-                    tweakFoldersInUse.update(with: folder);
+                    // L59-1：tweakFolder 是 "|" 拼接的多选串（LCAppModel
+                    // czfSplitTweakFolders），整串塞进在用集合永远比
+                    // 不上磁盘上的单个夹名——共享 App 的多选模块夹
+                    // 全被误判为闲置、搬回私有目录，插件静默丢失；
+                    // ".disabled" 停用态也一起算在用（共享 App 的
+                    // 停用改名发生在共享路径，见 LCTweaksView），
+                    // 与 moveToAppGroup/moveToPrivateDoc 的候选
+                    // [name, name + ".disabled"] 同款。
+                    for name in LCAppModel.czfSplitTweakFolders(folder) {
+                        tweakFoldersInUse.update(with: name)
+                        tweakFoldersInUse.update(with: name + ".disabled")
+                    }
                 }
 
             }
@@ -6028,7 +6039,12 @@ struct LCDataManagementView : View {
                     appDataFoldersInUse.update(with: container.folderName);
                 }
                 if let folder = app.appInfo.tweakFolder {
-                    tweakFoldersInUse.update(with: folder);
+                    // L59-1：同上，隐藏 App 的共享模块夹也先拆 "|"
+                    // 再登记，".disabled" 停用态一起算在用。
+                    for name in LCAppModel.czfSplitTweakFolders(folder) {
+                        tweakFoldersInUse.update(with: name)
+                        tweakFoldersInUse.update(with: name + ".disabled")
+                    }
                 }
 
             }
