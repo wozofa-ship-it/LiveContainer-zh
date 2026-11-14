@@ -441,6 +441,18 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     UIWindow *window = (UIWindow *)gestureRecognizer.view;
     if (![window isKindOfClass:[UIWindow class]]) return NO;
+    // 3.8.521（L47）：在途手势的起手状态不能被后来手指改写——
+    // 起手状态是文件全局（gCZFStart*），shouldReceiveTouch 对
+    // 每个落下的手指都会调一次：第一根手指边缘滑到一半、第二
+    // 根手指在中部落下，起手边/带/起手 x 全被覆盖成第二根手指
+    // 的，在途那滑直接按“中部起手”判死；反过来中部拖动中第二
+    // 根手指落左缘，拖动会继承边缘起手误触发面板。只在观察
+    // pan 还没追踪任何触摸（numberOfTouches == 0，新手势）
+    // 时写全局；已在追踪（在途、或第一根手指已落下但 pan 还
+    // 没 Began）时只决定接不接本触摸，不碰全局。单指流程
+    // 与原来一字不差；跨窗仍共用全局（见跳过清单 27）。
+    UIPanGestureRecognizer *observerPan = objc_getAssociatedObject(window, kCZFDockGesturePanKey);
+    BOOL czfStartStateLocked = (gestureRecognizer == observerPan && observerPan.numberOfTouches > 0);
     // 控件/进度条起手：观察 pan 与拦截器都不接——拦截器
     // 不接就不会取消 App 触摸，进度条拖动完整归 App。
     // 但边缘起手且落在普通控件（按钮等）上时放行：点按无
@@ -450,8 +462,10 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         CGPoint edgeLoc = [touch locationInView:window];
         BOOL atEdge = (edgeLoc.x <= 44 || edgeLoc.x >= window.bounds.size.width - 44);
         if (!(atEdge && !CZFTouchOnSliderOrProgress(touch))) {
-            gCZFStartEdge = 0;
-            gCZFStartX = 0;
+            if (!czfStartStateLocked) {
+                gCZFStartEdge = 0;
+                gCZFStartX = 0;
+            }
             return NO;
         }
     }
@@ -468,6 +482,8 @@ static BOOL CZFPanFallback(NSInteger startEdge, CGPoint translation, CGFloat end
         BOOL inBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
         return inBand && (loc.x <= kCZFEdgeTouchMax || loc.x >= width - 44);
     }
+    // 在途不改写（见本函数头 L47 注释）：新手势才记起手位置。
+    if (czfStartStateLocked) return YES;
     gCZFStartInBand = (loc.y >= height * 0.70 && loc.y <= height * 0.90);
     // 往外弹带恢复收窄前的好用值 0.55–0.93（用户 2026-11-04
     // 令：左往左滑根本不好用，检查好修复；11-03 收窄到跟

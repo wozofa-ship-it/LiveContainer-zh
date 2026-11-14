@@ -519,15 +519,24 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         if (![fm fileExistsAtPath:inboxPath]) {
             [fm createDirectoryAtPath:inboxPath withIntermediateDirectories:YES attributes:nil error:&error];
         }
-        if([fm fileExistsAtPath:inboxSymlinkPath]) {
-            NSString* fileType = [fm attributesOfItemAtPath:inboxSymlinkPath error:&error][NSFileType];
-            if(fileType == NSFileTypeDirectory) {
-                NSArray* contents = [fm contentsOfDirectoryAtPath:inboxSymlinkPath error:&error];
-                for(NSString* content in contents) {
-                    [fm moveItemAtPath:[inboxSymlinkPath stringByAppendingPathComponent:content] toPath:[inboxPath stringByAppendingPathComponent:content] error:&error];
-                }
-                [fm removeItemAtPath:inboxSymlinkPath error:&error];
+        // 3.8.521（L47）：旧链接必须先清——inboxSymlinkPath 在共享
+        // TMPDIR 里（同包名多开分身共用一个，见 NSExtension+GuestHooks
+        // 的 containerPath：按包名分容器、不按 dataUUID 分）。
+        // 原来的 fileExistsAtPath 会跟软链：旧链接还在、但指向的
+        // 旧容器已删时判不存在，整个分支跳过，symlink() 再因
+        // EEXIST 失败，新容器继续用旧容器的 Inbox，分享进来的
+        // 文件落到上一个容器里。改用 attributesOfItemAtPath
+        // （lstat，不跟软链）认链接本身：是软链就先删（只删链
+        // 接不跟目标），是实目录仍按旧逻辑迁移内容再删。
+        NSString* linkFileType = [fm attributesOfItemAtPath:inboxSymlinkPath error:&error][NSFileType];
+        if(linkFileType == NSFileTypeDirectory) {
+            NSArray* contents = [fm contentsOfDirectoryAtPath:inboxSymlinkPath error:&error];
+            for(NSString* content in contents) {
+                [fm moveItemAtPath:[inboxSymlinkPath stringByAppendingPathComponent:content] toPath:[inboxPath stringByAppendingPathComponent:content] error:&error];
             }
+            [fm removeItemAtPath:inboxSymlinkPath error:&error];
+        } else if(linkFileType == NSFileTypeSymbolicLink) {
+            [fm removeItemAtPath:inboxSymlinkPath error:&error];
         }
         
 

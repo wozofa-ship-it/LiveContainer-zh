@@ -547,7 +547,17 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
         host = CZFHostForFakeIP([NSString stringWithUTF8String:buf]);
     }
     int savedErrno = ECONNREFUSED;
-    int result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno, NULL);
+    BOOL socksConnFailed = NO;
+    int result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno, &socksConnFailed);
+    if (result != 0 && socksConnFailed) {
+        // 3.8.521（L47）：connect 同款——SOCKS 口瞬间没在听（核心重启/
+        // 轮换窗口）时等 200ms 再试一次；connect 有这路重试、connectx
+        // 没有，Network.framework 的连接在核心重启窗口里直接失败。
+        // 请求阶段失败（fd 已连 SOCKS）不重试，语义与 connect 一致。
+        usleep(200 * 1000);
+        savedErrno = ECONNREFUSED;
+        result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno, NULL);
+    }
     if (result != 0) {
         errno = savedErrno;
         __sync_add_and_fetch(&gStatConnFailed, 1);
@@ -591,8 +601,11 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
         if (wasNB2) fcntl(s, F_SETFL, flags2);
         if (hasOldSnd2) setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &oldSnd2, sizeof(oldSnd2));
         if (len) *len = written;
-        if (written == 0) {
-            errno = writeErrno ? writeErrno : ECONNREFUSED;
+        if (written == 0 && writeErrno != 0) {
+            // 3.8.521（L47）：iov 全是空段时 written==0 但没写错，
+            // SOCKS 连接本身已通，应按 connectx 语义成功返回
+            // （*len=0），不是失败；原来一律返 -1。
+            errno = writeErrno;
             CZFWriteStats(NO);
             return -1;
         }
