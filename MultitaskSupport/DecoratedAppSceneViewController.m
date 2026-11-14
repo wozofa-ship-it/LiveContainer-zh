@@ -629,13 +629,21 @@
 
 - (void)appSceneVC:(AppSceneViewController*)vc didInitializeWithError:(NSError *)error {
     dispatch_async(dispatch_get_main_queue(), ^{
+        // pidAvailableHandler 只回调一次：AppSceneViewController 可能因
+        // “扩展完成 + 请求取消”两次调 didInitializeWithError，第二次再调
+        // 会把 Swift 侧已恢复过的 continuation 再恢复一次，直接闪退
+        //（3.8.476 真机：EXC_BAD_ACCESS at 0x1e，swift_continuation_throwingResumeWithError）。
+        // 取出来就置空，后到的回调读到 nil 不再调；两个 block 都在主队列
+        // 串行跑，不会抢。报错弹框与清理不受影响，照常走。
+        void (^handler)(NSNumber *, NSError *) = self.pidAvailableHandler;
+        self.pidAvailableHandler = nil;
         if(error) {
             [vc appTerminationCleanUp];
             // 初始化失败也要把 PID/错误回给等待方（scene 路径同款）：
             // 原来只弹 alert 不回调，runApp 的 continuation 永不恢复，
             // czfLaunchInFlight 一直 true，下次点启动直接被挡掉。
-            if (self.pidAvailableHandler) {
-                self.pidAvailableHandler(nil, error);
+            if (handler) {
+                handler(nil, error);
             }
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"lc.common.error".loc message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"lc.common.ok".loc style:UIAlertActionStyleCancel handler:nil]];
@@ -650,8 +658,8 @@
             // 刷新 originalFrame，后续场景更新都以此为准
             [self czfApplySavedWindowStateIfNeeded];
             [self updateOriginalFrame];
-            if (self.pidAvailableHandler) {
-                self.pidAvailableHandler(@(self.pid), nil);
+            if (handler) {
+                handler(@(self.pid), nil);
             }
         }
     });

@@ -5695,9 +5695,11 @@ struct LCDataManagementView : View {
         let launchURLStr = "filza://view\(path.path)/."
         Task {
             do {
-                try await sharedModel.apps.first(where: { app in
-                    return app.appInfo.bundleIdentifier() == "com.tigisoftware.Filza"
-                })?.runApp(urlStr: launchURLStr)
+                // 锁旁路：Filza 也能被锁定，直启前先过共享守卫；
+                // 未装 Filza 时与原来一样静默无事，未锁时不弹人脸。
+                guard let filza = sharedModel.apps.first(where: { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }) else { return }
+                guard await filza.czfAuthenticateIfLocked() else { return }
+                try await filza.runApp(urlStr: launchURLStr)
             } catch {
                 successInfo = error.localizedDescription
                 successShow = true

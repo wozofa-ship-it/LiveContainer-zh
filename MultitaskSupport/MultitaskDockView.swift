@@ -4270,8 +4270,14 @@ struct SourcesPanelView: View {
                                 if setting.isToggle {
                                     toggleSetting(item: item)
                                 } else {
-                                    settingsApp = app
-                                    showAppSettings = true
+                                    // F-9：坞面板设置快捷方式进设置页前先认证
+                                    //（banner/网格同款守卫，474 漏了这一路）；
+                                    // 未通过不打开。
+                                    Task {
+                                        guard await app.czfAuthenticateIfLocked() else { return }
+                                        settingsApp = app
+                                        showAppSettings = true
+                                    }
                                 }
                             } label: {
                                 ZStack(alignment: .bottomTrailing) {

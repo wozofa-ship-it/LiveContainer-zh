@@ -547,9 +547,19 @@ struct CZFSourceDetailView: View {
     // 的 batchInstallSelected，跨源全装、不认搜索过滤），数字必须
     // 跟动作一致。原来数的是本源搜索过滤后的已勾：搜索开着时数字
     // 比实际装的少；本源没勾但别源有勾时按钮还会被禁用。改数全部
-    // 已勾（selectedIDs 本身就是跨源全集，不认搜索）。
+    // 已勾（selectedIDs 本身就是跨源全集，不认搜索），再按
+    // batchInstallSelected 同口径跨源同包名去重——同一 App 在
+    // 两个源里各勾一次只装一次，只数 selectedIDs 会多算。
     private var czfSelectedCountTotal: Int {
-        selectedIDs.count
+        var seen = Set<String>()
+        var count = 0
+        for item in viewModel.sources {
+            guard let source = item.source else { continue }
+            for app in source.apps where selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: app.bundleIdentifier)) {
+                if seen.insert(app.bundleIdentifier).inserted { count += 1 }
+            }
+        }
+        return count
     }
 
     var body: some View {
