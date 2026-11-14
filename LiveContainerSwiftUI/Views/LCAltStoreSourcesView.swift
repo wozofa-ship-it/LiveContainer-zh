@@ -708,8 +708,14 @@ struct CZFUpdatableAppsSheet: View {
                                 updatingIDs.insert(app.czfStableID)
                                 Task {
                                     if let error = await onUpdateOne(app) {
-                                        updatingIDs.remove(app.czfStableID)
-                                        sheetError = error
+                                        // 3.8.519（L44）：本 Task 是裸 Task、
+                                        // 不在主 actor 上（L40 同款），
+                                        // updatingIDs/sheetError 是 @State，
+                                        // 回主线程再写。
+                                        await MainActor.run {
+                                            updatingIDs.remove(app.czfStableID)
+                                            sheetError = error
+                                        }
                                     }
                                 }
                             }
@@ -1543,7 +1549,9 @@ struct LCSourcesView: View {
             // 再决定反馈（失败才写 errorMessage）。
             Task {
                 if case .failed(let error) = await installTweakIfDylib(app: app) {
-                    errorMessage = error.localizedDescription
+                    // 3.8.519（L44）：本 Task 是裸 Task、不在主 actor
+                    // 上（L40 同款），errorMessage 是 @State，回主线程再写。
+                    await MainActor.run { errorMessage = error.localizedDescription }
                 }
             }
             return
@@ -1583,7 +1591,9 @@ struct LCSourcesView: View {
             // S-8：走共用分支，等结果再决定反馈（失败才写 errorMessage）。
             Task {
                 if case .failed(let error) = await installTweakIfDylib(app: app) {
-                    errorMessage = error.localizedDescription
+                    // 3.8.519（L44）：本 Task 是裸 Task、不在主 actor
+                    // 上（L40 同款），errorMessage 是 @State，回主线程再写。
+                    await MainActor.run { errorMessage = error.localizedDescription }
                 }
             }
             return
@@ -1752,10 +1762,14 @@ struct LCSourcesView: View {
                     Task {
                         if let error = await handleAddSource(sourceUrl) {
                             if isManagingSources {
-                                isManagingSources = false
+                                // 3.8.519（L44）：本 Task 是裸 Task、不在主
+                                // actor 上（L40 同款），isManagingSources/
+                                // errorMessage 是 @State，回主线程再写；
+                                // 关 sheet 后等 400ms 再弹错的顺序不变。
+                                await MainActor.run { isManagingSources = false }
                                 try? await Task.sleep(nanoseconds: 400_000_000)
                             }
-                            errorMessage = error
+                            await MainActor.run { errorMessage = error }
                         }
                     }
                 } else {
@@ -1911,13 +1925,19 @@ private struct ManageSourcesSheet: View {
         Task {
             // 1：onAdd 返回错误文本（nil = 成功），失败时 sheet
             // 内本地弹，不再指望父级 alert（会被 sheet 盖住吞掉）。
+            // 3.8.519（L44）：本 Task 是裸 Task、不在主 actor 上
+            //（L40 同款），addError/manualSourceValue/
+            // isManualFieldFocused（@FocusState）/isAddingManual
+            // 是 @State，回主线程再写。
             if let error = await onAdd(trimmed) {
-                addError = error
+                await MainActor.run { addError = error }
             } else {
-                manualSourceValue = ""
-                isManualFieldFocused = false
+                await MainActor.run {
+                    manualSourceValue = ""
+                    isManualFieldFocused = false
+                }
             }
-            isAddingManual = false
+            await MainActor.run { isAddingManual = false }
         }
     }
 }

@@ -1153,15 +1153,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func batchHide() async {
         let apps = selectedBatchApps.filter { !$0.appInfo.isHidden }
         guard !apps.isEmpty else { return }
-        batchBusy = true
-        defer { batchBusy = false }
+        // 3.8.519（L44）：本函数从按钮的裸 Task 调来、不在主 actor
+        // 上（L40 同款），batchBusy/installInfo/batchMode/
+        // batchSelectedIDs 是 @State，回主线程再写；toggleHidden
+        // 本体已在 MainActor.run 里（L32），删文件/拷盘仍在外面。
+        // 原 defer 清标志改尾部同跳清（本函数无中途 return）。
+        await MainActor.run { batchBusy = true }
         for app in apps {
             await app.toggleHidden()
         }
-        installInfo = "已隐藏 \(apps.count) 个 App（在下方隐藏 App 分段里查看）"
-        installInfoShow = true
-        batchMode = false
-        batchSelectedIDs.removeAll()
+        await MainActor.run {
+            installInfo = "已隐藏 \(apps.count) 个 App（在下方隐藏 App 分段里查看）"
+            installInfoShow = true
+            batchMode = false
+            batchSelectedIDs.removeAll()
+            batchBusy = false
+        }
     }
 
     // 3.8.281：批量恢复显示——把勾中的隐藏 App 搬回可见区。
@@ -1171,15 +1178,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func batchUnhide() async {
         let apps = selectedBatchApps.filter { $0.appInfo.isHidden }
         guard !apps.isEmpty else { return }
-        batchBusy = true
-        defer { batchBusy = false }
+        // 3.8.519（L44）：同 batchHide，@State 写回主线程再写。
+        await MainActor.run { batchBusy = true }
         for app in apps {
             await app.toggleHidden()
         }
-        installInfo = "已恢复显示 \(apps.count) 个 App"
-        installInfoShow = true
-        batchMode = false
-        batchSelectedIDs.removeAll()
+        await MainActor.run {
+            installInfo = "已恢复显示 \(apps.count) 个 App"
+            installInfoShow = true
+            batchMode = false
+            batchSelectedIDs.removeAll()
+            batchBusy = false
+        }
     }
 
     // 新4（3.8.277）：批量删除——复用删 App 的文件部分
@@ -1190,8 +1200,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func batchDelete(removeDataFolders: Bool) async {
         let apps = selectedBatchApps
         guard !apps.isEmpty else { return }
-        batchBusy = true
-        defer { batchBusy = false }
+        // 3.8.519（L44）：本函数从确认框按钮的裸 Task 调来、不在主
+        // actor 上（L40 同款），batchBusy/errorInfo/installInfo/
+        // batchMode/batchSelectedIDs 是 @State，回主线程再写；循环
+        // 内 removeApp 本体已在 DispatchQueue.main.async 里（本文件
+        // :3710），删文件仍在外面。原 defer 清标志改尾部同跳清。
+        await MainActor.run { batchBusy = true }
         var deleted: [String] = []
         var failed: [String] = []
         var failedContainers: [String] = []
@@ -1215,14 +1229,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         if deleted.isEmpty {
-            errorInfo = "删除失败，一个都没删除：\n" + failed.joined(separator: "\n")
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "删除失败，一个都没删除：\n" + failed.joined(separator: "\n")
+                errorShow = true
+                batchMode = false
+                batchSelectedIDs.removeAll()
+                batchBusy = false
+            }
         } else {
-            installInfo = "已删除 \(deleted.count) 个 App" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")) + (failedContainers.isEmpty ? "" : "\n以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))") + (keptBackups.isEmpty ? "" : "\n以下备份已锁定，已保留：\(keptBackups.joined(separator: "、"))")
-            installInfoShow = true
+            await MainActor.run {
+                installInfo = "已删除 \(deleted.count) 个 App" + (failed.isEmpty ? "" : "，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")) + (failedContainers.isEmpty ? "" : "\n以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))") + (keptBackups.isEmpty ? "" : "\n以下备份已锁定，已保留：\(keptBackups.joined(separator: "、"))")
+                installInfoShow = true
+                batchMode = false
+                batchSelectedIDs.removeAll()
+                batchBusy = false
+            }
         }
-        batchMode = false
-        batchSelectedIDs.removeAll()
     }
 
     // 浏览器式搜索（2026-10-24 用户定）：搜索框不再只滤已装 App，
@@ -1432,7 +1454,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         // 网格双击与菜单设置按钮都走这里，一处守住两路。
                         Task {
                             guard await app.czfAuthenticateIfLocked() else { return }
-                            self.openNavigationView(view: AnyView(LCAppSettingsView(model: app)))
+                            // 3.8.519（L44）：本 Task 是裸 Task、不在主
+                            // actor 上，openNavigationView 写 navigateTo/
+                            // isNavigationActive（@State），回主线程再调。
+                            await MainActor.run { self.openNavigationView(view: AnyView(LCAppSettingsView(model: app))) }
                         }
                     }
                 ),
@@ -1472,8 +1497,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             do {
                 try await app.runApp(multitask: !app.shouldLaunchInMultitaskMode)
             } catch {
-                errorInfo = error.localizedDescription
-                errorShow = true
+                // 3.8.519（L44）：本 Task 是裸 Task、不在主 actor 上
+                //（L40 同款），errorInfo/errorShow 是 @State，回主线程再写。
+                await MainActor.run {
+                    errorInfo = error.localizedDescription
+                    errorShow = true
+                }
             }
         }
     }
@@ -1487,8 +1516,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         do {
             return try await LCUtils.authenticateUser()
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            // 3.8.519（L44）：本函数从网格启动两路的裸 Task 调来、
+            // 不在主 actor 上（L40 同款），errorInfo/errorShow 是
+            // @State，回主线程再写。
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
             return false
         }
     }
@@ -2189,8 +2223,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     func openWebView(urlString: String) async {
         guard var urlToOpen = URLComponents(string: urlString), urlToOpen.url != nil else {
-            errorInfo = "lc.appList.urlInvalidError".loc
-            errorShow = true
+            // 3.8.519（L44）：本函数从多路按钮/深链的裸 Task 调来、
+            // 不在主 actor 上（L40 同款），errorInfo/errorShow 是
+            // @State，回主线程再写；下面三处同款。
+            await MainActor.run {
+                errorInfo = "lc.appList.urlInvalidError".loc
+                errorShow = true
+            }
             return
         }
         if urlToOpen.scheme == nil || urlToOpen.scheme! == "" {
@@ -2224,8 +2263,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
 
             guard let appToLaunch = appToLaunch else {
-                errorInfo = "lc.appList.schemeCannotOpenError %@".localizeWithFormat(urlToOpen.scheme!)
-                errorShow = true
+                await MainActor.run {
+                    errorInfo = "lc.appList.schemeCannotOpenError %@".localizeWithFormat(urlToOpen.scheme!)
+                    errorShow = true
+                }
                 return
             }
             
@@ -2244,22 +2285,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             do {
                 try await appToLaunch.runApp(urlStr: urlToOpen.url!.absoluteString)
             } catch {
-                errorInfo = error.localizedDescription
-                errorShow = true
+                await MainActor.run {
+                    errorInfo = error.localizedDescription
+                    errorShow = true
+                }
             }
             
             return
         }
         // 新开网页时，之前最小化的网页被顶掉（只留一个最小化网页）。
-        sharedModel.clearMinimizedWeb()
-        webViewURL = urlToOpen.url!
-        if webViewOpened {
-            webViewOpened = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: {
+        // 3.8.519（L44）：clearMinimizedWeb 写 SharedModel 的两个
+        // @Published、webViewURL/webViewOpened 是 @State，回主线程
+        // 再写；asyncAfter 本来就在主线程，语义不变。
+        await MainActor.run {
+            sharedModel.clearMinimizedWeb()
+            webViewURL = urlToOpen.url!
+            if webViewOpened {
+                webViewOpened = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: {
+                    webViewOpened = true
+                })
+            } else {
                 webViewOpened = true
-            })
-        } else {
-            webViewOpened = true
+            }
         }
     }
 
@@ -3786,23 +3834,32 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     return
                 }
             } catch {
-                errorInfo = error.localizedDescription
-                errorShow = true
+                // 3.8.519（L44）：本函数从通知/深链/网格启动的裸 Task
+                // 调来、不在主 actor 上（L40 同款），errorInfo/errorShow
+                // 是 @State，回主线程再写；下面两处同款。
+                await MainActor.run {
+                    errorInfo = error.localizedDescription
+                    errorShow = true
+                }
                 return
             }
         }
         
         guard let appFound else {
-            errorInfo = "lc.appList.appNotFoundError".loc
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.appList.appNotFoundError".loc
+                errorShow = true
+            }
             return
         }
 
         do {
             try await appFound.runApp(multitask: nil, containerFolderName: container, urlStr: urlStr, forceJIT: forceJIT)
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
         
     }
@@ -3813,8 +3870,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return
             }
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            // 3.8.519（L44）：本函数从隐藏 App 解锁三路的裸 Task 调来、
+            // 不在主 actor 上（L40 同款），errorInfo/errorShow 是 @State，
+            // 回主线程再写（人脸标志本身已由 L34 在 MainActor.run 里置）。
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
             return
         }
     }

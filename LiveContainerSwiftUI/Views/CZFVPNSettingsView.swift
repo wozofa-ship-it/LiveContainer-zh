@@ -778,6 +778,13 @@ struct CZFVPNSettingsView: View {
         CZFVPNManager.shared.pingAllNodes(onPartial: { partial in
             // 列表中途被换过就别按下标合部分结果（见起跑时快照）。
             guard CZFVPNManager.shared.nodeLinks == pingNodes else { return }
+            // 3.8.519（L44）：合入部分结果时一并记快照——L43 只在批量
+            // 完成/单测收尾/缓存恢复三处记，onPartial 这个第四写点漏了。
+            // 首轮批量测速（快照还是空）中途列表被外边换掉时，已合入的
+            // 旧下标部分结果既不被 completion 清（跳过合并分支），也不被
+            // refreshVPNState 清（快照为空短路），会继续按旧下标显示在
+            // 新列表上；记了快照，收尾 refresh 才能按快照对上清掉。
+            vpnPingResultNodes = pingNodes
             // 通的先显示：只合并通的节点，不通的
             // 留空继续显示“测速中”，等最终结果；
             // 不在这里 save，最终结果才落盘。
