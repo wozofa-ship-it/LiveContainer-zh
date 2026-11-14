@@ -6622,19 +6622,33 @@ struct LCDataManagementView : View {
     /// 备份文件夹名里的实例后缀“（xxxxxxxx）”：backupFolderName 规则 3
     /// 拼的是 dataUUID 前 8 位（无 dataUUID 时退到容器文件夹名前 8 位）。
     /// 文件夹名形如“muse（a1b2c3d4）”时返回 a1b2c3d4，没有后缀返回 nil。
+    /// 3.8.548（L78）：只认 8 位十六进制才算后缀——显示名本身尾巴带
+    /// “（...）”的 App（“微信（国际版）”之类）文件夹名也以“）”结尾，
+    /// 旧写法见“）”就认，会拿“国际版”去对 UUID 前缀、恢复缺失实例
+    /// 的预设分身名也会被截成“微信”；规则 3 只拼得出 8 位十六进制
+    /// （“2”兜底基本走不到，见 backupFolderName 注释）。
+    private static func czfIsInstanceSuffix(_ s: String) -> Bool {
+        guard s.count == 8 else { return false }
+        return s.allSatisfy { $0.isHexDigit }
+    }
+
     static func czfInstanceSuffix(fromFolderName name: String) -> String? {
         guard name.hasSuffix("）"),
               let openRange = name.range(of: "（", options: .backwards) else { return nil }
         let suffix = String(name[openRange.upperBound..<name.index(before: name.endIndex)])
-        return suffix.isEmpty ? nil : suffix
+        guard czfIsInstanceSuffix(suffix) else { return nil }
+        return suffix
     }
 
     /// 去掉文件夹名尾巴的实例后缀“（xxxxxxxx）”，剩显示名本身。
     /// 恢复缺失实例时预设自定义名用：传“muse8（a1b2c3d4）”会把
-    /// 实例建歪成带后缀的名字，须先剥掉。
+    /// 实例建歪成带后缀的名字，须先剥掉。3.8.548（L78）：只剥
+    /// 8 位十六进制后缀（见 czfIsInstanceSuffix），显示名自带
+    /// “（...）”的原样保留，不再截断。
     static func czfStripInstanceSuffix(from name: String) -> String {
         guard name.hasSuffix("）"),
-              let openRange = name.range(of: "（", options: .backwards) else { return name }
+              let openRange = name.range(of: "（", options: .backwards),
+              czfIsInstanceSuffix(String(name[openRange.upperBound..<name.index(before: name.endIndex)])) else { return name }
         return String(name[..<openRange.lowerBound])
     }
 

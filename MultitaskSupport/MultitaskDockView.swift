@@ -4627,7 +4627,7 @@ struct SourcesPanelView: View {
             return
         }
         if downloadURL.pathExtension.lowercased() == "dylib" {
-            Task { await installTweakFromPanel(from: downloadURL, name: app.name) }
+            Task { await installTweakFromPanel(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) }
             return
         }
         DataManager.shared.model.selectedTab = .apps
@@ -4639,7 +4639,7 @@ struct SourcesPanelView: View {
 
     // 与源页 LCSourcesView.installTweak 一致
     @MainActor
-    private func installTweakFromPanel(from url: URL, name: String) async {
+    private func installTweakFromPanel(from url: URL, name: String, bundleIdentifier: String) async {
         do {
             let (tempURL, _) = try await URLSession.shared.download(from: url)
             // S-7 同款魔数校验：URLSession 不验 HTTP 状态，404 错误页
@@ -4649,7 +4649,14 @@ struct SourcesPanelView: View {
                 throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
             }
             let fm = FileManager.default
-            let folderURL = LCPath.tweakPath.appendingPathComponent(name)
+            // 3.8.548（L78）：文件夹名与源页 installTweak 同款
+            // “名-包名”——原来面板只用“名”，源页装一份、面板
+            // 再装一份，两份同款插件同时进加载器（递归全量加载，
+            // 不同路径算两个镜像，初始化/挂钩各跑一遍）；面板更
+            // 新也只写旧文件夹，新旧两版同时加载。isPluginInstalled
+            // 两边都认，显示不受影响，老文件夹的旧份不动（里面
+            // 可能有用户自己放的文件，不自动删）。
+            let folderURL = LCPath.tweakPath.appendingPathComponent("\(name)-\(bundleIdentifier)")
             if !fm.fileExists(atPath: folderURL.path) {
                 try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
             }
