@@ -40,6 +40,35 @@ final class SharePayload: ObservableObject {
                 }
             }
         }
+        // L8：激活规则是 TRUEPREDICATE，纯文本分享也会进扩展（某些
+        // App 只给 UTType.plainText）；旧代码只认 UTType.url，文本里
+        // 的链接直接丢成 .empty、推荐为空。URL 项优先；没有时再从
+        // 文本里抠第一个链接（NSDataDetector），抠不到才算空。
+        // 文本是兜底路，读失败不抛错、直接落到 .empty。
+        for provider in providers {
+            guard provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) else {
+                continue
+            }
+            guard let item = try? await provider.loadItem(forTypeIdentifier: UTType.plainText.identifier) else {
+                continue
+            }
+            let text: String?
+            if let string = item as? String {
+                text = string
+            } else if let data = item as? Data {
+                text = String(data: data, encoding: .utf8)
+            } else {
+                text = nil
+            }
+            if let text,
+               let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue),
+               let match = detector.firstMatch(in: text, options: [], range: NSRange(text.startIndex..., in: text)),
+               let url = match.url,
+               let scheme = url.scheme?.lowercased(),
+               scheme == "http" || scheme == "https" {
+                return .url(url)
+            }
+        }
         return .empty
     }
 }

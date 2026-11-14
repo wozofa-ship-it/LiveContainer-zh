@@ -34,6 +34,10 @@ final class ShareExtensionViewModel: ObservableObject {
     // 2 秒后自动 completeRequest 关面板。
     @Published var inboxNotice: String?
     private var inboxCompletionSent = false
+    // L8：beginRequest 与 viewDidLoad 各调一次 loadPayload——宿主先调
+    // beginRequest 再加载 view，两次调用会并行跑两份 Task（loadItem
+    // 两次 + AASA 推荐拉两次）。ViewModel 一次扩展调用只建一次，
+    // 守卫成只加载一次即可（无重试路依赖调两次）。
     // 3.8.376 分路日志：本次打开尝试的诊断行（每路一到两行）。
     // 失败时拼进 errorMessage 让用户截图；同时写 NSLog 和
     // App Group 里的 CZFShareExtensionLog.txt（带时间戳）。
@@ -64,7 +68,11 @@ final class ShareExtensionViewModel: ObservableObject {
         }
     }
 
+    private var payloadLoadStarted = false
+
     func loadPayload(from context: NSExtensionContext?) {
+        guard !payloadLoadStarted else { return }
+        payloadLoadStarted = true
         if let context {
             currentContext = context
         }

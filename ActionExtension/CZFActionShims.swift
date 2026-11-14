@@ -87,9 +87,17 @@ final class LCSharedUtils: NSObject {
             }
         }
         let team = teamIdentifier() ?? ""
+        // L8：补不带团队后缀的两组（对齐 LCSharedUtils.m appGroupID
+        // 的 3.8.411：Release 的 entitlements 是不带后缀的组，
+        // 只试带后缀的在 mobileprovision 读不到时永远命中不了；
+        // 本来 provision 路兜底，但 provision 读不到 + 无缓存时
+        // 替身会直接返 Unknown、分享收件箱写不进）。顺序与 ObjC
+        // 一致（带后缀在前），只影响原来会落到 Unknown 的路。
         let candidates = [
             "group.com.SideStore.SideStore.\(team)",
             "group.com.rileytestut.AltStore.\(team)",
+            "group.com.SideStore.SideStore",
+            "group.com.rileytestut.AltStore",
         ]
         for group in candidates {
             guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else { continue }

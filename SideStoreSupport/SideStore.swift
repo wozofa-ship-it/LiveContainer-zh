@@ -102,7 +102,14 @@ class RefreshHandler: NSObject, RefreshServer {
         if (sideStorePid <= 0 || getpgid(sideStorePid) <= 0) && launchContinuation == nil {
             let lcHome = String(cString:getenv("LC_HOME_PATH"))
             let sideStoreHomeURL = URL(fileURLWithPath: lcHome).appendingPathComponent("Documents/SideStore")
-            let bookmarkData = bookmarkForURL(sideStoreHomeURL)!
+            // L8：bookmarkForURL 建书签失败返 nil（目录不存在时必失败；
+            // 全仓没有任何地方创建 Documents/SideStore，只有客端
+            // SideStore 首次启动才会建）。从未打开过内置 SideStore 就
+            // 点“全部刷新”时旧代码在这里强解包直接崩。改抛错走正常
+            // 失败路（成功路径一字未动）。
+            guard let bookmarkData = bookmarkForURL(sideStoreHomeURL) else {
+                throw NSError(domain: "SideStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "SideStore container not found. Open SideStore once, then try again."])
+            }
 
             // start LiveProcess
             let extensionItem = NSExtensionItem()
