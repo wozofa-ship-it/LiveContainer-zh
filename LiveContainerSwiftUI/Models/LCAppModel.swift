@@ -629,7 +629,7 @@ class LCAppModel: ObservableObject, Hashable {
     // 个 AppGroup 文件夹）、钥匙串组是 0..<128 随机（多实例
     // 时会撞组，撞上就共用登录态）。新容器、已有容器都在启
     // 动时一次性隔离：App Group 隔离 + 厂商标识伪装 + 钥匙串
-    // 组改成同包名下没人用的组。隔离只做一次（打标记），之
+    // 组改成同包名下没人用的组。按容器打标记、只隔离一次，之
     // 后用户在容器设置里亲手改的开关不再被自动翻回去。
     private func czfOtherSameBundleApps() -> [LCAppModel] {
         let myPath = appInfo.relativeBundlePath
@@ -758,13 +758,31 @@ class LCAppModel: ObservableObject, Hashable {
         uiDefaultDataFolder = newName
         carryPendingKeychainImport(newContainer)
     }
+    // L89-2：按容器记“已隔离一次”的键（文件夹名是 UUID，全局唯一）。
+    private static let czfMultiOpenIsolatedContainersKey = "CZFMultiOpenIsolatedContainers"
+
     private func czfIsolateMultiOpenContainersIfNeeded() {
         guard !czfOtherSameBundleApps().isEmpty else { return }
-        // V2：老标记只含 App Group / IDFV / 钥匙串组，换新标记让
-        // 已隔离过的分身也跑一遍，把设备指纹补上（重跑是幂等的，
-        // 已分好的组不换，只补没开的那几项）。
-        let markerKey = "CZFMultiOpenIsolatedV2-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")"
-        if UserDefaults.standard.bool(forKey: markerKey) { return }
+        // 3.8.558（L89）：V2 全局标记已删（L89-1）——原来立标记后永不
+        // 再跑，但容器后来还能再加（设置页新建容器、恢复建容器、重新
+        // 登记旧文件夹三路都不带隔离，LCContainer 三旗默认全
+        // false），新容器永远得不到隔离、指纹/IDFV 与原身撞车。
+        // 但光删标记不够（L89-2）：本循环见旗关着就全翻回开，每次
+        // 启动都跑一遍，设置页里亲手关掉的隔离开关下次启动又被悄
+        // 悄打开——与上面“亲手改的开关不再被自动翻回去”正好反了。
+        // 改按容器记“已隔离一次”：UserDefaults 里记已处理过的容器
+        // 文件夹名集，只对没记过的容器跑一次隔离，跑完就记下来，
+        // 已处理过的哪怕用户后来关了旗也不再碰。共享容器不记
+        // （它本来就不隔离；以后拆分出来的是新容器，会自己走
+        // 一遍）。首轮种子：已隔离过的容器在 plist 里留有伪装值
+        // （spoofedIdentifier / spoofedAdvertisingIdentifier /
+        // spoofedMachine，didSet 开旗时生成、关旗不清除），从没隔
+        // 离过的全是 nil——有任一伪装值或任一旗开着就算已处理过，
+        // 只记不动；三旗全关且无伪装值的才是没隔离过的新容器。
+        // 记录丢了也不怕：种子判据只看容器自身状态，丢了下次重
+        // 跑一遍、已隔离过的照样只记不动。
+        var isolatedFolders = Set(UserDefaults.standard.stringArray(forKey: Self.czfMultiOpenIsolatedContainersKey) ?? [])
+        var isolatedChanged = false
         var otherGroups = Set<Int>()
         var otherFolders = Set<String>()
         for app in czfOtherSameBundleApps() {
@@ -779,18 +797,31 @@ class LCAppModel: ObservableObject, Hashable {
             // 会把另一个条目的组也翻掉，来回 ping-pong；拆分后
             // 选中的已是新容器，旧共享容器只留给原来那个条目。
             if otherFolders.contains(container.folderName) { continue }
-            var newGroup = container.keychainGroupId
-            if newGroup < 0 || otherGroups.contains(newGroup) {
-                newGroup = czfFreeKeychainGroup(excluding: container)
+            if isolatedFolders.contains(container.folderName) {
+                // 已处理过一次：组照常记进 otherGroups（后跑的容器
+                // 挑空闲组时别撞上它），其余不动。
+                if container.keychainGroupId >= 0 { otherGroups.insert(container.keychainGroupId) }
+                continue
             }
-            if !container.isolateAppGroup || !container.spoofIdentifierForVendor || !container.spoofDeviceFingerprint || container.keychainGroupId != newGroup {
-                container.enableMultiOpenIsolation()
-                container.makeLCContainerInfoPlist(appIdentifier: bundleIdentifier, keychainGroupId: newGroup)
+            let czfAlreadyIsolated = container.isolateAppGroup || container.spoofIdentifierForVendor || container.spoofDeviceFingerprint || container.spoofedIdentifier != nil || container.spoofedAdvertisingIdentifier != nil || container.spoofedMachine != nil
+            if !czfAlreadyIsolated {
+                var newGroup = container.keychainGroupId
+                if newGroup < 0 || otherGroups.contains(newGroup) {
+                    newGroup = czfFreeKeychainGroup(excluding: container)
+                }
+                if !container.isolateAppGroup || !container.spoofIdentifierForVendor || !container.spoofDeviceFingerprint || container.keychainGroupId != newGroup {
+                    container.enableMultiOpenIsolation()
+                    container.makeLCContainerInfoPlist(appIdentifier: bundleIdentifier, keychainGroupId: newGroup)
+                }
+                if newGroup >= 0 { otherGroups.insert(newGroup) }
+            } else if container.keychainGroupId >= 0 {
+                otherGroups.insert(container.keychainGroupId)
             }
-            if newGroup >= 0 { otherGroups.insert(newGroup) }
+            isolatedFolders.insert(container.folderName)
+            isolatedChanged = true
         }
-        if !uiContainers.isEmpty {
-            UserDefaults.standard.set(true, forKey: markerKey)
+        if isolatedChanged {
+            UserDefaults.standard.set(Array(isolatedFolders), forKey: Self.czfMultiOpenIsolatedContainersKey)
         }
     }
 
@@ -853,9 +884,6 @@ class LCAppModel: ObservableObject, Hashable {
                 }
                 appInfo.dataUUID = newName
                 uiDefaultDataFolder = newName
-                if isMultiOpen {
-                    UserDefaults.standard.set(true, forKey: "CZFMultiOpenIsolatedV2-\(bundleIdentifier)-\(appInfo.relativeBundlePath ?? "")")
-                }
             }
             czfIsolateMultiOpenContainersIfNeeded()
             if let containerFolderName {
