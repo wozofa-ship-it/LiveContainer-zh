@@ -26,6 +26,8 @@ final class CZFNotificationDelegate: NSObject, UNUserNotificationCenterDelegate 
 
 @objc class AppDelegate: UIResponder, UIApplicationDelegate {
 
+    private var willTerminateObserver: NSObjectProtocol?
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? ) -> Bool {
         application.shortcutItems = nil
         UserDefaults.standard.removeObject(forKey: "LCNeedToAcquireJIT")
@@ -33,7 +35,9 @@ final class CZFNotificationDelegate: NSObject, UNUserNotificationCenterDelegate 
         // （center 的 delegate 是弱引用，临时对象会被释放）。
         UNUserNotificationCenter.current().delegate = CZFNotificationDelegate.shared
         
-        NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+        // 3.8.498（L17）：block 观察者返的 token 必须留住（见
+        // CZFHostKeepAlive.swift 同款注释），丢掉就当场注销。
+        willTerminateObserver = NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             // Fix launching app if user opens JIT waiting dialog and kills the app. Won't trigger normally.
             if DataManager.shared.model.isJITModalOpen && !UserDefaults.standard.bool(forKey: "LCKeepSelectedWhenQuit"){
                 UserDefaults.standard.removeObject(forKey: "selected")

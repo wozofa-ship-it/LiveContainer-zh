@@ -1481,6 +1481,9 @@ extension Notification.Name {
     // 往里拖与右边缘一律不认它，见下方两个判定函数）。
     private var globalSwipeStartInOutwardBand: Bool = true
     private var globalSwipeObserversInstalled = false
+    // 3.8.498（L17）：block 观察者返的 token 必须留住（见
+    // CZFHostKeepAlive.swift 同款注释），丢掉就当场注销。
+    private var globalSwipeObserverTokens: [NSObjectProtocol] = []
     // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
     // 不闩住会在 .changed 里连震好几下）
     private var czfEdgeSwipeLatched = false
@@ -1527,12 +1530,12 @@ extension Notification.Name {
         // 游客 App 的窗口出现得晚：监听新窗口/新场景，一出现就补装
         if !globalSwipeObserversInstalled {
             globalSwipeObserversInstalled = true
-            NotificationCenter.default.addObserver(forName: UIWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
+            globalSwipeObserverTokens.append(NotificationCenter.default.addObserver(forName: UIWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
                 self?.setupGlobalSwipeRecognizer()
-            }
-            NotificationCenter.default.addObserver(forName: UIScene.didActivateNotification, object: nil, queue: .main) { [weak self] _ in
+            })
+            globalSwipeObserverTokens.append(NotificationCenter.default.addObserver(forName: UIScene.didActivateNotification, object: nil, queue: .main) { [weak self] _ in
                 self?.setupGlobalSwipeRecognizer()
-            }
+            })
         }
         globalSwipeRecognizers.removeAll { $0.view == nil }
         czfLeftEdgePanRecognizers.removeAll { $0.view == nil }

@@ -207,6 +207,9 @@ static BOOL gCZFStartAtEdge = NO;
 static CGFloat gCZFStartX = 0;
 // 本次滑动是否已触发过（一次滑动只触发一次）
 static BOOL gCZFFired = NO;
+// 3.8.498（L17）：block 观察者返的 token 必须留住（见
+// CZFHostKeepAlive.swift 同款注释），丢掉就当场注销。
+static NSMutableArray *gCZFDockGestureObservers = nil;
 
 // 起手点落在控件/滑块类视图上时，两路手势都不接（与宿主
 // 侧 czfTouchOnControlOrSlider 同款）：视频进度条在底部
@@ -879,22 +882,23 @@ static void CZFDockGestureInstall(void) {
     @autoreleasepool {
         CZFInstallSendEventHook();
         CZFKeyboardDismissOnMinimizeInstall();
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeKeyNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        if (!gCZFDockGestureObservers) gCZFDockGestureObservers = [NSMutableArray array];
+        [gCZFDockGestureObservers addObject:[[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeKeyNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             if ([note.object isKindOfClass:[UIWindow class]]) {
                 [[CZFDockGestureHandler shared] installOnWindow:(UIWindow *)note.object];
             }
-        }];
+        }]];
         // 窗口出现触发点：只成 key 不够——有些窗口出现时并不成
         // key（例如先出现的非 key 窗），DidBecomeKey 永远等不到；
         // 出现即装，装过的不重复装（installed 标志幂等）。
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeVisibleNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        [gCZFDockGestureObservers addObject:[[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeVisibleNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             if ([note.object isKindOfClass:[UIWindow class]]) {
                 [[CZFDockGestureHandler shared] installOnWindow:(UIWindow *)note.object];
             }
-        }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        }]];
+        [gCZFDockGestureObservers addObject:[[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             CZFDockGestureTryInstall();
-        }];
+        }]];
         // 窗口出现得晚：启动后数秒内重试几次，装上为止（装过的不重复装）
         for (NSInteger i = 1; i <= 10; i++) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

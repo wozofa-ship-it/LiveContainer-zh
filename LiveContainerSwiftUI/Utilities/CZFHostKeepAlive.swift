@@ -29,6 +29,10 @@ final class CZFHostKeepAlive {
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var isBackgrounded = false
     private var installed = false
+    // 3.8.498（L17）：block 观察者返的 token 必须留住——
+    // NotificationCenter 不强持有它，丢掉就当场注销，
+    // 下面 7 个观察者原来全是注册完立刻失效。
+    private var observerTokens: [NSObjectProtocol] = []
 
     private init() {}
 
@@ -38,40 +42,40 @@ final class CZFHostKeepAlive {
         installed = true
         isBackgrounded = UIApplication.shared.applicationState == .background
         let center = NotificationCenter.default
-        center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+        observerTokens.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.isBackgrounded = true
             self?.refresh()
-        }
-        center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        observerTokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.isBackgrounded = false
             self?.refresh()
-        }
+        })
         // 提前启动：上滑切 App 时 WillResignActive 先于 DidEnterBackground，
         // 这里就先播，切后台时音频会话已经是激活态。
-        center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        observerTokens.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.isBackgrounded = true
             self?.refresh()
-        }
-        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        observerTokens.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.isBackgrounded = false
             self?.refresh()
-        }
-        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
+        })
+        observerTokens.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
             guard let self = self else { return }
             guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   let type = AVAudioSession.InterruptionType(rawValue: raw),
                   type == .ended else { return }
             self.refresh()
-        }
+        })
         // O-25：音频服务丢了/重置了（mediaserverd 崩了重起等），
         // 播放器会静默停掉且不发 interruption——原来全靠 30 秒
         // 看门狗兜底。直接听这两个通知，丢了就重起，比等表快。
-        center.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, object: nil, queue: .main) { [weak self] _ in
+        observerTokens.append(center.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refresh()
-        }
-        center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        observerTokens.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refresh()
-        }
+        })
     }
 
     /// 白名单读法与 LCAppSettingsView.readKeepAliveList 同款：先读

@@ -26,6 +26,9 @@
 static AVAudioPlayer *gPlayer = nil;
 static NSTimer *gWatchdog = nil;
 static BOOL gInBackground = NO;
+// 3.8.498（L17）：block 观察者返的 token 必须留住（见
+// CZFHostKeepAlive.swift 同款注释），丢掉就当场注销。
+static NSMutableArray *gCZFKeepAliveObservers = nil;
 
 // 生成 1 秒静音 WAV 数据（8000Hz 单声道 16bit PCM），生成一次后缓存
 static NSData *CZFSilentWAVData(void) {
@@ -129,72 +132,73 @@ static void CZFKeepAliveInit(void) {
         if (!CZFShouldActivate()) return;
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
         NSOperationQueue *mainQ = [NSOperationQueue mainQueue];
+        if (!gCZFKeepAliveObservers) gCZFKeepAliveObservers = [NSMutableArray array];
 
-        [nc addObserverForName:UIApplicationDidEnterBackgroundNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:UIApplicationDidEnterBackgroundNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         gInBackground = YES;
                         CZFStartKeepAlive();
-                    }];
+                    }]];
 
-        [nc addObserverForName:UIApplicationWillEnterForegroundNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:UIApplicationWillEnterForegroundNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         gInBackground = NO;
                         CZFStopKeepAlive();
-                    }];
+                    }]];
 
         // 宿主切后台的通知：扩展里 UIApplication 后台通知不一定到，
         // 宿主通知是可靠的那路（Dead10ccFix 同款信号）。
-        [nc addObserverForName:NSExtensionHostDidEnterBackgroundNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:NSExtensionHostDidEnterBackgroundNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         gInBackground = YES;
                         CZFStartKeepAlive();
-                    }];
+                    }]];
 
-        [nc addObserverForName:NSExtensionHostWillEnterForegroundNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:NSExtensionHostWillEnterForegroundNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         gInBackground = NO;
                         CZFStopKeepAlive();
-                    }];
+                    }]];
 
         // 提前启动：切后台前（上滑切 App、来电弹框等）就先播，切后台时
         // 音频会话已经是激活态，不留“先被掐、后才开始播”的空档。
         // 回前台时 DidBecomeActive 停掉，短暂误触发成本只有几秒静音。
-        [nc addObserverForName:UIApplicationWillResignActiveNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:UIApplicationWillResignActiveNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         gInBackground = YES;
                         CZFStartKeepAlive();
-                    }];
+                    }]];
 
-        [nc addObserverForName:UIApplicationDidBecomeActiveNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         gInBackground = NO;
                         CZFStopKeepAlive();
-                    }];
+                    }]];
 
         // 启动时已经在后台的兜底（极少见）
-        [nc addObserverForName:UIApplicationDidFinishLaunchingNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:UIApplicationDidFinishLaunchingNotification
                         object:nil queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
                             gInBackground = YES;
                             CZFStartKeepAlive();
                         }
-                    }];
+                    }]];
 
         // 音频被来电等打断结束后，还在后台就恢复播放
-        [nc addObserverForName:AVAudioSessionInterruptionNotification
+        [gCZFKeepAliveObservers addObject:[nc addObserverForName:AVAudioSessionInterruptionNotification
                         object:[AVAudioSession sharedInstance] queue:mainQ
                     usingBlock:^(NSNotification *note) {
                         NSNumber *typeNum = note.userInfo[AVAudioSessionInterruptionTypeKey];
                         if (typeNum && typeNum.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded && gInBackground) {
                             CZFStartKeepAlive();
                         }
-                    }];
+                    }]];
     }
 }
