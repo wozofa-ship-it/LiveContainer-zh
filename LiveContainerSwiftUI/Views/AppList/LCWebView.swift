@@ -24,6 +24,11 @@ struct LCWebView: View {
     // 网页下载的非安装包文件（.ipa/.tipa 之外）：分享时用它，不用
     // 当前页 URL；点分享按钮时清掉（见 bottomBar）。
     @State private var shareFileURL: URL?
+    // 3.8.506（L28）：分享 sheet 开着时又下完的非安装包文件，
+    // 先排队——直接改 shareFileURL 会被 onDismiss 清掉，第二个
+    // 既没分享、tmp 子目录又没人清（completion 只认创建时抓的
+    // 那一个）。onDismiss 里按队弹出下一个再弹 sheet。
+    @State private var pendingShareFileURLs: [URL] = []
     
     @State private var runAppAlert = YesNoHelper()
     @State private var runAppAlertMsg = ""
@@ -106,6 +111,24 @@ struct LCWebView: View {
             // 3.8.505（L27）：只清状态，删文件已移到上面
             // completion 里——onDismiss 删太早（见上）。
             shareFileURL = nil
+            // 3.8.506（L28）：sheet 开着时又下完的排队文件，
+            // 在这里弹出下一个再弹 sheet——直接清掉就永远没
+            // 人分享它、tmp 子目录也漏了。onDismiss 里同步置
+            // true 赶不上 sheet 的关闭收尾、再弹不出来，下一
+            // 跳主线程再弹。网页本身已关（isPresent 为 false，
+            // 如 .ipa 下完触发的 close）时不再弹，排队的不等
+            // 分享了、直接清 tmp，免得漏。
+            if !pendingShareFileURLs.isEmpty {
+                if isPresent {
+                    shareFileURL = pendingShareFileURLs.removeFirst()
+                    DispatchQueue.main.async { showShareSheet = true }
+                } else {
+                    for pending in pendingShareFileURLs where pending.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") {
+                        try? FileManager.default.removeItem(at: pending.deletingLastPathComponent())
+                    }
+                    pendingShareFileURLs.removeAll()
+                }
+            }
         }) {
             // 刚下完的非安装包文件分享它自己；平时分享当前页。
             // 3.8.505（L27）：在内容闭包里当场抓住这次要分享的
@@ -374,8 +397,17 @@ struct LCWebView: View {
             }
             return
         }
-        shareFileURL = url
-        showShareSheet = true
+        // 3.8.506（L28）：sheet 已开着在分享上一个时，先排队——
+        // 直接改 shareFileURL 会被 onDismiss 清掉，第二个既没分
+        // 享、tmp 子目录又没人清（completion 只认创建时抓的那一
+        // 个）。排队非空也进队：onDismiss 已弹出下一个、正等下
+        // 一跳主线程再弹 sheet 的窗口里，新来的直接覆盖又会丢。
+        if showShareSheet || !pendingShareFileURLs.isEmpty {
+            pendingShareFileURLs.append(url)
+        } else {
+            shareFileURL = url
+            showShareSheet = true
+        }
     }
 
     func launchToApp(app: LCAppModel, url: URL) async {
@@ -410,7 +442,7 @@ struct LCWebView: View {
                 return
             }
             close()
-            Task { await handler(url.absoluteString) }
+            Task { @MainActor in await handler(url.absoluteString) }
             return
         }
         
@@ -596,10 +628,16 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         }
         if(scheme == "https") {
             decisionHandler(.allow)
-            Task {
+            // 3.8.506（L28）：WebViewDelegate 不是 @MainActor，
+            // 裸 Task 跑在全局执行器上——后面的 universalLink
+            // 会写 @State（弹确认框、跳 App），离主线程可能
+            // 丢更新；字典读也与 loadDomainAssociations 末尾
+            // 的 MainActor.run 写竞态。整段放主 actor 上
+            // （await 会挂起，不堵主线程；内层 Task 继承）。
+            Task { @MainActor in
                 await self.loadDomainAssociations(url: url)
                 if let host = url.host, let appIDs = self.domainBundleIdDict[host] {
-                    Task{ await self.universalLinkHandler(url, appIDs) }
+                    Task { @MainActor in await self.universalLinkHandler(url, appIDs) }
                 }
             }
             return
@@ -612,7 +650,9 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         // NSURLErrorUnsupportedURL（-1002）失败、再弹一个假错误框。
         // 直接 cancel（反正载不了），只走 urlSchemeHandler 跳 App。
         decisionHandler(.cancel)
-        Task{ await urlSchemeHandler(url) }
+        // 3.8.506（L28）：同上，urlSchemeHandler 会写 @State、
+        // 弹确认框、调 close（），必须主线程。
+        Task { @MainActor in await urlSchemeHandler(url) }
 
     }
     
@@ -705,7 +745,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate {
         Self.czfLiveWebViews.removeValue(forKey: key)
         Self.czfLiveDelegates.removeValue(forKey: key)
         guard let dest = Self.downloadDestinations.removeValue(forKey: key) else { return }
-        Task { await self.downloadedFileHandler(dest) }
+        // 3.8.506（L28）：WebViewDelegate 不是 @MainActor，裸
+        // Task 跑在全局执行器上——onDownloadedFile 写 @State
+        //（shareFileURL、showShareSheet）、调 close（）（改
+        // Binding + UIKit dismiss），离主线程可能丢更新：分享
+        // sheet 偶发弹不出来、还报“Publishing changes from
+        // background threads”。放主 actor 上。
+        Task { @MainActor in await self.downloadedFileHandler(dest) }
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
