@@ -467,6 +467,13 @@ enum AltStoreSourceLoader {
     
     private static func buildVersions(from response: AltStoreSourceAppResponse, baseURL: URL, isoFormatter: ISO8601DateFormatter, shortFormatter: DateFormatter) -> [AltStoreSourceAppVersion] {
         guard let versions = response.versions else { return [] }
+        // 3.8.549（L79）：versions 不按 JSON 顺序信——源格式约定是
+        // 新版在前，但手写源常把新版追加在末尾（用户中文源 83 个
+        // App 里 2 个升序、6 个乱序，实证）；latest = versions.first
+        // 会取到旧版，安装、下更新检测、历史列表全错。解码时按
+        // （版本，build）降序排好——合规源本来就是降序、排序是空
+        // 操作；历史列表也跟着新版在前。比较器就是 hasUpdate 同款
+        // czfIsNewerVersion（版本不等比版本、相等比 build），无新语义。
         return versions.compactMap { version in
             guard let versionString = version.version,
                   let downloadURLString = version.downloadURL,
@@ -481,6 +488,8 @@ enum AltStoreSourceLoader {
                 downloadURL: downloadURL,
                 size: version.size
             )
+        }.sorted { a, b in
+            czfIsNewerVersion(a.version, build: a.buildVersion, newerThan: b.version, installedBuild: b.buildVersion)
         }
     }
     
