@@ -418,23 +418,29 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     int currentPatchRev = 7;
     bool needPatch = [info[@"LCPatchRevision"] intValue] < currentPatchRev;
     if (needPatch || forceSign) {
-        // copy-delete-move to avoid EXC_BAD_ACCESS (SIGKILL - CODESIGNING)
+        // copy + atomic replace to avoid EXC_BAD_ACCESS (SIGKILL - CODESIGNING)
         NSString *backupPath = [NSString stringWithFormat:@"%@/%@_LiveContainerPatchBackUp", appPath, _infoPlist[@"CFBundleExecutable"]];
         NSError *err = nil;
         // 三步原来都不查错：上次在这三步之间崩溃会留下旧备份，
         // 下次 copy 因目标已存在直接失败，接着 remove 照样把
         // 可执行文件删掉、move 再把旧备份（可能是旧版二进制）
         // 挪回来；磁盘满时 copy 失败同款——删完主程序就没了，
-        // 只能重装 IPA。先清残留备份，任何一步失败都直接报错，
-        // 删过的尽量把备份挪回来。
+        // 只能重装 IPA。先清残留备份，任何一步失败都直接报错。
+        // 3.8.599（L133-2）：最后一步 remove + move
+        // 仍留一个窗口——两步之间被杀/闪退，主程序已删、备份还
+        // 在原地，下次签名先清残留备份再拷主程序，主程序不存在
+        // 直接报错、只能重装 IPA（L132 备份最后一步同款）。
+        // 换位改原子 replaceItemAtURL（appex 补丁同文件 :629
+        // 同款）：成功时备份原子落位、旧文件删掉，与 remove +
+        // move 结果一致（新 inode 落位，不触 CODESIGNING 映射）；
+        // 失败时主程序原样不动，不再需要回挪。
         [fm removeItemAtPath:backupPath error:nil];
         if (![fm copyItemAtPath:execPath toPath:backupPath error:&err]) {
             [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
             completetionHandler(NO, err.localizedDescription ?: @"签名失败：无法备份可执行文件");
             return;
         }
-        if (![fm removeItemAtPath:execPath error:&err] || ![fm moveItemAtPath:backupPath toPath:execPath error:&err]) {
-            [fm moveItemAtPath:backupPath toPath:execPath error:nil];
+        if (![fm replaceItemAtURL:[NSURL fileURLWithPath:execPath] withItemAtURL:[NSURL fileURLWithPath:backupPath] backupItemName:nil options:0 resultingItemURL:nil error:&err]) {
             [NSUserDefaults.standardUserDefaults removeObjectForKey:@"SigningInProgress"];
             completetionHandler(NO, err.localizedDescription ?: @"签名失败：无法替换可执行文件");
             return;

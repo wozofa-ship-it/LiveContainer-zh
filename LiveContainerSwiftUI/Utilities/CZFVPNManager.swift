@@ -855,13 +855,24 @@ public final class CZFVPNManager {
                     // 没了、还返回 true（调用方以为换上了新插件就
                     // 去单签，实际签的是不存在的文件）；钉死节点的
                     // App 没了插件就断网。临时文件拷失败时旧插件
-                    // 原样保留、返回 false；换位是同目录 move，
-                    // 拷成功后基本不会失败，失败也清临时文件。
+                    // 原样保留、返回 false。
+                    // 3.8.599（L133-1）：换位也走 replaceItemAt——原来
+                    // 先删旧插件再 move，删与挪之间被杀/闪退就是
+                    // 插件没了（备份最后一步与钥匙串桥同款口子，
+                    // L132-1 已修那两处，这里是第三处）；同目录
+                    // replaceItemAt（无旧插件时 move），失败时旧
+                    // 插件原样保留、清临时文件、返 false。
                     let tmpDest = dest.appendingPathExtension("czf-tmp")
                     try? fm.removeItem(at: tmpDest)
                     guard (try? fm.copyItem(at: src, to: tmpDest)) != nil else { return false }
-                    try? fm.removeItem(at: dest)
-                    guard (try? fm.moveItem(at: tmpDest, to: dest)) != nil else {
+                    if fm.fileExists(atPath: dest.path) {
+                        do {
+                            _ = try fm.replaceItemAt(dest, withItemAt: tmpDest)
+                        } catch {
+                            try? fm.removeItem(at: tmpDest)
+                            return false
+                        }
+                    } else if (try? fm.moveItem(at: tmpDest, to: dest)) == nil {
                         try? fm.removeItem(at: tmpDest)
                         return false
                     }
