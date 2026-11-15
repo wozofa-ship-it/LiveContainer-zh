@@ -776,13 +776,16 @@ struct CZFUpdatableAppsSheet: View {
                                 // 恢复行、错误进 sheet 内 alert。
                                 updatingIDs.insert(app.czfStableID)
                                 Task {
-                                    if let error = await onUpdateOne(app) {
-                                        // 3.8.519（L44）：本 Task 是裸 Task、
-                                        // 不在主 actor 上（L40 同款），
-                                        // updatingIDs/sheetError 是 @State，
-                                        // 回主线程再写。
-                                        await MainActor.run {
-                                            updatingIDs.remove(app.czfStableID)
+                                    let error = await onUpdateOne(app)
+                                    // 3.8.544（L161）：成功时也要摘 ID——原来只在失败时摘，
+                                    // 成功那路行已从名单剔除、ID 却留在集合里；源再刷新、
+                                    // 同一 App 出新版本重进名单时，行一直显示“已入队”、
+                                    // 更新按钮与左滑跳过都没了，只能关了重开 sheet。
+                                    // 本 Task 是裸 Task、不在主 actor 上（L40/L44 同款），
+                                    // updatingIDs/sheetError 是 @State，回主线程再写。
+                                    await MainActor.run {
+                                        updatingIDs.remove(app.czfStableID)
+                                        if let error {
                                             sheetError = error
                                         }
                                     }

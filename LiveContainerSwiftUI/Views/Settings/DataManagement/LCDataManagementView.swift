@@ -535,7 +535,8 @@ struct LCDataManagementView : View {
                         }
                         Button("lc.common.cancel".loc, role: .cancel) {}
                     } message: {
-                        Text("将删除本地 \(backupFolderList.count) 个 + iCloud \(externalBackupFolderList.count) 个备份，此操作不可恢复")
+                        // 3.8.544（L162）：确认数只算真会删的——原来照抄两张列表的总数，锁了的也算进去；锁了的根本不删（deleteAllBackups 跳过并报“已锁定未删”），确认文案先报虚数。只数未锁定的；有锁了的就补一句“已锁定的不会删”（多选删确认框同款写法）。
+                        Text("将删除本地 \(backupFolderList.filter { !lockedBackupNames.contains($0.lastPathComponent) }.count) 个 + iCloud \(externalBackupFolderList.filter { !lockedBackupNames.contains($0.lastPathComponent) }.count) 个备份，此操作不可恢复" + ((backupFolderList + externalBackupFolderList).contains { lockedBackupNames.contains($0.lastPathComponent) } ? "，已锁定的不会删" : ""))
                     }
             )
             // 单个删除改用 alert：同页已有两个 confirmationDialog
@@ -747,7 +748,8 @@ struct LCDataManagementView : View {
                         // 3.8.307：写清本地 + iCloud 份一起删
                         //（306 起多选删就两边都清，文案不写
                         // 用户以为只删一边）
-                        Text("将删除所选的 \(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) }.count) 个备份（本地 + iCloud 份一起删），已锁定的不会删，此操作不可恢复")
+                        // 3.8.544（L162）：确认数只算真会删的——原来 N 是勾选总数，锁了的也算进去；锁了的根本不删（deleteSelectedBackups 跳过并报数），文案一边说“将删除 N 个”一边说“已锁定的不会删”，自相矛盾。只数未锁定的。
+                        Text("将删除所选的 \(selectBackupFolders.filter { selectedBackupFolderURLs.contains($0) && !lockedBackupNames.contains($0.lastPathComponent) }.count) 个备份（本地 + iCloud 份一起删），已锁定的不会删，此操作不可恢复")
                     }
                 }
             }
