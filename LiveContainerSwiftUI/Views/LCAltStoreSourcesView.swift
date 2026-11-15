@@ -251,7 +251,14 @@ final class AltStoreSourcesViewModel: ObservableObject {
             guard let sourceIndex = sources.firstIndex(where: { $0.url == url }) else {
                 return
             }
-            if let previousData, previousData == data {
+            // L147-1：数据没变就跳过重写缓存——但只在内存里
+            // 已有解出的 source 时才跳。缓存解不出（缓存损坏、
+            // 或更新后解码变严）时 source 是 nil，旧写法照样跳过、
+            // source 永远是 nil：行只剩名字 + host，无 App、无错、
+            // 不转圈，刷新多少次都一样，只能删源重加才好。
+            // 新数据反正已在 load 里解过，直接用它填上；解不出
+            // 就走下面的 catch 报错，不再静默空白。
+            if let previousData, previousData == data, sources[sourceIndex].source != nil {
                 sources[sourceIndex].isLoading = false
                 return
             }

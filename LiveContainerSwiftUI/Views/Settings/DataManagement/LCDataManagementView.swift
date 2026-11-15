@@ -3014,7 +3014,7 @@ struct LCDataManagementView : View {
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
         // 备份列表扫不到），全部写完最后一步才换名上位。原来是
         // 先删旧备份再重建，写到一半失败/空间满/被系统杀掉，
-        // 就是新旧两空——仅密匙备份以后是登录命根子，不能赌。
+        // 就是新旧两空——仅钥匙串备份以后是登录命根子，不能赌。
         // 临时目录与 Backups 同卷，换名是瞬间完成的改名操作
         let finalURL = backupRoot.appendingPathComponent(folderName)
         let appBackupURL = backupRoot.deletingLastPathComponent()
@@ -3607,7 +3607,7 @@ struct LCDataManagementView : View {
             // 开过那个 App；有快照还空 = 桥确认它没存令牌
             var czfSuccessText = String(format: "lc.settings.backupComplete".loc, count) + "\n钥匙串令牌共导出 \(keychainTotal) 条"
             if keychainTotal == 0 {
-                czfSuccessText += snapshotMissing ? "（还没有密匙快照：先打开一次要备份的 App，再回来备份）" : "（密匙快照是空的）"
+                czfSuccessText += snapshotMissing ? "（还没有钥匙串快照：先打开一次要备份的 App，再回来备份）" : "（钥匙串快照是空的）"
             }
             if loginOnly {
                 if loginFileTotal > 0 {
@@ -5609,7 +5609,7 @@ struct LCDataManagementView : View {
             outcome.keychainPlistFiles = plistFiles.count
             // 3.8.563（L94）：条数不在这里计——这一遍读没有触发下载/重试，iCloud 占位文件第一遍读不出、下面第二遍下载重试后才读出来，条数会少算，报告“备份含 0 条”/登录态“没有钥匙串快照”就与实际已排队/已直写的条数对不上；条数移到下面真正读出来那处计。
             // 没容器可落先补一个：刚装完还没打开过的 App 一个
-            // 容器都没有（列表里标"数据文件夹未创建"），仅密匙
+            // 容器都没有（列表里标"数据文件夹未创建"），仅钥匙串
             // 备份又没有容器文件夹可借道恢复，钥匙串整份落空
             // （真机实测：装完自动恢复报"没有可恢复的数据"、
             // 手动恢复报 0 个）。照 runApp 首启的建法补一个默认
@@ -5642,7 +5642,7 @@ struct LCDataManagementView : View {
             for file in plistFiles {
                 let folderName = file.deletingPathExtension().lastPathComponent
                 // 落点：同名容器优先；对不上号的落当前默认容器
-                // ——仅密匙备份的全部身家就是这几份快照，原逻
+                // ——仅钥匙串备份的全部身家就是这几份快照，原逻
                 // 辑只认同名/备份时默认/仅一份三种情况，容器
                 // 名字一换（删后重装、多容器）就整份丢弃，登录
                 // 态永远回不来；并入默认容器同键覆盖以备份为准
@@ -5804,7 +5804,7 @@ struct LCDataManagementView : View {
     /// 完整备份不标
     static func backupScopeBadge(_ folderURL: URL) -> String {
         switch backupScope(of: folderURL) {
-        case "keychain": return " · 仅密匙"
+        case "keychain": return " · 仅钥匙串"
         case "login": return " · 登录态"
         default: return ""
         }
