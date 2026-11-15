@@ -88,6 +88,8 @@ public final class CZFVPNManager {
         } else {
             shared.cancelRotateCheck()
         }
+        // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
+        shared.refreshSettingsBackup()
     }
     // 核心状态串行化：start/stop/开 App 预热原来在
     // 主线程、detached Task、测速后台队列三处同时改
@@ -221,6 +223,12 @@ public final class CZFVPNManager {
     // 本来只在手动导出 / 备份 App 时写，节点增删改后不刷就过期，
     // 换机重装导入的还是旧节点；这里顺手刷一份，配置永远是最新节点。
     // 只调 DataManagement 现成的静态写函数，不改那份文件。
+    // 3.8.537（L143-1）：只接节点列表变更不够——别名/开关/钉死/
+    // 跟随/自动轮换/宿主代理五处调用点、六个键也是 CZF 键、也在备份 payload 里，
+    // 改完不刷，恢复用的备份里还是旧值（钉死节点丢了=悄悄换 IP，
+    // L91 同款伤害）；运行时状态（预热抑制/核心在跑/故障转移改
+    // 活动下标/测速缓存）不接。写盘本身已防抖（0.5 秒后才写），
+    // 故障转移连调几次也只落一笔，不阻塞调用方。
     private func refreshSettingsBackup() {
         LCDataManagementView.writeCZFSettingsBackupDebounced()
     }
@@ -583,6 +591,8 @@ public final class CZFVPNManager {
             dict.removeValue(forKey: link)
         }
         UserDefaults.standard.set(dict, forKey: nodeAliasKey)
+        // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
+        shared.refreshSettingsBackup()
     }
 
     // 改一条节点的链接（长按菜单“编辑链接”用）：只换列表
@@ -764,6 +774,8 @@ public final class CZFVPNManager {
                 setNodeOverride(current, for: appInfo)
             }
         }
+        // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
+        shared.refreshSettingsBackup()
     }
 
     // 用户是否在 App 设置里亲手选过"跟随全局"（缺省 false）
@@ -792,6 +804,8 @@ public final class CZFVPNManager {
             UserDefaults.standard.removeObject(forKey: nodeOverrideKeyPrefix + bundleId)
             UserDefaults.standard.set(true, forKey: followGlobalKeyPrefix + bundleId)
         }
+        // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
+        shared.refreshSettingsBackup()
     }
 
     // 这个 App 实际用的节点链接：钉死过就用钉死的，不管它还
@@ -2501,7 +2515,11 @@ public final class CZFVPNManager {
     /// （境外源才需要；JIT 的局域网服务器调用不走这里、不受影响）
     public static var isHostProxyEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "CZFVPNHostProxyEnabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "CZFVPNHostProxyEnabled") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "CZFVPNHostProxyEnabled")
+            // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
+            shared.refreshSettingsBackup()
+        }
     }
 
     public static func proxyDictionary() -> [String: Any] {

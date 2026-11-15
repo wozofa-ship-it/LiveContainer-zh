@@ -4281,8 +4281,11 @@ struct SourcesPanelView: View {
 
     /// 读某个开关类快捷方式的当前状态（多选项类 / 解析失败返回 nil）。
     private func currentSettingState(item: String) -> Bool? {
+        // L144-1：与渲染（:4577）同款包名兜底——只精确匹配时，
+        // 删 App 重装换了 dataUUID 后状态读不到、角标恒灰，
+        // 而行本身靠兜底还渲染着，灰标与真实开关对不上。
         guard let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
-              let app = app(forPinKey: pinKey),
+              let app = app(forPinKeyWithBundleFallback: pinKey),
               let setting = CZFPanelAppSetting(rawValue: key),
               setting.isToggle else { return nil }
         switch setting {
@@ -4321,8 +4324,11 @@ struct SourcesPanelView: View {
 
     /// 点按开关类快捷方式：直接切换该设置（不进设置页）。
     private func toggleSetting(item: String) {
+        // L144-1：与渲染（:4577）同款包名兜底——只精确匹配时，
+        // 删 App 重装换了 dataUUID 后点按静默无反应（行还在、
+        // 开关切不动），须删了快捷方式重加才恢复。
         guard let (pinKey, key) = CZFPanelCustomShortcuts.settingPinKeyAndKey(from: item),
-              let app = app(forPinKey: pinKey),
+              let app = app(forPinKeyWithBundleFallback: pinKey),
               let setting = CZFPanelAppSetting(rawValue: key),
               setting.isToggle else { return }
         switch setting {
