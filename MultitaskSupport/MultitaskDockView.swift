@@ -3915,6 +3915,17 @@ struct SourcesPanelView: View {
     // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
     @State private var vpnPinging: Bool = false
+    // 3.8.586（L118）：面板下载在途 URL 集——“下载”按钮没有在途
+    // 态，连点两下会起两个 Task 并发下同一个 URL；裸 Task 走全局
+    // 执行器，removeItem→moveItem 两步之间能插进另一个 Task：先
+    // 到的 move 成功、后到的 move 因目标已存在抛错，文件明明下
+    // 好了、分享框也弹了，还多一个“文件已存在”报错。源页同款
+    // 有 DownloadHelper 单飞守卫（L50-1），面板这份拷贝漏了。
+    // 按 URL 记在途，不同 URL 仍可并发；成功/失败两路都在
+    // MainActor.run 里清掉（函数本身 @MainActor，判据与插入
+    // 在主线程；Task 取消走 catch 清，进程被杀则 @State 随之
+    // 消失，不会卡住下次下载）。
+    @State private var panelDownloadingURLs: Set<URL> = []
 
     // 3.8.309：VPN 开关（与 App 页 toggleVPNCore 同款：先记手动
     // 切换、再起/停、再刷新状态）。
@@ -4768,6 +4779,11 @@ struct SourcesPanelView: View {
     // 3.8.291：历史版本下载——指定任意版本 URL 下载（不只 latest）。
     @MainActor
     private func downloadFromPanel(url: URL) {
+        // 3.8.586（L118）：同 URL 在途时直接 return——见
+        // panelDownloadingURLs 注释；第二下不是丢下载，第一下
+        // 完成后分享框照常弹。
+        guard !panelDownloadingURLs.contains(url) else { return }
+        panelDownloadingURLs.insert(url)
         Task {
             do {
                 let (tempURL, _) = try await URLSession.shared.download(from: url)
@@ -4793,10 +4809,12 @@ struct SourcesPanelView: View {
                 }
                 try FileManager.default.moveItem(at: tempURL, to: destURL)
                 await MainActor.run {
+                    panelDownloadingURLs.remove(url)
                     shareFileFromPanel(at: destURL)
                 }
             } catch {
                 await MainActor.run {
+                    panelDownloadingURLs.remove(url)
                     errorMessage = error.localizedDescription
                 }
             }
