@@ -2510,7 +2510,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 到时 drainPendingInstalls 走 installFromUrl 的 file
         // 分支装；“+”常驻、进度圈只跟在后面（:591-600），用户
         // 随时能再点，排队提示在 :1843 一带已现成。
-        if self.installprogressVisible {
+        // 3.8.560（L311-1）：忙时门四处 @State（installprogressVisible/installQueue/czfInFlightInstall/pendingInstalls）离主线程读 + append——与 installFromUrl 的门同款；读 + 判重 + 入队一次回主线程做。门与置 flag 合并在同一次跳里：分开跳会在门与置 flag 之间留窗口，第二路并发调用会也通过门、两路同时装（installFromUrl 入口单跳同款）。czfFileImporterTmpToDelete 是静态 Set，insert 随门一起回主线程（删方在 drain 里已回主线程，表只在主线程碰）。
+        let czfBusyQueued = await MainActor.run { () -> Bool in
+            guard installprogressVisible else {
+                self.installprogressVisible = true
+                return false
+            }
             let urlStr = fileUrl.absoluteString
             let alreadyQueued = installQueue.contains(where: { $0.url == fileUrl && $0.autoReplace == false && $0.preview == false && $0.forceAsNew == false && $0.customDisplayName == nil })
             let alreadyInFlight = czfInFlightInstall.map { $0.url == fileUrl && $0.autoReplace == false && $0.preview == false && $0.forceAsNew == false && $0.customDisplayName == nil } ?? false
@@ -2534,17 +2539,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             try? FileManager.default.removeItem(at: fileUrl)
             // installIpaFile 成功路不一定清 flag，这里先清再出队，
             // 否则队里那个撞上正忙会重新排队、一直等不到
-            self.installprogressVisible = false
-            drainPendingInstalls()
+            // 3.8.560（L311-1）：收尾走 czfFinishInstall()（清 flag + 续排，顺序与原来一致）。
+            await czfFinishInstall()
         } catch is CZFInstallCancelled {
             // 3.8.428 安装#2：用户取消安装，不弹错误提示。
-            self.installprogressVisible = false
-            drainPendingInstalls()
+            // 3.8.560（L311-1）：收尾走 czfFinishInstall()。
+            await czfFinishInstall()
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
-            self.installprogressVisible = false
-            drainPendingInstalls()
+            // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写；收尾走 czfFinishInstall()。
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
+            await czfFinishInstall()
         }
     }
     
@@ -2584,7 +2591,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 不查 czfInstallCancelRequested——进度条旁点了取消，
             // 这里还要白等满 60 秒才走到后面的取消检查点。每次
             // sleep 后查一次，命中就按取消抛（与同款检查点一致）。
-            if czfTakeInstallCancel() {
+            // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）。
+            if await MainActor.run(body: { czfTakeInstallCancel() }) {
                 throw CZFInstallCancelled()
             }
             if let v = try? url.resourceValues(forKeys: keys), czfIsDownloaded(v) {
@@ -2618,7 +2626,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
 
         let installProgress = Progress.discreteProgress(totalUnitCount: 100)
-        self.installProgressPercentage = 0.0
+        // 3.8.560（L311-1）：installProgressPercentage 是 @State，回主线程置（KVO 回调里那处早已用 main.async 包过，只剩这里直写）。
+        await MainActor.run { self.installProgressPercentage = 0.0 }
         // 第 2 条：解包每读一块就推一次 KVO，原来每次都 main.async 写
         // @State，全程无节流。只在变化 ≥0.5% 或距上次发布 ≥100ms
         // 时才发布；到 100% 时一定发布一次，不让进度条卡在 99.x%。
@@ -2658,7 +2667,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
         // O-9：解包后取消检查点——原来解包、落盘、签名全程无检查点，
         // 大包签名时点取消毫无反应，只能等签完或 5 分钟超时。
-        if czfTakeInstallCancel() {
+        // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）。
+        if await MainActor.run(body: { czfTakeInstallCancel() }) {
             throw CZFInstallCancelled()
         }
 
@@ -2717,7 +2727,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     throw error
                 }
                 if !czfAuthOK {
-                    self.installprogressVisible = false
+                    // 3.8.560（L311-1）：installprogressVisible 是 @State，回主线程清（清完再抛，调用方 catch 不重复清也无妨，重复清是幂等写）。
+                    await MainActor.run { self.installprogressVisible = false }
                     try? fm.removeItem(at: payloadPath)
                     throw CZFInstallCancelled()
                 }
@@ -2770,7 +2781,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // user cancelled
                 // 3.8.428 安装#2：替换选择框点取消=取消安装，抛
                 // 专用取消信号（原来直接 return，会被批量计为成功）。
-                self.installprogressVisible = false
+                // 3.8.560（L311-1）：installprogressVisible 是 @State，回主线程清。
+                await MainActor.run { self.installprogressVisible = false }
                 try? fm.removeItem(at: payloadPath)
                 throw CZFInstallCancelled()
             }
@@ -2795,7 +2807,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 guard let inputName else {
                     // 3.8.428 安装#2：输新名字点取消=取消安装，抛
                     // 专用取消信号（原来直接 return，会被批量计为成功）。
-                    self.installprogressVisible = false
+                    // 3.8.560（L311-1）：installprogressVisible 是 @State，回主线程清。
+                    await MainActor.run { self.installprogressVisible = false }
                     try? fm.removeItem(at: payloadPath)
                     throw CZFInstallCancelled()
                 }
@@ -2885,7 +2898,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
 
         // O-9：落盘后取消检查点（与解包后、签名等待里同款）。
-        if czfTakeInstallCancel() {
+        // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）。
+        if await MainActor.run(body: { czfTakeInstallCancel() }) {
             czfRestoreOldBackup()
             throw CZFInstallCancelled()
         }
@@ -2938,7 +2952,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfSignCancelTask = Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 500_000_000)
-                    if czfInstallCancelRequested {
+                    // 3.8.560（L311-1）：czfInstallCancelRequested 是 @State，轮询 Task 跑全局执行器——回主线程读。
+                    let czfSignCancelled = await MainActor.run { czfInstallCancelRequested }
+                    if czfSignCancelled {
                         if czfSignResumeOnce.claimCancelled() {
                             c.resume()
                         }
@@ -2961,7 +2977,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         if czfSignResumeOnce.cancelled {
             // O-9：签名等待被取消（取消轮询抢到了 resume）：抛取消，
             // 不走下面的签名失败路径；顺手取走取消标志，记取消数。
-            _ = czfTakeInstallCancel()
+            // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取。
+            _ = await MainActor.run { czfTakeInstallCancel() }
             // 3.8.527（L54）：签名取消，旧包搬回来再抛错。
             czfRestoreOldBackup()
             throw CZFInstallCancelled()
@@ -2971,7 +2988,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 本次安装照常装完（点了取消还装上），标志还留给下一次安装、
         // 下次安装入口 :3409 直接取走当取消、白白记一次失败。签名刚完
         // 在这里再取一次，抢到就按取消抛（与上面 cancelled 分支同款）。
-        if czfTakeInstallCancel() {
+        // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）。
+        if await MainActor.run(body: { czfTakeInstallCancel() }) {
             // 3.8.527（L54）：签名刚完被取消，旧包搬回来再抛错。
             czfRestoreOldBackup()
             throw CZFInstallCancelled()
@@ -2983,12 +3001,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         
         // we leave it unsigned even if signing failed
         if let signError {
-            if signSuccess {
-                errorInfo = "\("lc.appList.signSuccessWithError".loc)\n\n\(signError)"
-            } else {
-                errorInfo = signError.loc
+            // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
+            await MainActor.run {
+                if signSuccess {
+                    errorInfo = "\("lc.appList.signSuccessWithError".loc)\n\n\(signError)"
+                } else {
+                    errorInfo = signError.loc
+                }
+                errorShow = true
             }
-            errorShow = true
         }
         
         if let appToReplace {
@@ -3227,10 +3248,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 进行中再点：同样排队（与 url 安装共用一个队）
         // .plist 项没有 autoReplace/preview/forceAsNew 三个字段，
         // 排队去重仍只比 urlStr（O-9 的四字段键只管 .url 项）。
-        if self.installprogressVisible {
+        // 3.8.560（L311-1）：忙时门两处 @State（installprogressVisible/pendingInstalls）离主线程读 + append——与 installFromUrl 的门同款（L309-1/L311-1）；读 + 入队一次回主线程做。
+        let czfBusyQueued = await MainActor.run { () -> Bool in
+            guard installprogressVisible else { return false }
             if !pendingInstalls.contains(where: { $0.urlStr == urlStr }) {
                 pendingInstalls.append(.plist(urlStr))
             }
+            return true
+        }
+        if czfBusyQueued {
             return
         }
 
@@ -3242,8 +3268,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                let urlParam = queryItems.first(where: { $0.name == "url" })?.value {
                 plistUrlStr = urlParam
             } else {
-                errorInfo = "lc.appList.plistInvalidError".loc
-                errorShow = true
+                // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
+                await MainActor.run {
+                    errorInfo = "lc.appList.plistInvalidError".loc
+                    errorShow = true
+                }
                 return
             }
         }
@@ -3253,7 +3282,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 的才是真 plist 地址。唯一顺序变化：原来 multiLCStatus 检查在
         // 解包前、现在在解包后——双重有错的输入（副 App + 坏 itms 链接）
         // 先报 plistInvalidError，不再先报副 App 提示。
-        guard let plistUrl = czfValidatedInstallURL(plistUrlStr) else {
+        // 3.8.560（L311-1）：czfValidatedInstallURL 内写 errorInfo/errorShow（@State），回主线程验（body: 标签，610 同款）。
+        guard let plistUrl = await MainActor.run(body: { czfValidatedInstallURL(plistUrlStr) }) else {
             return
         }
         
@@ -3274,8 +3304,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                   let items = plist["items"] as? [[String: Any]],
                   let firstItem = items.first,
                   let assets = firstItem["assets"] as? [[String: Any]] else {
-                errorInfo = "lc.appList.plistParseError".loc
-                errorShow = true
+                // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
+                await MainActor.run {
+                    errorInfo = "lc.appList.plistParseError".loc
+                    errorShow = true
+                }
                 return
             }
             
@@ -3289,16 +3322,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             
             guard let ipaUrlStr else {
-                errorInfo = "lc.appList.plistNoIpaError".loc
-                errorShow = true
+                // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
+                await MainActor.run {
+                    errorInfo = "lc.appList.plistNoIpaError".loc
+                    errorShow = true
+                }
                 return
             }
             
+            // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）。
+            if await MainActor.run(body: { czfTakeInstallCancel() }) {
+                return
+            }
             await installFromUrl(urlStr: ipaUrlStr)
             
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
     
@@ -3579,9 +3622,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @discardableResult
     // 出队一个接着装：Task 里跑，撞上正忙会重新排队，不丢不死循环
     private func drainPendingInstalls() {
-        guard !pendingInstalls.isEmpty else { return }
-        let next = pendingInstalls.removeFirst()
+        // 3.8.560（L311-1）：pendingInstalls 是 @State；drain 从 installFromUrl/installFromPlist 的 defer 与 startInstallApp 调来，全是离主线程的执行器——pop 回主线程做（Task 本身仍是裸 Task、跑全局执行器，安装活离主线程；pop 与起跑取取消标志之间无其他挂起点，L42 口径不变）。
         Task {
+            let next = await MainActor.run { () -> CZFPendingInstall? in
+                guard !pendingInstalls.isEmpty else { return nil }
+                return pendingInstalls.removeFirst()
+            }
+            guard let next else { return }
             // 3.8.517（L42）：取消点在排水 Task 起跑前——正在装的
             // 那一项刚结束、defer 已把这一项出队并起了 Task，用户
             // 此时点进度条旁的取消：标志立起来后，下面
@@ -3596,11 +3643,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 该项按取消丢掉、其余排队等下一次安装才续上），不
             // 在此批动——那一项本就是要取消的，残留只是续排晚
             // 一步。
-            if czfTakeInstallCancel() {
+            if await MainActor.run(body: { czfTakeInstallCancel() }) {
                 // 3.8.527（L54）：起跑即取消的这一项若是
                 // startInstallApp 排进来的 asCopy 临时副本，
                 // 也按表删掉——不装就不留 tmp。
-                Self.czfDeleteFileImporterTmp(next.urlStr)
+                // 3.8.560（L311-1）：czfFileImporterTmpToDelete 是静态 Set，删表回主线程做（插表在忙时门里已回主线程，表只在主线程碰，不再竞态）。
+                await MainActor.run { Self.czfDeleteFileImporterTmp(next.urlStr) }
                 drainPendingInstalls()
                 return
             }
@@ -3610,7 +3658,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 3.8.527（L54）：排空装完，按表删 asCopy 临时
                 // 副本（installFromUrl 的 file 分支不删它）；不
                 // 在表里的地址（源页/收件箱/直链）原样不动。
-                Self.czfDeleteFileImporterTmp(s)
+                // 3.8.560（L311-1）：同上，删表回主线程。
+                await MainActor.run { Self.czfDeleteFileImporterTmp(s) }
             case .plist(let s):
                 await installFromPlist(urlStr: s)
             }
@@ -3807,6 +3856,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         return true
     }
 
+    // 3.8.560（L311-1）：安装收尾共用——清进度标志 + 续排。flag 必须在
+    // drain 起跑的下一项读到之前清掉（否则下一项看 busy 又排回
+    // pendingInstalls、还被队里记一次失败）；defer 里不能 await，
+    // 置 flag 的函数各 return 点显式调这里，不再用 defer 清 flag。
+    private func czfFinishInstall() async {
+        await MainActor.run { installprogressVisible = false }
+        drainPendingInstalls()
+    }
+
     func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil) async -> Bool {
         // 3.8.428 App#4：粘贴的安装链接带首尾空格/换行就报“链接
         // 无效”，先 trim（与 installFromPlist 同款处理）。
@@ -3820,18 +3878,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 里或正在装的同一请求不再往 pendingInstalls 里加（原来只比
         // urlStr，同地址不同 autoReplace/forceAsNew 的请求会被误丢、
         // 已在队里/在途的又会重复排一份）。
-        if self.installprogressVisible {
-            let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew, customDisplayName)
-            let alreadyQueued = URL(string: urlStr).map { queuedURL in
-                installQueue.contains(where: { $0.url == queuedURL && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName })
-            } ?? false
-            let alreadyInFlight = czfInFlightInstall.map { $0.url.absoluteString == urlStr && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName } ?? false
-            let alreadyPending = pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: urlStr, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew, customDisplayName: customDisplayName, as: $0) })
-            if !alreadyQueued && !alreadyInFlight && !alreadyPending {
-                pendingInstalls.append(item)
-            }
-            return false
-        }
         // 3.8.428 安装#6：进度条旁点了取消——还没开始装就直接
         // 按取消返回，不进下载/解包。
         // 3.8.556（L301-1）：下面两条 return 都在 defer 注册之前——不续排，
@@ -3840,31 +3886,51 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 校验失败能进队：忙时路只比去重、不校验，粘贴的坏链接（如带空格）
         // 先排队、排水时才在 czfValidatedInstallURL 失败；multiLCStatus 是
         // 启动时定值（Shared.init），不会半路变 2。
-        if czfTakeInstallCancel() {
-            drainPendingInstalls()
+        // 3.8.560（L311-1）：门 + 取取消 + 校验 + 置 flag 一次回主线程做——四步原子在主线程上，中间不挂起。分开跳会在门与置 flag 之间留窗口：第二个并发调用会在第一个还没置 flag 时也通过门、两路同时装（原写法门到置 flag 间无挂起点、窗口只有几条同步语句；拆成四跳会把窗口放大到两次主线程往返）。czfTakeInstallCancel/czfValidatedInstallURL 保持同步、只在调用点包（签名不动）；忙时返回 (nil, true) 入队、取消/校验失败返回 (nil, false) 续排、放行返回 (url, false) 且 flag 已置。
+        let (czfEntryURL, czfBusyQueued): (URL?, Bool) = await MainActor.run {
+            if installprogressVisible {
+                let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew, customDisplayName)
+                let alreadyQueued = URL(string: urlStr).map { queuedURL in
+                    installQueue.contains(where: { $0.url == queuedURL && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName })
+                } ?? false
+                let alreadyInFlight = czfInFlightInstall.map { $0.url.absoluteString == urlStr && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName } ?? false
+                let alreadyPending = pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: urlStr, autoReplace: autoReplace, preview: preview, forceAsNew: forceAsNew, customDisplayName: customDisplayName, as: $0) })
+                if !alreadyQueued && !alreadyInFlight && !alreadyPending {
+                    pendingInstalls.append(item)
+                }
+                return (nil, true)
+            }
+            if czfTakeInstallCancel() {
+                return (nil, false)
+            }
+            // O-9：入口校验走共用函数（trim + multiLCStatus + URL 合法，
+            // 与 installFromPlist 同款）；忙时排队与取消检查已在前面做过，
+            // 顺序与原来一致。
+            guard let installUrl = czfValidatedInstallURL(urlStr) else {
+                return (nil, false)
+            }
+            // defer 里不能 await，收尾改走 czfFinishInstall()（各 return 点显式调），这里不再挂 defer。
+            self.installprogressVisible = true
+            return (installUrl, false)
+        }
+        if czfBusyQueued {
             return false
         }
-
-        // O-9：入口校验走共用函数（trim + multiLCStatus + URL 合法，
-        // 与 installFromPlist 同款）；忙时排队与取消检查已在前面做过，
-        // 顺序与原来一致。
-        guard var installUrl = czfValidatedInstallURL(urlStr) else {
+        guard var installUrl = czfEntryURL else {
             drainPendingInstalls()
             return false
-        }
-        
-        self.installprogressVisible = true
-        defer {
-            self.installprogressVisible = false
-            drainPendingInstalls()
         }
 
         if installUrl.isFileURL {
             // install from local, we directly call local install method
             let fileExtension = installUrl.pathExtension.lowercased()
             if fileExtension != "ipa" && fileExtension != "tipa" {
-                errorInfo = "lc.appList.urlFileIsNotIpaError".loc
-                errorShow = true
+                // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写；收尾走 czfFinishInstall()（清 flag + 续排）。
+                await MainActor.run {
+                    errorInfo = "lc.appList.urlFileIsNotIpaError".loc
+                    errorShow = true
+                }
+                await czfFinishInstall()
                 return false
             }
             
@@ -3907,8 +3973,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     installUrl = resolvedURL
                     didStartAccessing = resolvedURL.startAccessingSecurityScopedResource()
                 } catch {
-                    errorInfo =  "读取共享的 IPA 文件失败：\(LCUtils.czfFriendlyError(error))"
-                    errorShow = true
+                    // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写；收尾走 czfFinishInstall()。
+                    await MainActor.run {
+                        errorInfo =  "读取共享的 IPA 文件失败：\(LCUtils.czfFriendlyError(error))"
+                        errorShow = true
+                    }
+                    await czfFinishInstall()
                     return false
                 }
             }
@@ -3918,8 +3988,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
 
             if !fm.isReadableFile(atPath: installUrl.path) && !didStartAccessing {
-                errorInfo = "lc.appList.ipaAccessError".loc
-                errorShow = true
+                // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写；收尾走 czfFinishInstall()。
+                await MainActor.run {
+                    errorInfo = "lc.appList.ipaAccessError".loc
+                    errorShow = true
+                }
+                await czfFinishInstall()
                 return false
             }
             
@@ -3950,7 +4024,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
             // 3.8.428 安装#6：解包前再查一次取消——进度条旁点取消
             // 后，正在等前一个安装的这一项轮到时直接按取消返回。
-            if czfTakeInstallCancel() {
+            // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）；收尾走 czfFinishInstall()。
+            if await MainActor.run(body: { czfTakeInstallCancel() }) {
+                await czfFinishInstall()
                 return false
             }
 
@@ -3959,12 +4035,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 try await installIpaFile(installUrl, autoReplace: autoReplace, forceAsNew: forceAsNew, customDisplayName: customDisplayName)
             } catch is CZFInstallCancelled {
                 // 3.8.428 安装#2：取消不弹错、不计失败，记取消。
-                czfLastInstallWasCancelled = true
+                // 3.8.560（L311-1）：czfLastInstallWasCancelled 是 @State，回主线程写。
+                await MainActor.run { czfLastInstallWasCancelled = true }
                 installOK = false
             } catch {
                 installOK = false
-                errorInfo = LCUtils.czfFriendlyError(error)
-                errorShow = true
+                // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
+                await MainActor.run {
+                    errorInfo = LCUtils.czfFriendlyError(error)
+                    errorShow = true
+                }
             }
 
             // I2：只有安装成功才删 Inbox 源 IPA；安装失败时
@@ -4005,6 +4085,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     print("delete inbox ipa failed: \(error)")
                 }
             }
+            // 3.8.560（L311-1）：收尾走 czfFinishInstall()（清 flag + 续排，原 defer 的活）。
+            await czfFinishInstall()
             return installOK
         }
         
@@ -4053,21 +4135,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             try await downloadHelper.download(url: installUrl, to: destinationURL)
             if downloadHelper.cancelled {
                 // 3.8.428 安装#2：用户取消下载=取消，不计失败。
-                czfLastInstallWasCancelled = true
+                // 3.8.560（L311-1）：czfLastInstallWasCancelled 是 @State，回主线程写；收尾走 czfFinishInstall()。
+                await MainActor.run { czfLastInstallWasCancelled = true }
+                await czfFinishInstall()
                 return false
             }
             // 3.8.428 安装#6：下载完、解包前再查一次取消。
-            if czfTakeInstallCancel() {
+            // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）；收尾走 czfFinishInstall()。
+            if await MainActor.run(body: { czfTakeInstallCancel() }) {
                 try? fileManager.removeItem(at: destinationURL)
+                await czfFinishInstall()
                 return false
             }
             if preview, let text = await makeInstallPreviewText(forIpa: destinationURL) {
                 // 下完了先弹信息卡：用户点「安装」才继续，
                 // 点「取消」删掉临时包、什么都不装
                 let proceed = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-                    installPreviewContinuation = cont
-                    installPreviewText = text
-                    installPreviewShow = true
+                    // 3.8.560（L311-1）：installPreviewContinuation/Text/Show 是 @State；本闭包跑在裸 Task 的执行器上，直接写离主线程。continuation 由 withCheckedContinuation 同步创建、alert 靠 Show 弹出——三处回主线程写（Task 跳，alert 晚一拍弹出，不影响按钮/超时取 continuation：按钮在主线程读，超时 Task 也回主线程取）。
+                    Task { @MainActor in
+                        installPreviewContinuation = cont
+                        installPreviewText = text
+                        installPreviewShow = true
+                    }
                     // 3.8.428 设置#24：预览 alert 挂着 continuation，
                     // 若被别的 alert 顶掉就永远挂起；5 分钟超时自动
                     // 按取消 resume（与安装#2 的取消信号打通）。
@@ -4087,8 +4176,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 if !proceed {
                     // 3.8.428 安装#2：预览点取消或超时=取消，不计失败。
-                    czfLastInstallWasCancelled = true
+                    // 3.8.560（L311-1）：czfLastInstallWasCancelled 是 @State，回主线程写；收尾走 czfFinishInstall()。
+                    await MainActor.run { czfLastInstallWasCancelled = true }
                     try? fileManager.removeItem(at: destinationURL)
+                    await czfFinishInstall()
                     return false
                 }
             }
@@ -4101,7 +4192,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         } catch is CZFInstallCancelled {
             // 3.8.428 安装#2：安装中途取消（替换选择/输名/运行中
             // 确认），清掉临时包、不弹错，记取消。
-            czfLastInstallWasCancelled = true
+            // 3.8.560（L311-1）：czfLastInstallWasCancelled 是 @State，回主线程写。
+            await MainActor.run { czfLastInstallWasCancelled = true }
             try? fileManager.removeItem(at: destinationURL)
         } catch {
             // L50-2：下载弹窗点了取消时 download() 是抛错出来
@@ -4112,16 +4204,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 同款：cancelled 就不报 errorMessage）；只有真
             // 失败才弹错。
             if downloadHelper.cancelled {
-                czfLastInstallWasCancelled = true
+                // 3.8.560（L311-1）：czfLastInstallWasCancelled 是 @State，回主线程写。
+                await MainActor.run { czfLastInstallWasCancelled = true }
                 try? fileManager.removeItem(at: destinationURL)
             } else {
-                errorInfo = LCUtils.czfFriendlyError(error)
-                errorShow = true
+                // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
+                await MainActor.run {
+                    errorInfo = LCUtils.czfFriendlyError(error)
+                    errorShow = true
+                }
             }
         }
         if czfRemoteInstallOK {
             try? fileManager.removeItem(at: destinationURL)
         }
+        // 3.8.560（L311-1）：收尾走 czfFinishInstall()（清 flag + 续排，原 defer 的活）。
+        await czfFinishInstall()
         return czfRemoteInstallOK
     }
     

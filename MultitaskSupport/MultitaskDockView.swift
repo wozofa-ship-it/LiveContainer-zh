@@ -2910,6 +2910,12 @@ extension Notification.Name {
     }
     
     @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        // 3.8.560（L252-1）：右缘分支漏了总开关守卫——台前有客 App
+        // 时走 showDockFromHidden，它只守 LCHideDock、不认总开关；
+        // 总开关关着 + 栏藏着 + 右缘一滑超 30pt，栏照样弹出来。
+        // L204-1 的注释称“开关关着时面板不会开”只说对了一半：
+        // 面板确实不开，栏还会出。入口守卫只是提前短路。
+        guard Self.czfEdgeGesturesEnabled else { return }
         guard isDockHidden, gesture.state == .began || gesture.state == .changed else {
             return
         }

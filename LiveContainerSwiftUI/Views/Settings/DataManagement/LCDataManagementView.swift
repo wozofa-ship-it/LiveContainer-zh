@@ -1556,7 +1556,10 @@ struct LCDataManagementView : View {
         // 时 App 列表还没加载完也会扫空一次定终身。反向同款：
         // 删了 Filza，按钮还留着，点下去才报打不开。appeared 标志
         // 只为这处扫描设门，门拆了标志一并删（本修法内清掉）。
-        filzaInstalled = sharedModel.apps.contains { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }
+        // 3.8.560（L258）：隐藏的 Filza 也要认——sharedModel.apps 只含可见 App，
+        // 隐藏的在 hiddenApps 里（scanAppLists 按 isHidden 分流）；只扫 apps，
+        // 隐藏 Filza 后数据页的 Filza 按钮直接消失，明明装着却打不开。
+        filzaInstalled = (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }
         // 3.8.313：直开某动作——只跑一次（关掉内层 sheet 后
         // 本页重现时不再重复弹）。包一层 async，让外层 sheet
         // 先落定再弹内层，避免两层 sheet 同帧抢呈现。
@@ -6684,7 +6687,9 @@ struct LCDataManagementView : View {
                 // 复/清缓存/定时三路，这里漏了）；先回主线程取
                 // Filza 的模型，bundleIdentifier() 的 _info 读也
                 // 在同一跳里，后面流程不动。
-                guard let filza = await MainActor.run(body: { sharedModel.apps.first(where: { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }) }) else { return }
+                // 3.8.560（L258）：同款——Filza 被隐藏时只扫 apps 找不到模型，
+                // guard 直接 return、点了没反应；与上面按钮判定同口径，含 hiddenApps。
+                guard let filza = await MainActor.run(body: { (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }) }) else { return }
                 guard await filza.czfAuthenticateIfLocked() else { return }
                 try await filza.runApp(urlStr: launchURLStr)
             } catch {
