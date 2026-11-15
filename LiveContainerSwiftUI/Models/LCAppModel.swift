@@ -170,6 +170,12 @@ class LCAppModel: ObservableObject, Hashable {
             // 没有 dock 条目（原生窗口模式等）：拉满路保留旧行为，
             // 只带回不拉满，带回失败再落到新起；小窗路不试带回。
             guard maximize else { return false }
+            // 3.8.559（L243-1）：与 runApp 内 bringExisting 同款——
+            // appDict 残留会让 openExistingAppWindow 把已销毁的
+            // 原生场景当成活窗（带回成功、调用方不再新起；顶回来
+            // 的还是场景 VC 自己拉起的客，同样没 JIT、没 VPN 核心）。
+            // 容器没注册 = 没活客，直接走新起。
+            guard MultitaskManager.isUsing(container: uuid) else { return false }
             var brought = false
             if #available(iOS 16.1, *) {
                 brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
@@ -1693,6 +1699,24 @@ class LCAppModel: ObservableObject, Hashable {
             }
             if let urlScheme {
                 UserDefaults.standard.setValue(urlScheme, forKey: "launchAppUrlScheme")
+            }
+            // 3.8.559（L243-1）：appDict 从不清——只写（W:32），
+            // 场景销毁后残留；openExistingAppWindow 只凭表里有无
+            // 就返 true，已销毁的原生场景会被当成活窗顶回来，
+            // runApp 直接 return，签名、跟 App 走的 VPN 核心、
+            // JIT 全跳过（客靠场景 VC 自己拉起，表面照常跑起来，
+            // 只是没 JIT、没 VPN 核心）。容器注册表才是活客的
+            // 信号：客初始化完成时注册（AppSceneViewController.m:105），
+            // 终止清理时注销（:363）；没注册 = 没活客，不认 appDict。
+            // dock 条目在前已验过（活虚拟窗一定有条目），这里只剩
+            // “没条目”一路：原生活窗没条目但容器已注册；死窗两者皆无。
+            // 同模型启动锁在外（runApp 入口）挡并发，启动中（未注册
+            // 完）的二重启动进不来——本函数唯一调用方就是 runApp。
+            if !MultitaskManager.isUsing(container: dataUUID) {
+                if let urlScheme {
+                    UserDefaults.standard.removeObject(forKey: "launchAppUrlScheme")
+                }
+                return false
             }
             var found = false
             if #available(iOS 16.1, *) {

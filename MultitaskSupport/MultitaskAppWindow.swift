@@ -296,7 +296,17 @@ class MultitaskRelaunchManager: NSObject {
     
     private static func relaunchApp(bundleId: String, dataUUID: String) async {
         guard let appModel = await MainActor.run(body: { lookupAppModel(bundleId: bundleId) }),
-              appModel.appInfo.lastLaunched.distance(to: .now) > 2
+              // 3.8.559（L250-1）：lastLaunched 是没标 nullability 的
+              // ObjC 属性（LCAppInfo.h:51），Swift 里是 Date!；getter
+              // 只读 _info（LCAppInfo.m:1034-1035），从没成功启动过
+              // 的 App 读出来是 nil——runApp 只在末尾 czfDidLaunch
+              // 时才写（M:1377-1379），客端初始化失败/30 秒超时抛
+              // 错时根本到不了那行。首启失败又开着“跳过终止屏 +
+              // 重启已终止”时，这里直接对 nil 解包闪退（L248 第 16
+              // 条“每次启动都写、trap 不可达”只对成功路成立）。
+              // nil = 没成功启动过、无“刚启动过”可节流，放行重起；
+              // 最近启动排序（LCAppSortManager:292/:299）同款认 nil。
+              (appModel.appInfo.lastLaunched?.distance(to: .now) ?? .infinity) > 2
         else {
             return
         }
