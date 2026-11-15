@@ -3042,6 +3042,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     sharedModel.apps.removeAll { $0 == appToReplace }
                     sharedModel.apps.append(newAppModel)
                 }
+                // 3.8.561（L265-1）：32 位表同款维护——旧实例摘掉、新实例是 32 位就补进来，否则覆盖重装后表里留的是旧实例（路径 tag 相同、看着一样），新装 32 位 App 则要等下次冷启动才进模拟器选择器。
+                sharedModel.arm32EmuApps.removeAll { $0 == appToReplace }
+                if finalNewApp.is32bitEmulator {
+                    sharedModel.arm32EmuApps.append(newAppModel)
+                }
                 // 覆盖安装（旧模型换新模型）后同款清掉，否则旧
                 // 包路径的缓存/dock 条目会指到已替换的 App。
                 if #available(iOS 16.0, *) {
@@ -3051,6 +3056,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             } else {
                 let newAppModel = LCAppModel(appInfo: finalNewApp, delegate: self)
                 sharedModel.apps.append(newAppModel)
+                // 3.8.561（L265-1）：新装 32 位 App 同步进 32 位表，否则要等下次冷启动才进模拟器选择器。
+                if finalNewApp.is32bitEmulator {
+                    sharedModel.arm32EmuApps.append(newAppModel)
+                }
 
                 // 3.8.602（L136）：全新安装也要走同一失效——删后重
                 // 装/恢复缺失 App 走的都是这条分支，包路径按包名
@@ -4231,6 +4240,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return app == now
             }
             sharedModel.hiddenApps.removeAll { now in
+                return app == now
+            }
+            // 3.8.561（L265-1）：32 位表也要一起摘——arm32EmuApps 只在冷启动扫描时重建（LiveContainerSwiftUIApp:44），删 App 只摘 apps/hiddenApps，删掉的 32 位 App 一直留在两个模拟器选择器里；被删的若是全局默认模拟器（LCSelected32BitEmulator），之后所有 32 位启动都在 LCBootstrap 报“The specified 32-bit emulator app is not found”起不来，只能亲手重选；B-12 的变空清理（LCSettingsView:257-259）也因表 mid-session 永不变空而永不触发。
+            sharedModel.arm32EmuApps.removeAll { now in
                 return app == now
             }
             // 删 App 后 AppInfo 缓存与 dock 残留条目一起清，否

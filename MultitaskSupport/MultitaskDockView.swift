@@ -2544,6 +2544,19 @@ extension Notification.Name {
     // 与 App 面板同限。面板内的列表滚动一点不受影响；其余
     // 手势一律放行。
     public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        // 3.8.561（L260-1）：总开关关着时，坞的窗口级缘滑识别器
+        // 还在抢客 App 的缘滑——两支没设 cancelsTouchesInView =
+        // false（默认 true），又不在同时识别表里；L252-1 的守卫
+        // 只在动作入口 no-op，识别器照常认领、按竞技场规则把客
+        // App 自己的缘滑挤失败、触摸取消掉，动作却因开关没发生。
+        // 开关关着时识别器直接失败、触摸原样进客 App；开关开着
+        // 时返回 true，与修前 fall-through 一字不变。全局左缘那
+        // 支被 contains 排除在外（它本来就不抢）。
+        if gestureRecognizer is UIScreenEdgePanGestureRecognizer,
+           gestureRecognizer.view is UIWindow,
+           !czfLeftEdgePanRecognizers.contains(where: { $0 === gestureRecognizer }) {
+            return Self.czfEdgeGesturesEnabled
+        }
         if let hostView = gestureRecognizer.view,
            hostView === czfPanelOverlayHost?.view || hostView === czfSourcesOverlayHost?.view {
             let topLimit: CGFloat = 64

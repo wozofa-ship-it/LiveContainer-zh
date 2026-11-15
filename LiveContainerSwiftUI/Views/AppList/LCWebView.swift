@@ -499,7 +499,9 @@ struct LCWebView: View {
         if url.scheme == "itms-services", let handler = itmsServicesHandler {
             installAppAlertMsg = "lc.webView.installAppDesc".loc
             
-            if let doInstall = await installAppAlert.open(), !doInstall {
+            // 3.8.561（L312-1）：nil = 已有弹窗未决（AlertHelper 单槽守卫），本次跳过、不装；
+            // 原来 `if let ..., !doInstall` 在 nil 时落空到下面直接装，重定向链双触发时会未经确认就装。
+            guard let doInstall = await installAppAlert.open(), doInstall else {
                 return
             }
             close()
@@ -544,6 +546,9 @@ struct LCWebView: View {
             }
         }
         
+        // 3.8.561（L312-1）：已有弹窗未决时直接跳过——不改 runAppAlertMsg（正显示的那问的文案
+        // 不能被后来的重定向链覆盖，否则用户照第二问答、第一问却执行）、不 open（单槽已占）。
+        guard !runAppAlert.isPending else { return }
         runAppAlertMsg = "lc.webView.pageLaunch %@".localizeWithFormat(appToLaunch.appInfo.displayName()!)
         
         // 3.8.527（L54）：本次会话内已拒绝过这个 scheme 的“用 App
@@ -551,7 +556,11 @@ struct LCWebView: View {
         if let scheme = url.scheme, czfDeclinedSchemes.contains(scheme) {
             return
         }
-        if let doRunApp = await runAppAlert.open(), !doRunApp {
+        // 3.8.561（L312-1）：nil = 已有弹窗未决（单槽守卫的兜底），本次跳过、不打开、不记拒
+        // （用户没见过这问，下次点还弹）；false 才是用户点了拒绝，记入本次会话已拒。
+        // 原来 `if let ..., !doRunApp` 在 nil 时落空到下面直接 launchToApp，未经确认就打开 App。
+        guard let doRunApp = await runAppAlert.open() else { return }
+        if !doRunApp {
             if let scheme = url.scheme { czfDeclinedSchemes.insert(scheme) }
             return
         }
@@ -594,6 +603,8 @@ struct LCWebView: View {
             }
         }
         
+        // 3.8.561（L312-1）：同上——已有弹窗未决时跳过，不改文案、不 open。
+        guard !runAppAlert.isPending else { return }
         runAppAlertMsg = "lc.webView.pageCanBeOpenIn %@".localizeWithFormat(appToLaunch.appInfo.displayName()!)
         // 3.8.527（L54）：本次会话内已拒绝过这个 (host, bundleID)
         // 的“用 App 打开”，不再重复弹、静默留网页（见
@@ -602,7 +613,9 @@ struct LCWebView: View {
         if czfDeclinedUniversalLinks.contains(czfDeclineKey) {
             return
         }
-        if let doRunApp = await runAppAlert.open(), !doRunApp {
+        // 3.8.561（L312-1）：nil = 已有弹窗未决（兜底），本次跳过、不打开、不记拒；false 才记拒。
+        guard let doRunApp = await runAppAlert.open() else { return }
+        if !doRunApp {
             czfDeclinedUniversalLinks.insert(czfDeclineKey)
             return
         }

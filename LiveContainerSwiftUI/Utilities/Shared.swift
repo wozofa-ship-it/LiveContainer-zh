@@ -193,7 +193,17 @@ class AlertHelper<T> : ObservableObject {
     private var result : T?
     private var c : UnsafeContinuation<Void, Never>? = nil
     
+    /// 是否已有一次 open() 在等回答（单槽被占）。
+    /// 读 self.c：与 open()/close() 现有访问同一模式（调用方均在主线程：WK 回调与 SwiftUI 按钮动作）。
+    var isPending: Bool { c != nil }
+
     func open() async -> T? {
+        // 3.8.561（L312-1）：单槽 continuation 已有人在等时直接返 nil，不覆写 self.c——
+        // 同一 helper 两路同时 open 会覆写，先等的那路永不 resume（悬挂 Task、无错静默丢导航）；
+        // runAppAlert 两路：LCWebView onURLSchemeDetected 与 onUniversalLinkDetected，
+        // 重定向链可在弹窗未答时再触发一路。nil 在调用方按“取消/跳过”处理（见 LCWebView 三处）。
+        // 查与置之间无挂起点，是同一 Task 的同步前缀，不会被另一路插队。
+        if self.c != nil { return nil }
         await withUnsafeContinuation { c in
             self.c = c
             Task { await MainActor.run {
