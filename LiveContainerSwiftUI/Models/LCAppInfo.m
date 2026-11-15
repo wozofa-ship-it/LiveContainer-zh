@@ -316,6 +316,16 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
     [LCAppInfoIconCache() removeObjectForKey:[_bundlePath stringByAppendingString:@"#dark"]];
 }
 
+// 3.8.602（L136）：App 变了时整表清掉共享图标缓存——键是
+// bundle 路径 + 明/暗，覆盖安装/恢复重装都是同路径原位
+// 替换，新 LCAppInfo 解图标会直接命中旧图标；per-instance
+// 的 clearIconCache 只能清自己的路径，refreshAfterAppChanged
+// 不知道是哪个 App 变了，只能整表清（下次按需从磁盘 png
+// 重读，代价极小）。
++ (void)czfClearSharedIconCache {
+    [LCAppInfoIconCache() removeAllObjects];
+}
+
 - (UIImage *)generateLiveContainerWrappedIconWithStyle:(GeneratedIconStyle)style {
     UIImage* icon = [UIImage generateIconForBundleURL:[NSURL fileURLWithPath:_bundlePath] style:style hasBorder:NO];
     if (![NSUserDefaults.standardUserDefaults boolForKey:@"LCFrameShortcutIcons"]) {

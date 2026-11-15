@@ -63,6 +63,7 @@ typedef NS_ENUM(NSInteger, MultitaskSpecified){
 - (NSMutableDictionary*)info;
 - (UIImage*)iconIsDarkIcon:(BOOL)isDarkIcon;
 - (void)clearIconCache;
++ (void)czfClearSharedIconCache;
 - (NSString*)displayName;
 - (NSString*)bundlePath;
 - (NSString*)bundleIdentifier;

@@ -2996,6 +2996,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 let newAppModel = LCAppModel(appInfo: finalNewApp, delegate: self)
                 sharedModel.apps.append(newAppModel)
 
+                // 3.8.602（L136）：全新安装也要走同一失效——删后重
+                // 装/恢复缺失 App 走的都是这条分支，包路径按包名
+                // 生成、与旧包同一路径，共享图标缓存里旧图标还
+                // 在，不清就一直显示旧图标。
+                if #available(iOS 16.0, *) {
+                    MultitaskDockManager.refreshAfterAppChanged()
+                }
+
                 // add url schemes
                 if let urlSchemes = finalNewApp.urlSchemes(), urlSchemes.count > 0 {
                     UserDefaults.lcShared().mutableArrayValue(forKey: "LCGuestURLSchemes")

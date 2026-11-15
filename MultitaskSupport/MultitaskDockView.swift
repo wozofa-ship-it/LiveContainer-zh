@@ -812,7 +812,7 @@ extension Notification.Name {
         }
     }
 
-    /// App 删除/覆盖安装/恢复完成 后调用：AppInfo 缓存与 dock
+    /// App 删除/覆盖安装/全新安装/恢复完成 后调用：AppInfo 缓存与 dock
     /// 残留条目一起清掉，否则删掉/换掉的 App 还会按旧 LCAppInfo
     /// 被解析、旧 dock 条目还会被顶回前台。正在运行的窗口不动
     /// （见 pruneStaleDockEntries）。必须在主线程调。
@@ -820,6 +820,15 @@ extension Notification.Name {
     static func refreshAfterAppChanged() {
         AppInfoProvider.shared.clearCache()
         MultitaskDockManager.shared.pruneStaleDockEntries()
+        // 3.8.602（L136）：App 变了时两层图标内存缓存都要清，
+        // 否则覆盖安装/恢复重装后图标一直显示旧版，直到手动
+        // 清图标缓存或重启：① Swift 侧 IconCacheManager（坞/
+        // 面板，键=包名+dataUUID+明暗），clearCache 从来没被
+        // 调过；② ObjC 侧共享图标缓存（App 页经 iconIsDarkIcon
+        // 走它，键=包路径+明暗，同路径原位替换后旧图标会一直
+        // 命中）。磁盘 png 在新包里本来就没有，清内存即可。
+        IconCacheManager.shared.clearCache()
+        LCAppInfo.czfClearSharedIconCache()
     }
 
     // C4 信号：最近一次 bring 调用是否清掉了死窗（见
