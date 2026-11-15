@@ -331,11 +331,13 @@ class LCAppModel: ObservableObject, Hashable {
     }
 
     /// F-10：未运行分支的共用骨架——最小化/小窗口共用：
-    /// ① 在旧 uuid 上注册“窗出现即动作”回调；② 调 launch 启动；
-    /// ③ 启动完重读 uuid，换了就在新 uuid 上再注册一次（F-3：
-    /// 拆容器换号后旧 uuid 等不来新窗）；④ 到期动作没跑就经
-    /// onError 报一次超时。action 在窗口出现时调；timeout 是
-    /// 等窗预算（秒）；launch 抛错时经 onError 报启动错、不再报超时。
+    /// ① 调 launch 启动（启动失败经 onError 报启动错、不再报超时，
+    /// 此时还没注册过观察者，跳过项 25 的 stale 观察者不存在）；
+    /// ② 启动完重读 uuid（拆容器换号走新号）再注册“窗出现即动作”
+    /// 回调，窗已出现时当场调 handler；等窗预算从启动完成才起算
+    /// （L155：原来先注册再启动，启动耗时吃掉预算、冷启动超 6 秒
+    /// 时最小化必报超时）；③ 到期动作没跑就经 onError 报一次超时。
+    /// action 在窗口出现时调；timeout 是启动完成后的等窗预算（秒）。
     @available(iOS 16.0, *)
     private static func czfLaunchThenActOnWindow(
         app: LCAppModel,
@@ -347,15 +349,6 @@ class LCAppModel: ObservableObject, Hashable {
     ) async {
         // 3.8.544（L74）：同上，裸 Task 执行器上读 @Published + _info；现取。
         guard let uuid = await MainActor.run(body: { app.czfInstanceUUID }) else { return }
-        let deadline = Date().addingTimeInterval(timeout)
-        var done = false
-        let act: (String) -> Void = { waitUUID in
-            action(waitUUID)
-            done = true
-        }
-        MultitaskDockManager.shared.czfOnWindowAppeared(uuid: uuid, timeout: timeout) {
-            act(uuid)
-        }
         do {
             try await app.runApp(multitask: multitask, containerFolderName: uuid)
         } catch {
@@ -369,11 +362,25 @@ class LCAppModel: ObservableObject, Hashable {
             await MainActor.run { onError(error.localizedDescription) }
             return
         }
+        // 3.8.542（L155）：等窗预算从启动完成才起算——原来先注册
+        // 再启动，czfOnWindowAppeared 的超时钟从注册那一刻就走，
+        // 启动（签名/挂 JIT/客初始化）吃掉预算：冷启动超 6 秒时
+        // 最小化必报“最小化超时”，明明 App 已打开、再点一次才好。
+        // 改成启动完再注册：窗已出现时 czfOnWindowAppeared 见 apps
+        // 里已有该 uuid、当场调 handler，不丢快启动；启动完重读
+        // uuid（拆容器换号走新号，旧的双注册不要了）。附带：启动
+        // 失败 early return 时还没注册过，跳过项 25 的 stale 观察
+        // 者（失败后 30 秒内手动重开、大窗被缩成小窗）也不存在了。
+        var done = false
+        let act: (String) -> Void = { waitUUID in
+            action(waitUUID)
+            done = true
+        }
         // 3.8.544（L74）：同上，启动完重读 uuid 也是离主线程读；现取。
-        if let freshUUID = await MainActor.run(body: { app.czfInstanceUUID }), freshUUID != uuid, Date() < deadline {
-            MultitaskDockManager.shared.czfOnWindowAppeared(uuid: freshUUID, timeout: max(0, deadline.timeIntervalSinceNow)) {
-                act(freshUUID)
-            }
+        guard let waitUUID = await MainActor.run(body: { app.czfInstanceUUID }) else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        MultitaskDockManager.shared.czfOnWindowAppeared(uuid: waitUUID, timeout: timeout) {
+            act(waitUUID)
         }
         Task { @MainActor in
             let remaining = deadline.timeIntervalSinceNow

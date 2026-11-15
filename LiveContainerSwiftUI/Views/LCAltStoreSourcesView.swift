@@ -1505,16 +1505,52 @@ struct LCSourcesView: View {
         case failed(Error)
     }
 
+    private final class CZFDylibInstallInFlightBox {
+        let task: Task<CZFDylibInstallOutcome, Never>
+        init(_ task: Task<CZFDylibInstallOutcome, Never>) { self.task = task }
+    }
+    @State private var czfDylibInstallInFlight: [String: CZFDylibInstallInFlightBox] = [:]
+
     @MainActor
+    // L157-1：在途合并——同一 dylib 双击/重入时只装一份：行里
+    // “安装”/“更新”按钮（banner :2483/:2575、详情页 :2765、
+    // 格子 :1040）点下去不禁用，dylib 分支是裸 Task（install
+    // :1669、installAsNew :1711），双击就并行跑两份 installTweak，下载各走
+    // 各的临时文件，最后都进 czfReplaceTweakFile 换同一个
+    // destURL：常见一路是两份都验到旧文件在、第二份挪 .bak
+    // 时撞空抛错，装其实成了、用户却看到一条系统原样报错；
+    // 极窄一路（第二份的存在检查正好落在第一份挪走旧文件、
+    // 还没挪进新文件的微秒缝里）是第二份挪新文件时撞已存在
+    // 而抛错，catch 里删 dest、旧文件也没了——插件整个被删
+    // 掉（跳过清单 55 是源页与面板同时装同款的同根竞态，
+    // 本修只拦源页内这一路，55 仍在）。修法照图标缓存
+    // CZFSourceIconCache 的在途合并同款（:3038 InFlightBox +
+    // 身份比对再清）：按目标文件全路径（文件夹“名-包名”+
+    // 文件名，与 installTweak 的 destURL 同款拼法）记在途
+    // Task，第二路直接等同一个任务的结果；单装一路行为不变。
+    // 在途表放 @State——本方法是 View 结构体的非 mutating
+    // 方法，普通存储属性写不进去；@State 的 setter 是
+    // nonmutating，同一视图身份下各次调用共用同一份表。
+    // 3.8.542（L157）
     private func installTweakIfDylib(app: AltStoreSourceApp) async -> CZFDylibInstallOutcome {
         guard let downloadURL = app.latestVersion?.downloadURL,
               downloadURL.pathExtension.lowercased() == "dylib" else {
             return .notDylib
         }
-        if let error = await installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
-            return .failed(error)
+        let key = "\(app.name)-\(app.bundleIdentifier)/\(LCUtils.czfTweakFileName(for: downloadURL))"
+        if let existing = czfDylibInstallInFlight[key] {
+            return await existing.task.value
         }
-        return .succeeded
+        let box = CZFDylibInstallInFlightBox(Task<CZFDylibInstallOutcome, Never> {
+            if let error = await self.installTweak(from: downloadURL, name: app.name, bundleIdentifier: app.bundleIdentifier) {
+                return .failed(error)
+            }
+            return .succeeded
+        })
+        czfDylibInstallInFlight[key] = box
+        let result = await box.task.value
+        if czfDylibInstallInFlight[key] === box { czfDylibInstallInFlight.removeValue(forKey: key) }
+        return result
     }
 
     /// 批量安装一组 App（勾选批量装、「全部更新」共用）：
