@@ -146,22 +146,32 @@ public final class DownloadHelper : ObservableObject {
                     do {
                         let fm = FileManager.default
                         print(to)
-                        // 目标有同名残留时 moveItem 直接报"已存在
-                        // 同名项目"、下载白下完（真机实测：上次
-                        // 安装没清干净的 tmp 文件、或重试时上一
-                        // 轮已搬到位的文件都会撞上）：搬之前先清
-                        if tempFileURL.standardizedFileURL != to.standardizedFileURL,
-                           fm.fileExists(atPath: to.path) {
-                            try? fm.removeItem(at: to)
-                        }
-                        do {
-                            try fm.moveItem(at: tempFileURL, to: to)
-                        } catch let moveError as NSError where moveError.domain == NSCocoaErrorDomain && moveError.code == NSFileWriteFileExistsError {
-                            // 仍撞上“已存在”：并发另一路刚搬到位、或
-                            // 上面那下 removeItem 静默失败了。再清一
-                            // 次、再搬一次；还不行才把错往上抛。
-                            try? fm.removeItem(at: to)
-                            try fm.moveItem(at: tempFileURL, to: to)
+                        // 3.8.601（L135）：落盘先删后挪的换位口子（L132/L133/
+                        // L134-3 同款，第六处）——原来目标已存在时先
+                        // removeItem 再 moveItem，两步之间被杀/闪退，
+                        // 旧文件已删、新文件还留在 URLSession 临时目录
+                        // （系统会清掉）。L133 只看了安装路的 tmp
+                        // 新名、判“丢的只是刚下的文件”没修；这助手
+                        // 是四路共用的，源页下 IPA 到 Documents 时目标
+                        // 可能已存在（downloadVersion 先问过覆盖确认），
+                        // 丢的是用户已下好的旧包、得重下。旧在就
+                        // replaceItemAt 原子换上、不在就 moveItem；
+                        // move 路仍留 NSFileWriteFileExistsError 重试
+                        // （并发另一路刚搬到位），重试也走 replaceItemAt。
+                        // 目标是同名目录（.ipa 名的文件夹）时 replaceItemAt
+                        // 直接抛错、旧目录原样不动，比原来先删整目录安全。
+                        if tempFileURL.standardizedFileURL != to.standardizedFileURL {
+                            if fm.fileExists(atPath: to.path) {
+                                _ = try fm.replaceItemAt(to, withItemAt: tempFileURL)
+                            } else {
+                                do {
+                                    try fm.moveItem(at: tempFileURL, to: to)
+                                } catch let moveError as NSError where moveError.domain == NSCocoaErrorDomain && moveError.code == NSFileWriteFileExistsError {
+                                    // 仍撞上“已存在”：并发另一路刚搬到位。
+                                    // 原子换上，不再先删后挪；还不行才把错往上抛。
+                                    _ = try fm.replaceItemAt(to, withItemAt: tempFileURL)
+                                }
+                            }
                         }
                     } catch {
                         ansError = error
