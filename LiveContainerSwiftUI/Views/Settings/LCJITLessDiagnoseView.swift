@@ -329,14 +329,24 @@ struct LCJITLessDiagnoseView : View {
                     
                 }
             }
-            .alert("lc.common.error".loc, isPresented: $errorShow){
-            } message: {
-                Text(errorInfo)
-            }
-            .alert("lc.common.success".loc, isPresented: $successShow){
-            } message: {
-                Text(successInfo)
-            }
+            // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+            // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+            // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+            .background(
+                EmptyView()
+                    .alert("lc.common.error".loc, isPresented: $errorShow){
+                    } message: {
+                        Text(errorInfo)
+                    }
+            )
+            // 3.8.589（L121）：同款——也挪 background 叶子。
+            .background(
+                EmptyView()
+                    .alert("lc.common.success".loc, isPresented: $successShow){
+                    } message: {
+                        Text(successInfo)
+                    }
+            )
             
         } else {
             Text("lc.common.loading".loc)

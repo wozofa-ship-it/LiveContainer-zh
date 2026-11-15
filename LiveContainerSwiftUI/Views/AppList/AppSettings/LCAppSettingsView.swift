@@ -243,22 +243,32 @@ struct LCAppSettingsView: View {
             loadSchedMinSettings()
             loadKeepAliveSetting()
         }
-        .alert("lc.common.error".loc, isPresented: $errorShow) {
-            Button("lc.common.ok".loc, action: {
-            })
-        } message: {
-            Text(errorInfo)
-        }
+        // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+        // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: $errorShow) {
+                    Button("lc.common.ok".loc, action: {
+                    })
+                } message: {
+                    Text(errorInfo)
+                }
+        )
         // #13：隐藏确认框
-        .alert("lc.appSettings.hideApp".loc, isPresented: $hideConfirmShow) {
-            Button("lc.appSettings.hideApp".loc) {
-                Task { await toggleHidden() }
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-            }
-        } message: {
-            Text("隐藏后将返回 App 列表。")
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.appSettings.hideApp".loc, isPresented: $hideConfirmShow) {
+                    Button("lc.appSettings.hideApp".loc) {
+                        Task { await toggleHidden() }
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                    }
+                } message: {
+                    Text("隐藏后将返回 App 列表。")
+                }
+        )
         
         .textFieldAlert(
             isPresented: $renameFolderInput.show,
@@ -272,54 +282,70 @@ struct LCAppSettingsView: View {
                 renameFolderInput.close(result: "")
             }
         )
-        .alert("lc.appSettings.toSharedApp".loc, isPresented: $moveToAppGroupAlert.show) {
-            Button {
-                self.moveToAppGroupAlert.close(result: true)
-            } label: {
-                Text("lc.common.move".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.moveToAppGroupAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.toSharedAppDesc".loc)
-        }
-        .alert("lc.appSettings.toPrivateApp".loc, isPresented: $moveToPrivateDocAlert.show) {
-            Button {
-                self.moveToPrivateDocAlert.close(result: true)
-            } label: {
-                Text("lc.common.move".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.moveToPrivateDocAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.toPrivateAppDesc".loc)
-        }
-        .alert("lc.appSettings.forceSign".loc, isPresented: $signUnsignedAlert.show) {
-            Button {
-                self.signUnsignedAlert.close(result: true)
-            } label: {
-                Text("lc.common.ok".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.signUnsignedAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.signUnsignedDesc".loc)
-        }
-        .alert("lc.appSettings.addExternalNonLocalContainer".loc, isPresented: $addExternalNonLocalContainerWarningAlert.show) {
-            Button {
-                self.addExternalNonLocalContainerWarningAlert.close(result: true)
-            } label: {
-                Text("lc.common.continue".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                self.addExternalNonLocalContainerWarningAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appSettings.addExternalNonLocalContainerWarningAlert".loc)
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.appSettings.toSharedApp".loc, isPresented: $moveToAppGroupAlert.show) {
+                    Button {
+                        self.moveToAppGroupAlert.close(result: true)
+                    } label: {
+                        Text("lc.common.move".loc)
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        self.moveToAppGroupAlert.close(result: false)
+                    }
+                } message: {
+                    Text("lc.appSettings.toSharedAppDesc".loc)
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.appSettings.toPrivateApp".loc, isPresented: $moveToPrivateDocAlert.show) {
+                    Button {
+                        self.moveToPrivateDocAlert.close(result: true)
+                    } label: {
+                        Text("lc.common.move".loc)
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        self.moveToPrivateDocAlert.close(result: false)
+                    }
+                } message: {
+                    Text("lc.appSettings.toPrivateAppDesc".loc)
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.appSettings.forceSign".loc, isPresented: $signUnsignedAlert.show) {
+                    Button {
+                        self.signUnsignedAlert.close(result: true)
+                    } label: {
+                        Text("lc.common.ok".loc)
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        self.signUnsignedAlert.close(result: false)
+                    }
+                } message: {
+                    Text("lc.appSettings.signUnsignedDesc".loc)
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.appSettings.addExternalNonLocalContainer".loc, isPresented: $addExternalNonLocalContainerWarningAlert.show) {
+                    Button {
+                        self.addExternalNonLocalContainerWarningAlert.close(result: true)
+                    } label: {
+                        Text("lc.common.continue".loc)
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        self.addExternalNonLocalContainerWarningAlert.close(result: false)
+                    }
+                } message: {
+                    Text("lc.appSettings.addExternalNonLocalContainerWarningAlert".loc)
+                }
+        )
         .sheet(isPresented: $selectUnusedContainerSheetShow) {
             LCSelectContainerView(isPresent: $selectUnusedContainerSheetShow, delegate: self)
         }

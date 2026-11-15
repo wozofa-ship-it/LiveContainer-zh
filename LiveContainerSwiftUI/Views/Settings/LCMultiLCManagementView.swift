@@ -123,31 +123,41 @@ struct LCMultiLCManagementView : View, InstallAnotherLCButtonDelegate {
         .onAppear {
             reloadLaunchPriorityItems()
         }
-        .alert("lc.settings.multiLCInstall".loc, isPresented: $installLC2Alert.show) {
-            if(UserDefaults.sideStoreExist()) {
-                Button {
-                    installLC2Alert.close(result: 2)
-                } label: {
-                    Text("lc.settings.multiLCInstall.installWithBuiltInSideStore".loc)
+        // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+        // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .alert("lc.settings.multiLCInstall".loc, isPresented: $installLC2Alert.show) {
+                    if(UserDefaults.sideStoreExist()) {
+                        Button {
+                            installLC2Alert.close(result: 2)
+                        } label: {
+                            Text("lc.settings.multiLCInstall.installWithBuiltInSideStore".loc)
+                        }
+                    }
+            
+                    Button {
+                        installLC2Alert.close(result: 1)
+                    } label: {
+                        Text("lc.common.continue".loc)
+                    }
+            
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        installLC2Alert.close(result: 0)
+                    }
+                } message: {
+                    Text("lc.settings.multiLCInstallAlertDesc %@".localizeWithFormat(storeName))
                 }
-            }
-            
-            Button {
-                installLC2Alert.close(result: 1)
-            } label: {
-                Text("lc.common.continue".loc)
-            }
-            
-            Button("lc.common.cancel".loc, role: .cancel) {
-                installLC2Alert.close(result: 0)
-            }
-        } message: {
-            Text("lc.settings.multiLCInstallAlertDesc %@".localizeWithFormat(storeName))
-        }
-        .alert("lc.common.error".loc, isPresented: $errorShow) {
-        } message: {
-            Text(errorInfo)
-        }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: $errorShow) {
+                } message: {
+                    Text(errorInfo)
+                }
+        )
         .sheet(isPresented: $showShareSheet) {
             if let shareURL = shareURL {
                 ActivityViewController(activityItems: [shareURL])

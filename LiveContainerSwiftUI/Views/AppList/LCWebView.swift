@@ -164,33 +164,47 @@ struct LCWebView: View {
                 }
             }
         }
-        .alert("lc.webView.runApp".loc, isPresented: $runAppAlert.show) {
-            Button("lc.appBanner.run".loc, action: {
-                runAppAlert.close(result: true)
-            })
-            Button("lc.common.cancel".loc, role: .cancel, action: {
-                runAppAlert.close(result: false)
-            })
-        } message: {
-            Text(runAppAlertMsg)
-        }
-        .alert("lc.webView.installApp".loc, isPresented: $installAppAlert.show) {
-            Button("lc.common.install".loc, action: {
-                installAppAlert.close(result: true)
-            })
-            Button("lc.common.cancel".loc, role: .cancel, action: {
-                installAppAlert.close(result: false)
-            })
-        } message: {
-            Text(installAppAlertMsg)
-        }
+        // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+        // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .alert("lc.webView.runApp".loc, isPresented: $runAppAlert.show) {
+                    Button("lc.appBanner.run".loc, action: {
+                        runAppAlert.close(result: true)
+                    })
+                    Button("lc.common.cancel".loc, role: .cancel, action: {
+                        runAppAlert.close(result: false)
+                    })
+                } message: {
+                    Text(runAppAlertMsg)
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.webView.installApp".loc, isPresented: $installAppAlert.show) {
+                    Button("lc.common.install".loc, action: {
+                        installAppAlert.close(result: true)
+                    })
+                    Button("lc.common.cancel".loc, role: .cancel, action: {
+                        installAppAlert.close(result: false)
+                    })
+                } message: {
+                    Text(installAppAlertMsg)
+                }
+        )
         
-        .alert("lc.common.error".loc, isPresented: $errorShow) {
-            Button("lc.common.ok".loc, action: {
-            })
-        } message: {
-            Text(errorInfo)
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: $errorShow) {
+                    Button("lc.common.ok".loc, action: {
+                    })
+                } message: {
+                    Text(errorInfo)
+                }
+        )
         
     }
     

@@ -1809,41 +1809,55 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 .background(Color(.secondarySystemBackground))
             }
         }
-        .confirmationDialog("删除 \(batchSelectedIDs.count) 个 App", isPresented: $batchDeleteConfirm, titleVisibility: .visible) {
-            Button("删除 App（保留数据）", role: .destructive) {
-                Task { await batchDelete(removeDataFolders: false) }
-            }
-            Button("删除 App 及其数据", role: .destructive) {
-                Task { await batchDelete(removeDataFolders: true) }
-            }
-            Button("取消", role: .cancel) { }
-        }
+        // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+        // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .confirmationDialog("删除 \(batchSelectedIDs.count) 个 App", isPresented: $batchDeleteConfirm, titleVisibility: .visible) {
+                    Button("删除 App（保留数据）", role: .destructive) {
+                        Task { await batchDelete(removeDataFolders: false) }
+                    }
+                    Button("删除 App 及其数据", role: .destructive) {
+                        Task { await batchDelete(removeDataFolders: true) }
+                    }
+                    Button("取消", role: .cancel) { }
+                }
+        )
         // 3.8.302：批量备份范围单（与数据管理页“备份范围”单同款
         // 两选项 + 同款说明）；选了范围才跑 batchBackup，取消不跑。
-        .confirmationDialog("备份范围", isPresented: $batchBackupScopeConfirm, titleVisibility: .visible) {
-            Button("只备份登录态") {
-                Task { await batchBackup(loginOnly: true) }
-            }
-            Button("完整备份（数据 + 登录态）") {
-                Task { await batchBackup(loginOnly: false) }
-            }
-            Button("取消", role: .cancel) { }
-        } message: {
-            Text("只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .confirmationDialog("备份范围", isPresented: $batchBackupScopeConfirm, titleVisibility: .visible) {
+                    Button("只备份登录态") {
+                        Task { await batchBackup(loginOnly: true) }
+                    }
+                    Button("完整备份（数据 + 登录态）") {
+                        Task { await batchBackup(loginOnly: false) }
+                    }
+                    Button("取消", role: .cancel) { }
+                } message: {
+                    Text("只备份登录态：体积小、备得快，重装后恢复即可免登录，大多数 App 选这个就够。")
+                }
+        )
         // 批量恢复范围单（与批量备份同款两选项）；选了范围
         // 才跑 batchRestore，取消不跑。
-        .confirmationDialog("恢复范围", isPresented: $batchRestoreScopeConfirm, titleVisibility: .visible) {
-            Button("只恢复登录态") {
-                Task { await batchRestore(loginOnly: true) }
-            }
-            Button("完整恢复（数据 + 登录态）") {
-                Task { await batchRestore(loginOnly: false) }
-            }
-            Button("取消", role: .cancel) { }
-        } message: {
-            Text("只恢复登录态：只恢复登录会话，不动 App 数据；完整恢复会把备份里的数据整个恢复回来。没有备份的 App 会跳过。")
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .confirmationDialog("恢复范围", isPresented: $batchRestoreScopeConfirm, titleVisibility: .visible) {
+                    Button("只恢复登录态") {
+                        Task { await batchRestore(loginOnly: true) }
+                    }
+                    Button("完整恢复（数据 + 登录态）") {
+                        Task { await batchRestore(loginOnly: false) }
+                    }
+                    Button("取消", role: .cancel) { }
+                } message: {
+                    Text("只恢复登录态：只恢复登录会话，不动 App 数据；完整恢复会把备份里的数据整个恢复回来。没有备份的 App 会跳过。")
+                }
+        )
         .navigationViewStyle(StackNavigationViewStyle())
         // 设置低 #49：系统返回只改 isNavigationActive、不清
         // navigateTo，旧 destination 常驻内存；返回后清掉。
@@ -1852,40 +1866,56 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .onChange(of: isNavigationActive) { active in
             if !active { navigateTo = nil }
         }
-        .alert("lc.common.error".loc, isPresented: $errorShow){
-            Button("lc.common.ok".loc, action: {
-            })
-            Button("lc.common.copy".loc, action: {
-                copyError()
-            })
-        } message: {
-            Text(errorInfo)
-        }
-        .alert("提示", isPresented: $installInfoShow){
-            Button("lc.common.ok".loc, action: {
-            })
-        } message: {
-            Text(installInfo)
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: $errorShow){
+                    Button("lc.common.ok".loc, action: {
+                    })
+                    Button("lc.common.copy".loc, action: {
+                        copyError()
+                    })
+                } message: {
+                    Text(errorInfo)
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("提示", isPresented: $installInfoShow){
+                    Button("lc.common.ok".loc, action: {
+                    })
+                } message: {
+                    Text(installInfo)
+                }
+        )
         // 3.8.282：顶部盾牌长按菜单的测速 / 切节点结果提示
-        .alert("测延迟", isPresented: Binding(get: { vpnPingMessage != nil }, set: { if !$0 { vpnPingMessage = nil } })) {
-            Button("lc.common.ok".loc, action: {
-            })
-        } message: {
-            Text(vpnPingMessage ?? "")
-        }
-        .alert("安装前预览", isPresented: $installPreviewShow){
-            Button("安装", action: {
-                installPreviewContinuation?.resume(returning: true)
-                installPreviewContinuation = nil
-            })
-            Button("lc.common.cancel".loc, role: .cancel, action: {
-                installPreviewContinuation?.resume(returning: false)
-                installPreviewContinuation = nil
-            })
-        } message: {
-            Text(installPreviewText)
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("测延迟", isPresented: Binding(get: { vpnPingMessage != nil }, set: { if !$0 { vpnPingMessage = nil } })) {
+                    Button("lc.common.ok".loc, action: {
+                    })
+                } message: {
+                    Text(vpnPingMessage ?? "")
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("安装前预览", isPresented: $installPreviewShow){
+                    Button("安装", action: {
+                        installPreviewContinuation?.resume(returning: true)
+                        installPreviewContinuation = nil
+                    })
+                    Button("lc.common.cancel".loc, role: .cancel, action: {
+                        installPreviewContinuation?.resume(returning: false)
+                        installPreviewContinuation = nil
+                    })
+                } message: {
+                    Text(installPreviewText)
+                }
+        )
         // 3.8.428 设置#23：批量安装进度 pill 从 .overlay(alignment:
         // .top) 移到 safeAreaInset(edge: .top)——原来贴在整个
         // NavigationView 顶部、只留 6pt，会盖住内联标题和顶栏按钮、
@@ -1997,67 +2027,83 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         })
         // 文件夹选择器与文件夹 sheet 已随文件夹移到源页
         // （3.8.454），App 页不再挂 betterFolderImporter。
-        .alert("lc.appList.installation".loc, isPresented: $installReplaceAlert.show) {
-            ForEach(installOptions, id: \.self) { installOption in
-                Button(role: installOption.isReplace ? .destructive : nil, action: {
-                    installReplaceAlert.close(result: installOption)
-                }, label: {
-                    Text(installOption.isReplace ? installOption.nameOfFolderToInstall : "lc.appList.installAsNew".loc)
-                })
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.appList.installation".loc, isPresented: $installReplaceAlert.show) {
+                    ForEach(installOptions, id: \.self) { installOption in
+                        Button(role: installOption.isReplace ? .destructive : nil, action: {
+                            installReplaceAlert.close(result: installOption)
+                        }, label: {
+                            Text(installOption.isReplace ? installOption.nameOfFolderToInstall : "lc.appList.installAsNew".loc)
+                        })
             
-            }
-            Button(role: .cancel, action: {
-                installReplaceAlert.close(result: nil)
-            }, label: {
-                Text("lc.appList.abortInstallation".loc)
-            })
-        } message: {
-            Text("lc.appList.installReplaceTip".loc)
-        }
-        .alert("lc.webView.runApp".loc, isPresented: $runWhenMultitaskAlert.show) {
-            Button(role: .destructive) {
-                runWhenMultitaskAlert.close(result: true)
-            } label: {
-                Text("lc.common.continue".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                runWhenMultitaskAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.appBanner.confirmRunWhenMultitasking".loc)
-        }
+                    }
+                    Button(role: .cancel, action: {
+                        installReplaceAlert.close(result: nil)
+                    }, label: {
+                        Text("lc.appList.abortInstallation".loc)
+                    })
+                } message: {
+                    Text("lc.appList.installReplaceTip".loc)
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.webView.runApp".loc, isPresented: $runWhenMultitaskAlert.show) {
+                    Button(role: .destructive) {
+                        runWhenMultitaskAlert.close(result: true)
+                    } label: {
+                        Text("lc.common.continue".loc)
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        runWhenMultitaskAlert.close(result: false)
+                    }
+                } message: {
+                    Text("lc.appBanner.confirmRunWhenMultitasking".loc)
+                }
+        )
         // 3.8.428 安装#9：覆盖运行中 App 前的确认——不静默强杀，
         // 请用户先退出该 App；“继续覆盖”才装，取消=放弃这次安装。
-        .alert("该 App 正在运行", isPresented: $czfRunningAppConfirm.show) {
-            Button("继续覆盖", role: .destructive) {
-                czfRunningAppConfirm.close(result: true)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                czfRunningAppConfirm.close(result: false)
-            }
-        } message: {
-            Text("「\(czfRunningAppName)」正在运行，覆盖安装前请先退出它，否则可能装坏或丢数据。确定要继续吗？")
-        }
-        .alert("lc.appList.generatedIconStyleSelector.title".loc, isPresented:$generatedIconStyleSelector.show) {
-            Button {
-                generatedIconStyleSelector.close(result: .Light)
-            } label: {
-                Text("lc.appList.generatedIconStyleSelector.light".loc)
-            }
-            Button {
-                generatedIconStyleSelector.close(result: .Dark)
-            } label: {
-                Text("lc.appList.generatedIconStyleSelector.dark".loc)
-            }
-            Button {
-                generatedIconStyleSelector.close(result: .Original)
-            } label: {
-                Text("lc.appList.generatedIconStyleSelector.original".loc)
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                generatedIconStyleSelector.close(result: nil)
-            }
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("该 App 正在运行", isPresented: $czfRunningAppConfirm.show) {
+                    Button("继续覆盖", role: .destructive) {
+                        czfRunningAppConfirm.close(result: true)
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        czfRunningAppConfirm.close(result: false)
+                    }
+                } message: {
+                    Text("「\(czfRunningAppName)」正在运行，覆盖安装前请先退出它，否则可能装坏或丢数据。确定要继续吗？")
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.appList.generatedIconStyleSelector.title".loc, isPresented:$generatedIconStyleSelector.show) {
+                    Button {
+                        generatedIconStyleSelector.close(result: .Light)
+                    } label: {
+                        Text("lc.appList.generatedIconStyleSelector.light".loc)
+                    }
+                    Button {
+                        generatedIconStyleSelector.close(result: .Dark)
+                    } label: {
+                        Text("lc.appList.generatedIconStyleSelector.dark".loc)
+                    }
+                    Button {
+                        generatedIconStyleSelector.close(result: .Original)
+                    } label: {
+                        Text("lc.appList.generatedIconStyleSelector.original".loc)
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        generatedIconStyleSelector.close(result: nil)
+                    }
+                }
+        )
         .textFieldAlert(
             isPresented: $webViewUrlInput.show,
             title:  "lc.appList.enterUrlTip".loc,

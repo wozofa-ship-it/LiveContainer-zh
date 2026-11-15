@@ -412,23 +412,33 @@ struct CZFAppGridView: View {
                 }
         }
         }
-        .confirmationDialog("删除 App", isPresented: $czfGridDeleteConfirm, titleVisibility: .visible) {
-            Button("删除 App（保留数据）", role: .destructive) {
-                czfDeleteGridApp(removeDataFolders: false)
-            }
-            Button("删除 App 及其数据", role: .destructive) {
-                czfDeleteGridApp(removeDataFolders: true)
-            }
-            Button("取消", role: .cancel) {
-                czfGridDeleteTarget = nil
-            }
-        }
-        .alert("提示", isPresented: Binding(get: { czfGridError != nil }, set: { if !$0 { czfGridError = nil } })) {
-            Button("lc.common.ok".loc, role: .cancel) {
-            }
-        } message: {
-            Text(czfGridError ?? "")
-        }
+        // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+        // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .confirmationDialog("删除 App", isPresented: $czfGridDeleteConfirm, titleVisibility: .visible) {
+                    Button("删除 App（保留数据）", role: .destructive) {
+                        czfDeleteGridApp(removeDataFolders: false)
+                    }
+                    Button("删除 App 及其数据", role: .destructive) {
+                        czfDeleteGridApp(removeDataFolders: true)
+                    }
+                    Button("取消", role: .cancel) {
+                        czfGridDeleteTarget = nil
+                    }
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("提示", isPresented: Binding(get: { czfGridError != nil }, set: { if !$0 { czfGridError = nil } })) {
+                    Button("lc.common.ok".loc, role: .cancel) {
+                    }
+                } message: {
+                    Text(czfGridError ?? "")
+                }
+        )
     }
 }
 

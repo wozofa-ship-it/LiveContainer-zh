@@ -261,65 +261,91 @@ struct LCSettingsView: View {
                     selected32BitEmulator = ""
                 }
             }
-            .alert("lc.common.error".loc, isPresented: $errorShow){
-            } message: {
-                Text(errorInfo)
-            }
-            .alert("lc.common.success".loc, isPresented: $successShow){
-            } message: {
-                Text(successInfo)
-            }
-            .alert("lc.settings.importCertificate".loc, isPresented: $certificateImportAlert.show) {
-                Button {
-                    certificateImportAlert.close(result: true)
-                } label: {
-                    Text("lc.common.ok".loc)
-                }
+            // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+            // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+            // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+            .background(
+                EmptyView()
+                    .alert("lc.common.error".loc, isPresented: $errorShow){
+                    } message: {
+                        Text(errorInfo)
+                    }
+            )
+            // 3.8.589（L121）：同款——也挪 background 叶子。
+            .background(
+                EmptyView()
+                    .alert("lc.common.success".loc, isPresented: $successShow){
+                    } message: {
+                        Text(successInfo)
+                    }
+            )
+            // 3.8.589（L121）：同款——也挪 background 叶子。
+            .background(
+                EmptyView()
+                    .alert("lc.settings.importCertificate".loc, isPresented: $certificateImportAlert.show) {
+                        Button {
+                            certificateImportAlert.close(result: true)
+                        } label: {
+                            Text("lc.common.ok".loc)
+                        }
 
-                Button("lc.common.cancel".loc, role: .cancel) {
-                    certificateImportAlert.close(result: false)
-                }
-            } message: {
-                Text("lc.settings.importCertificateDesc".loc)
-            }
-            .alert("lc.settings.removeCertificate".loc, isPresented: $certificateRemoveAlert.show) {
-                Button(role: .destructive) {
-                    certificateRemoveAlert.close(result: true)
-                } label: {
-                    Text("lc.common.ok".loc)
-                }
+                        Button("lc.common.cancel".loc, role: .cancel) {
+                            certificateImportAlert.close(result: false)
+                        }
+                    } message: {
+                        Text("lc.settings.importCertificateDesc".loc)
+                    }
+            )
+            // 3.8.589（L121）：同款——也挪 background 叶子。
+            .background(
+                EmptyView()
+                    .alert("lc.settings.removeCertificate".loc, isPresented: $certificateRemoveAlert.show) {
+                        Button(role: .destructive) {
+                            certificateRemoveAlert.close(result: true)
+                        } label: {
+                            Text("lc.common.ok".loc)
+                        }
 
-                Button("lc.common.cancel".loc, role: .cancel) {
-                    certificateRemoveAlert.close(result: false)
-                }
-            } message: {
-                Text("lc.settings.removeCertificateDesc".loc)
-            }
-            .alert("lc.settings.nukeSideStore".loc, isPresented: $nukeSideStoreAlert.show) {
-                Button(role: .destructive) {
-                    nukeSideStoreAlert.close(result: true)
-                } label: {
-                    Text("lc.common.ok".loc)
-                }
+                        Button("lc.common.cancel".loc, role: .cancel) {
+                            certificateRemoveAlert.close(result: false)
+                        }
+                    } message: {
+                        Text("lc.settings.removeCertificateDesc".loc)
+                    }
+            )
+            // 3.8.589（L121）：同款——也挪 background 叶子。
+            .background(
+                EmptyView()
+                    .alert("lc.settings.nukeSideStore".loc, isPresented: $nukeSideStoreAlert.show) {
+                        Button(role: .destructive) {
+                            nukeSideStoreAlert.close(result: true)
+                        } label: {
+                            Text("lc.common.ok".loc)
+                        }
 
-                Button("lc.common.cancel".loc, role: .cancel) {
-                    nukeSideStoreAlert.close(result: false)
-                }
-            } message: {
-                Text("将删除 SideStore 的 Database 与 Apps 目录，此操作不可撤销，要继续吗？")
-            }
-            .alert("lc.settings.importCertFromBuiltinSideStore".loc, isPresented: $certificateImportFromBuiltInSideStoreAlert.show) {
-                Button {
-                    certificateImportFromBuiltInSideStoreAlert.close(result: true)
-                } label: {
-                    Text("lc.common.ok".loc)
-                }
-                Button("lc.common.cancel".loc, role: .cancel) {
-                    certificateImportFromBuiltInSideStoreAlert.close(result: false)
-                }
-            } message: {
-                Text("lc.settings.importCertFromBuiltinSideStoreDesc".loc)
-            }
+                        Button("lc.common.cancel".loc, role: .cancel) {
+                            nukeSideStoreAlert.close(result: false)
+                        }
+                    } message: {
+                        Text("将删除 SideStore 的 Database 与 Apps 目录，此操作不可撤销，要继续吗？")
+                    }
+            )
+            // 3.8.589（L121）：同款——也挪 background 叶子。
+            .background(
+                EmptyView()
+                    .alert("lc.settings.importCertFromBuiltinSideStore".loc, isPresented: $certificateImportFromBuiltInSideStoreAlert.show) {
+                        Button {
+                            certificateImportFromBuiltInSideStoreAlert.close(result: true)
+                        } label: {
+                            Text("lc.common.ok".loc)
+                        }
+                        Button("lc.common.cancel".loc, role: .cancel) {
+                            certificateImportFromBuiltInSideStoreAlert.close(result: false)
+                        }
+                    } message: {
+                        Text("lc.settings.importCertFromBuiltinSideStoreDesc".loc)
+                    }
+            )
             .betterFileImporter(isPresented: $certificateImportFileAlert.show, types: [.p12], multiple: false, callback: { fileUrls in
                 certificateImportFileAlert.close(result: fileUrls[0])
             }, onDismiss: {

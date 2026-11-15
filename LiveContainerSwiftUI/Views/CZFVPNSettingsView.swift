@@ -104,46 +104,64 @@ struct CZFVPNSettingsView: View {
         Form {
             vpnSection
         }
-        .alert("lc.common.error".loc, isPresented: $errorShow){
-        } message: {
-            Text(errorInfo)
-        }
-        .alert("lc.common.success".loc, isPresented: $successShow){
-        } message: {
-            Text(successInfo)
-        }
-        .confirmationDialog("替换全部节点？", isPresented: $showSubReplaceConfirm, titleVisibility: .visible) {
-            Button("替换为订阅的 \(pendingSubLinks.count) 个节点", role: .destructive) {
-                applySubscriptionLinks(pendingSubLinks)
-                pendingSubLinks = []
-            }
-            Button("合并导入（只加新的）") {
-                mergeSubscriptionLinks(pendingSubLinks)
-                pendingSubLinks = []
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                pendingSubLinks = []
-            }
-        } message: {
-            Text("替换会把当前 \(vpnNodes.count) 个节点（包括手动添加的）整体换掉，此操作不可恢复；合并只追加订阅里没有的节点，保留手填节点")
-        }
-        .alert("删除在用节点？", isPresented: $showDeleteActiveConfirm) {
-            Button("删除并停核心", role: .destructive) {
-                for i in pendingDeleteIndices.sorted(by: >) {
-                    CZFVPNManager.shared.removeNode(at: i)
+        // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+        // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: $errorShow){
+                } message: {
+                    Text(errorInfo)
                 }
-                pendingDeleteIndices = []
-                vpnSelectedNodeLinks = []
-                vpnNodeSelecting = false
-                vpnPingResults = [:]
-                refreshVPNState()
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                pendingDeleteIndices = []
-            }
-        } message: {
-            Text("删掉在用节点后核心会停掉，不会自动切到别的节点继续跑")
-        }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.common.success".loc, isPresented: $successShow){
+                } message: {
+                    Text(successInfo)
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .confirmationDialog("替换全部节点？", isPresented: $showSubReplaceConfirm, titleVisibility: .visible) {
+                    Button("替换为订阅的 \(pendingSubLinks.count) 个节点", role: .destructive) {
+                        applySubscriptionLinks(pendingSubLinks)
+                        pendingSubLinks = []
+                    }
+                    Button("合并导入（只加新的）") {
+                        mergeSubscriptionLinks(pendingSubLinks)
+                        pendingSubLinks = []
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        pendingSubLinks = []
+                    }
+                } message: {
+                    Text("替换会把当前 \(vpnNodes.count) 个节点（包括手动添加的）整体换掉，此操作不可恢复；合并只追加订阅里没有的节点，保留手填节点")
+                }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("删除在用节点？", isPresented: $showDeleteActiveConfirm) {
+                    Button("删除并停核心", role: .destructive) {
+                        for i in pendingDeleteIndices.sorted(by: >) {
+                            CZFVPNManager.shared.removeNode(at: i)
+                        }
+                        pendingDeleteIndices = []
+                        vpnSelectedNodeLinks = []
+                        vpnNodeSelecting = false
+                        vpnPingResults = [:]
+                        refreshVPNState()
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        pendingDeleteIndices = []
+                    }
+                } message: {
+                    Text("删掉在用节点后核心会停掉，不会自动切到别的节点继续跑")
+                }
+        )
         .textFieldAlert(
             isPresented: $vpnEditNodeShow,
             title: "编辑节点链接",

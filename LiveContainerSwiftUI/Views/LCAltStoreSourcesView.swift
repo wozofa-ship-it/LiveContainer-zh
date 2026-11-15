@@ -1175,54 +1175,68 @@ struct LCSourcesView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
-        .alert("lc.common.error".loc, isPresented: Binding<Bool>(
-            get: { errorMessage != nil },
-            set: { if !$0 { errorMessage = nil } })
-        ) {
-            Button("lc.common.ok".loc, role: .cancel) { errorMessage = nil }
-        } message: {
-            Text(errorMessage ?? "")
-        }
-        .alert("lc.sources.removeConfirmation.title".loc, isPresented: Binding(
-            get: { sourcePendingRemoval != nil },
-            set: { if !$0 { sourcePendingRemoval = nil } })
-        ) {
-            Button("lc.common.remove".loc, role: .destructive) {
-                if let sourcePendingRemoval {
-                    viewModel.removeSource(sourcePendingRemoval)
+        // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
+        // 各挪一个 background 叶子、各占一条分支，宿主链上不再留弹窗类修饰符；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: Binding<Bool>(
+                    get: { errorMessage != nil },
+                    set: { if !$0 { errorMessage = nil } })
+                ) {
+                    Button("lc.common.ok".loc, role: .cancel) { errorMessage = nil }
+                } message: {
+                    Text(errorMessage ?? "")
                 }
-                sourcePendingRemoval = nil
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                sourcePendingRemoval = nil
-            }
-        } message: {
-            if let name = sourcePendingRemoval?.displayName {
-                Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(name))
-            } else {
-                Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(""))
-            }
-        }
+        )
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.sources.removeConfirmation.title".loc, isPresented: Binding(
+                    get: { sourcePendingRemoval != nil },
+                    set: { if !$0 { sourcePendingRemoval = nil } })
+                ) {
+                    Button("lc.common.remove".loc, role: .destructive) {
+                        if let sourcePendingRemoval {
+                            viewModel.removeSource(sourcePendingRemoval)
+                        }
+                        sourcePendingRemoval = nil
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        sourcePendingRemoval = nil
+                    }
+                } message: {
+                    if let name = sourcePendingRemoval?.displayName {
+                        Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(name))
+                    } else {
+                        Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(""))
+                    }
+                }
+        )
         // S-7：存文件下载同名覆盖前问一次——目标已存在时先弹确认，
         // 用户点“覆盖”才下载，点取消不下载、不覆盖。
-        .confirmationDialog(
-            "文件已存在",
-            isPresented: Binding<Bool>(
-                get: { czfDownloadOverwritePending != nil },
-                set: { if !$0 { czfDownloadOverwritePending = nil } }
-            ),
-            presenting: czfDownloadOverwritePending
-        ) { pending in
-            Button("覆盖", role: .destructive) {
-                czfDownloadVersionTo(url: pending.url, destURL: pending.destURL)
-                czfDownloadOverwritePending = nil
-            }
-            Button("取消", role: .cancel) {
-                czfDownloadOverwritePending = nil
-            }
-        } message: { pending in
-            Text("\(pending.destURL.lastPathComponent) 已存在，是否覆盖？")
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .confirmationDialog(
+                    "文件已存在",
+                    isPresented: Binding<Bool>(
+                        get: { czfDownloadOverwritePending != nil },
+                        set: { if !$0 { czfDownloadOverwritePending = nil } }
+                    ),
+                    presenting: czfDownloadOverwritePending
+                ) { pending in
+                    Button("覆盖", role: .destructive) {
+                        czfDownloadVersionTo(url: pending.url, destURL: pending.destURL)
+                        czfDownloadOverwritePending = nil
+                    }
+                    Button("取消", role: .cancel) {
+                        czfDownloadOverwritePending = nil
+                    }
+                } message: { pending in
+                    Text("\(pending.destURL.lastPathComponent) 已存在，是否覆盖？")
+                }
+        )
         .sheet(isPresented: $czfSourceGridSettingsShow) {
             CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode, showSort: false, isSource: true)
         }
@@ -1954,34 +1968,42 @@ private struct ManageSourcesSheet: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
-        .confirmationDialog(
-            "lc.sources.removeConfirmation.title".loc,
-            isPresented: Binding<Bool>(
-                get: { sourcePendingRemoval != nil },
-                set: { if !$0 { sourcePendingRemoval = nil } }
-            ),
-            presenting: sourcePendingRemoval
-        ) { item in
-            Button("lc.common.remove".loc, role: .destructive) {
-                viewModel.removeSource(item)
-                sourcePendingRemoval = nil
-            }
-            Button("lc.common.cancel".loc, role: .cancel) {
-                sourcePendingRemoval = nil
-            }
-        } message: { item in
-            Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(item.displayName))
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .confirmationDialog(
+                    "lc.sources.removeConfirmation.title".loc,
+                    isPresented: Binding<Bool>(
+                        get: { sourcePendingRemoval != nil },
+                        set: { if !$0 { sourcePendingRemoval = nil } }
+                    ),
+                    presenting: sourcePendingRemoval
+                ) { item in
+                    Button("lc.common.remove".loc, role: .destructive) {
+                        viewModel.removeSource(item)
+                        sourcePendingRemoval = nil
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        sourcePendingRemoval = nil
+                    }
+                } message: { item in
+                    Text("lc.sources.removeConfirmation.message %@".localizeWithFormat(item.displayName))
+                }
+        )
         // 1 添加源失败无反馈：sheet 内本地弹错误，挂在 sheet
         // 自己的层级上，不会被 sheet 盖住吞掉。
-        .alert("lc.common.error".loc, isPresented: Binding<Bool>(
-            get: { addError != nil },
-            set: { if !$0 { addError = nil } })
-        ) {
-            Button("lc.common.ok".loc, role: .cancel) { addError = nil }
-        } message: {
-            Text(addError ?? "")
-        }
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: Binding<Bool>(
+                    get: { addError != nil },
+                    set: { if !$0 { addError = nil } })
+                ) {
+                    Button("lc.common.ok".loc, role: .cancel) { addError = nil }
+                } message: {
+                    Text(addError ?? "")
+                }
+        )
     }
     
     // 低 #7：删第二段冗余查找——ManageSourcesSheet 的 ForEach
