@@ -921,7 +921,20 @@ class LCAppModel: ObservableObject, Hashable {
         
         // 3.8.545（L75）：defaultClassicMode 读 _info 缓存、未命中还写 _info + save（LCAppInfo.m:672），shouldLaunchInMultitaskMode 读 @Published uiIsMultitaskModeSpecificed；逐点取。
         let classicMode = await MainActor.run { appInfo.defaultClassicMode }
-        let multitask = classicMode == 0 ? (multitask ?? await MainActor.run { shouldLaunchInMultitaskMode }) : false
+        // 3.8.534 修法：await 不能出现在 ?? 右侧（非赋值运算符后），且 ?? 右侧
+        // 的 MainActor.run 闭包是不支持并发的 autoclosure 上下文；拆成语句，
+        // 先判再取——classicMode==0 且未传 multitask 时才回主线程读，语义不变。
+        let resolvedMultitask: Bool
+        if classicMode == 0 {
+            if let existingMultitask = multitask {
+                resolvedMultitask = existingMultitask
+            } else {
+                resolvedMultitask = await MainActor.run { shouldLaunchInMultitaskMode }
+            }
+        } else {
+            resolvedMultitask = false
+        }
+        let multitask = resolvedMultitask
         
         if MultitaskManager.isMultitasking() || multitask,
            let currentDataFolder {
@@ -1123,7 +1136,10 @@ class LCAppModel: ObservableObject, Hashable {
         }
 
         // 3.8.545（L75）：下面三路 launch 用的名字、脚本、容器是“本次启动”的身份——delegate 回调与门（:1035 已按容器号持门）都按启动时定下的那一份走，中途改名/切容器不应让同一路启动前后用两份身份；启动决策点一次取齐（displayName 读 _info，jitLaunchScriptJs 与 uiSelectedContainer 是 @Published）。
-        let launchDisplayName = await MainActor.run { appInfo.displayName() }
+        // 3.8.534 修法：displayName() 是未标注 nullability 的 ObjC 方法，泛型推断
+        // 下 launchDisplayName 成了 String?，jitLaunch(appName:) 要 String；
+        // 本文件 :262/:306 同款位置都用 ?? "App" 兜底，照抄。
+        let launchDisplayName = await MainActor.run { appInfo.displayName() ?? "App" }
         let launchJITScript = await MainActor.run { jitLaunchScriptJs }
         let launchContainerFolder = await MainActor.run { uiSelectedContainer?.folderName }
         // 3.8.580（L111）：经典启动的 MetalANGLE 预载文件只在带框架时写，

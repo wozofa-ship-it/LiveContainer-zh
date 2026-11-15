@@ -2979,7 +2979,13 @@ private final class CZFSourceIconCache {
     // 等同一个任务的结果回来。ioQueue（串行）顺带 guard 这张表，
     // 与磁盘读写共用一把锁；下载任务里只调 ioQueue.async 写盘，
     // 不嵌套 sync，不会死锁。
-    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    // 3.8.534 修法：Task 是 struct，没有身份，=== 编不过；盒子是类，
+    // 按盒身份比对再清，只清自己那一项（L85 原意不变）。
+    private final class InFlightBox {
+        let task: Task<UIImage?, Never>
+        init(_ task: Task<UIImage?, Never>) { self.task = task }
+    }
+    private var inFlight: [String: InFlightBox] = [:]
     func load(url: URL) async -> UIImage? {
         let key = url.absoluteString as NSString
         if let hit = memory.object(forKey: key) { return hit }
@@ -2993,7 +2999,7 @@ private final class CZFSourceIconCache {
         // 图标走 hostSession：代理开时经节点取（URLSession.shared
         // 绕开代理、图标一直灰占位）；代理关时 hostSession() 回落
         // .shared，行为不变。
-        let task: Task<UIImage?, Never> = ioQueue.sync {
+        let box: InFlightBox = ioQueue.sync {
             if let existing = inFlight[url.absoluteString] {
                 return existing
             }
@@ -3015,15 +3021,16 @@ private final class CZFSourceIconCache {
                 }
                 return img
             }
-            inFlight[url.absoluteString] = newTask
-            return newTask
+            let newBox = InFlightBox(newTask)
+            inFlight[url.absoluteString] = newBox
+            return newBox
         }
-        let result = await task.value
+        let result = await box.task.value
         // 3.8.555（L85）：只清自己那一项——原来无条件 removeValue：A、B 两路
         // 等同一个在途任务时，A 先跑完就把表项清掉，C 随后新建任务 T2 登记，
         // B 跑完又清一次、把 T2 也清掉，D 再来就认不出 T2 在途、又另起一次
         // 下载。只多下一次图标，不坏数据；按身份比对再清，零行为变化。
-        ioQueue.sync { if inFlight[url.absoluteString] === task { inFlight.removeValue(forKey: url.absoluteString) } }
+        ioQueue.sync { if inFlight[url.absoluteString] === box { inFlight.removeValue(forKey: url.absoluteString) } }
         return result
     }
 
