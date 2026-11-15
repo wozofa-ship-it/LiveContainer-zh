@@ -813,14 +813,19 @@ struct LCTweakFolderView : View {
         // 3.8.534（L61-2）：本函数从文件导入回调的裸 Task 调来、不在
         // 主 actor 上（L40 同款；回调方是 DocModifier 的 Coordinator，
         // 普通 NSObject 方法）；isTweakInstalling/tweakItems/errorInfo/
-        // errorShow 是 @State，回主线程再写。defer 里不能 await，改
-        // 尾部两路同跳清（L44 batchHide 同款）。
+        // errorShow 是 @State，回主线程再写。
+        // 3.8.557（L236-1）：逐个 try——原来整个循环共用外层一个 try，
+        // 导入器是多选（:350 multiple: true），中间一个文件重名
+        // moveItem 抛错就进 catch、后面的文件一个都不装，还只报第
+        // 一个错（L150/L152 同款共用 try 中断）；各记各的失败、装
+        // 完再汇总报，前面装好的不受影响。
         await MainActor.run { isTweakInstalling = true }
-        do {
-            let fm = FileManager()
-            // we will sign later before app launch
-            
-            for fileUrl in urls {
+        let fm = FileManager()
+        // we will sign later before app launch
+        var failedNames: [String] = []
+        var firstError: String? = nil
+        for fileUrl in urls {
+            do {
                 // handle deb file
                 if(!fileUrl.isFileURL) {
                     throw "lc.tweakView.notFileError %@".localizeWithFormat(fileUrl.lastPathComponent)
@@ -855,16 +860,36 @@ struct LCTweakFolderView : View {
                     if !self.tweakItems.contains(where: { $0.fileUrl == toPath }) {
                         self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true))
                     }
+                    if isRoot && isFramework {
+                        // 3.8.557（L306-1）：模块页导入 .framework 只 moveItem、不进 tweakFolderNames 注册表——
+                        // 注册表只在冷启动扫描与模块页新建/改名时维护；源页（S:1753）与面板（K:4936）
+                        // 同款漏了，L303-1/L302-1 已修，模块页导入这里也漏了。本次启动内 App 设置
+                        // （LCAppSettingsView.swift:399）/网格（CZFAppGridView.swift:728）/横幅菜单
+                        // （LCAppBannerViewController.swift:477）看不到刚导入的 framework、挂不上去，
+                        // 重启才出现。按 L96 口径（去 .disabled 后缀、表里没有才加）登记；子文件夹
+                        // 不记、.dylib 不记；失败走 catch，不登记。
+                        let folderName = toPath.lastPathComponent
+                        let registryName = folderName.hasSuffix(LCTweakItem.disabledSuffix) ? String(folderName.dropLast(LCTweakItem.disabledSuffix.count)) : folderName
+                        if !sharedModel.tweakFolderNames.contains(registryName) {
+                            sharedModel.tweakFolderNames.append(registryName)
+                        }
+                    }
                 }
+            } catch {
+                failedNames.append(fileUrl.lastPathComponent)
+                if firstError == nil { firstError = error.localizedDescription }
             }
-            await MainActor.run { isTweakInstalling = false }
-        } catch {
-            await MainActor.run {
-                errorInfo = error.localizedDescription
+        }
+        await MainActor.run {
+            isTweakInstalling = false
+            if !failedNames.isEmpty {
+                var text = "已导入 \(urls.count - failedNames.count) 个插件，以下 \(failedNames.count) 个导入失败：\(failedNames.joined(separator: "、"))"
+                if let firstError {
+                    text += "（\(firstError)）"
+                }
+                errorInfo = text
                 errorShow = true
-                isTweakInstalling = false
             }
-            return
         }
     }
 }
