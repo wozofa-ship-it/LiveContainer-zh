@@ -471,6 +471,14 @@ struct LCTweakFolderView : View {
             // 出两个都叫 `X.dylib` 的项（L98 只修了启用-停用撞名）；
             // 第一个照旧给原文件，重复出现的才拷临时目录改 -2 名。
             var seenEnabledNames = Set<String>()
+            // 3.8.575（L106）：夹里还有 .framework——加载器递归进子
+            // 文件夹、.framework 当单个插件加载（TweakLoader.m
+            // loadTweaksRecursively），但导出循环只收 .dylib/
+            // .dylib.disabled；夹里的 framework 导出时丢了，恢复
+            // 后插件就没了。池子与 dylib 分开记（后缀命名空间
+            // 不同），去重口径与 dylib 同款：启用的名先进池。
+            var usedFrameworkNames = Set(entries.filter { $0.lastPathComponent.hasSuffix(".framework") }.map { $0.lastPathComponent })
+            var seenEnabledFrameworkNames = Set<String>()
             for entryURL in entries {
                 let last = entryURL.lastPathComponent
                 if last.hasSuffix(".dylib") {
@@ -522,6 +530,69 @@ struct LCTweakFolderView : View {
                             cleanName = cand
                         }
                         usedCleanNames.insert(cleanName)
+                        let cleanUrl = tmpDir!.appendingPathComponent(cleanName)
+                        try fm.copyItem(at: entryURL, to: cleanUrl)
+                        urls.append(cleanUrl)
+                    } catch {
+                        errorShow = true
+                        errorInfo = error.localizedDescription
+                        return
+                    }
+                } else if last.hasSuffix(".framework") {
+                    // 3.8.575（L106）：启用的 .framework——第一个给原包，
+                    // 重复的拷临时目录改 -2/-3 名（与 dylib 同款去重；
+                    // 改名不影响加载，加载器按 Info.plist 找主二进制）。
+                    if seenEnabledFrameworkNames.contains(last) {
+                        do {
+                            if tmpDir == nil {
+                                tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                                try fm.createDirectory(at: tmpDir!, withIntermediateDirectories: true)
+                            }
+                            var cleanName = last
+                            if usedFrameworkNames.contains(cleanName) {
+                                let base = String(cleanName.dropLast(".framework".count))
+                                var n = 2
+                                var cand = cleanName
+                                while usedFrameworkNames.contains(cand) {
+                                    cand = "\(base)-\(n).framework"
+                                    n += 1
+                                }
+                                cleanName = cand
+                            }
+                            usedFrameworkNames.insert(cleanName)
+                            let cleanUrl = tmpDir!.appendingPathComponent(cleanName)
+                            try fm.copyItem(at: entryURL, to: cleanUrl)
+                            urls.append(cleanUrl)
+                        } catch {
+                            errorShow = true
+                            errorInfo = error.localizedDescription
+                            return
+                        }
+                    } else {
+                        seenEnabledFrameworkNames.insert(last)
+                        urls.append(entryURL)
+                    }
+                } else if last.hasSuffix(".framework" + LCTweakItem.disabledSuffix) {
+                    // 3.8.575（L106）：停用的 .framework——与单条导出
+                    // 的 L100 同款，拷临时目录去 .disabled 后缀再分
+                    // 享，同名走 -2/-3。
+                    do {
+                        if tmpDir == nil {
+                            tmpDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                            try fm.createDirectory(at: tmpDir!, withIntermediateDirectories: true)
+                        }
+                        var cleanName = String(last.dropLast(LCTweakItem.disabledSuffix.count))
+                        if usedFrameworkNames.contains(cleanName) {
+                            let base = String(cleanName.dropLast(".framework".count))
+                            var n = 2
+                            var cand = cleanName
+                            while usedFrameworkNames.contains(cand) {
+                                cand = "\(base)-\(n).framework"
+                                n += 1
+                            }
+                            cleanName = cand
+                        }
+                        usedFrameworkNames.insert(cleanName)
                         let cleanUrl = tmpDir!.appendingPathComponent(cleanName)
                         try fm.copyItem(at: entryURL, to: cleanUrl)
                         urls.append(cleanUrl)
@@ -680,12 +751,27 @@ struct LCTweakFolderView : View {
                 }
                 let toPath = self.baseUrl.appendingPathComponent(fileUrl.lastPathComponent)
                 try fm.moveItem(at: fileUrl, to: toPath)
-                LCParseMachO((toPath.path as NSString).utf8String, false) { path, header, _, _ in
-                    LCPatchAddRPath(path, header);
-                }
 
                 let isFramework = toPath.lastPathComponent.hasSuffix(".framework")
                 let isTweak = toPath.lastPathComponent.hasSuffix(".dylib")
+                // 3.8.575（L106）：.framework 是目录，LCParseMachO
+                // 在目录上 open(O_RDWR) 直接 EISDIR 失败、rpath
+                // 补丁悄悄跳过，导进来的 framework 主二进制永远没
+                // 打上与 dylib 同款的 rpath，链了同夹 dylib 的加
+                // 载时 dlopen 找不到。按签名侧同款
+                // （LCUtilsExtensions signTweakImpl）用 Bundle
+                // 取主二进制再打；取不到就不打，导入本身照常成功。
+                if isFramework {
+                    if let executableURL = Bundle(url: toPath)?.executableURL {
+                        LCParseMachO((executableURL.path as NSString).utf8String, false) { path, header, _, _ in
+                            LCPatchAddRPath(path, header)
+                        }
+                    }
+                } else {
+                    LCParseMachO((toPath.path as NSString).utf8String, false) { path, header, _, _ in
+                        LCPatchAddRPath(path, header);
+                    }
+                }
                 // 3.8.571（L102）：导入中途切走再切回时 onAppear
                 // 重扫已把刚移好的文件收进列表，追加前先判重，
                 // 不然同一文件两行、ForEach(id: \.self) 撞重名。
