@@ -5991,10 +5991,21 @@ struct LCDataManagementView : View {
             let dest = folder.appendingPathComponent("CZFKeychainBridge.dylib")
             let destData = try? Data(contentsOf: dest)
             if destData != srcData {
+                // 3.8.579（L110）：先拷临时文件、再换位——原来先删旧
+                // 桥再拷新，拷失败（磁盘满）时旧桥已没了，钥匙串导
+                // 出/写回悄悄停掉（syncProxyTweak 的 L51-14 与
+                // syncKeepAliveTweak 的 L52 同款）；临时文件拷失败
+                // 时旧桥原样保留，下次启动再比内容重试。换位是同目
+                // 录 move，拷成功后基本不会失败，失败也清临时文件。
+                let tmpDest = dest.appendingPathExtension("czf-tmp")
+                try? fm.removeItem(at: tmpDest)
+                guard (try? fm.copyItem(at: src, to: tmpDest)) != nil else { continue }
                 try? fm.removeItem(at: dest)
-                if (try? fm.copyItem(at: src, to: dest)) != nil {
-                    copiedDests.append(dest)
+                guard (try? fm.moveItem(at: tmpDest, to: dest)) != nil else {
+                    try? fm.removeItem(at: tmpDest)
+                    continue
                 }
+                copiedDests.append(dest)
             }
         }
         if !copiedDests.isEmpty {

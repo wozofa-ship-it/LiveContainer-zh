@@ -4274,9 +4274,14 @@ struct SourcesPanelView: View {
                     list.removeAll { $0 == bid }
                     try writeKeepAliveList(list)
                 } else {
-                    // 首次关：用全部 App 名单种子，只去掉这个 App
+                    // 首次关：用全部 App 名单种子，只去掉这个 App。
+                    // 3.8.579（L110）：只装 1 个 App 时 all 为空也照写——
+                    // 空文件就是合法的“无人保活”态（readKeepAliveList
+                    // 返 []），原来 guard 拒掉空名单，开关关不掉、角标
+                    // 刷新后仍显绿，用户点了毫无反应；设置页
+                    // LCAppSettingsView.setKeepAlive 同款路早已照写，
+                    // 面板这份拷贝漏了。
                     let all = (LCAppSortManager.shared.sortedApps + LCAppSortManager.shared.sortedHiddenApps).compactMap { $0.appInfo.bundleIdentifier() }.filter { !$0.isEmpty && $0 != bid }
-                    guard !all.isEmpty else { return }
                     try writeKeepAliveList(all)
                 }
             }
