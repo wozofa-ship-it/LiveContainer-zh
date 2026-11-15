@@ -112,7 +112,6 @@ enum LCDataManagementInitialSheet {
 struct LCDataManagementView : View {
     @State var folderPaths : [LCFolderPath]
     @State var filzaInstalled = false
-    @State var appeared = false
     // 3.8.313：直开某动作（见 LCDataManagementInitialSheet）。
     let initialSheet: LCDataManagementInitialSheet?
     // 3.8.349：.backupScope 直出范围框要备的 App（只含目标
@@ -1551,15 +1550,13 @@ struct LCDataManagementView : View {
     }
 
     func onAppearFunc() {
-        if !appeared {
-            for app in sharedModel.apps {
-                if app.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" {
-                    filzaInstalled = true
-                    break
-                }
-            }
-            appeared = true
-        }
+        // 3.8.549（L208）：Filza 是否装了每次出现都重查——原来只在
+        // appeared 首现时扫一次：先开设置页、后装 Filza 再回来，
+        // 按钮一直不出现（appeared 已 true，扫描不再跑）；冷启动
+        // 时 App 列表还没加载完也会扫空一次定终身。反向同款：
+        // 删了 Filza，按钮还留着，点下去才报打不开。appeared 标志
+        // 只为这处扫描设门，门拆了标志一并删（本修法内清掉）。
+        filzaInstalled = sharedModel.apps.contains { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }
         // 3.8.313：直开某动作——只跑一次（关掉内层 sheet 后
         // 本页重现时不再重复弹）。包一层 async，让外层 sheet
         // 先落定再弹内层，避免两层 sheet 同帧抢呈现。

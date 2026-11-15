@@ -1758,6 +1758,12 @@ extension Notification.Name {
     // 返回/滑动不受影响；终结兜底（.ended/.cancelled 才触发的）
     // 触摸已经结束，没什么可取消，不关。
     private static func czfCancelGuestTouches(in window: UIWindow) {
+        // 3.8.549（L204）：总开关关着时不取消——三处认领点的动作
+        // 入口都守了 czfEdgeGesturesEnabled，开关关着时面板不会开；
+        // 但取消跑在动作入口之前，开关关着也照杀客 App 正在进行的
+        // 横滑（左边缘一滑，客 App 的返回/横滑被打断、面板又没出）。
+        // 开关关着 = 没认领，不关。
+        guard Self.czfEdgeGesturesEnabled else { return }
         window.isUserInteractionEnabled = false
         DispatchQueue.main.async {
             window.isUserInteractionEnabled = true
@@ -4031,7 +4037,16 @@ struct SourcesPanelView: View {
 
     // 3.8.309：VPN 开关（与 App 页 toggleVPNCore 同款：先记手动
     // 切换、再起/停、再刷新状态）。
+    // 3.8.549（L193）：测速窗口内不许亲手起停核心——测速前
+    // stopCoreForPing 已把核心停下并快照，窗口内点“停止核心”
+    // 只是空操作，测完 completion 还会 restartCoreAfterPing
+    // 把核心起回来，用户亲手停核心的意图被 undo（App 页与
+    // 设置页同款按钮都挂 .disabled(vpnPinging)，只坞面板漏了；
+    // 盾牌有 primaryAction，按钮上挂 disabled 盖不住，须在
+    // 函数内守卫）。测速窗口内点“启动核心”同样被拦，无害——
+    // 核心已为测速停下，start() 走探针守卫本来就被拒。
     private func togglePanelVPNCore() {
+        guard !vpnPinging else { return }
         CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
         if vpnCoreRunning {
             CZFVPNManager.shared.stop()
