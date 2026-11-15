@@ -5348,10 +5348,14 @@ private struct RunningAppsStripView: View {
 private struct RunningAppIcon: View {
     let appInfo: LCAppInfo?
     @State private var icon: UIImage?
+    // 3.8.577（L108）：与 AppIconView 同款口径——原来这里与
+    // AppCardRow 一直写死 iconIsDarkIcon(false)、键也不带变体，
+    // 深色开关翻了面板运行条/列表行永远浅色（L102 只修了坞图标）。
+    @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
 
     private var cacheKey: String {
         guard let appInfo = appInfo else { return "" }
-        return "\(appInfo.bundleIdentifier() ?? "")_\(appInfo.dataUUID ?? "")"
+        return "\(appInfo.bundleIdentifier() ?? "")_\(appInfo.dataUUID ?? "")_\(darkModeIcon ? "dark" : "light")"
     }
     private var cachedIcon: UIImage? {
         guard !cacheKey.isEmpty else { return nil }
@@ -5378,8 +5382,11 @@ private struct RunningAppIcon: View {
     }
 
     private func loadIcon() {
-        // 已有图标不重复加载。
-        if icon != nil { return }
+        // 3.8.577（L108）：`icon != nil` 的早返不能留——变体一切换
+        // .task(id: cacheKey) 重跑，旧变体图标已在 @State 里、早返
+        // 会把新变体挡在外面；改走缓存命中（键已带变体，命中即
+        // 当前变体），未命中才后台按当前变体解一次。
+        let wantDark = darkModeIcon
         // 缓存命中也写回 @State（审计建议）：body 与 onAppear 是
         // 同一主线程 pass，若缓存恰在两者之间被别的行写进来，
         // 光 return 不设 State，灰块要等下次父视图重渲染才消失。
@@ -5390,11 +5397,13 @@ private struct RunningAppIcon: View {
         guard let appInfo = appInfo else { return }
         let key = cacheKey
         DispatchQueue.global(qos: .userInitiated).async {
-            let loaded = appInfo.iconIsDarkIcon(false)
+            let loaded = appInfo.iconIsDarkIcon(wantDark)
             if let loaded = loaded, !key.isEmpty {
                 IconCacheManager.shared.setIcon(loaded, for: key)
             }
             DispatchQueue.main.async {
+                // 迟到的旧变体解码不许盖掉新变体（L102 同款守卫）。
+                guard self.darkModeIcon == wantDark else { return }
                 self.icon = loaded
             }
         }
@@ -5411,6 +5420,8 @@ struct AppCardRow: View {
     let onSmallWindowOpen: () -> Void
     @ObservedObject private var pinnedStore = CZFPinnedAppsStore.shared
     @State private var appIcon: UIImage?
+    // 3.8.577（L108）：与 AppIconView 同款口径（见下面 loadIcon）。
+    @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     
     // 3.8.293：行长按菜单抽成独立 @ViewBuilder 子表达式——
     // body 已超类型检查器上限（292 在这里报 type '()' cannot
@@ -5453,6 +5464,9 @@ struct AppCardRow: View {
             .frame(width: 52, height: 52)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .onAppear { loadIcon() }
+            // 3.8.577（L108）：设置页深色图标开关翻了，活着的行要
+            // 跟着换——原来只靠 onAppear（L102 坞图标同款漏网）。
+            .onChange(of: darkModeIcon) { _ in loadIcon() }
             
             // 只显示 App 名字（用户要求：版本号/包名/UUID 不再显示）
             VStack(alignment: .leading, spacing: 2) {
@@ -5519,19 +5533,26 @@ struct AppCardRow: View {
     private func loadIcon() {
         // 卡片图标走共享缓存：LazyVStack 的行滑出滑回都会重新
         // onAppear，原来每次都重新解一次图标；先查缓存命中直接
-        // 用，未命中才后台解一次并写回。键用 Bundle ID + dataUUID，
-        // 与 dock 那边名字_UUID 的键不同，不会串深色/浅色图标。
-        let cacheKey = "\(app.appInfo.bundleIdentifier() ?? "")_\(app.appInfo.dataUUID ?? "")"
+        // 用，未命中才后台解一次并写回。
+        // 3.8.577（L108）：键要带深浅变体、按当前变体解——原来键是
+        // Bundle ID + dataUUID、不带变体，解还写死 iconIsDarkIcon(false)，
+        // 深色开关翻了面板列表行永远浅色（L102 只修了坞图标 AppIconView，
+        // 这里与 RunningAppIcon 是同款漏网）。键口径与 AppIconView
+        // 同款（变体后缀），底子仍是本行的 Bundle ID + dataUUID。
+        let wantDark = darkModeIcon
+        let cacheKey = "\(app.appInfo.bundleIdentifier() ?? "")_\(app.appInfo.dataUUID ?? "")_\(wantDark ? "dark" : "light")"
         if let cached = IconCacheManager.shared.getIcon(for: cacheKey) {
             self.appIcon = cached
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
-            let icon = app.appInfo.iconIsDarkIcon(false)
+            let icon = app.appInfo.iconIsDarkIcon(wantDark)
             if let icon = icon {
                 IconCacheManager.shared.setIcon(icon, for: cacheKey)
             }
             DispatchQueue.main.async {
+                // 迟到的旧变体解码不许盖掉新变体（L102 同款守卫）。
+                guard self.darkModeIcon == wantDark else { return }
                 self.appIcon = icon
             }
         }
