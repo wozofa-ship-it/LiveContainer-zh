@@ -1126,6 +1126,25 @@ class LCAppModel: ObservableObject, Hashable {
         let launchDisplayName = await MainActor.run { appInfo.displayName() }
         let launchJITScript = await MainActor.run { jitLaunchScriptJs }
         let launchContainerFolder = await MainActor.run { uiSelectedContainer?.folderName }
+        // 3.8.580（L111）：经典启动的 MetalANGLE 预载文件只在带框架时写，
+        // 失败启动后宿主还活着、文件残留，下次经典启动的客会 dlopen 到
+        // 上一个 App 的框架——main.c 读一行 dlopen 一行、读完才删
+        //（LiveContainer/main.c:18-35），而 launchToGuestApp 失败时宿主
+        // 不死（LCSharedUtils.m:155-161 注释）。本次非多任务即经典客
+        //（JIT 经典路也经 delegate 走 launchToGuestApp）：带框架就原子
+        // 写（防宿主 SIGKILL 在写一半时把文件撕成半截路径），不带就删
+        // 残留；多任务客不走 main.c（同进程开窗，LCUtils.m:59），不动。
+        // 原来这段只在下面经典 else 分支里、JIT 经典路根本不写，挪到
+        // 分发前三路共用。
+        if !multitask, #available(iOS 26.0, *) {
+            let preloadURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("preloadLibraries.txt")
+            if FileManager.default.fileExists(atPath: "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE") {
+                let fileContents = "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE".data(using: .utf8)
+                try fileContents?.write(to: preloadURL, options: .atomic)
+            } else {
+                try? FileManager.default.removeItem(at: preloadURL)
+            }
+        }
         // JIT 确认取消时不盖“最近启动”：delegate 的 jitLaunch 返 Bool，
         // 取消返 false；其它路（多任务/直接启动）照常盖戳。
         var czfDidLaunch = true
@@ -1227,11 +1246,6 @@ class LCAppModel: ObservableObject, Hashable {
                 }
             }
         } else {
-            if #available(iOS 26.0, *), FileManager.default.fileExists(atPath: "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE") {
-                let fileContents = "\(appInfo.bundlePath()!)/Frameworks/MetalANGLE.framework/MetalANGLE".data(using: .utf8)
-                let fileURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("preloadLibraries.txt")
-                try fileContents?.write(to: fileURL)
-            }
             LCSharedUtils.launchToGuestApp(withClassicMode: classicMode)
         }
 
