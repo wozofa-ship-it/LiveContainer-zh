@@ -440,7 +440,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             title: appInfo.isLocked ? "解锁" : "锁定",
             image: UIImage(systemName: appInfo.isLocked ? "lock.open" : "lock")
         ) { _ in
-            Task { await model.setLocked(newLockState: !appInfo.isLocked) }
+            // 3.8.556（L233）：!appInfo.isLocked 在裸 Task 里算就是离主线程读 _info（LCAppInfo.m:714）；主线程 setLocked 写 _info + save 时读-写并发可能崩（L70/L72/L74 同款，L74 只修了 setLocked 本体入口、没修这两路调用方传参时的读）。整段放主 actor 上算。
+            Task { @MainActor in await model.setLocked(newLockState: !appInfo.isLocked) }
         })
 
         // 单 App VPN（用户定）：长按直接调用，不用进设置页翻。

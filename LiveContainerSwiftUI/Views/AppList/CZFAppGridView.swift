@@ -732,7 +732,8 @@ struct CZFAppGridCell: View {
             Task { await app.toggleHidden() }
         }
         Button(app.appInfo.isLocked ? "解锁" : "锁定", systemImage: app.appInfo.isLocked ? "lock.open" : "lock") {
-            Task { await app.setLocked(newLockState: !app.appInfo.isLocked) }
+            // 3.8.556（L233）：同横幅卡——!app.appInfo.isLocked 在裸 Task 里算就是离主线程读 _info；整段放主 actor 上算（按钮标题那两处读在 body 求值时、主线程，安全不动）。
+            Task { @MainActor in await app.setLocked(newLockState: !app.appInfo.isLocked) }
         }
         if !app.uiIsShared {
             Button("lc.appBanner.uninstall".loc, systemImage: "trash", role: .destructive) {

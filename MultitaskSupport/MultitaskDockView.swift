@@ -5155,6 +5155,15 @@ private struct SourcePanelRow: View {
             Button {
                 UIPasteboard.general.string = downloadURL.absoluteString
                 copied = true
+                // 3.8.556（L304-1）：✓ 只表示“刚拷过”——原来置 true 后没人复位，
+                // 行不重建（源不刷新）就一直挂着 ✓，再点别的行、回来看还是 ✓，
+                // 跟“刚拷”对不上；1.5 秒后复位成拷贝图标。主线程 asyncAfter，
+                // @State 写在主线程（RunningAppIcon.loadIcon 同款写法）；
+                // 行已重建时闭包写的是旧行的存储，不影响新行；1.5 秒内连点
+                // 两次时第一次的复位会早到一次，只影响 ✓ 多挂/少挂零点几秒。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    copied = false
+                }
             } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 14, weight: .semibold))

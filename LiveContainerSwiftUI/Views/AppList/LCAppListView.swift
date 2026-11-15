@@ -1242,7 +1242,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 的，防误触反向取消隐藏；想取消隐藏走下面的 batchUnhide，
     // 底栏按钮在全选隐藏时自动变“恢复显示”）。
     private func batchHide() async {
-        let apps = selectedBatchApps.filter { !$0.appInfo.isHidden }
+        // 3.8.556（L233）：isHidden 读 _info（LCAppInfo.m:727），本函数从按钮的裸 Task 调来、不在主 actor 上；主线程 toggleHidden 写 _info + save 时读-写并发可能崩（L70/L72/L74 同款）。整段 filter 回主线程取。
+        let apps = await MainActor.run { selectedBatchApps.filter { !$0.appInfo.isHidden } }
         guard !apps.isEmpty else { return }
         // 3.8.519（L44）：本函数从按钮的裸 Task 调来、不在主 actor
         // 上（L40 同款），batchBusy/installInfo/batchMode/
@@ -1267,7 +1268,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 隐藏的调，可见的勾中了也不动（底栏按钮只在全选隐藏时
     // 才变“恢复显示”，混选时仍是“隐藏”，防一键两边乱动）。
     private func batchUnhide() async {
-        let apps = selectedBatchApps.filter { $0.appInfo.isHidden }
+        // 3.8.556（L233）：isHidden 读 _info（LCAppInfo.m:727），同 batchHide，裸 Task 里离主线程读、主线程写 _info + save 时读-写并发可能崩。整段 filter 回主线程取。
+        let apps = await MainActor.run { selectedBatchApps.filter { $0.appInfo.isHidden } }
         guard !apps.isEmpty else { return }
         // 3.8.519（L44）：同 batchHide，@State 写回主线程再写。
         await MainActor.run { batchBusy = true }
@@ -1612,7 +1614,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // LCUtils.authenticateUser 成功后会置 isHiddenAppUnlocked，之后
     // launchAppWithBundleId 里的同款检查直接短路，不会弹第二次人脸。
     private func czfAuthenticateLockedApp(_ app: LCAppModel) async -> Bool {
-        guard app.appInfo.isLocked && !sharedModel.isHiddenAppUnlocked else { return true }
+        // 3.8.556（L233）：isLocked 读 _info（LCAppInfo.m:714），本函数从网格启动两路（czfGridLaunchMultitask/czfGridLaunch）的裸 Task 调来、不在主 actor 上；主线程 setLocked 写 _info + save 时读-写并发可能崩（L70/L72/L74 同款）。先回主线程取。
+        let locked = await MainActor.run { app.appInfo.isLocked }
+        guard locked && !sharedModel.isHiddenAppUnlocked else { return true }
         do {
             return try await LCUtils.authenticateUser()
         } catch {
@@ -2416,7 +2420,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return
             }
             
-            if appToLaunch.appInfo.isLocked && !sharedModel.isHiddenAppUnlocked {
+            // 3.8.556（L233）：isLocked 读 _info（LCAppInfo.m:714），本函数从多路按钮/深链的裸 Task 调来、不在主 actor 上；主线程 setLocked 写 _info + save 时读-写并发可能崩（L70/L72/L74 同款）。先回主线程取。
+            let appLocked = await MainActor.run { appToLaunch.appInfo.isLocked }
+            if appLocked && !sharedModel.isHiddenAppUnlocked {
                 do {
                     if !(try await LCUtils.authenticateUser()) {
                         return
@@ -3789,7 +3795,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         // 3.8.428 安装#6：进度条旁点了取消——还没开始装就直接
         // 按取消返回，不进下载/解包。
+        // 3.8.556（L301-1）：下面两条 return 都在 defer 注册之前——不续排，
+        // 队里剩下的要等下一次安装才接着排（installFromPlist 同款，L299-3
+        // 已修；忙时排队那条 return 不补排是对的，正在装的那一项会续排）。
+        // 校验失败能进队：忙时路只比去重、不校验，粘贴的坏链接（如带空格）
+        // 先排队、排水时才在 czfValidatedInstallURL 失败；multiLCStatus 是
+        // 启动时定值（Shared.init），不会半路变 2。
         if czfTakeInstallCancel() {
+            drainPendingInstalls()
             return false
         }
 
@@ -3797,6 +3810,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 与 installFromPlist 同款）；忙时排队与取消检查已在前面做过，
         // 顺序与原来一致。
         guard var installUrl = czfValidatedInstallURL(urlStr) else {
+            drainPendingInstalls()
             return false
         }
         
@@ -4128,7 +4142,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         for app in sharedModel.apps {
             if app.appInfo.relativeBundlePath == bundleId {
                 appFound = app
-                if app.appInfo.isLocked {
+                // 3.8.556（L233）：isLocked 读 _info（LCAppInfo.m:714），本函数从通知/收件箱/网格启动的裸 Task 调来、不在主 actor 上；主线程 setLocked 写 _info + save 时读-写并发可能崩（L70/L72/L74 同款）。只对命中的这一条回主线程取（relativeBundlePath 是 ivar，直读安全）。
+                let locked = await MainActor.run { app.appInfo.isLocked }
+                if locked {
                     isFoundAppLocked = true
                 }
                 break
