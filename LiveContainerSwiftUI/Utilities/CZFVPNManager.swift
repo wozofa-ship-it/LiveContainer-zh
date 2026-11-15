@@ -1914,6 +1914,16 @@ public final class CZFVPNManager {
     /// 自己的占用守卫兜底（中途别的 App 起了核心就拒绝）。
     public func restartCoreAfterPing() {
         vpnCoreLock.lock()
+        // 3.8.554（L227）：另一轮测速还在跑时别消费快照——快照
+        // 读完即清，但 ensureRunning 会因 isPinging 拒绝起核心，
+        // 快照丢了就没人再起，核心悄悄一直停着（跨页两轮重叠：
+        // 停核心那轮先完、另一轮还在探；后完那轮的 pingStoppedCore
+        // 是 false，不会再调这里）。留给最新一轮收尾消费（ping
+        // 尾 isLatestPing 分支里调这里补起）。
+        guard !isPinging else {
+            vpnCoreLock.unlock()
+            return
+        }
         var link = pingStoppedLink
         var owner = pingStoppedOwner
         pingStoppedLink = nil
@@ -2098,6 +2108,16 @@ public final class CZFVPNManager {
             self.vpnCoreLock.unlock()
             let finalRejected = (coreRunningAtStart || coreRunningAtEnd) && outcome.batchRejected
             let items = outcome.items
+            // 3.8.554（L227）：最新一轮收尾时把遗留快照消费掉——
+            // 停核心那轮先完时它的 completion 调 restartCoreAfterPing
+            // 被上面守卫拦下（快照没动）；本轮是最后一轮，isPinging
+            // 已清，在这里补起原来那条。放 completion 之前、deferred
+            // 补跑之后（补跑的 App 先占核心，restart 再按快照守卫
+            // 退让，与 completion 里调的顺序一致）；finalRejected
+            // 已按探针时状态算好，不受这次重启影响。
+            if isLatestPing {
+                self.restartCoreAfterPing()
+            }
             DispatchQueue.main.async { completion(items, finalRejected) }
         }
     }
@@ -2200,6 +2220,12 @@ public final class CZFVPNManager {
             // 轮末复核：与 pingAllNodes 同理，中途起的核心也算占用。
             let finalRejected = (coreRunningAtStart || coreRunningAtEnd) && outcome.batchRejected
             let item = outcome.items.first
+            // 3.8.554（L227）：最新一轮收尾时把遗留快照消费掉（同
+            // pingAllNodes 尾部：停核心那轮先完时 restart 被守卫拦
+            // 下，快照留给本轮补起）。
+            if isLatestPing {
+                self.restartCoreAfterPing()
+            }
             DispatchQueue.main.async { completion(item, finalRejected) }
         }
     }

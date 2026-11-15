@@ -804,6 +804,14 @@ struct CZFVPNSettingsView: View {
     // 进度按批回主线程，按钮显示“测速 3/10”/
     // “重试 2/5”，不再只有一句测速中。
     func startVPNPing() {
+        // 3.8.554（L223）：入口再守一次重入——按钮挂了
+        // .disabled(vpnPinging || vpnSinglePinging)，但快点两下时
+        // 第二下可能抢在重渲染禁掉按钮之前进来（L212-1 同款）；
+        // 单测 :921 与多选删 :969 都有函数内守卫，只这里漏了。
+        // 两轮重叠时先完那轮的 completion 会 restartCoreAfterPing
+        // 把核心起回来，后完那轮探针撞“核心占用”、整批结果作废，
+        // 还附赠一条误导警告。入口拦住，第二下直接返回。
+        guard !vpnPinging && !vpnSinglePinging else { return }
         // 测速期间保留旧结果不清空：原来一开测就清表，
         // 测速中界面是空的、要等整轮测完才回来；现在旧
         // 结果先留着（按钮进度另行显示“测速 3/10”），
