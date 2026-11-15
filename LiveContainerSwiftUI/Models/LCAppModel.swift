@@ -895,9 +895,17 @@ class LCAppModel: ObservableObject, Hashable {
                             let src = entry.appendingPathComponent("CZFKeychainImport.plist")
                             guard FileManager.default.fileExists(atPath: src.path) else { continue }
                             if !oldUUID.isEmpty, entry.lastPathComponent == oldUUID {
-                                try? FileManager.default.copyItem(at: src, to: dst)
-                                copied = true
-                                break
+                                // 3.8.543（L159）：拷成了才记 copied、才 break——
+                                // 原来 try? 吞掉失败还照记 copied = true、break，
+                                // fallback 也被堵死：旧容器那份拷失败（读不出）时
+                                // 别的容器那份明明能拷，登录排队文件却悄悄丢了。
+                                // 失败就 continue，继续扫 fallback，不把失败那
+                                // 份记成 fallback（再拷它一次也是白拷）。
+                                if (try? FileManager.default.copyItem(at: src, to: dst)) != nil {
+                                    copied = true
+                                    break
+                                }
+                                continue
                             }
                             if fallbackSrc == nil { fallbackSrc = src }
                         }

@@ -4018,6 +4018,17 @@ struct SourcesPanelView: View {
     // 消失，不会卡住下次下载）。
     @State private var panelDownloadingURLs: Set<URL> = []
 
+    // L160-1：面板装 dylib 在途键（与 L118 的 panelDownloadingURLs 同款
+    // 在途集合）：同一 dylib 连点两下会并行跑两份 installTweakFromPanel，
+    // 最后都进 czfReplaceTweakFile 换同一个 destURL——常见一路第二份挪
+    // .bak 撞空抛错、装其实成了却弹系统原样错，极窄一路第二份存在检查
+    // 落在第一份挪走旧文件、还没挪进新文件的缝里，catch 删 dest、旧
+    // 文件也没了（源页内双击同款，L157-1）。键是目标文件全路径（文件
+    // 夹“名-包名”+ 文件名，与 installTweakFromPanel 的 destURL 同款拼
+    // 法）；第二下直接 return，第一份装完自己报结果。
+    // 3.8.543（L160）
+    @State private var panelInstallingTweakKeys: Set<String> = []
+
     // 3.8.309：VPN 开关（与 App 页 toggleVPNCore 同款：先记手动
     // 切换、再起/停、再刷新状态）。
     private func togglePanelVPNCore() {
@@ -4861,6 +4872,15 @@ struct SourcesPanelView: View {
     // 与源页 LCSourcesView.installTweak 一致
     @MainActor
     private func installTweakFromPanel(from url: URL, name: String, bundleIdentifier: String) async {
+        // L160-1：在途守卫（见 panelInstallingTweakKeys）：同一 dylib
+        // 连点两下，第二下直接 return；函数本身 @MainActor，判据与插入
+        // 在主线程串行，第一份下载挂起前键已登记，第二份 body 起跑时必
+        // 然看到。成功/失败都走 defer 清键；Task 取消走 catch 后 defer
+        // 同样清，不会卡住下次安装。
+        let installKey = "\(name)-\(bundleIdentifier)/\(LCUtils.czfTweakFileName(for: url))"
+        guard !panelInstallingTweakKeys.contains(installKey) else { return }
+        panelInstallingTweakKeys.insert(installKey)
+        defer { panelInstallingTweakKeys.remove(installKey) }
         do {
             let (tempURL, _) = try await URLSession.shared.download(from: url)
             // S-7 同款魔数校验：URLSession 不验 HTTP 状态，404 错误页
