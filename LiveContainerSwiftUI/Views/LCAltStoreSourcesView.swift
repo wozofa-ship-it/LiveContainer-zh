@@ -530,7 +530,7 @@ enum AltStoreSourceLoader {
         // （版本，build）降序排好——合规源本来就是降序、排序是空
         // 操作；历史列表也跟着新版在前。比较器就是 hasUpdate 同款
         // czfIsNewerVersion（版本不等比版本、相等比 build），无新语义。
-        let sorted = versions.compactMap { version in
+        let sorted: [AltStoreSourceAppVersion] = versions.compactMap { version in
             guard let versionString = version.version,
                   let downloadURLString = version.downloadURL,
                   let downloadURL = url(for: downloadURLString, baseURL: baseURL) else {
