@@ -4047,13 +4047,22 @@ struct LCDataManagementView : View {
     //（与 restoreCZFSettings 同款文件；iCloud 占位文件现读会堵
     // 下载，放 detached 读，解析 + 判断仍在这里）。
     private func loadMigrationContents() async {
-        let folders = backupFolders(fromExternal: migrationSourceExternal)
+        // 3.8.591（L124）：只认最后一次选的来源——第 1 步有“上一步”，
+        // 选本地后不等加载完就能回第 0 步改选 iCloud，两路裸 Task 并跑；
+        // 原来四处 MainActor.run 写都无条件，后完成的旧任务会把新来源
+        // 的文件夹/预览/设置标记盖掉（两任务在 previewItems 循环与
+        // Task.detached 读盘两处 await 上交错，文件夹与预览可能各取
+        // 一路、设置标记与文件夹对不上）。入口先在主线程取齐本次来源，
+        // 每处写前先认仍是本次来源才写（:2623 预览“只认最后一次”同款）。
+        let src = await MainActor.run { migrationSourceExternal }
+        let folders = backupFolders(fromExternal: src)
         // 3.8.516（L40）：本函数从按钮/视图的裸 Task 调来、不在
         // 主 actor 上（L40-1 同款），migrationFolders/
         // migrationPreviews/migrationHasSettings/migrationHasSort/
         // migrationHasSchemes 全是 @State，回主线程再写；读盘
         // 与 previewItems 仍在外面。
         await MainActor.run {
+            guard migrationSourceExternal == src else { return }
             migrationFolders = folders
         }
         var items: [BackupPreviewItem] = []
@@ -4061,15 +4070,17 @@ struct LCDataManagementView : View {
             items.append(contentsOf: await Self.previewItems(for: folder))
         }
         await MainActor.run {
+            guard migrationSourceExternal == src else { return }
             migrationPreviews = items
         }
         let settingsURL: URL?
-        if migrationSourceExternal {
+        if src {
             settingsURL = Self.externalBackupFolderURL()?.appendingPathComponent("CZFSettingsBackup.json")
         } else {
             settingsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("CZFSettingsBackup.json")
         }
         await MainActor.run {
+            guard migrationSourceExternal == src else { return }
             migrationHasSettings = false
             migrationHasSort = false
             migrationHasSchemes = false
@@ -4081,6 +4092,7 @@ struct LCDataManagementView : View {
             }.value
             if let dict {
                 await MainActor.run {
+                    guard migrationSourceExternal == src else { return }
                     migrationHasSettings = true
                     migrationHasSort = dict["LCCustomSortOrder"] != nil || dict["LCAppSortType"] != nil
                     migrationHasSchemes = dict["LCCustomSortSchemes"] != nil
