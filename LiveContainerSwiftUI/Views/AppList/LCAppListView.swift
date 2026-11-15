@@ -2527,10 +2527,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 里装完（或起跑即取消）后删，免得 tmp 漏一个 IPA。
                 Self.czfFileImporterTmpToDelete.insert(urlStr)
             }
+            return true
+        }
+        if czfBusyQueued {
             return
         }
         do {
-            self.installprogressVisible = true
             try await installIpaFile(fileUrl)
             // L50-3：fileUrl 是文件选择器 asCopy: true 拷出来
             // 的临时副本，装完删它是清 tmp；删失败（极少）不该
