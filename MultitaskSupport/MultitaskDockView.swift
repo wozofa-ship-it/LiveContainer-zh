@@ -580,7 +580,19 @@ extension Notification.Name {
                !self.apps.contains(where: { $0.appUUID != appUUID && $0.appInfo?.bundleIdentifier() == bid }) {
                 self.czfUnregisterTouchRaiseObserver(identifier: bid)
             }
+            // 3.8.585（L117）：测速窗口内关掉的 App，它排进
+            // deferredEnsureApps 的启动请求要一起取消——收尾
+            // 补跑会把核心起在已关 App 的节点上，而关窗那刻
+            // 核心还没跑、下面 noteRunningAppsChanged 的
+            // `guard isRunning else { return }` 直接 return、
+            // 没排待停，核心起起来后就一直跑到下一次 App 开
+            // 关才停。appInfo 先在删条目前取（删完就找不到了）；
+            // 没排进的 App 取消是空操作，不影响正常关窗。
+            let closedAppInfo = self.apps.first(where: { $0.appUUID == appUUID })?.appInfo
             self.apps.removeAll { $0.appUUID == appUUID }
+            if let closedAppInfo {
+                CZFVPNManager.shared.cancelDeferredEnsure(for: closedAppInfo)
+            }
 
             if self.apps.isEmpty {
                 self.hideDock()

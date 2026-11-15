@@ -1645,6 +1645,17 @@ class LCAppModel: ObservableObject, Hashable {
         
         toAppInfo.lastLaunched = fromApp.appInfo.lastLaunched
         
+        // 3.8.585（L117）：上游的 copy 漏了这三项用户配置，覆盖安装
+        // 后全丢了——dontSign（设置页“不签名”，丢了下次启动会把用户
+        // 设成不签名的 App 又签一遍）、remark（设置页备注）、
+        // selected32BitEmulator（32 位模拟器选择，丢了回落全局默认；
+        // 客启动时 LCBootstrap.m:690 先读它）。customDisplayName
+        // 同款缺口在调用方补（LCAppListView:2911），这里三项直接
+        // 补进 copy，之后别的调用方也不丢。
+        toAppInfo.dontSign = fromApp.appInfo.dontSign
+        toAppInfo.remark = fromApp.appInfo.remark
+        toAppInfo.selected32BitEmulator = fromApp.appInfo.selected32BitEmulator
+
         toAppInfo.autoSaveDisabled = false
         toAppInfo.save()
     }

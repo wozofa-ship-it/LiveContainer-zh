@@ -897,6 +897,28 @@ public final class CZFVPNManager {
         }
     }
 
+    /// 测速窗口内关掉的 App：它排进 deferredEnsureApps 的那次
+    /// 启动请求作废——收尾补跑会把核心起在已关 App 的节点上，
+    /// 而关窗那刻核心还没跑、noteRunningAppsChanged 的
+    /// `guard isRunning else { return }` 直接 return、没排待停，
+    /// 核心起起来后就一直跑到下一次 App 开关才停（没有别的
+    /// 周期巡检会停它）。宿主侧不用同款：ensureRunningForHost
+    /// 的补跑入口先查 isHostProxyEnabled，关了就直接 return。
+    /// 调用方在主线程（removeRunningApp 的 main.async 块），
+    /// bundleIdentifier() 的 _info 读安全；同数组的追加与两
+    /// 路收尾取走都在这把锁下。按身份比对，AppInfoProvider
+    /// 兜底重建的另一份实例按（包名，容器）认——同一容器就
+    /// 是同一份启动请求，不会误取消别的分身。
+    public func cancelDeferredEnsure(for appInfo: LCAppInfo) {
+        vpnCoreLock.lock()
+        deferredEnsureApps.removeAll(where: {
+            $0 === appInfo
+                || ($0.dataUUID != nil && $0.dataUUID == appInfo.dataUUID
+                    && $0.bundleIdentifier() == appInfo.bundleIdentifier())
+        })
+        vpnCoreLock.unlock()
+    }
+
     /// 起核心后认领归属（ensureRunning / startFallback /
     /// waitUntilNodeReady 三路共用）：只有在同一把锁下看到
     /// runningLink 仍是刚起的那条才认领。两个 VPN App 同时启动
