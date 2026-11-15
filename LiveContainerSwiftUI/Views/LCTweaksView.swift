@@ -289,22 +289,35 @@ struct LCTweakFolderView : View {
 
             }
         }
-        .alert("lc.common.error".loc, isPresented: $errorShow) {
-            Button("lc.common.ok".loc, action: {
-            })
-        } message: {
-            Text(errorInfo)
-        }
+        // 3.8.588（L120）：同一视图挂两个 .alert 只有最后一个生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证：多 .alert
+        // 同视图/同分支时只剩最后一个能弹）。原来错误弹窗被下面的
+        // 删除确认盖掉，插件安装/签名/删除/导出失败全程静默。两个
+        // 弹窗各挪一个 background 叶子、各占一条分支，宿主 List 上
+        // 不再留 .alert；触发点与按钮一字不动。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: $errorShow) {
+                    Button("lc.common.ok".loc, action: {
+                    })
+                } message: {
+                    Text(errorInfo)
+                }
+        )
         // 单删确认：沙盒删除不进废纸篓，插件很可能只有这一份。
-        .alert("删除插件？", isPresented: $showDeleteItemConfirm) {
-            Button("lc.common.delete".loc, role: .destructive) {
-                if let item = pendingDeleteItem { deleteTweakItem(tweakItem: item) }
-                pendingDeleteItem = nil
-            }
-            Button("lc.common.cancel".loc, role: .cancel) { pendingDeleteItem = nil }
-        } message: {
-            Text("删除后无法恢复")
-        }
+        // 3.8.588（L120）：同款——删除确认也挪叶子，与错误弹窗各占一条分支。
+        .background(
+            EmptyView()
+                .alert("删除插件？", isPresented: $showDeleteItemConfirm) {
+                    Button("lc.common.delete".loc, role: .destructive) {
+                        if let item = pendingDeleteItem { deleteTweakItem(tweakItem: item) }
+                        pendingDeleteItem = nil
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) { pendingDeleteItem = nil }
+                } message: {
+                    Text("删除后无法恢复")
+                }
+        )
         .sheet(isPresented: $showExportSheet) {
             if !exportItems.isEmpty {
                 ActivityViewController(activityItems: exportItems)

@@ -524,44 +524,54 @@ struct LCDataManagementView : View {
                     }
                 }
             }
-            .confirmationDialog("确定删除全部备份？", isPresented: $showDeleteAllBackupsConfirm, titleVisibility: .visible) {
-                Button("删除全部", role: .destructive) {
-                    deleteAllBackups()
-                }
-                Button("lc.common.cancel".loc, role: .cancel) {}
-            } message: {
-                Text("将删除本地 \(backupFolderList.count) 个 + iCloud \(externalBackupFolderList.count) 个备份，此操作不可恢复")
-            }
+            // 3.8.588（L120）：同一视图挂 confirmationDialog + .alert，确认框与
+            // 弹窗同抢一个槽——删除全部的确认框被单删弹窗盖掉。两个各挪一个
+            // background 叶子、各占一条分支；宿主视图上不再留弹窗类修饰符。
+            .background(
+                EmptyView()
+                    .confirmationDialog("确定删除全部备份？", isPresented: $showDeleteAllBackupsConfirm, titleVisibility: .visible) {
+                        Button("删除全部", role: .destructive) {
+                            deleteAllBackups()
+                        }
+                        Button("lc.common.cancel".loc, role: .cancel) {}
+                    } message: {
+                        Text("将删除本地 \(backupFolderList.count) 个 + iCloud \(externalBackupFolderList.count) 个备份，此操作不可恢复")
+                    }
+            )
             // 单个删除改用 alert：同页已有两个 confirmationDialog
             // 时确认框会一闪而过（多 dialog 同层抢占）；alert
             // 在 sheet 内是唯一弹窗，不抢占
-            .alert("确定删除这个备份？", isPresented: $showDeleteBackupConfirm) {
-                Button("删除", role: .destructive) {
-                    let url = pendingDeleteBackupURL
-                    pendingDeleteBackupURL = nil
-                    // 闪退修（325 没盖住这条：单删仍崩 Invalid update
-                    // section 3，7→7、删 1 个）：325 只修了
-                    // deleteBackup 里的数据源（从磁盘重载），但
-                    // 没修执行时机——alert 确认按钮里同步改
-                    // backupFolderList，List 的 diff 与 alert
-                    // 消失合并成一次更新，UICollectionView 拿
-                    // 到“删了 1 个”却看到数据源还是 7 条，直接
-                    // 崩。挪到下一轮 runloop：alert 先消失，
-                    // 列表再单独更新 7→6，两次干净更新，不再合并。
-                    if let url {
-                        DispatchQueue.main.async {
-                            deleteBackup(at: url)
+            // 3.8.588（L120）：单删确认也挪叶子（见上）。
+            .background(
+                EmptyView()
+                    .alert("确定删除这个备份？", isPresented: $showDeleteBackupConfirm) {
+                        Button("删除", role: .destructive) {
+                            let url = pendingDeleteBackupURL
+                            pendingDeleteBackupURL = nil
+                            // 闪退修（325 没盖住这条：单删仍崩 Invalid update
+                            // section 3，7→7、删 1 个）：325 只修了
+                            // deleteBackup 里的数据源（从磁盘重载），但
+                            // 没修执行时机——alert 确认按钮里同步改
+                            // backupFolderList，List 的 diff 与 alert
+                            // 消失合并成一次更新，UICollectionView 拿
+                            // 到“删了 1 个”却看到数据源还是 7 条，直接
+                            // 崩。挪到下一轮 runloop：alert 先消失，
+                            // 列表再单独更新 7→6，两次干净更新，不再合并。
+                            if let url {
+                                DispatchQueue.main.async {
+                                    deleteBackup(at: url)
+                                }
+                            }
                         }
+                        Button("lc.common.cancel".loc, role: .cancel) {
+                            pendingDeleteBackupURL = nil
+                        }
+                    } message: {
+                        // 3.8.307：写清本地 + iCloud 份一起删（306
+                        // 起单删就两边都清，文案不写用户以为只删一边）
+                        Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」（本地 + iCloud 份一起删），此操作不可恢复")
                     }
-                }
-                Button("lc.common.cancel".loc, role: .cancel) {
-                    pendingDeleteBackupURL = nil
-                }
-            } message: {
-                // 3.8.307：写清本地 + iCloud 份一起删（306
-                // 起单删就两边都清，文案不写用户以为只删一边）
-                Text("将删除备份「\(pendingDeleteBackupURL?.lastPathComponent ?? "")」（本地 + iCloud 份一起删），此操作不可恢复")
-            }
+            )
             // iCloud 未设时在 sheet 内直接选文件夹：选完
             // 刷新 iCloud 列表 + 体积，不用关 sheet 重进
             .sheet(isPresented: $showRestoreSheetFolderPicker) {
@@ -759,39 +769,48 @@ struct LCDataManagementView : View {
         if initialSheet == .restore {
             restoreBackupContent
                 .onAppear { onAppearFunc() }
-                .alert("lc.common.error".loc, isPresented: $errorShow){
-                    // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
-                    // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。
-                    // 为空时 builder 仍为空，走默认“好”按钮，行为不变。
-                    if !pendingNoDataFolders.isEmpty {
-                        ForEach(pendingNoDataFolders) { entry in
-                            Button("在文件 App 里打开「\(entry.name)」") {
-                                openFolderInFiles(entry.folder)
-                                pendingNoDataFolders = []
+                // 3.8.588（L120）：直进恢复分支也挂两个 .alert，错误弹窗被成功弹窗盖掉——
+                // 恢复失败静默无提示。两个弹窗各挪一个 background 叶子（见 Form 根链同款）。
+                .background(
+                    EmptyView()
+                        .alert("lc.common.error".loc, isPresented: $errorShow){
+                            // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
+                            // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。
+                            // 为空时 builder 仍为空，走默认“好”按钮，行为不变。
+                            if !pendingNoDataFolders.isEmpty {
+                                ForEach(pendingNoDataFolders) { entry in
+                                    Button("在文件 App 里打开「\(entry.name)」") {
+                                        openFolderInFiles(entry.folder)
+                                        pendingNoDataFolders = []
+                                    }
+                                }
+                                Button("好", role: .cancel) {
+                                    pendingNoDataFolders = []
+                                }
                             }
+                        } message: {
+                            Text(errorInfo)
                         }
-                        Button("好", role: .cancel) {
-                            pendingNoDataFolders = []
-                        }
-                    }
-                } message: {
-                    Text(errorInfo)
-                }
-                .alert("lc.common.success".loc, isPresented: $successShow){
-                    if !pendingNoDataFolders.isEmpty {
-                        ForEach(pendingNoDataFolders) { entry in
-                            Button("在文件 App 里打开「\(entry.name)」") {
-                                openFolderInFiles(entry.folder)
-                                pendingNoDataFolders = []
+                )
+                // 3.8.588（L120）：成功弹窗也挪叶子（见 Form 根链同款）。
+                .background(
+                    EmptyView()
+                        .alert("lc.common.success".loc, isPresented: $successShow){
+                            if !pendingNoDataFolders.isEmpty {
+                                ForEach(pendingNoDataFolders) { entry in
+                                    Button("在文件 App 里打开「\(entry.name)」") {
+                                        openFolderInFiles(entry.folder)
+                                        pendingNoDataFolders = []
+                                    }
+                                }
+                                Button("好", role: .cancel) {
+                                    pendingNoDataFolders = []
+                                }
                             }
+                        } message: {
+                            Text(successInfo)
                         }
-                        Button("好", role: .cancel) {
-                            pendingNoDataFolders = []
-                        }
-                    }
-                } message: {
-                    Text(successInfo)
-                }
+                )
         } else if czfDirectScopeOpen {
             // 3.8.404：直进备份直接返回范围选页（与 366 的 .restore
             // 直返 restoreBackupContent 同款）——不再先 present
@@ -1103,98 +1122,127 @@ struct LCDataManagementView : View {
         .navigationTitle(initialSheet == nil ? "lc.settings.dataManagement".loc : "")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarHidden(initialSheet != nil)
-        .alert("lc.common.error".loc, isPresented: $errorShow){
-            // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
-            // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。
-            // 为空时 builder 仍为空，走默认“好”按钮，行为不变。
-            if !pendingNoDataFolders.isEmpty {
-                ForEach(pendingNoDataFolders) { entry in
-                    Button("在文件 App 里打开「\(entry.name)」") {
-                        openFolderInFiles(entry.folder)
-                        pendingNoDataFolders = []
+        // 3.8.588（L120）：同一视图挂六个 .alert 只有最后一个（清缓存）生效——
+        // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证）。错误/成功结果弹窗、
+        // 清数据夹/清钥匙串/清临时文件三路确认全被盖掉：备份/恢复完结果弹窗
+        // 从来没弹过（用户 2026-11-11 原话），三路清确认的 open() 永远等不到
+        // close、点了清理没反应。六个弹窗各挪一个 background 叶子、各占一条
+        // 分支，宿主 Form 上不再留 .alert；触发点、按钮、AlertHelper 一字不动。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: $errorShow){
+                    // v216：恢复后“无可恢复数据”的文件夹，在结果弹窗里
+                    // 直接给打开按钮（点过就清空，不漏到下一次无关弹窗）。
+                    // 为空时 builder 仍为空，走默认“好”按钮，行为不变。
+                    if !pendingNoDataFolders.isEmpty {
+                        ForEach(pendingNoDataFolders) { entry in
+                            Button("在文件 App 里打开「\(entry.name)」") {
+                                openFolderInFiles(entry.folder)
+                                pendingNoDataFolders = []
+                            }
+                        }
+                        Button("好", role: .cancel) {
+                            pendingNoDataFolders = []
+                        }
                     }
+                } message: {
+                    Text(errorInfo)
                 }
-                Button("好", role: .cancel) {
-                    pendingNoDataFolders = []
-                }
-            }
-        } message: {
-            Text(errorInfo)
-        }
-        .alert("lc.common.success".loc, isPresented: $successShow){
-            if !pendingNoDataFolders.isEmpty {
-                ForEach(pendingNoDataFolders) { entry in
-                    Button("在文件 App 里打开「\(entry.name)」") {
-                        openFolderInFiles(entry.folder)
-                        pendingNoDataFolders = []
+        )
+        // 3.8.588（L120）：成功弹窗也挪叶子（见上）。
+        .background(
+            EmptyView()
+                .alert("lc.common.success".loc, isPresented: $successShow){
+                    if !pendingNoDataFolders.isEmpty {
+                        ForEach(pendingNoDataFolders) { entry in
+                            Button("在文件 App 里打开「\(entry.name)」") {
+                                openFolderInFiles(entry.folder)
+                                pendingNoDataFolders = []
+                            }
+                        }
+                        Button("好", role: .cancel) {
+                            pendingNoDataFolders = []
+                        }
                     }
+                } message: {
+                    Text(successInfo)
                 }
-                Button("好", role: .cancel) {
-                    pendingNoDataFolders = []
-                }
-            }
-        } message: {
-            Text(successInfo)
-        }
-        .alert("lc.settings.cleanDataFolder".loc, isPresented: $appFolderRemovalAlert.show) {
-            if folderRemoveCount > 0 {
-                Button(role: .destructive) {
-                    appFolderRemovalAlert.close(result: true)
-                } label: {
-                    Text("lc.common.delete".loc)
-                }
-            }
+        )
+        // 3.8.588（L120）：清数据夹确认也挪叶子（见上）。
+        .background(
+            EmptyView()
+                .alert("lc.settings.cleanDataFolder".loc, isPresented: $appFolderRemovalAlert.show) {
+                    if folderRemoveCount > 0 {
+                        Button(role: .destructive) {
+                            appFolderRemovalAlert.close(result: true)
+                        } label: {
+                            Text("lc.common.delete".loc)
+                        }
+                    }
 
-            Button("lc.common.cancel".loc, role: .cancel) {
-                appFolderRemovalAlert.close(result: false)
-            }
-        } message: {
-            if folderRemoveCount > 0 {
-                Text("lc.settings.cleanDataFolderConfirm %lld".localizeWithFormat(folderRemoveCount))
-            } else {
-                Text("lc.settings.noDataFolderToClean".loc)
-            }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        appFolderRemovalAlert.close(result: false)
+                    }
+                } message: {
+                    if folderRemoveCount > 0 {
+                        Text("lc.settings.cleanDataFolderConfirm %lld".localizeWithFormat(folderRemoveCount))
+                    } else {
+                        Text("lc.settings.noDataFolderToClean".loc)
+                    }
 
-        }
-        .alert("lc.settings.cleanKeychain".loc, isPresented: $keyChainRemovalAlert.show) {
+                }
+        )
+        // 3.8.588（L120）：清钥匙串确认也挪叶子（见上）。
+        .background(
+            EmptyView()
+                .alert("lc.settings.cleanKeychain".loc, isPresented: $keyChainRemovalAlert.show) {
+                    Button(role: .destructive) {
+                        keyChainRemovalAlert.close(result: true)
+                    } label: {
+                        Text("lc.common.delete".loc)
+                    }
+
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        keyChainRemovalAlert.close(result: false)
+                    }
+                } message: {
+                    Text("lc.settings.cleanKeychainDesc".loc)
+                }
+        )
+        // 3.8.588（L120）：清临时文件确认也挪叶子（见上）。
+        .background(
+            EmptyView()
+                .alert("lc.settings.cleanTmp".loc, isPresented: $tmpRemovalAlert.show) {
+                    Button(role: .destructive) {
+                        tmpRemovalAlert.close(result: true)
+                    } label: {
+                        Text("lc.common.delete".loc)
+                    }
+
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        tmpRemovalAlert.close(result: false)
+                    }
+                } message: {
+                    Text("lc.settings.cleanTmpConfirm".loc)
+                }
+        )
+        // 3.8.588（L120）：清缓存确认也挪叶子（见上）。
+        .background(
+            EmptyView()
+                .alert("lc.settings.cleanCaches".loc, isPresented: $cacheRemovalAlert.show) {
             Button(role: .destructive) {
-                keyChainRemovalAlert.close(result: true)
+                cacheRemovalAlert.close(result: true)
             } label: {
                 Text("lc.common.delete".loc)
             }
 
             Button("lc.common.cancel".loc, role: .cancel) {
-                keyChainRemovalAlert.close(result: false)
+                cacheRemovalAlert.close(result: false)
             }
         } message: {
-            Text("lc.settings.cleanKeychainDesc".loc)
+            Text("lc.settings.cleanCacheConfirm".loc)
         }
-        .alert("lc.settings.cleanTmp".loc, isPresented: $tmpRemovalAlert.show) {
-            Button(role: .destructive) {
-                tmpRemovalAlert.close(result: true)
-            } label: {
-                Text("lc.common.delete".loc)
-            }
-
-            Button("lc.common.cancel".loc, role: .cancel) {
-                tmpRemovalAlert.close(result: false)
-            }
-        } message: {
-            Text("lc.settings.cleanTmpConfirm".loc)
-        }
-        .alert("lc.settings.cleanCaches".loc, isPresented: $cacheRemovalAlert.show) {
-    Button(role: .destructive) {
-        cacheRemovalAlert.close(result: true)
-    } label: {
-        Text("lc.common.delete".loc)
-    }
-
-    Button("lc.common.cancel".loc, role: .cancel) {
-        cacheRemovalAlert.close(result: false)
-    }
-} message: {
-    Text("lc.settings.cleanCacheConfirm".loc) 
-}
+        )
 
         .onAppear {
             onAppearFunc()
