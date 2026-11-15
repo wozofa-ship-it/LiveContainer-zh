@@ -442,6 +442,16 @@ public final class CZFVPNManager {
             UserDefaults.standard.set(max(links.count - 1, 0), forKey: Self.activeNodeKey)
         }
         if wasActive {
+            // 3.8.594（L127）：删在用节点就是亲手停核心——
+            // stop() 只停核心，不清测速的待重启快照；测速窗口
+            // 内删在用节点时，收尾跟随会把快照改写成新活动链
+            // 接、restart 又把核心起回来，“删在用节点就停核心”
+            // 就落空了。快照一并清掉，restart 不再起；非测速
+            // 窗口内快照本来就是 nil，清掉是空操作。
+            vpnCoreLock.lock()
+            pingStoppedLink = nil
+            pingStoppedOwner = nil
+            vpnCoreLock.unlock()
             stop()
         } else {
             applyActiveNodeChange()
@@ -494,14 +504,41 @@ public final class CZFVPNManager {
     // 或停着。核心停着且有待重启快照时，把快照改写成新链接、
     // 无归属，让 restart 按新链接起（与窗外亲手切节点 start()
     // 清归属同款语义）；核心在跑时 applyActiveNodeChange 已切
-    // 过去，同样把快照清掉，免得 restart 又起回旧节点。只认
-    // setActiveNode 的显式切换（nodeSwitched）：删在用节点/
-    // 导入恢复改了链接时不走这里，removeNode“删在用节点就停
-    // 核心”的原语义不动；没显式切换时就是原来的 applyActive-
-    // NodeChange，行为一字不动。
+    // 过去，同样把快照清掉，免得 restart 又起回旧节点。显式
+    // 切换（nodeSwitched）与列表变动（订阅刷新/改在用节点链
+    // 接/清理不通节点）两路都跟随：没显式切换时，核心在跑仍
+    // 走 applyActiveNodeChange，核心停着且有快照时同样改写快
+    // 照（与显式切换同款）；removeNode 删在用节点时直接清快
+    // 照（见 removeNode），“删在用节点就停核心”原语义不动。
     private func czfFollowPostPingNodeSwitch(postPingActiveLink: String, nodeSwitched: Bool) {
         guard nodeSwitched else {
-            self.applyActiveNodeChange()
+            // 3.8.594（L127）：列表变动改了活动链接（订阅刷新/
+            // 改在用节点链接/清理不通节点）时也得跟随——原来这路
+            // 只调 applyActiveNodeChange，它只在核心在跑时才切；
+            // 测速开始时核心通常已被 stopCoreForPing 停掉，跟随
+            // 就是空操作，旧快照还指着旧链接，restartCoreAfterPing
+            // 的守卫（有效链接 == 快照链接）直接拦掉：测速前还在
+            // 跑的核心测完一直停着，且收尾在没用户动作时已把预热
+            // 抑制置真（!epochChanged 时），预热也不会把它带回
+            // 来，只能亲手再起。L125 只盖了亲手点节点那路
+            // （nodeSwitched），列表变动这路一直漏着。
+            // 核心在跑时照旧 applyActiveNodeChange（原来这路）；
+            // 核心停着且有待重启快照时，把快照改写成当前活动链
+            // 接、无归属，让 restart 按新链接起（与显式切换
+            // 同款：改写后归属为 nil，restart 守卫按当前活动
+            // 链接比对、照常通过）。
+            vpnCoreLock.lock()
+            let czfCoreRunningNow = isRunning
+            let czfHadSnapshot = pingStoppedLink != nil
+            vpnCoreLock.unlock()
+            if czfCoreRunningNow {
+                self.applyActiveNodeChange()
+            } else if czfHadSnapshot {
+                vpnCoreLock.lock()
+                self.pingStoppedLink = postPingActiveLink
+                self.pingStoppedOwner = nil
+                vpnCoreLock.unlock()
+            }
             return
         }
         vpnCoreLock.lock()
@@ -1962,9 +1999,17 @@ public final class CZFVPNManager {
                     self.ensureRunning(for: app)
                 }
                 // 显式切换在补跑后再切一次（窗外亲手切节点同款：
-                // start() 清归属）；列表变动不走这里，补跑的归属不动。
-                if nodeSwitched && postPingActiveLink != prePingActiveLink {
-                    self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
+                // start() 清归属）；列表变动（订阅刷新/改链接/
+                // 清理）只在补跑没把核心跑起来时跟随——改写快照
+                // 让 restart 按新活动链接起，跑起来了就不动补跑
+                // 刚起的核心。
+                if postPingActiveLink != prePingActiveLink {
+                    self.vpnCoreLock.lock()
+                    let czfReplayStartedCore = self.isRunning
+                    self.vpnCoreLock.unlock()
+                    if nodeSwitched || !czfReplayStartedCore {
+                        self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
+                    }
                 }
             } else if postPingActiveLink != prePingActiveLink {
                 self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
@@ -2055,9 +2100,17 @@ public final class CZFVPNManager {
                     self.ensureRunning(for: app)
                 }
                 // 显式切换在补跑后再切一次（窗外亲手切节点同款：
-                // start() 清归属）；列表变动不走这里，补跑的归属不动。
-                if nodeSwitched && postPingActiveLink != prePingActiveLink {
-                    self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
+                // start() 清归属）；列表变动（订阅刷新/改链接/
+                // 清理）只在补跑没把核心跑起来时跟随——改写快照
+                // 让 restart 按新活动链接起，跑起来了就不动补跑
+                // 刚起的核心。
+                if postPingActiveLink != prePingActiveLink {
+                    self.vpnCoreLock.lock()
+                    let czfReplayStartedCore = self.isRunning
+                    self.vpnCoreLock.unlock()
+                    if nodeSwitched || !czfReplayStartedCore {
+                        self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
+                    }
                 }
             } else if postPingActiveLink != prePingActiveLink {
                 self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
