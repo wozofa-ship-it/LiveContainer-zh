@@ -429,7 +429,8 @@ private extension AltStoreSourcesViewModel {
 
 enum AltStoreSourceLoader {
     static func load(from url: URL) async throws -> (AltStoreSource, Data) {
-        let (data, response) = try await CZFVPNManager.hostSession().data(from: url)
+        // 3.8.547（L181）：源 JSON 会变，走 freshData 绕开 URLCache 取新鲜数据。
+        let (data, response) = try await CZFVPNManager.freshData(from: url)
         if let httpResponse = response as? HTTPURLResponse,
            !(200...299).contains(httpResponse.statusCode) {
             throw NSError(domain: "AltStoreSource", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"])
@@ -3079,7 +3080,8 @@ private final class CZFSourceIconCache {
             let newTask = Task<UIImage?, Never> {
                 // D4：先验 HTTP 状态，非 2xx（404 错误页等）直接返 nil，
                 // 不缓存坏数据（N2/N3 同款）。失败不缓存，成功才缓存。
-                guard let (data, response) = try? await CZFVPNManager.hostSession().data(from: url),
+                // 3.8.547（L181）：图标会变（同地址换图），绕开 URLCache；磁盘 30 天 TTL 照旧先验。
+                guard let (data, response) = try? await CZFVPNManager.freshData(from: url),
                       let httpResponse = response as? HTTPURLResponse,
                       (200...299).contains(httpResponse.statusCode),
                       let img = Self.decodedImage(from: data) else { return nil }

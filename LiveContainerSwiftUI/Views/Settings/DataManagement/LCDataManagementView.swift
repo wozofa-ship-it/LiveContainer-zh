@@ -6308,7 +6308,10 @@ struct LCDataManagementView : View {
         for urlString in stored {
             guard let sourceURL = URL(string: urlString) else { continue }
             do {
-                let (data, response) = try await CZFVPNManager.hostSession().data(from: sourceURL)
+                // 3.8.547（L184）：源表会变，走 freshData 绕开 URLCache 取新鲜数据——
+                // 同 L181-1（源页/图标/订阅）机理；恢复缺 App 时拉到缓存旧字节，
+                // downloadURL 还是旧版的，缺 App 就装上旧版（L79/L80 同款害处）。
+                let (data, response) = try await CZFVPNManager.freshData(from: sourceURL)
                 // 404 等错误页也可能落盘成“源表”再解析；先验状态，
                 // 非 2xx 直接跳过这个源，别把错误页当源表解析。
                 guard let httpResponse = response as? HTTPURLResponse,

@@ -328,11 +328,18 @@ public final class CZFVPNManager {
             return
         }
         var request = URLRequest(url: url)
+        // 3.8.547（L181）：订阅会变，绕开 URLCache（同 freshData 的理
+        // 由；这里本来就是 URLRequest，直接置 cachePolicy）。
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 30
         // 不少机场按客户端 UA 返回不同格式，给个常见客户端的
         // UA 拿到原始分享链接列表
         request.setValue("Shadowrocket/2.2.50", forHTTPHeaderField: "User-Agent")
-        URLSession.shared.dataTask(with: request) { data, response, error in
+        // 3.8.547（L183）：订阅走 hostSession——代理开且核心在跑时经节点
+        // 取（URLSession.shared 绕开代理；机场订阅域名在直连下常被墙，
+        // 核心明明在跑、订阅却拉不下来，图标同款已在 load 里修过）；
+        // 代理关时 hostSession() 本来就回 .shared，行为不变。
+        Self.hostSession().dataTask(with: request) { data, response, error in
             if let error {
                 completion(.failure(error))
                 return
@@ -2541,6 +2548,22 @@ public final class CZFVPNManager {
     public static func hostSession() -> URLSession {
         guard isHostProxyEnabled, shared.isRunning else { return .shared }
         return proxiedHostSession
+    }
+
+    // 3.8.547（L181）：取会变的内容必须绕开 URLCache——hostSession()
+    // 的两路会话（.shared 与 proxiedHostSession）都是
+    // URLSessionConfiguration.default，requestCachePolicy 默认
+    // .useProtocolCachePolicy、urlCache 默认共享缓存；源站
+    // （GitHub Pages / raw 常见 max-age 300–600 秒）回了
+    // Cache-Control 后，max-age 内刷新直接拿缓存字节、不走网，
+    // 用户明明点了刷新、新版也上架了，源页还是旧数据，直到
+    // max-age 过期才出现；L147-1 的短路还把这份缓存字节当成
+    // “数据没变”直接跳过。离线时照旧走 catch（旧内容保留 +
+    // 报错），不改离线行为；代理行为走 hostSession() 原样。
+    public static func freshData(from url: URL) async throws -> (Data, URLResponse) {
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        return try await hostSession().data(for: request)
     }
 
     /// 下载用配置：走节点时改用前台配置——后台配置的下载任务由
