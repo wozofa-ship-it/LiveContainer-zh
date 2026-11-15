@@ -1078,8 +1078,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 errorShow = true
             }
         } else {
+            // 610 修法：540 唯一红字是这里类型检查超时（LCAppListView.swift:1080，
+            // the compiler is unable to type-check this expression in reasonable time）。
+            // 长串拼接（6 段 +、4 个三元、3 处插值、2 处 joined）原来是直接赋值、
+            // 编得过；540（L61-4）把它包进 await MainActor.run 闭包后推过
+            // 类型检查的时限。修法是拆表达式、不改逻辑：闭包外先把几段
+            // 分别拼好，闭包里只做一次赋值。值全是本函数局部量（:1030
+            // 的元组解包 + loginOnly 参数），与 @State 无关，先拼后赋
+            // 语义一字不变。
+            let backupSummaryBase = "批量备份完成：成功 \(okNames.count) 个" + (loginOnly ? "（只备份登录态）" : "（完整备份）")
+            let backupSummaryOverwritten = overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : ""
+            let backupSummaryFailed = failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")
+            let backupSummarySkipped = skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")
+            let backupSummaryCopyFailed = copyFailedCount > 0 ? "\n其中 \(copyFailedCount) 个文件拷贝失败（备份可能不完整）" : ""
+            let backupSummary = backupSummaryBase + backupSummaryOverwritten + backupSummaryFailed + backupSummarySkipped + backupSummaryCopyFailed
             await MainActor.run {
-                installInfo = "批量备份完成：成功 \(okNames.count) 个" + (loginOnly ? "（只备份登录态）" : "（完整备份）") + (overwrittenCount > 0 ? "（其中 \(overwrittenCount) 个覆盖了旧备份）" : "") + (failedNames.isEmpty ? "" : "，失败 \(failedNames.count) 个：\n" + failedNames.joined(separator: "\n")) + (skippedNames.isEmpty ? "" : "，跳过 \(skippedNames.count) 个（已锁定）：\n" + skippedNames.joined(separator: "\n")) + (copyFailedCount > 0 ? "\n其中 \(copyFailedCount) 个文件拷贝失败（备份可能不完整）" : "")
+                installInfo = backupSummary
                 installInfoShow = true
             }
         }
