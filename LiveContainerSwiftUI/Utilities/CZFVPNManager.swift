@@ -160,6 +160,15 @@ public final class CZFVPNManager {
     // 测速窗口内被挡下的源下载开关起核心请求：与
     // 与 deferredEnsureApps 同理，测速收尾再补跑一次。
     private var deferredHostEnsure = false
+    // 测速窗口内亲手换了节点：setActiveNode 在 isPinging 时、或
+    // 快照还在等 restart 时（收尾已把 isPinging 置 false、restart
+    // 还没跑，中间还隔着补跑的阻塞式起核心）记一笔，测速收尾/
+    // restart 取走再跟随——applyActiveNodeChange 只在核心在跑时
+    // 才切，测速开始时核心通常已被 stopCoreForPing 停掉，直接调
+    // 它跟随就落空。只认显式切换（且有效节点真变了）：删节点/
+    // 导入恢复改了链接时不记，removeNode“删在用节点就停核心”
+    // 的原语义不动。收尾链接没变时不清除，留给 restart 消费。
+    private var czfNodeSwitchDuringPing = false
     // 核心关闭后自动停时长（CZF，可调）：设置页“单App VPN”里
     // 选 5 / 10 / 30 分钟，默认 10 分钟（以前写死 30 分钟）。
     // 注意定义：只在最后一个标 VPN 的 App 关窗后计时，
@@ -442,7 +451,17 @@ public final class CZFVPNManager {
 
     public func setActiveNode(at index: Int) {
         guard nodeLinks.indices.contains(index) else { return }
+        let oldIndex = activeNodeIndex
         UserDefaults.standard.set(index, forKey: Self.activeNodeKey)
+        // 3.8.592（L125）：测速窗口内点的切换记一笔，收尾跟随用
+        //（见 czfFollowPostPingNodeSwitch / restartCoreAfterPing）；
+        // 窗外切换走下面 applyActiveNodeChange 立刻切，标志不记。
+        // 只在有效节点真变了时记（点已在用的节点不记）；快照还在
+        // 等 restart 时也记——收尾已把 isPinging 置 false、restart
+        // 还没跑，中间还隔着补跑的阻塞式起核心。
+        vpnCoreLock.lock()
+        if index != oldIndex && (isPinging || pingStoppedLink != nil) { czfNodeSwitchDuringPing = true }
+        vpnCoreLock.unlock()
         applyActiveNodeChange()
         refreshSettingsBackup()
     }
@@ -463,6 +482,43 @@ public final class CZFVPNManager {
             stop()
         } else if runningLink != nodeLink {
             _ = start()
+        }
+    }
+
+    // 测速收尾跟随用户在窗口内亲手换的节点（两条测速收尾调）：
+    // 原来只调 applyActiveNodeChange，它只在核心在跑时才切；
+    // 测速开始时核心通常已被 stopCoreForPing 停掉，跟随落空，
+    // 之后 completion 里的 restartCoreAfterPing 又会把核心起回
+    // 旧节点（钉死归属时）或干脆不起（跟随全局时守卫拦掉），
+    // 用户的切换被悄悄丢掉：界面显示新节点，核心却跑旧节点
+    // 或停着。核心停着且有待重启快照时，把快照改写成新链接、
+    // 无归属，让 restart 按新链接起（与窗外亲手切节点 start()
+    // 清归属同款语义）；核心在跑时 applyActiveNodeChange 已切
+    // 过去，同样把快照清掉，免得 restart 又起回旧节点。只认
+    // setActiveNode 的显式切换（nodeSwitched）：删在用节点/
+    // 导入恢复改了链接时不走这里，removeNode“删在用节点就停
+    // 核心”的原语义不动；没显式切换时就是原来的 applyActive-
+    // NodeChange，行为一字不动。
+    private func czfFollowPostPingNodeSwitch(postPingActiveLink: String, nodeSwitched: Bool) {
+        guard nodeSwitched else {
+            self.applyActiveNodeChange()
+            return
+        }
+        vpnCoreLock.lock()
+        let czfCoreRunningNow = isRunning
+        let czfHadSnapshot = pingStoppedLink != nil
+        vpnCoreLock.unlock()
+        if czfCoreRunningNow {
+            self.applyActiveNodeChange()
+            vpnCoreLock.lock()
+            self.pingStoppedLink = nil
+            self.pingStoppedOwner = nil
+            vpnCoreLock.unlock()
+        } else if czfHadSnapshot {
+            vpnCoreLock.lock()
+            self.pingStoppedLink = postPingActiveLink
+            self.pingStoppedOwner = nil
+            vpnCoreLock.unlock()
         }
     }
 
@@ -1745,10 +1801,21 @@ public final class CZFVPNManager {
     /// 自己的占用守卫兜底（中途别的 App 起了核心就拒绝）。
     public func restartCoreAfterPing() {
         vpnCoreLock.lock()
-        let link = pingStoppedLink
-        let owner = pingStoppedOwner
+        var link = pingStoppedLink
+        var owner = pingStoppedOwner
         pingStoppedLink = nil
         pingStoppedOwner = nil
+        // 3.8.592（L125）：收尾把 isPinging 置 false 后、这里跑
+        // 起来之前点的切换——setActiveNode 在快照还在时也记了
+        // 标志（见 setActiveNode），这里把快照改写成当前活动链
+        // 接、无归属，再按原路起在新节点上；没换过节点时一字不动。
+        // 改写目标永远是当前活动链接（用户最新选择），即使标志
+        // 是旧轮残留的也不会起错节点。
+        if czfNodeSwitchDuringPing {
+            czfNodeSwitchDuringPing = false
+            link = self.nodeLink
+            owner = nil
+        }
         vpnCoreLock.unlock()
         guard let link = link else { return }
         // 测速中途换了目标就不重启旧的：收尾已按用户的新
@@ -1861,6 +1928,7 @@ public final class CZFVPNManager {
             var deferredApps: [LCAppInfo] = []
             var deferredHost = false
             var postPingActiveLink = prePingActiveLink
+            var nodeSwitched = false
             self.vpnCoreLock.lock()
             // 并发测速收尾：只有最新一轮才清标志、记预热抑制、
             // 取走被挡请求；先完的旧轮只回自己的 completion，
@@ -1879,6 +1947,13 @@ public final class CZFVPNManager {
                 self.deferredEnsureApps = []
                 deferredHost = self.deferredHostEnsure
                 self.deferredHostEnsure = false
+                nodeSwitched = self.czfNodeSwitchDuringPing
+                // 链接没变时不清除：窗口内点的切换可能在收尾与
+                // restart 之间才发生，留给 restartCoreAfterPing
+                // 消费；变了就由跟随分支消费。
+                if postPingActiveLink != prePingActiveLink {
+                    self.czfNodeSwitchDuringPing = false
+                }
                 self.isPinging = false
             }
             self.vpnCoreLock.unlock()
@@ -1886,8 +1961,13 @@ public final class CZFVPNManager {
                 for app in deferredApps {
                     self.ensureRunning(for: app)
                 }
+                // 显式切换在补跑后再切一次（窗外亲手切节点同款：
+                // start() 清归属）；列表变动不走这里，补跑的归属不动。
+                if nodeSwitched && postPingActiveLink != prePingActiveLink {
+                    self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
+                }
             } else if postPingActiveLink != prePingActiveLink {
-                self.applyActiveNodeChange()
+                self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
             }
             if deferredHost {
                 self.ensureRunningForHost()
@@ -1943,6 +2023,7 @@ public final class CZFVPNManager {
             var deferredApps: [LCAppInfo] = []
             var deferredHost = false
             var postPingActiveLink = prePingActiveLink
+            var nodeSwitched = false
             self.vpnCoreLock.lock()
             // 并发测速收尾（同 pingAllNodes）：只有最新一轮才
             // 清标志、记预热抑制、取走被挡请求。
@@ -1959,6 +2040,13 @@ public final class CZFVPNManager {
                 self.deferredEnsureApps = []
                 deferredHost = self.deferredHostEnsure
                 self.deferredHostEnsure = false
+                nodeSwitched = self.czfNodeSwitchDuringPing
+                // 链接没变时不清除：窗口内点的切换可能在收尾与
+                // restart 之间才发生，留给 restartCoreAfterPing
+                // 消费；变了就由跟随分支消费。
+                if postPingActiveLink != prePingActiveLink {
+                    self.czfNodeSwitchDuringPing = false
+                }
                 self.isPinging = false
             }
             self.vpnCoreLock.unlock()
@@ -1966,8 +2054,13 @@ public final class CZFVPNManager {
                 for app in deferredApps {
                     self.ensureRunning(for: app)
                 }
+                // 显式切换在补跑后再切一次（窗外亲手切节点同款：
+                // start() 清归属）；列表变动不走这里，补跑的归属不动。
+                if nodeSwitched && postPingActiveLink != prePingActiveLink {
+                    self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
+                }
             } else if postPingActiveLink != prePingActiveLink {
-                self.applyActiveNodeChange()
+                self.czfFollowPostPingNodeSwitch(postPingActiveLink: postPingActiveLink, nodeSwitched: nodeSwitched)
             }
             if deferredHost {
                 self.ensureRunningForHost()
