@@ -3255,12 +3255,21 @@ struct LCDataManagementView : View {
             try? fm.removeItem(at: appBackupURL)
             throw NSError(domain: "LiveContainerBackup", code: 2, userInfo: [NSLocalizedDescriptionKey: "备份校验未通过（\(reason)），已保留上次备份"])
         }
-        // 全部写完才换上：删掉旧备份、临时文件夹改名到位。
-        // 中途任何一步抛错都走不到这里，旧备份原样保留
+        // 全部写完才换上：旧备份在就 replaceItemAt 换上、不
+        // 在就 moveItem。原来是先删旧备份再改名，两步之间被
+        // 杀/闪退就是新旧两空——旧备份已删、新备份还在带点
+        // 前缀的临时目录里（备份列表扫不到），下次备份入口
+        // 还会把它清掉；临时目录这整套防丢设计在最后一步
+        // 恰恰留了这个口子。照恢复侧 replaceContainerOffMain
+        // 同款（3.8.286 P0-3）：replaceItemAt 失败时原位文
+        // 件保留，成功后 tmp 即被换走；同卷（见上面注释），
+        // 换名仍是瞬间完成。中途任何一步抛错都走不到这里，
+        // 旧备份原样保留。
         if fm.fileExists(atPath: finalURL.path) {
-            try fm.removeItem(at: finalURL)
+            _ = try fm.replaceItemAt(finalURL, withItemAt: appBackupURL)
+        } else {
+            try fm.moveItem(at: appBackupURL, to: finalURL)
         }
-        try fm.moveItem(at: appBackupURL, to: finalURL)
         return (keychainCount, keychainHasSnapshot, bridgeStatus, loginFileCount, loginBreakdown, loginSkipped, newestDumpDate, loginSkippedPaths, folderName, containerCount, containerNames, loginFailed, loginFailedPaths)
     }
 
@@ -6113,12 +6122,24 @@ struct LCDataManagementView : View {
                 // 出/写回悄悄停掉（syncProxyTweak 的 L51-14 与
                 // syncKeepAliveTweak 的 L52 同款）；临时文件拷失败
                 // 时旧桥原样保留，下次启动再比内容重试。换位是同目
-                // 录 move，拷成功后基本不会失败，失败也清临时文件。
+                // 录 replaceItemAt（无旧桥时 move），拷成功后基本不会
+                // 失败，失败也清临时文件。
                 let tmpDest = dest.appendingPathExtension("czf-tmp")
                 try? fm.removeItem(at: tmpDest)
                 guard (try? fm.copyItem(at: src, to: tmpDest)) != nil else { continue }
-                try? fm.removeItem(at: dest)
-                guard (try? fm.moveItem(at: tmpDest, to: dest)) != nil else {
+                // 3.8.597（L132）：换上也走 replaceItemAt——原来
+                // 先删旧桥再 move，删与挪之间被杀就是桥没了（下
+                // 次启动才重部署）；备份最后一步同款口子，照恢
+                // 复侧 replaceContainerOffMain 同款。失败时原位
+                // 文件保留、清临时文件，下次启动再比内容重试。
+                if fm.fileExists(atPath: dest.path) {
+                    do {
+                        _ = try fm.replaceItemAt(dest, withItemAt: tmpDest)
+                    } catch {
+                        try? fm.removeItem(at: tmpDest)
+                        continue
+                    }
+                } else if (try? fm.moveItem(at: tmpDest, to: dest)) == nil {
                     try? fm.removeItem(at: tmpDest)
                     continue
                 }
