@@ -339,8 +339,15 @@ public final class CZFVPNManager {
             let compact = trimmed.components(separatedBy: .whitespacesAndNewlines).joined()
                 .replacingOccurrences(of: "-", with: "+")
                 .replacingOccurrences(of: "_", with: "/")
-            if !compact.isEmpty, compact.count % 4 == 0,
-               let decoded = Data(base64Encoded: compact),
+            // 3.8.576（L107）：整段 base64 常常不带尾部 `=`（URL 安全变体
+            // 尤其如此，上面刚换过 `-`/`_`）；`Data(base64Encoded:)` 要
+            // 求长度是 4 的倍数，没补 `=` 就解不出来、订阅报“里没找到
+            // 节点链接”。与 sub:// 分支（:291）与 vmessDisplay 同款，
+            // 先补齐再解；`count % 4 == 1` 的串补了也解不出，自然落
+            // 到下面的明文行过滤，不误伤。
+            let padded = compact + String(repeating: "=", count: (4 - compact.count % 4) % 4)
+            if !compact.isEmpty,
+               let decoded = Data(base64Encoded: padded),
                let decodedText = String(data: decoded, encoding: .utf8),
                decodedText.contains("://") {
                 text = decodedText
