@@ -3615,16 +3615,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 guard found else { continue }
                 Self.czfClaimedInboxFiles.insert(fileKey)
                 Task {
-                    await self.launchAppWithBundleId(bundleId: bundleName, container: entry.containerFolderName, urlStr: entry.launchURL)
-                    try? fm.removeItem(at: url)
+                    // 3.8.578（L109）：启动失败也留着下次前台重试——
+                    // 原来无论成败都删 JSON，人脸点了拒绝/启动抛错时
+                    // 这次分享就丢了，用户得回客 App 重新分享；与
+                    // .file 分支“成功删 JSON，失败留着下次重试”同款。
+                    let ok = await self.launchAppWithBundleId(bundleId: bundleName, container: entry.containerFolderName, urlStr: entry.launchURL)
+                    if ok { try? fm.removeItem(at: url) }
                     // L58-1：同上，裸 Task 里删静态 Set 回主线程。
                     await MainActor.run { Self.czfClaimedInboxFiles.remove(fileKey) }
                 }
             case .sidestore:
                 Self.czfClaimedInboxFiles.insert(fileKey)
                 Task {
-                    await self.launchAppWithBundleId(bundleId: "builtinSideStore", container: nil, urlStr: entry.launchURL)
-                    try? fm.removeItem(at: url)
+                    // 3.8.578（L109）：.launch 同款，启动失败留着重试。
+                    let ok = await self.launchAppWithBundleId(bundleId: "builtinSideStore", container: nil, urlStr: entry.launchURL)
+                    if ok { try? fm.removeItem(at: url) }
                     // L58-1：同上，裸 Task 里删静态 Set 回主线程。
                     await MainActor.run { Self.czfClaimedInboxFiles.remove(fileKey) }
                 }
@@ -4029,9 +4034,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
     
-    func launchAppWithBundleId(bundleId : String, container : String?, urlStr: String? = nil, forceJIT: Bool? = nil) async {
+    // 3.8.578（L109）：返 Bool 供分享收件箱认领用——启动失败
+    // 也要留着 JSON 下次前台重试（.file 分支同款口径）；其余
+    // 三处调用点忽略返回值，@discardableResult 覆盖。
+    @discardableResult
+    func launchAppWithBundleId(bundleId : String, container : String?, urlStr: String? = nil, forceJIT: Bool? = nil) async -> Bool {
         if bundleId == "" {
-            return
+            return false
         }
         var appFound : LCAppModel? = nil
         var isFoundAppLocked = false
@@ -4062,7 +4071,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             do {
                 let result = try await LCUtils.authenticateUser()
                 if !result {
-                    return
+                    return false
                 }
             } catch {
                 // 3.8.519（L44）：本函数从通知/深链/网格启动的裸 Task
@@ -4072,7 +4081,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     errorInfo = error.localizedDescription
                     errorShow = true
                 }
-                return
+                return false
             }
         }
         
@@ -4081,16 +4090,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 errorInfo = "lc.appList.appNotFoundError".loc
                 errorShow = true
             }
-            return
+            return false
         }
 
         do {
             try await appFound.runApp(multitask: nil, containerFolderName: container, urlStr: urlStr, forceJIT: forceJIT)
+            return true
         } catch {
             await MainActor.run {
                 errorInfo = error.localizedDescription
                 errorShow = true
             }
+            return false
         }
         
     }
