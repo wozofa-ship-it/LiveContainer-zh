@@ -685,10 +685,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
 
         do {
-            guard let profile = configuration.model.appInfo.generateWebClipConfig(
-                withContainerId: configuration.model.uiSelectedContainer?.folderName,
-                iconStyle: style
-            ) else {
+            // 3.8.564（L303-2）：generateWebClipConfig 内部读 displayName ×4 + bundleIdentifier ×1，
+            // 全是 _info 读；本函数从横幅卡裸 Task 调来、不在主线程（L33 同款），
+            // L33 只包了 installMdm 的 MainActor.run。整段调回主线程再做（guard 条件里
+            // await MainActor.run 不能跟尾随闭包，写 body: 标签，610 同款）。
+            guard let profile = await MainActor.run(body: {
+                configuration.model.appInfo.generateWebClipConfig(
+                    withContainerId: configuration.model.uiSelectedContainer?.folderName,
+                    iconStyle: style
+                )
+            }) else {
                 throw CocoaError(.propertyListWriteInvalid)
             }
             let data = try PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
@@ -708,6 +714,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         guard let style = await delegate.promptForGeneratedIconStyle() else {
             return
         }
+        // 3.8.564（L303-2）：displayName() 读 _info，本函数从横幅卡裸 Task 调来、不在主线程（L33 同款）；
+        // L33 只把 UIKit 判窗/present 包进 MainActor.run，漏了这次 _info 读。入口先回主线程取一次名，后面只用局部量。
+        let rawDisplayName = await MainActor.run { configuration.model.appInfo.displayName() ?? configuration.model.displayName }
 
         do {
             guard let image = configuration.model.appInfo.generateLiveContainerWrappedIcon(with: style),
@@ -720,7 +729,6 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
 
-            let rawDisplayName = configuration.model.appInfo.displayName() ?? configuration.model.displayName
             let displayName = rawDisplayName.replacingOccurrences(of: "/", with: "_")
             let fileURL = temporaryDirectory.appendingPathComponent("\(displayName) Icon.png")
             try imageData.write(to: fileURL, options: .atomic)

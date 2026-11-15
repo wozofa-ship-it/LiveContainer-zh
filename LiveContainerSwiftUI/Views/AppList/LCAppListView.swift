@@ -1002,7 +1002,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.302：范围由调用方从范围单里选了再传进来（原来无参、
     // 默认完整备份，从不问范围）。
     private func batchBackup(loginOnly: Bool) async {
-        let apps = selectedBatchApps
+        // 3.8.564（L289-1）：selectedBatchApps 离主线程读会撞 _info 与 @State——本函数从范围单按钮的裸 Task 调来（:1852/:1855），同步前缀跑在后台执行器上；selectedBatchApps 读 batchSelectedIDs（@State）+ sharedModel.apps/hiddenApps（@Published 数组）+ czfBatchKey → getUniqueIdentifier → bundleIdentifier()/relativeBundlePath 读 _info（NSMutableDictionary）；主线程 toggleHidden/toggleLocked 写 _info + save、列表刷新改数组时，并发读可能崩（L233-1 同款，只修了 batchHide/batchUnhide 的 filter，这三处与隐藏/恢复按钮的 Task 读点漏了；L44 注释也留了“本页这两处仍留着”）。快照回主线程取，数组是值类型、模型是 class，取完离线用无碍。
+        let apps = await MainActor.run { selectedBatchApps }
         guard !apps.isEmpty else { return }
         // 3.8.534（L61-4）：本函数从批量备份范围单按钮的裸 Task 调来、
         // 不在主 actor 上（L40 同款）；batchBusy/installInfo/
@@ -1110,7 +1111,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 记“无备份”跳过；单个失败不 abort 整批，跑完汇总报数；
     // 跑完刷新每行备份状态。
     private func batchRestore(loginOnly: Bool) async {
-        let apps = selectedBatchApps
+        // 3.8.564（L289-1）：同 batchBackup——范围单按钮的裸 Task 调来（:1869/:1872），selectedBatchApps 快照回主线程取。
+        let apps = await MainActor.run { selectedBatchApps }
         guard !apps.isEmpty else { return }
         // 3.8.534（L61-4）：同 batchBackup，范围单按钮的裸 Task 调来、
         // 不在主 actor 上；@State 写回主线程再写，defer 改各 return
@@ -1291,7 +1293,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 钥匙串），逐个调，单个失败不 abort 整批。确认在调用前
     // 由 confirmationDialog 一次问清（删 App / 删 App 及其数据）。
     private func batchDelete(removeDataFolders: Bool) async {
-        let apps = selectedBatchApps
+        // 3.8.564（L289-1）：同 batchBackup——确认框按钮的裸 Task 调来（:1837/:1840），selectedBatchApps 快照回主线程取。
+        let apps = await MainActor.run { selectedBatchApps }
         guard !apps.isEmpty else { return }
         // 3.8.519（L44）：本函数从确认框按钮的裸 Task 调来、不在主
         // actor 上（L40 同款），batchBusy/errorInfo/installInfo/
@@ -1813,7 +1816,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 全隐藏判断直接拿 batchSelectionAllHidden 算。
                     Button(batchSelectionAllHidden ? "恢复显示" : "隐藏") {
                         Task {
-                            if batchSelectionAllHidden {
+                            // 3.8.564（L289-1）：batchSelectionAllHidden 读 selectedBatchApps（见 batchBackup 注释），裸 Task 里直接读会离主线程撞 _info；先回主线程取快照再分支，batchHide/batchUnhide 自己还会再取一次，两次一致。
+                            let allHidden = await MainActor.run { batchSelectionAllHidden }
+                            if allHidden {
                                 await batchUnhide()
                             } else {
                                 await batchHide()

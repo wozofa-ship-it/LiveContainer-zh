@@ -214,6 +214,11 @@ struct CZFAppGridView: View {
     // coordinator 的三个回调清掉（选完/取消/手势关掉）。
     private func czfSaveIcon(for app: LCAppModel) async {
         guard let style = await promptForGeneratedIconStyle() else { return }
+        // 3.8.564（L303-2）：displayName() 读 _info（LCAppInfo.plist 字典），本函数从网格菜单裸 Task 调来、
+        // 不在主线程（L38 同款）；L38 只把 UIKit 判窗/present 与 @State 写包进 MainActor.run，漏了这次 _info 读——
+        // 锁/隐藏开关、自定义名等主线程写点撞上同一毫秒会崩。入口先回主线程取一次名，后面只用局部量。
+        // 横幅卡 saveIcon（LCAppBannerViewController.swift:718）与两处 createAppClip 同款，四处同根同修。
+        let rawDisplayName = await MainActor.run { app.appInfo.displayName() ?? app.displayName }
         // 写盘失败时清掉已建的临时目录（banner saveIcon 的 catch
         // 同款清理；导出成功时 coordinator 接管，不走这里）。
         var temporaryDirectory: URL?
@@ -226,7 +231,6 @@ struct CZFAppGridView: View {
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             temporaryDirectory = dir
-            let rawDisplayName = app.appInfo.displayName() ?? app.displayName
             let displayName = rawDisplayName.replacingOccurrences(of: "/", with: "_")
             let fileURL = dir.appendingPathComponent("\(displayName) Icon.png")
             try imageData.write(to: fileURL, options: .atomic)
@@ -278,10 +282,17 @@ struct CZFAppGridView: View {
     private func czfCreateAppClip(for app: LCAppModel) async {
         guard let style = await promptForGeneratedIconStyle() else { return }
         do {
-            guard let profile = app.appInfo.generateWebClipConfig(
-                withContainerId: app.uiSelectedContainer?.folderName,
-                iconStyle: style
-            ) else {
+            // 3.8.564（L303-2）：generateWebClipConfig 内部读 displayName ×4 + bundleIdentifier ×1，
+            // 全是 _info 读；本函数从网格菜单裸 Task 调来、不在主线程（L38 同款），
+            // L38 只包了 installMdm 的 MainActor.run。整段调回主线程再做——
+            // uiSelectedContainer（@Published）的读与图标生成（UIKit 活）也一并回主线程。
+            // guard 条件里 await MainActor.run 不能跟尾随闭包，写 body: 标签（610 同款）。
+            guard let profile = await MainActor.run(body: {
+                app.appInfo.generateWebClipConfig(
+                    withContainerId: app.uiSelectedContainer?.folderName,
+                    iconStyle: style
+                )
+            }) else {
                 throw CocoaError(.propertyListWriteInvalid)
             }
             let data = try PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)

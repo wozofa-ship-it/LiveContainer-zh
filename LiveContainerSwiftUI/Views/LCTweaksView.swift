@@ -720,11 +720,6 @@ struct LCTweakFolderView : View {
             tweakItems.insert(newTweakItem, at: idx)
 
             if isRoot {
-                let indexToRename2 = sharedModel.tweakFolderNames.firstIndex(of: tweakItem.displayName)
-                guard let indexToRename2 = indexToRename2 else {
-                    return
-                }
-                sharedModel.tweakFolderNames.remove(at: indexToRename2)
                 // 3.8.565（L96）：注册表里只存去后缀的名（冷启动
                 // 扫描同款口径）——原来直接插用户敲的新名，改成
                 // `X.disabled` 会进一条带后缀的键，下次开 App 设
@@ -732,8 +727,23 @@ struct LCTweakFolderView : View {
                 // 后缀后若已在表里（磁盘上已有 `X.disabled`），
                 // 不再插第二条，ForEach(id: \.self) 不撞重名。
                 let registryName = cleanName.hasSuffix(LCTweakItem.disabledSuffix) ? String(cleanName.dropLast(LCTweakItem.disabledSuffix.count)) : cleanName
-                if !sharedModel.tweakFolderNames.contains(registryName) {
-                    sharedModel.tweakFolderNames.insert(registryName, at: indexToRename2)
+                // 3.8.564（L316-1）：旧名不在表里时别直接 return——
+                // 本机/共享根目录下外部新建（文件 App、iCloud 同步）
+                // 的夹，冷启动扫描只在启动时记一次，会话中途建的旧
+                // 名根本不在 tweakFolderNames 里；改名后新名也跟着
+                // 丢，App 设置/网格/横幅菜单要等下次冷启动才看得到
+                // 改名后的夹（L302-1/L303-1/L306-1 同款注册表漏）。
+                // 找得到就原位替换，找不到就按 L96 口径补一条；
+                // .dylib 不是文件夹、不进注册表（冷启动扫描只记目录）。
+                // 刚导入的 .framework 行里 isFolder 恒 false（导入
+                // 追加处写死），须另认 isFramework。
+                if let indexToRename2 = sharedModel.tweakFolderNames.firstIndex(of: tweakItem.displayName) {
+                    sharedModel.tweakFolderNames.remove(at: indexToRename2)
+                    if !sharedModel.tweakFolderNames.contains(registryName) {
+                        sharedModel.tweakFolderNames.insert(registryName, at: indexToRename2)
+                    }
+                } else if (tweakItem.isFolder || tweakItem.isFramework) && !sharedModel.tweakFolderNames.contains(registryName) {
+                    sharedModel.tweakFolderNames.append(registryName)
                 }
             }
         }
