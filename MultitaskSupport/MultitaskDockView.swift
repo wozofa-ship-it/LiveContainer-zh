@@ -4843,21 +4843,22 @@ private struct SourcePanelRow: View {
     }
 
     private var hasUpdate: Bool {
-        guard let sourceVersion = app.latestVersion?.version,
+        // 3.8.574（L105）：坞源面板这份 hasUpdate 是第三份手写版本
+        // 比较，只比版本号、不比 build、也不查忽略——只升 build 的
+        // 更新（2.0/b50 → 2.0/b100）在源页/网格/横幅都打更新角标，
+        // 坞面板里不显示「更新」按钮；用户忽略掉的版本，源页三处
+        // 都藏了，坞面板还继续显示。低 #8 早已把三处消费者统一到
+        // czfIsNewerVersion（版本 + build 二元组），只有这里漏了。
+        // 改走共用比较器 + 忽略检查，与横幅/网格同款形状；
+        // 私有的 isVersion 只有这里一处调用，随之一并删掉。
+        // latest 先解包：latestVersion?.buildVersion 是 String??（双层
+        // 可选），直接传给 String? 参数编不过；解包后 buildVersion
+        // 是 String?，单层。
+        guard let latest = app.latestVersion,
               let installed = installedAppModel else { return false }
-        return Self.isVersion(sourceVersion, newerThan: installed.appInfo.version())
-    }
-
-    private static func isVersion(_ a: String, newerThan b: String) -> Bool {
-        let aParts = a.split(separator: ".").map { Int($0) ?? 0 }
-        let bParts = b.split(separator: ".").map { Int($0) ?? 0 }
-        let count = max(aParts.count, bParts.count)
-        for i in 0..<count {
-            let av = i < aParts.count ? aParts[i] : 0
-            let bv = i < bParts.count ? bParts[i] : 0
-            if av != bv { return av > bv }
-        }
-        return false
+        let sourceVersion = latest.version
+        if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
+        return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
     }
 
     private var isPlugin: Bool {
