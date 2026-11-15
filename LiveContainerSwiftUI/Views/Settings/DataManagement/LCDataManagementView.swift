@@ -2065,9 +2065,14 @@ struct LCDataManagementView : View {
             Set((sharedModel.apps + sharedModel.hiddenApps).flatMap { $0.appInfo.containers.map { $0.folderName } })
         }
         foldersToDelete.removeAll(where: { ownedNow.contains($0) })
-        do {
-            let fm = FileManager()
-            for folder in foldersToDelete {
+        let fm = FileManager()
+        // 3.8.541（L152）：逐个 try——原来整个循环共用外层一个 try，
+        // 任一文件夹删失败（锁住/权限）就进 catch、后面的文件夹一
+        // 个都不删；各记各的失败、删完再汇总报。失败的夹钥匙串与
+        // 名单都不动（仍在原处），下次再点可重来。
+        var failedFolders: [String] = []
+        for folder in foldersToDelete {
+            do {
                 try fm.removeItem(at: LCPath.dataPath.appendingPathComponent(folder))
                 LCUtils.removeAppKeychain(dataUUID: folder)
                 await MainActor.run {
@@ -2075,10 +2080,13 @@ struct LCDataManagementView : View {
                         return s == folder
                     })
                 }
+            } catch {
+                failedFolders.append(folder)
             }
-        } catch {
+        }
+        if !failedFolders.isEmpty {
             await MainActor.run {
-                errorInfo = error.localizedDescription
+                errorInfo = "以下闲置数据文件夹删除失败（已跳过，仍在原处）：\n" + failedFolders.joined(separator: "\n")
                 errorShow = true
             }
         }
@@ -2132,13 +2140,26 @@ struct LCDataManagementView : View {
                 return
             }
 
+            // 3.8.541（L152）：逐个 try——原来整个循环共用外层一个 try，
+            // 任一临时文件删失败就进 catch、后面的文件一个都不清；
+            // 各记各的失败、清完再汇总报。
+            var failedTmpCount = 0
             for item in tmpItems {
-                try fm.removeItem(at: item)
+                do {
+                    try fm.removeItem(at: item)
+                } catch {
+                    failedTmpCount += 1
+                }
             }
 
             await MainActor.run {
-                successInfo = "lc.settings.cleanTmpComplete".loc
-                successShow = true
+                if failedTmpCount == 0 {
+                    successInfo = "lc.settings.cleanTmpComplete".loc
+                    successShow = true
+                } else {
+                    errorInfo = "已清理临时文件，\(failedTmpCount) 个清理失败（仍在原处）"
+                    errorShow = true
+                }
             }
         } catch {
             await MainActor.run {
@@ -2176,6 +2197,7 @@ struct LCDataManagementView : View {
         let appContainers = await MainActor.run { allApps.map { ($0, $0.uiContainers) } }
 
         var cleanedCount = 0
+        var failedCount = 0
 
         do {
             for (_, containers) in appContainers {
@@ -2197,11 +2219,23 @@ struct LCDataManagementView : View {
                     let guestCachePath = containerPath.appendingPathComponent("Library/Caches")
                     
                     if fm.fileExists(atPath: guestCachePath.path) {
-                        let cacheItems = try fm.contentsOfDirectory(at: guestCachePath, includingPropertiesForKeys: nil)
-                        for item in cacheItems {
-                            try fm.removeItem(at: item)
+                        // 3.8.541（L152）：逐个 try——原来整轮清理共用外层
+                        // 一个 try，任一容器列目录失败或任一缓存项删失败
+                        // 就进 catch、后面所有 App 的缓存一个都不清；各记
+                        // 各的失败、清完再汇总报。
+                        do {
+                            let cacheItems = try fm.contentsOfDirectory(at: guestCachePath, includingPropertiesForKeys: nil)
+                            for item in cacheItems {
+                                do {
+                                    try fm.removeItem(at: item)
+                                } catch {
+                                    failedCount += 1
+                                }
+                            }
+                            cleanedCount += 1
+                        } catch {
+                            failedCount += 1
                         }
-                        cleanedCount += 1
                     }
                 }
             }
@@ -2209,21 +2243,35 @@ struct LCDataManagementView : View {
                 fm.fileExists(atPath: lcCaches.path) {
                 let cacheItems = try fm.contentsOfDirectory(at: lcCaches, includingPropertiesForKeys: nil)
                 for item in cacheItems {
-                    try fm.removeItem(at: item)
+                    do {
+                        try fm.removeItem(at: item)
+                    } catch {
+                        failedCount += 1
+                    }
                 }
                 cleanedCount += 1
             }
 
-            if cleanedCount == 0 {
-                // 3.8.515（L39）：同上，@State 写回主线程再写。
-                await MainActor.run {
-                    successInfo = "lc.settings.noCacheToClean".loc
-                    successShow = true
+            if failedCount == 0 {
+                if cleanedCount == 0 {
+                    // 3.8.515（L39）：同上，@State 写回主线程再写。
+                    await MainActor.run {
+                        successInfo = "lc.settings.noCacheToClean".loc
+                        successShow = true
+                    }
+                } else {
+                    await MainActor.run {
+                        successInfo = "lc.settings.cleanCacheComplete".loc
+                        successShow = true
+                    }
                 }
             } else {
+                // 3.8.541（L152）：有失败时报已清数 + 失败数，不报成功。
+                // 本机缓存列目录失败仍走外层 catch（已是最后一步，
+                // 后面无别的 App 要清）；其余失败都已按项记数。
                 await MainActor.run {
-                    successInfo = "lc.settings.cleanCacheComplete".loc
-                    successShow = true
+                    errorInfo = "已清理 \(cleanedCount) 个容器缓存，\(failedCount) 项清理失败（仍在原处）"
+                    errorShow = true
                 }
             }
         } catch {

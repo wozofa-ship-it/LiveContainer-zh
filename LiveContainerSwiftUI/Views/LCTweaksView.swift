@@ -691,6 +691,11 @@ struct LCTweakFolderView : View {
         let newFileName = tweakItem.isEnabled ? cleanName : cleanName + LCTweakItem.disabledSuffix
         let newUrl = self.baseUrl.appendingPathComponent(newFileName)
 
+        // 3.8.541（L154）：改成原名时不挪文件——moveItem 挪到自身会抛错、
+        // 弹一条“已存在”报错；改名框默认填的就是原名，不改直接点确定
+        // 是正常操作，不是错。setTweakEnabled（L116）同款守卫在位。
+        guard newUrl != tweakItem.fileUrl else { return }
+
         let fm = FileManager()
         do {
             try fm.moveItem(at: tweakItem.fileUrl, to: newUrl)
