@@ -19,6 +19,15 @@ struct AltStoreSourceAppVersion: Identifiable, Hashable {
     let localizedDescription: String?
     let downloadURL: URL
     let size: Int64?
+
+    // L175：版本行身份——同 B-9/czfStableID：id 是每次解码都换的
+    // UUID，详情页 ForEach(app.versions) 用它时，源刷新一到就
+    // 重建全部版本行，已点进的旧版详情页被顶回详情根（L174-1
+    // 同款）。身份只用版本号 + build，不进下载地址——地址改了
+    // 也不换身份；同一版本 + build 列两次时由解码处去重。
+    var czfStableID: String {
+        version + "|" + (buildVersion ?? "")
+    }
 }
 
 struct AltStoreSourceApp: Identifiable, Hashable {
@@ -521,7 +530,7 @@ enum AltStoreSourceLoader {
         // （版本，build）降序排好——合规源本来就是降序、排序是空
         // 操作；历史列表也跟着新版在前。比较器就是 hasUpdate 同款
         // czfIsNewerVersion（版本不等比版本、相等比 build），无新语义。
-        return versions.compactMap { version in
+        let sorted = versions.compactMap { version in
             guard let versionString = version.version,
                   let downloadURLString = version.downloadURL,
                   let downloadURL = url(for: downloadURLString, baseURL: baseURL) else {
@@ -538,6 +547,12 @@ enum AltStoreSourceLoader {
         }.sorted { a, b in
             czfIsNewerVersion(a.version, build: a.buildVersion, newerThan: b.version, installedBuild: b.buildVersion)
         }
+        // L175：按版本身份去重（留第一条）——ForEach(app.versions)
+        // 的身份走 czfStableID（版本号 + build），源里同一版本 +
+        // build 列两次时 ForEach 撞 id 的行为未定义（B-10 同款），
+        // 解码处一次去重；latest = versions.first 不受影响。
+        var seenVersionIDs = Set<String>()
+        return sorted.filter { seenVersionIDs.insert($0.czfStableID).inserted }
     }
     
     private static func buildLegacyVersion(from response: AltStoreSourceAppResponse, baseURL: URL, isoFormatter: ISO8601DateFormatter, shortFormatter: DateFormatter) -> AltStoreSourceAppVersion? {
@@ -2836,7 +2851,8 @@ struct LCSourceAppDetailView: View {
                 // 地址 + 下载按钮），点下载走“下载地址”栏同款
                 // （先关详情单再下该版的包）。
                 Section(header: Text("版本信息")) {
-                    ForEach(app.versions) { version in
+                    // 3.8.546（L175）：版本行身份走 czfStableID——AltStoreSourceAppVersion.id 是每次解码都换的 UUID，源刷新落地换掉整组 App 对象时全部版本行重建，已点进的旧版详情页被顶回详情根（L174-1 同款，面板行是 B-9 修过的 czfStableID）。版本身份只用版本号 + build，不进下载地址。
+                    ForEach(app.versions, id: \.czfStableID) { version in
                         NavigationLink {
                             LCSourceAppVersionDetailView(app: app, version: version, onDownloadVersion: onDownloadVersion)
                         } label: {

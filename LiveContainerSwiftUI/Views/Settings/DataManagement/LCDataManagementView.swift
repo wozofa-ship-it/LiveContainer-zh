@@ -6615,9 +6615,13 @@ struct LCDataManagementView : View {
                 try await filza.runApp(urlStr: launchURLStr)
             } catch {
                 // 3.8.527（L54）：裸 Task 里 @State 回主线程再写。
+                // 3.8.546（L178）：启动失败是错误，别走成功弹窗——原来
+                // successInfo + successShow 弹出来标题是“成功”，
+                // 正文却是一条系统原样报错（v214 同款误导，已在
+                // 恢复回执里修过一次）；改走 errorInfo/errorShow。
                 await MainActor.run {
-                    successInfo = error.localizedDescription
-                    successShow = true
+                    errorInfo = error.localizedDescription
+                    errorShow = true
                 }
             }
         }
