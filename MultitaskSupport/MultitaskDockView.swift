@@ -205,6 +205,11 @@ extension Notification.Name {
     // 同时运行上限（CZF）：3 个，第 4 个窗口注册时弹确认，
     // 防连续注册时弹框叠加，只弹一个。
     private var czfCapAlertShowing = false
+    // 3.8.596（L130）：上限确认框的弱引用——UIAlertController
+    // 被宿主连带关掉时不走任何 action 回调，上面这面旗会
+    // 一直 true、本会话再也不提醒；入口按它是否还在台上
+    // 认旗有没有过期（见 czfEnforceRunningCap）。
+    private weak var czfCapAlert: UIAlertController?
     private var czfPanelOverlayBackdrop: UIView?
     private var czfPanelOverlayHost: UIHostingController<AnyView>?
     // 源面板覆盖层：与 App 面板同构，各自一套遮罩+宿主，互开时先关对方
@@ -1076,6 +1081,15 @@ extension Notification.Name {
     // 第 4 个留着）。弹确认，点了“关闭并继续”才关最久最小
     // 化的那个，点了“不开了”就关掉刚开的这个新窗口。
     private func czfEnforceRunningCap(newUUID: String) {
+        // 3.8.596（L130）：旗过期自愈——确认框 present 在最顶层
+        // VC 上，若那层 VC 被代码关掉（如数据页备份完自动关页），
+        // UIAlertController 跟着被关、两个 action 回调一个都不走，
+        // czfCapAlertShowing 一直 true，此后整会话再也不提醒、
+        // 软上限悄悄失效；presentingViewController 为空即框已不
+        // 在台上，清旗重来。框还在台上时不动（下轮再来时还在）。
+        if czfCapAlertShowing, czfCapAlert?.presentingViewController == nil {
+            czfCapAlertShowing = false
+        }
         guard apps.count > 3, !czfCapAlertShowing else { return }
         // 定时打开不弹框：定时执行时人可能不在手机前，弹框
         // 没人点就卡住；当天定时拉起的直接按软上限放行（第 4 个
@@ -1121,6 +1135,7 @@ extension Notification.Name {
             self?.czfCapAlertShowing = false
             self?.closeAppWindow(uuid: newUUID)
         })
+        czfCapAlert = alert
         presenter.present(alert, animated: true)
     }
 
