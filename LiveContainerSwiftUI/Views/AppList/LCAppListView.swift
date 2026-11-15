@@ -4342,8 +4342,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return false
         }
 
+        // 3.8.563（L287-1）：内置 SideStore 的 relativeBundlePath 是 nil
+        // （LCAppInfo.h:24 只声明、从不赋值），runApp 没 bundleIdOverride
+        // 时直接拿它写 "selected" 键——UserDefaults.set(nil) 等于删键；
+        // 客端 LCBootstrap.m:961 的门（selectedApp || isSideStore）双空、
+        // invokeAppMain 不跑，收件箱 .sidestore 这路就静默落回 LC 自身 UI、
+        // 还把收件箱 JSON 当成功删了。openSideStore（LCUtilsExtensions:972）
+        // 同款早已传 bundleIdOverride，这里补上才对齐；普通 App 的
+        // bundleId 就是 relativeBundlePath，传 nil 走老路、不变。
+        let bundleIdOverride = bundleId == "builtinSideStore" ? "builtinSideStore" : nil
         do {
-            try await appFound.runApp(multitask: nil, containerFolderName: container, urlStr: urlStr, forceJIT: forceJIT)
+            try await appFound.runApp(multitask: nil, containerFolderName: container, bundleIdOverride: bundleIdOverride, urlStr: urlStr, forceJIT: forceJIT)
             return true
         } catch {
             await MainActor.run {

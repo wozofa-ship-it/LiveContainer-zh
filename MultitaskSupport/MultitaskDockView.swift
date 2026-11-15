@@ -4975,6 +4975,19 @@ struct SourcesPanelView: View {
             // + 旧文件先挪 .bak，签失败恢复旧的。
             let destURL = folderURL.appendingPathComponent(LCUtils.czfTweakFileName(for: url))
             try await LCUtils.czfReplaceTweakFile(tempURL: tempURL, destURL: destURL, folderURL: folderURL)
+            // 3.8.563（L302-1）：面板装插件建了文件夹却没进 tweakFolderNames 注册表——
+            // 注册表只在冷启动扫描（LiveContainerSwiftUIApp.swift:142）与模块页新建/改名
+            // （LCTweaksView.swift:814）时维护；源页 installTweak（S:1753）同款漏了，
+            // 面板这里也漏了。后果：本次启动内 App 设置（LCAppSettingsView.swift:399）/
+            // 网格（CZFAppGridView.swift:717）/横幅菜单（LCAppBannerViewController.swift:477）
+            // 里看不到刚装的文件夹、挂不上去，重启才出现。修法：装成功后按 L96 同口径
+            // （去 .disabled 后缀、表里没有才加）登记；失败走 catch，不登记。
+            // 函数本身 @MainActor，@Published 写在主线程。
+            let folderName = "\(name)-\(bundleIdentifier)"
+            let registryName = folderName.hasSuffix(".disabled") ? String(folderName.dropLast(".disabled".count)) : folderName
+            if !DataManager.shared.model.tweakFolderNames.contains(registryName) {
+                DataManager.shared.model.tweakFolderNames.append(registryName)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }

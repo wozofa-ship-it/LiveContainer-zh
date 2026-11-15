@@ -3734,6 +3734,20 @@ struct LCDataManagementView : View {
             await MainActor.run {
                 successInfo = czfSuccessText
                 successShow = true
+                // 3.8.563（L314-1）：备完刷恢复页的列表——backupFolderList/
+                // externalBackupFolderList 只在 onAppear（:470）与删备份/
+                // 换文件夹三路刷，backupApps 完事从不刷；恢复页内“去备份”
+                // （:435）建完备份回来，列表还停在备前那份、新备份看不
+                // 见（空态“先备份一次”也不消），得关页重进才出现。此处
+                // 是 count>0 的成功分支（0 个的两路在上面，failure 路
+                // resume 时 count 恒 0），盘上确有新文件夹才刷；+1 逼
+                // List 重建（L335/L192 同款，显示中的列表改数走 diff
+                // 会 Invalid update）；体积按新列表重算（refreshBackupSizes
+                // 只认现成两表）。
+                backupFolderList = backupFolders(fromExternal: false)
+                externalBackupFolderList = Self.externalBackupFolderURL() != nil ? backupFolders(fromExternal: true) : []
+                backupListVersion += 1
+                refreshBackupSizes()
             }
         }
     }
