@@ -104,6 +104,11 @@ struct AppSceneViewSwiftUI: UIViewControllerRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(onAppInitialize: onAppInitialize, onExit: {
             show = false
+            // 3.8.555（L228）：客进程退出时也摘条目——场景还活着
+            // （终止屏），但 App 已经不在跑；只靠 disconnect 钩子，
+            // 条目要残留到用户关场景。removeRunningApp 幂等，两处
+            // 各调一次无害。本结构体没有 appInfo，只有 dataUUID。
+            MultitaskDockManager.shared.removeRunningApp(dataUUID)
         })
     }
     
@@ -133,6 +138,8 @@ struct MultitaskAppWindow: View {
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("LCSkipTerminatedScreen", store: LCUtils.appGroupUserDefault) var skipTerminatedScreen = false
     let pub = NotificationCenter.default.publisher(for: UIScene.didDisconnectNotification)
+    // 3.8.555（L228）：原生窗口关窗信号——管理器发、本场景收
+    let closePub = NotificationCenter.default.publisher(for: .czfCloseNativeWindow)
     init(id: String) {
         guard let appInfo = MultitaskWindowManager.appDict[id] else {
             return
@@ -167,7 +174,20 @@ struct MultitaskAppWindow: View {
             .onReceive(pub) { out in
                 if let scene1 = sceneDelegate.window?.windowScene, let scene2 = out.object as? UIWindowScene, scene1 == scene2 {
                     show = false
+                    // 3.8.555（L228）：场景销毁时摘坞条目——原生条目没有
+                    // view，removeRunningApp 仅有的两个调用点（Decorated
+                    // 退出回调、C4 死窗清理）都够不到它，条目原来永久残留、
+                    // 幽灵图标一直挂着，VPN 自动停也不触发。
+                    MultitaskDockManager.shared.removeRunningApp(appInfo.dataUUID)
                 }
+            }
+            .onReceive(closePub) { note in
+                // 3.8.555（L228）：管理器关窗信号——原生场景只能自己
+                // 销毁（requestSceneDestruction），管理器够不到场景；
+                // uuid 对上才关，别家场景不动。关后 disconnect 钩子
+                // 摘条目（同上）。语义与虚拟窗 closeWindow 一致。
+                guard (note.userInfo?["appUUID"] as? String) == appInfo.dataUUID else { return }
+                requestSceneDestruction(isManual: true)
             }
             
         } else if skipTerminatedScreen && isVirtualWindowMode, appInfo != nil {

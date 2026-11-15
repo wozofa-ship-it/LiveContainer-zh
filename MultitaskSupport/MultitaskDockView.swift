@@ -157,6 +157,8 @@ class AppInfoProvider {
 // 的建窗回调与串行门都认它（与 smallWindow 旧轮询同一信号）。
 extension Notification.Name {
     static let czfMultitaskWindowAppeared = Notification.Name("CZFMultitaskWindowAppeared")
+    // 3.8.555（L228-1）：原生窗口关窗信号——管理器发、场景收（W:142 订）。
+    static let czfCloseNativeWindow = Notification.Name("CZFCloseNativeWindow")
 }
 
 // MARK: - MultitaskDockView Manager
@@ -810,6 +812,12 @@ extension Notification.Name {
             }
             return false
         }
+        // 3.8.555（L228-1）：剪完查空收坞——原来只有关窗路查空
+        // 收坞，剪残留路不查；删 App/覆盖安装后最后一个幽灵
+        // 条目被剪掉，坞还挂在屏边只剩四个按钮。hideDock 自带
+        // isVisible 守卫，prune 又是文档要求主线程调的函数，
+        // 线程安全。
+        if apps.isEmpty { hideDock() }
     }
 
     /// App 删除/覆盖安装/全新安装/恢复完成 后调用：AppInfo 缓存与 dock
@@ -1173,9 +1181,21 @@ extension Notification.Name {
     // 关闭单个运行中 App（面板顶部状态栏的图标右上角 ✕ 用）
     @objc public func closeAppWindow(uuid: String) {
         DispatchQueue.main.async {
-            if let app = self.apps.first(where: { $0.appUUID == uuid }),
-               let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController {
+            guard let app = self.apps.first(where: { $0.appUUID == uuid }) else { return }
+            if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController {
                 vc.closeWindow()
+                return
+            }
+            // 3.8.555（L228-1）：原生窗口没有 Decorated 包装器，view 是
+            // nil——上面那路够不到，整个 if let 失败、函数直接空操作。
+            // 面板 ✕、重启、备份前关窗全都没反应，条目还一直挂着，
+            // VPN 自动停与坞收起也永远到不了。view 为 nil 才发关窗
+            // 信号，场景自己销毁（W:142 订了这信号，uuid 对上才关，
+            // 别家场景不动）；有 view 但 delegate 不是 Decorated 的
+            // 不发（没有对应的原生场景可关）。
+            // 虚拟路一字未动。
+            if app.view == nil {
+                NotificationCenter.default.post(name: .czfCloseNativeWindow, object: nil, userInfo: ["appUUID": uuid])
             }
         }
     }
@@ -1533,6 +1553,15 @@ extension Notification.Name {
             self.apps.forEach { app in
                 if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController {
                     vc.closeWindow()
+                } else if app.view == nil {
+                    // 3.8.555（L232-1）：批量关只修了单关路的一半——
+                    // closeAllWindows 循环里只有虚拟窗一路，原生条目 view
+                    // 是 nil，两处“关闭全部”点下去全员空操作、无任何反馈。
+                    // 与单关同款：view 为 nil 就发关窗信号，场景自己销毁、
+                    // disconnect 钩子摘条目；虚拟分支一字未动。有 view 但
+                    // delegate 不是 Decorated 的不发信号（与单关同款）。
+                    // 接收侧零改动：W:142 已订阅，uuid 对上才关。
+                    NotificationCenter.default.post(name: .czfCloseNativeWindow, object: nil, userInfo: ["appUUID": app.appUUID])
                 }
             }
         }
