@@ -4458,6 +4458,14 @@ struct LCDataManagementView : View {
                     missing.append((folder: appFolder, name: appName, bundleID: appBundleID))
                     continue
                 }
+                // 3.8.583（L114）：报告里用的显示名取快照里的——本函数跑裸 Task，
+                // displayName() 读 _info NSMutableDictionary（LCAppInfo.m:148，
+                // 先读 LCCustomDisplayName），离主线程读与主线程写（改名写
+                // customDisplayName、启动写 lastLaunched）竞态，是 L73/L74
+                // 元素级快照的漏网：下面 9 处报告聚合全在裸 Task 上直读；
+                // allAppIdentities 已在恢复前取齐，app 五路匹配全出自它，
+                // 一定对得上（对不上回落文件夹名，与原来 ?? folderName 同款）。
+                let reportName = allAppIdentities.first(where: { $0.app === app })?.displayName ?? folderName
                 do {
                     // v216：iCloud 下载进度经闭包回主线程写文案
                     //（只在外部源等待时触发；本地恢复不报进度）。
@@ -4472,23 +4480,23 @@ struct LCDataManagementView : View {
                     keychainImportedTotal += outcome.keychainImported
                     keychainUnwritableTotal += outcome.keychainUnwritable
                     if keychainStatusFirst == nil && outcome.keychainStatus != errSecSuccess {
-                        keychainStatusFirst = (app.appInfo.displayName() ?? folderName, outcome.keychainStatus)
+                        keychainStatusFirst = (reportName, outcome.keychainStatus)
                     }
                     // v216：钥匙串已排队的 App 记下来，报告末尾
                     // 逐个提醒打开一次（排队快照下次全新启动才写回）
                     if outcome.keychainQueued > 0 {
-                        keychainQueuedApps.append(app.appInfo.displayName() ?? folderName)
+                        keychainQueuedApps.append(reportName)
                     }
                     // 3.8.286：组容器失败进报告（旧数据已保留）
                     if !outcome.groupRestoreFailed.isEmpty {
-                        groupFailedApps.append("\(app.appInfo.displayName() ?? folderName)（组容器 \(outcome.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
+                        groupFailedApps.append("\(reportName)（组容器 \(outcome.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
                     }
                     // B-6：会话文件合并失败进报告（原文件未动，
                     // 可再恢复一次；路径带 App 名前缀，跨 App
                     // 同名路径不混淆）。
                     if outcome.mergedLoginFailed > 0 {
                         mergeFailedTotal += outcome.mergedLoginFailed
-                        let mergeDisplayName = app.appInfo.displayName() ?? folderName
+                        let mergeDisplayName = reportName
                         if mergeFailedPathsTotal.count < 10 {
                             mergeFailedPathsTotal.append(contentsOf: outcome.mergedLoginFailedPaths.prefix(10 - mergeFailedPathsTotal.count).map { "\(mergeDisplayName)/\($0)" })
                         }
@@ -4496,15 +4504,15 @@ struct LCDataManagementView : View {
                     // 3.8.294（P0-4）：下载未完成仍算恢复成功（部分
                     // 数据已拷回），单列进报告，不进 noDataApps。
                     if outcome.downloadIncomplete {
-                        downloadIncompleteApps.append(app.appInfo.displayName() ?? folderName)
+                        downloadIncompleteApps.append(reportName)
                     }
                     if outcome.ok {
                         restoredCount += 1
                         if await Self.backupVersionDiffers(appFolder: appFolder, app: app) {
-                            versionMismatchApps.append(app.appInfo.displayName() ?? folderName)
+                            versionMismatchApps.append(reportName)
                         }
                         if let note = fallbackNote {
-                            fallbackPairedApps.append("\(app.appInfo.displayName() ?? folderName)（\(note)）")
+                            fallbackPairedApps.append("\(reportName)（\(note)）")
                         }
                     } else {
                         // 完整恢复时带上备份里容器数：0 个 = 备份里真
@@ -4515,7 +4523,7 @@ struct LCDataManagementView : View {
                         // 不再是结构 0），会话合并数与钥匙串条数一
                         // 起，0 报告时能直接定位是文件夹空、合并 0
                         // 还是快照空——14:45 弹窗只写裸名，定不了。
-                        let displayName = app.appInfo.displayName() ?? folderName
+                        let displayName = reportName
                         if loginOnly {
                             noDataApps.append("\(displayName)（备份里容器 \(outcome.containerFolderCount) 个，会话文件合并 \(outcome.mergedLoginFiles) 个，合并失败 \(outcome.mergedLoginFailed) 个，钥匙串快照 \(outcome.keychainFound) 条）")
                         } else {
@@ -4526,7 +4534,7 @@ struct LCDataManagementView : View {
                         noDataFolders.append(NoDataFolderEntry(name: displayName, folder: appFolder))
                     }
                 } catch {
-                    restoreFailedApps.append("\(app.appInfo.displayName() ?? folderName)：\(LCUtils.czfFriendlyError(error))")
+                    restoreFailedApps.append("\(reportName)：\(LCUtils.czfFriendlyError(error))")
                 }
             }
             // 未安装的 App：先从源里下载安装，等装好再恢复它的数据。
@@ -4626,19 +4634,25 @@ struct LCDataManagementView : View {
                             // hiddenApps 是 @Published，主线程在安装
                             // 完成时改它、这里每 2 秒读它，跨线程读
                             // 写会读到不一致的中间态。
-                            let currentApps = await MainActor.run { sharedModel.apps + sharedModel.hiddenApps }
-                            installedApp = currentApps.first(where: {
-                                !czfMissingBeforeApps.contains(ObjectIdentifier($0)) &&
-                                // 显示名认预设名或 manifest 名任一：安装时
-                                // 传的是文件夹名剥后缀的预设名（czfPresetName），
-                                // manifest 名（plan.name）是备份时的显示名；
-                                // 实例改名后备份过，文件夹名冻在首次备份
-                                // 时、manifest 每次备份都重写，两边会岔开——
-                                // 只认 plan.name 时装好的 App 永远对不上，
-                                // 空等 5 分钟报安装失败、数据也不恢复。
-                                (($0.appInfo.displayName() ?? "") == plan.name || ($0.appInfo.displayName() ?? "") == czfPresetName) &&
-                                (plan.bundleID.isEmpty || ($0.appInfo.bundleIdentifier() ?? "") == plan.bundleID)
-                            })
+                            // 3.8.583（L114）：只取数组还不够——谓词里的
+                            // displayName()/bundleIdentifier() 读 _info，
+                            // 原来 first(where:) 在 MainActor.run 外面
+                            // 跑、每 2 秒离主线程读一次，是 L73 元素级
+                            // 快照的漏网；取数组 + 匹配挪进同一跳。
+                            installedApp = await MainActor.run {
+                                (sharedModel.apps + sharedModel.hiddenApps).first(where: {
+                                    !czfMissingBeforeApps.contains(ObjectIdentifier($0)) &&
+                                    // 显示名认预设名或 manifest 名任一：安装时
+                                    // 传的是文件夹名剥后缀的预设名（czfPresetName），
+                                    // manifest 名（plan.name）是备份时的显示名；
+                                    // 实例改名后备份过，文件夹名冻在首次备份
+                                    // 时、manifest 每次备份都重写，两边会岔开——
+                                    // 只认 plan.name 时装好的 App 永远对不上，
+                                    // 空等 5 分钟报安装失败、数据也不恢复。
+                                    (($0.appInfo.displayName() ?? "") == plan.name || ($0.appInfo.displayName() ?? "") == czfPresetName) &&
+                                    (plan.bundleID.isEmpty || ($0.appInfo.bundleIdentifier() ?? "") == plan.bundleID)
+                                })
+                            }
                             if installedApp != nil { break }
                         }
                         return CZFMissingWaitResult(name: plan.name, folder: plan.folder, installedApp: installedApp, cancelled: waitCancelled)
@@ -6371,7 +6385,12 @@ struct LCDataManagementView : View {
             do {
                 // 锁旁路：Filza 也能被锁定，直启前先过共享守卫；
                 // 未装 Filza 时与原来一样静默无事，未锁时不弹人脸。
-                guard let filza = sharedModel.apps.first(where: { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }) else { return }
+                // 3.8.583（L114）：sharedModel.apps 是 @Published，
+                // 裸 Task 里直读是 L70/L76 同款漏网（那两轮修了恢
+                // 复/清缓存/定时三路，这里漏了）；先回主线程取
+                // Filza 的模型，bundleIdentifier() 的 _info 读也
+                // 在同一跳里，后面流程不动。
+                guard let filza = await MainActor.run { sharedModel.apps.first(where: { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }) } else { return }
                 guard await filza.czfAuthenticateIfLocked() else { return }
                 try await filza.runApp(urlStr: launchURLStr)
             } catch {

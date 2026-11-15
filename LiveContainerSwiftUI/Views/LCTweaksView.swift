@@ -384,6 +384,20 @@ struct LCTweakFolderView : View {
                 return s == tweakItem
             })
         } catch {
+            // 3.8.583（L114）：磁盘上已没了（外部删/同步清掉）——
+            // 要删的终态本来就是“盘上无、表里无”，别报错、直接把
+            // 行与注册表清掉，不然这行永远删不掉、每点一次报一次
+            // 错（indexSet 版同款口径：不留僵尸条目）；盘上还在
+            // 才是真删失败，照旧报错。
+            if !fm.fileExists(atPath: tweakItem.fileUrl.path) {
+                if let index = tweakItems.firstIndex(of: tweakItem) {
+                    tweakItems.remove(at: index)
+                }
+                if isRoot {
+                    sharedModel.tweakFolderNames.removeAll(where: { $0 == tweakItem.displayName })
+                }
+                return
+            }
             errorShow = true
             errorInfo = error.localizedDescription
             return
