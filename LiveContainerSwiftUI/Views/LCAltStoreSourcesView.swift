@@ -664,14 +664,19 @@ enum CZFSkippedUpdate {
     /// 该条目永不再命中，读时顺手删掉，别让 UserDefaults 无限长。
     /// 未装的 App 保守保留（重装旧版回来时跳过仍有效）。
     static func pruneStale(installed apps: [LCAppModel]) {
-        let installedVersions = Dictionary(apps.map {
-            ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.version() ?? "")
-        }, uniquingKeysWith: { first, _ in first })
+        // L149-1：按包名收全部已装分身的版本，不只取首个——
+        // 只按首个分身判会误删：新分身排在前时条目被删，之后
+        // 删掉新分身、旧分身顶上来，更新行重现、跳过却丢了。
+        var installedVersions: [String: [String]] = [:]
+        for app in apps {
+            installedVersions[app.appInfo.bundleIdentifier() ?? "", default: []]
+                .append(app.appInfo.version() ?? "")
+        }
         var dict = skippedVersions()
         let before = dict.count
         dict = dict.filter { stableID, skippedVersion in
             let bundleId = String(stableID.split(separator: "|", maxSplits: 1).first ?? Substring(stableID))
-            guard let installed = installedVersions[bundleId], !installed.isEmpty else { return true }
+            guard let versions = installedVersions[bundleId], !versions.isEmpty else { return true }
             // 3.8.562（L93）：原来只留“跳过版本比已装新”的条目——
             // 已装与跳过版本号相等时（只升 build 的更新：已装
             // 2.0/build 50、源最新 2.0/build 100，用户跳过 2.0）
@@ -679,7 +684,8 @@ enum CZFSkippedUpdate {
             // 跳过是按版本号记的，与 CZFUpdateIgnore 同款语义：
             // 只有已装版本号严格新于跳过版本（已更新过去了）
             // 才删；相等留着，源出了更新的版本号再提醒。
-            return !czfIsVersion(installed, newerThan: skippedVersion)
+            // L149-1：全部已装分身都严格新于跳过版本才删；单分身时与原来一字相同。
+            return !versions.allSatisfy { czfIsVersion($0, newerThan: skippedVersion) }
         }
         if dict.count != before {
             UserDefaults.standard.set(dict, forKey: key)

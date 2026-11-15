@@ -6401,30 +6401,63 @@ struct LCDataManagementView : View {
             }
             
             var movedDataFolderCount = 0
+            var failedDataNames: [String] = []
             let sharedDataFolders = try fm.contentsOfDirectory(atPath: LCPath.lcGroupDataPath.path)
             for sharedDataFolder in sharedDataFolders {
                 if appDataFoldersInUse.contains(sharedDataFolder) {
                     continue
                 }
-                try fm.moveItem(at: LCPath.lcGroupDataPath.appendingPathComponent(sharedDataFolder), to: LCPath.dataPath.appendingPathComponent(sharedDataFolder))
-                movedDataFolderCount += 1
+                // 3.8.540（L150）：逐个 try——原来整个循环共用外层
+                // 一个 try，任一文件夹目标位置已有同名（私目录里
+                // 同名夹）时 moveItem 抛 Cocoa 516，整个函数直接
+                // 进 catch、后面的文件夹一个都不搬，还只报一条系
+                // 统原样错误；各记各的失败、搬完再汇总报。
+                do {
+                    try fm.moveItem(at: LCPath.lcGroupDataPath.appendingPathComponent(sharedDataFolder), to: LCPath.dataPath.appendingPathComponent(sharedDataFolder))
+                    movedDataFolderCount += 1
+                } catch {
+                    failedDataNames.append(sharedDataFolder)
+                }
             }
-            
+
             var movedTweakFolderCount = 0
+            var failedTweakNames: [String] = []
             let sharedTweakFolders = try fm.contentsOfDirectory(atPath: LCPath.lcGroupTweakPath.path)
             for tweakFolderInUse in sharedTweakFolders {
                 if tweakFoldersInUse.contains(tweakFolderInUse) || tweakFolderInUse == "TweakLoader.dylib" {
                     continue
                 }
-                try fm.moveItem(at: LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolderInUse), to: LCPath.tweakPath.appendingPathComponent(tweakFolderInUse))
-                movedTweakFolderCount += 1
+                do {
+                    try fm.moveItem(at: LCPath.lcGroupTweakPath.appendingPathComponent(tweakFolderInUse), to: LCPath.tweakPath.appendingPathComponent(tweakFolderInUse))
+                    movedTweakFolderCount += 1
+                } catch {
+                    failedTweakNames.append(tweakFolderInUse)
+                }
             }
             // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在主
             // actor 上（L40-1 同款），successInfo/successShow 是
             // @State，回主线程再写；搬文件仍在外面。
+            // 3.8.540（L150）：有失败时报点名错误、不报成功——原来
+            // 失败只走外层 catch、一条系统原样错误，成功文案只
+            // 在全搬完时报；现在搬完再汇总：全成功时文案一字不
+            // 变，有失败时报已搬数 + 失败名单；失败的留在共享区
+            // 没动、数据没丢，手动改名/删掉私目录同名夹后再点
+            // 一次即可。
             await MainActor.run {
-                successInfo = "lc.settings.moveDanglingFolderComplete %lld %lld".localizeWithFormat(movedDataFolderCount,movedTweakFolderCount)
-                successShow = true
+                if failedDataNames.isEmpty && failedTweakNames.isEmpty {
+                    successInfo = "lc.settings.moveDanglingFolderComplete %lld %lld".localizeWithFormat(movedDataFolderCount,movedTweakFolderCount)
+                    successShow = true
+                } else {
+                    var text = "已移回 \(movedDataFolderCount) 个数据文件夹、\(movedTweakFolderCount) 个模块文件夹；以下文件夹移回失败（目标位置已有同名文件夹，留在共享区未动）："
+                    if !failedDataNames.isEmpty {
+                        text += "\n数据文件夹：\n" + failedDataNames.joined(separator: "\n")
+                    }
+                    if !failedTweakNames.isEmpty {
+                        text += "\n模块文件夹：\n" + failedTweakNames.joined(separator: "\n")
+                    }
+                    errorInfo = text
+                    errorShow = true
+                }
             }
             
         } catch {
