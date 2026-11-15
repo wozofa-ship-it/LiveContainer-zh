@@ -3969,15 +3969,18 @@ struct SourcesPanelView: View {
     // czfDirectDataPage/czfDirectBackupApp/czfPreselectedLoginOnly
     // 三个 @State 一并删掉，不留摆设。
     // 3.8.309：VPN 节点菜单状态（与 App 页盾牌同款：长按选节点
-    // 挂延迟，点按开关核心；测速结果只存本面板，不动 App 页）。
+    // 挂延迟，点按开关核心；测速结果内存里只存本面板，L134-2 后
+    // 测完也写共用缓存，App 页/VPN 页切过来不再显示“未测速”）。
     @State private var vpnPingResults: [Int: CZFVPNManager.CZFNodePingResult] = [:]
+    // L134-2：测速结果属于哪个节点列表的快照 + 测量时间（App 页 L58-2 同款）。
+    @State private var vpnPingResultNodes: [String] = []
+    @State private var vpnPingResultsFetchedAt: Date?
     @State private var vpnPinging: Bool = false
     // 3.8.586（L118）：面板下载在途 URL 集——“下载”按钮没有在途
-    // 态，连点两下会起两个 Task 并发下同一个 URL；裸 Task 走全局
-    // 执行器，removeItem→moveItem 两步之间能插进另一个 Task：先
-    // 到的 move 成功、后到的 move 因目标已存在抛错，文件明明下
-    // 好了、分享框也弹了，还多一个“文件已存在”报错。源页同款
-    // 有 DownloadHelper 单飞守卫（L50-1），面板这份拷贝漏了。
+    // 态，连点两下会起两个 Task 并发下同一个 URL；两个 Task 各下
+    // 一份、先后落盘，各弹一次分享框。源页同款有 DownloadHelper
+    // 单飞守卫（L50-1），面板这份拷贝漏了。L134-3 后落盘是原子
+    // replaceItemAt（无两步竞态），守卫仍防重复下载与重复弹框。
     // 按 URL 记在途，不同 URL 仍可并发；成功/失败两路都在
     // MainActor.run 里清掉（函数本身 @MainActor，判据与插入
     // 在主线程；Task 取消走 catch 清，进程被杀则 @State 随之
@@ -4001,7 +4004,9 @@ struct SourcesPanelView: View {
     private func panelVPNNodeMenuLabel(idx: Int, link: String) -> String {
         let name = CZFVPNManager.nodeDisplay(for: link).name
         var suffix = ""
-        if let r = vpnPingResults[idx] {
+        // L134-2：内存结果的下标属于旧列表时不挂延迟——设置页增删/重排
+        // 后下标仍在界内、指的却是另一个节点（App 页 L58-2 同款）。
+        if vpnPingResultNodes == CZFVPNManager.shared.nodeLinks, let r = vpnPingResults[idx] {
             suffix = r.success ? " · \(r.delay)ms" : " · 失败"
         }
         let mark = idx == CZFVPNManager.shared.activeNodeIndex ? "✓ " : ""
@@ -4023,6 +4028,12 @@ struct SourcesPanelView: View {
                 var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (idx, r) in results.enumerated() { stored[idx] = r }
                 self.vpnPingResults = stored
+                // L134-2：结果按下标记存，快照记下它属于哪个列表（App 页
+                // L58-2 同款）；结果写共用缓存，App 页/VPN 页切过来也
+                // 不再显示“未测速”（App 页 R-3 同款）。
+                self.vpnPingResultNodes = links
+                self.vpnPingResultsFetchedAt = Date()
+                CZFVPNManager.savePingResults(stored, nodes: links)
                 if let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }) {
                     bestIndex = best.offset
                 }
@@ -4030,8 +4041,14 @@ struct SourcesPanelView: View {
             if pingStoppedCore {
                 CZFVPNManager.shared.restartCoreAfterPing()
             }
-            if let best = bestIndex, best != CZFVPNManager.shared.activeNodeIndex, best < CZFVPNManager.shared.nodeLinks.count {
-                CZFVPNManager.shared.setActiveNode(at: best)
+            // L134-2：best 是测速起跑时快照 links 里的下标——测速期间去
+            // 设置页增删/重排节点后，照旧下标切会切到错的节点；按链接
+            // 内容换算成当前列表下标，找不到了（已删）就不切（App 页
+            // L58-2 同款）。
+            if let best = bestIndex, best < links.count,
+               let liveIdx = CZFVPNManager.shared.nodeLinks.firstIndex(of: links[best]),
+               liveIdx != CZFVPNManager.shared.activeNodeIndex {
+                CZFVPNManager.shared.setActiveNode(at: liveIdx)
             }
         }
     }
@@ -4040,7 +4057,19 @@ struct SourcesPanelView: View {
     // 本轮测速结果直接切，没有就先测再切；下标先判界防越界）。
     private func panelSwitchToFastestNode() {
         let links = CZFVPNManager.shared.nodeLinks
-        if let best = vpnPingResults.filter({ $0.value.success && $0.key < links.count }).min(by: { $0.value.delay < $1.value.delay }) {
+        // L134-2：内存结果的下标属于旧列表时（设置页增删/重排后没回过
+        // 本页），先清掉再现场重测——只判 best.key < links.count 不够，
+        // 列表变了下标仍在界内、指的却是另一个节点（App 页 L58-2 同款）。
+        if !vpnPingResults.isEmpty, vpnPingResultNodes != links {
+            vpnPingResults = [:]
+            vpnPingResultNodes = []
+            vpnPingResultsFetchedAt = nil
+        }
+        // 内存结果也会过期：面板常驻、App 连续活过 24h 不重启时，测得的
+        // 旧数仍在内存里，按旧数切会切到次优节点。有测量时间且在 24h
+        // 内才走内存快路，否则现场重测（App 页 L58-2 同款）。
+        let memoryFresh = vpnPingResultsFetchedAt.map { Date().timeIntervalSince($0) <= CZFVPNManager.pingCacheStaleAfter } ?? false
+        if memoryFresh, let best = vpnPingResults.filter({ $0.value.success && $0.key < links.count }).min(by: { $0.value.delay < $1.value.delay }) {
             CZFVPNManager.shared.setActiveNode(at: best.key)
             return
         }
@@ -4055,7 +4084,8 @@ struct SourcesPanelView: View {
         let idx = CZFVPNManager.shared.activeNodeIndex
         guard idx < links.count else { return "暂无节点" }
         let name = CZFVPNManager.nodeDisplay(for: links[idx]).name
-        if let r = vpnPingResults[idx] {
+        // L134-2：同上，快照与当前列表不一致时不显示旧下标的延迟。
+        if vpnPingResultNodes == links, let r = vpnPingResults[idx] {
             return r.success ? "当前节点：\(name) · \(r.delay)ms" : "当前节点：\(name) · 失败"
         }
         return "当前节点：\(name) · 未测速"
@@ -4861,10 +4891,16 @@ struct SourcesPanelView: View {
                 }
                 let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let destURL = docsURL.appendingPathComponent(fileName)
+                // L134-3：先删后挪的换位口子（L132/L133 同款，第五处）——两步
+                // 之间被杀，旧下载没了、新下载还在临时目录（系统会清掉）；
+                // 旧在就 replaceItemAt 原子换上、不在就 moveItem，失败时
+                // 旧文件原样不动（这里是可重下的文件，后果比备份/桥轻，
+                // 但换法与修法同款、成功路行为一字不变）。
                 if FileManager.default.fileExists(atPath: destURL.path) {
-                    try FileManager.default.removeItem(at: destURL)
+                    _ = try FileManager.default.replaceItemAt(destURL, withItemAt: tempURL)
+                } else {
+                    try FileManager.default.moveItem(at: tempURL, to: destURL)
                 }
-                try FileManager.default.moveItem(at: tempURL, to: destURL)
                 await MainActor.run {
                     panelDownloadingURLs.remove(url)
                     shareFileFromPanel(at: destURL)

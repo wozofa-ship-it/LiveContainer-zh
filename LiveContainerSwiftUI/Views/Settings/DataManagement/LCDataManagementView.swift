@@ -5312,7 +5312,8 @@ struct LCDataManagementView : View {
         // 是备份里的文件夹名（不是结尾的 restoredFolderNames）：
         // 精确动过的集合要等各循环跑完才知道，开始前只能按候选
         // 集关，个别被跳过（登录空壳）的窗口多关一次无害、重开
-        // 即可。过滤条件与下面 containerFolders 同款；loginOnly
+        // 即可。过滤条件与下面 containerFolders 同款（只按名，
+        // 不加 isDirectory——杂散名匹配不到窗口）；loginOnly
         // 全量合并时 containerFolders 为空，这里仍按备份文件夹名
         // 关，覆盖合并路径。MultitaskDockManager 是 iOS 16+ 类，
         // 必须用 #available 包住（2026-10-25 构建 #186 红字教训）。
@@ -5494,7 +5495,7 @@ struct LCDataManagementView : View {
         // （首启也会建一个），钥匙串段随后复用它，不重复建。
         if loginOnly && !isLoginBackup {
             let topFolders = (try? fm.contentsOfDirectory(at: appFolder, includingPropertiesForKeys: nil)) ?? []
-            loginMergeFolderCount = topFolders.filter { let n = $0.lastPathComponent; return n != "manifest.json" && !n.hasSuffix(".app") && n != "AppGroup" && n != "Keychain" }.count
+            loginMergeFolderCount = topFolders.filter { let n = $0.lastPathComponent; return n != "manifest.json" && !n.hasSuffix(".app") && n != "AppGroup" && n != "Keychain" && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }.count
             // 3.8.544（L74）：逐点取当前值（同 :5188 注释）。
             let (loginContainersEmpty, loginIsShared) = await MainActor.run { (app.uiContainers.isEmpty, app.appInfo.isShared) }
             if loginContainersEmpty, loginMergeFolderCount > 0 {
@@ -6765,7 +6766,7 @@ struct LCDataManagementView : View {
         let info = isFileDownloaded(manifestURL, underExternal: underExternal) ? manifestInfo(of: folderURL) : nil
         let children = (try? fm.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)) ?? []
         // 与 restoreOneApp 的 containerFolders 同口径
-        let containerCount = children.filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }.count
+        let containerCount = children.filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }.count
         let hasAppBundle = children.contains { $0.lastPathComponent.hasSuffix(".app") }
         // 钥匙串：目录不存在 = 无快照；存在则只数已下载的 plist，
         // 有任何一个未下载就标未同步（数是已下载部分的合计，
@@ -6794,7 +6795,7 @@ struct LCDataManagementView : View {
         // 在点行主线程同步跑，大容器几万文件时是秒级长堵。
         var sessionFileCount: Int? = nil
         if info?.scope == "login" {
-            let containerDirs = children.filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" }
+            let containerDirs = children.filter { $0.lastPathComponent != "manifest.json" && !$0.lastPathComponent.hasSuffix(".app") && $0.lastPathComponent != "AppGroup" && $0.lastPathComponent != "Keychain" && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             sessionFileCount = await Self.sessionFileCount(dirs: containerDirs)
         }
         return BackupPreviewItem(
