@@ -6286,6 +6286,7 @@ struct LCDataManagementView : View {
     
     func moveAppGroupFolderFromAppGroupToPrivate() {
         let fm = FileManager()
+        var movedNames: [String] = []
         do {
             if !fm.fileExists(atPath: LCPath.appGroupPath.path) {
                 try fm.createDirectory(atPath: LCPath.appGroupPath.path, withIntermediateDirectories: true)
@@ -6303,11 +6304,21 @@ struct LCDataManagementView : View {
             }
             for file in sharedFolderContents {
                 try fm.moveItem(at: file, to: LCPath.appGroupPath.appendingPathComponent(file.lastPathComponent))
+                movedNames.append(file.lastPathComponent)
             }
             successInfo = "lc.settings.appGroup.moveSuccess".loc
             successShow = true
             
         } catch {
+            // 3.8.581（L112）：中途失败回滚——原来逐个 move，挪到
+            // 一半抛错就停，文件劈成两半（源剩一半、目标已有一半），
+            // 再点入口守卫又拦住（目标非空），界面上没法续挪完，
+            // 数据分两处、App 只读一处；回滚已挪的，失败时两边
+            // 原样，下次再点能重来。回滚本身 try?（同因失败就
+            // 留原样，报错照旧）。
+            for name in movedNames {
+                try? fm.moveItem(at: LCPath.appGroupPath.appendingPathComponent(name), to: LCPath.lcGroupAppGroupPath.appendingPathComponent(name))
+            }
             errorInfo = error.localizedDescription
             errorShow = true
         }
@@ -6315,6 +6326,7 @@ struct LCDataManagementView : View {
     
     func moveAppGroupFolderFromPrivateToAppGroup() {
         let fm = FileManager()
+        var movedNames: [String] = []
         do {
             if !fm.fileExists(atPath: LCPath.appGroupPath.path) {
                 try fm.createDirectory(atPath: LCPath.appGroupPath.path, withIntermediateDirectories: true)
@@ -6332,11 +6344,18 @@ struct LCDataManagementView : View {
             }
             for file in privateFolderContents {
                 try fm.moveItem(at: file, to: LCPath.lcGroupAppGroupPath.appendingPathComponent(file.lastPathComponent))
+                movedNames.append(file.lastPathComponent)
             }
             successInfo = "lc.settings.appGroup.moveSuccess".loc
             successShow = true
             
         } catch {
+            // 3.8.581（L112）：同款回滚（见上一函数）：逐个 move
+            // 挪一半抛错会把文件劈成两半，再点入口守卫拦住、界
+            // 面上续挪不了；回滚已挪的，失败时两边原样。
+            for name in movedNames {
+                try? fm.moveItem(at: LCPath.lcGroupAppGroupPath.appendingPathComponent(name), to: LCPath.appGroupPath.appendingPathComponent(name))
+            }
             errorInfo = error.localizedDescription
             errorShow = true
         }
