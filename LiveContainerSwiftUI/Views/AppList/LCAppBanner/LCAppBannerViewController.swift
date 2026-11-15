@@ -614,7 +614,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
 
     private func uninstall() async {
         let appInfo = configuration.model.appInfo
-        let displayName = appInfo.displayName() ?? configuration.model.displayName
+        // 3.8.558（L307-1）：displayName() 读 _info（LCAppInfo.m:188），containers 读 _info[@"LCContainers"]（LCAppInfo.m:939），deleteAppFiles 内还读 containers 循环删容器 + 改 @Published appDataFolderNames；本函数从横幅卡 UIAction 的裸 Task 调来、不在主线程（L33 同款，见 presentConfirmation 注释；L303-2 只修了 saveIcon/createAppClip，这里漏了；L305-1 只修了批量删除那路调用）。三处各回主线程取/做——L303-2 快照口径 + L305-1 包裹口径。
+        let displayName = await MainActor.run { appInfo.displayName() ?? configuration.model.displayName }
         let shouldUninstall = await presentConfirmation(
             title: "lc.appBanner.confirmUninstallTitle".loc,
             message: "lc.appBanner.confirmUninstallMsg %@".localizeWithFormat(displayName),
@@ -626,7 +627,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
 
         var shouldRemoveAppFolders = false
-        let containers = appInfo.containers
+        // 3.8.558（L307-1）：上面 await presentConfirmation 之后恢复在后台执行器上（非隔离 Task 的执行器是全局并发池、不是主线程），containers 读 _info 仍离主线程；单独再取一次快照。
+        let containers = await MainActor.run { appInfo.containers }
         if !containers.isEmpty {
             shouldRemoveAppFolders = await presentConfirmation(
                 title: "lc.appBanner.deleteDataTitle".loc,
@@ -637,8 +639,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
 
         do {
-            let (failedContainers, keptBackupName) = try Self.deleteAppFiles(configuration.model, removeDataFolders: shouldRemoveAppFolders) { [weak self] model in
-                self?.delegate.removeApp(app: model)
+            // 3.8.558（L307-1）：deleteAppFiles 内读 containers（_info）循环删容器 + 改 @Published appDataFolderNames，离主线程跑与主线程 toggleHidden/toggleLocked 写 _info 并发可能崩（L233-1/L305-1 同款）；整段包进 MainActor.run——网格单删（czfDeleteGridApp，确认框按钮同步调、本就在主线程）删文件在主线程，语义不变；闭包非逃逸、抓 weak self 合法。
+            let (failedContainers, keptBackupName) = try await MainActor.run {
+                try Self.deleteAppFiles(configuration.model, removeDataFolders: shouldRemoveAppFolders) { [weak self] model in
+                    self?.delegate.removeApp(app: model)
+                }
             }
             var messages: [String] = []
             if !failedContainers.isEmpty {

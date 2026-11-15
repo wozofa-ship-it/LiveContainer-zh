@@ -1924,26 +1924,31 @@ public final class CZFVPNManager {
             vpnCoreLock.unlock()
             return
         }
-        var link = pingStoppedLink
+        let hadSnapshot = pingStoppedLink != nil
         var owner = pingStoppedOwner
         pingStoppedLink = nil
         pingStoppedOwner = nil
         // 3.8.592（L125）：收尾把 isPinging 置 false 后、这里跑
         // 起来之前点的切换——setActiveNode 在快照还在时也记了
-        // 标志（见 setActiveNode），这里把快照改写成当前活动链
-        // 接、无归属，再按原路起在新节点上；没换过节点时一字不动。
-        // 改写目标永远是当前活动链接（用户最新选择），即使标志
-        // 是旧轮残留的也不会起错节点。
+        // 标志（见 setActiveNode），归属清掉、按当前 effectiveLink
+        // 起在新节点上；没换过节点时一字不动。目标永远是用户最
+        // 新选择，即使标志是旧轮残留的也不会起错节点。
         if czfNodeSwitchDuringPing {
             czfNodeSwitchDuringPing = false
-            link = self.nodeLink
             owner = nil
         }
         vpnCoreLock.unlock()
-        guard let link = link else { return }
-        // 测速中途换了目标就不重启旧的：收尾已按用户的新
-        // 选择处理过，旧快照作废。
-        guard effectiveLink(for: owner).trimmingCharacters(in: .whitespacesAndNewlines) == link.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+        guard hadSnapshot else { return }
+        // 3.8.558（L241）：快照只用来判断“测速停过核心”，不再
+        // 比对目标链接——收尾跟随（czfFollowPostPingNodeSwitch）
+        // 只处理全局活动链接的变化；归属 App 的专属节点在测速
+        // 窗口内被改了（App 设置页 pin 节点，setNodeOverride 只
+        // 写 UserDefaults、不动核心、无跟随），旧守卫拿新目标比
+        // 旧快照、直接拦掉重启，测速前还在跑的核心测完一直停着，
+        // 预热抑制也已置真，只能亲手再起（L127 同款）。ensureRunning
+        // 自己按当前 effectiveLink 取，旧链接本来就起不回来；
+        // 亲手停核心（noteManualCoreToggle）与删在用节点（removeNode）
+        // 已在快照为 nil 时早退，拦重启的口子不在这里。
         ensureRunning(for: owner)
         // 重启成功后清掉测速收尾置的预热抑制：收尾时核心
         // 是停的（抑制置真），现在核心又在跑了，抑制前提

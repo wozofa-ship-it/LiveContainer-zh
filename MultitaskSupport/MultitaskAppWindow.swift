@@ -302,7 +302,13 @@ class MultitaskRelaunchManager: NSObject {
         }
         
         do {
-            try await appModel.runApp(multitask: true, containerFolderName: dataUUID)
+            // 3.8.558（L242-1）：内置 SideStore 走 openSideStore 同款
+            // override 再起——见 lookupAppModel 注释；普通 App 不动。
+            if appModel.appInfo is BuiltInSideStoreAppInfo {
+                try await appModel.runApp(multitask: true, containerFolderName: dataUUID, bundleIdOverride: bundleId)
+            } else {
+                try await appModel.runApp(multitask: true, containerFolderName: dataUUID)
+            }
         } catch {
             print("Failed to restart \(bundleId): \(error)")
         }
@@ -313,6 +319,20 @@ class MultitaskRelaunchManager: NSObject {
         if let app = sharedModel.apps.first(where: { $0.appInfo.relativeBundlePath == bundleId }) {
             return app
         }
-        return sharedModel.hiddenApps.first(where: { $0.appInfo.relativeBundlePath == bundleId })
+        if let app = sharedModel.hiddenApps.first(where: { $0.appInfo.relativeBundlePath == bundleId }) {
+            return app
+        }
+        // 3.8.558（L242-1）：内置 SideStore 的“重启已终止的 App”从没
+        // 生效过——启动时 "selected" 写的是 bundleIdOverride 的
+        // "builtinSideStore"（openSideStore，LCUtilsExtensions:967），
+        // 这里只按 relativeBundlePath 在 apps/hiddenApps 两表里找；
+        // SideStore 是合成模型（不在两表里）、relativeBundlePath
+        // 又是 nil（BuiltInSideStoreAppInfo 从不设它），永远找不
+        // 到、relaunchApp 在 guard 处静默 return。普通 App 不受
+        // 影响（"selected" 就是 relativeBundlePath）。
+        if bundleId == "builtinSideStore" {
+            return LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared)
+        }
+        return nil
     }
 }
