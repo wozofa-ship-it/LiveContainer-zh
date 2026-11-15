@@ -1009,13 +1009,17 @@ struct WebView: UIViewRepresentable {
         self.webView = WKWebView()
     }
     
-    mutating func setDelegate(delegete: WKNavigationDelegate) {
+    mutating func setDelegate(delegete: WebViewDelegate) {
         self.delegate = delegete
         self.webView.navigationDelegate = delegete
-        // 3.8.527（L54）：同对象兼 WKUIDelegate（target=_blank
-        // 与 JS 面板），这里一起挂上；不是 WKUIDelegate 的
-        // 调用方（若有）不挂、不改行为。
-        self.webView.uiDelegate = delegete as? WKUIDelegate
+        // 3.8.527 修 533：原来这里是 `delegete as? WKUIDelegate`
+        //（delegete 是 WKNavigationDelegate 存在类型），Swift 6.2.3
+        // 编译器在 OwnershipModelEliminator 直接崩掉（SIL verification
+        // failed，533 两次 Archive exit 65、日志 0 条红字就是它，修法
+        // 构建的 archive-raw-log artifact 里有原文）；唯一调用方传的
+        // 就是 WebViewDelegate（兼 WKUIDelegate），参数直接收具体类，
+        // 两处赋值都是静态上转型，不再有条件转型。
+        self.webView.uiDelegate = delegete
     }
     
     mutating func setObserver(observer: WebViewLoadObserver) {
