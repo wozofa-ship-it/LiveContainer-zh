@@ -4675,7 +4675,15 @@ struct SourcesPanelView: View {
                 // 开关状态（与 App 面板同款）
                 proxy.scrollTo("czfSourcesPanelTop", anchor: .top)
                 vpnCoreRunning = CZFVPNManager.shared.isRunning
-                Task { await viewModel.refreshAllSources() }
+                // L113-1：面板的 viewModel 与源页是两个实例，覆盖层常驻、
+                // @StateObject 只建一次；只刷已知 URL 的话，源页新加的
+                // 源进不了面板、删掉的还留着——调出前先按 UserDefaults
+                // 重读名单合并，再刷新。Task 必须标 @MainActor：Swift 5
+                // 下裸 Task 走全局执行器，reloadStoredSources 是同步的
+                // @MainActor 方法（类头 @MainActor），裸 Task 里直接调
+                // 编不过（旧的 refreshAllSources 是 async、await 能跳
+                // 过去，同步方法不行）。
+                Task { @MainActor in viewModel.reloadStoredSources(); await viewModel.refreshAllSources() }
             }
             .alert("提示", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                 Button("好") { errorMessage = nil }

@@ -266,6 +266,14 @@ final class AltStoreSourcesViewModel: ObservableObject {
         }
     }
     
+    // L113-1：坞源面板与源页各持一个 ViewModel 实例，面板覆盖层常驻、
+    // @StateObject 只在首次创建时建一次；旧版这里只在 init 跑一次，
+    // 之后源页增删源只写 UserDefaults，面板的 sources 永远是旧名单——
+    // 新源进不了面板、删掉的源还留在面板里继续刷。改成按 URL 合并：
+    // 已有的条目（含已解出的 source）原样保留，新 URL 以 isLoading
+    // 追加（面板显示转圈，等下一次刷新填数），已删的 URL 摘掉。
+    // init 时 sources 为空，与旧行为完全一致。面板每次调出前调一次
+    // reloadStoredSources() 再刷新。
     private func loadStoredSources() {
         let defaults = UserDefaults.standard
         let stored = defaults.array(forKey: defaultsKey) as? [String] ?? []
@@ -277,7 +285,17 @@ final class AltStoreSourcesViewModel: ObservableObject {
         let urls = stored.compactMap { URL(string: $0) }
             .map { stripTrailingSlash(from: $0) }
             .filter { seen.insert($0.absoluteString).inserted }
-        self.sources = urls.map { SourceItem(url: $0, isLoading: false) }
+        self.sources = urls.map { url in
+            if let existing = sources.first(where: { $0.url == url }) {
+                return existing
+            }
+            return SourceItem(url: url, isLoading: true)
+        }
+    }
+
+    /// L113-1：面板调出前重读已存源名单（见 loadStoredSources）。
+    func reloadStoredSources() {
+        loadStoredSources()
     }
 
     /// O-28：已存源缓存读盘 + 解码放后台——原来 init 里同步全在主
