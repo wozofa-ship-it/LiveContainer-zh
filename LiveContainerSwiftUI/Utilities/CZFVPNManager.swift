@@ -921,6 +921,22 @@ public final class CZFVPNManager {
     public func noteManualCoreToggle(started: Bool) {
         vpnCoreLock.lock()
         coreActionEpoch += 1
+        // 3.8.554（L221）：亲手停核心时一并清掉测速的待重启快照——
+        // stop() 只停核心，不清快照（L127 删在用节点同款已修过一次，
+        // removeNode :467 在位）；三处开关只认本页 vpnPinging，跨页
+        // 不互斥：面板打开后设置页/App 页才开始测速，面板开关还是
+        // 打开前刷的那个 true、照常能点，点“停止核心”只是空操作
+        // （核心已被 stopCoreForPing 停下），测完 completion 还会
+        // restartCoreAfterPing 把核心起回来，亲手停核心的意图被
+        // undo（L193-1 只拦了面板自己测速那一窗；L222 的调出刷新
+        // 只在打开时刷，面板已打开时不补刷）。快照只由
+        // restartCoreAfterPing 消费，清掉后 restart 读到 nil 不再起；
+        // 非测速窗口内快照本来就是 nil，清掉是空操作。三处开关都
+        // 先调这里再起/停，放这里一次盖住三路。
+        if !started {
+            pingStoppedLink = nil
+            pingStoppedOwner = nil
+        }
         // 亲手起核心才清掉测速后的预热抑制：亲手停核心不
         // 清——停完切回前台又被预热起回来，和测速后翻盘是
         // 同一类毛病；想恢复预热，拨一次预热开关即可。
@@ -1245,6 +1261,20 @@ public final class CZFVPNManager {
     public func start() -> Bool {
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
+        // 3.8.554（L221）：测速窗口内亲手起核心直接拒——三处开关只认
+        // 本页 vpnPinging，跨页不互斥：别处测速时本页开关还能点“启动
+        // 核心”（核心已被 stopCoreForPing 停下，开关显示未启动）；Xray
+        // 节点测速不走 sing-box 临时实例，start(withLink:) 里的探针守卫
+        // （CZFSingBoxCore.isServiceRunning）拦不住，start() 会把主核心
+        // 起起来、测速的 pingBatch 被生命周期锁拒、整批结果记“核心占用”
+        // （TUIC 测速有临时实例占着才拦得住）。内部三路 start() 调用方
+        // 进门前都已判 isPinging（prewarmIfNeeded、applyActiveNodeChange、
+        // ensureRunningForHost），不受影响；restartCoreAfterPing 走
+        // ensureRunning → start(withLink:)，不走这里。
+        guard !isPinging else {
+            lastError = "测速进行中，稍后再试"
+            return false
+        }
         // 3.8.523（L51）：手动起核心是新的明确意图，之前排好的
         // 自动停不能再按旧截止时间把它停掉——ensureRunning（开
         // App）与 ensureRunningForHost 起核心时都会取消待停，
@@ -1855,8 +1885,11 @@ public final class CZFVPNManager {
             // 悄悄一直停着（两轮重叠：App 页与设置页各有自己的
             // 测速标志，pingGeneration 注释已认两轮可并发；本页
             // 与设置页的 guard 只拦各自页内重入，拦不住跨页）。
-            // 快照只由 restartCoreAfterPing 读完即清；三处调用
-            // 方都在 completion 里按 pingStoppedCore 配对调它，
+            // 快照由 restartCoreAfterPing 读完即清；亲手停核心
+            // （noteManualCoreToggle，L221）与删在用节点（removeNode，
+            // L127）也会清——那两路本意就是停核心，restart 不再起；
+            // 收尾跟随在核心已在跑时也会清（restart 没必要）。
+            // 四处调用方都在 completion 里按 pingStoppedCore 配对调它，
             // pingAllNodes/pingSingleNode 一定调 completion，
             // 不留陈旧快照。
             return false

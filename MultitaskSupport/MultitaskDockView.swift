@@ -3689,9 +3689,15 @@ struct AllAppsListView: View {
         }
     }
 
-    // 3.8.284：已隐藏 App 也按同款搜索筛（与上面同一谓词）
+    // 3.8.284：已隐藏 App 也按同款搜索筛（与上面同一谓词）。
+    // 3.8.554（L224）：底表走 sortManager.sortedHiddenApps——原来
+    // 直接读 sharedModel.hiddenApps 原序：用户切了排序（字母/
+    // 时间/自定义）后，可见区跟排序走、隐藏区还按模型原序排，
+    // 同一个列表里两段顺序各走各的；主 App 页（sortedHiddenApps）
+    // 与本面板固定区（:3533）早已用排序后表，只剩这里漏了。
+    // 默认排序时 getSortedApps 原样返回，行为一字不动。
     private var filteredHiddenApps: [LCAppModel] {
-        let hidden = sharedModel.hiddenApps
+        let hidden = sortManager.sortedHiddenApps
         if searchText.isEmpty { return hidden }
         return hidden.filter { app in
             app.appInfo.displayName().localizedCaseInsensitiveContains(searchText) ||
@@ -3854,14 +3860,6 @@ struct AllAppsListView: View {
                 // 不留上次滑动的位置），搜索也一并清空。
                 proxy.scrollTo("czfAppPanelTop", anchor: .top)
                 searchText = ""
-                // 3.8.553（L222）：每次调出也刷新 VPN 开关状态——
-                // 覆盖层常驻、onAppear 只来一次（:4762 只在首次跑），
-                // 核心在别处起停（App 页开关 K2:390/:392、设置页开
-                // 关 P:505/:507、带 VPN 标记的 App 启动时
-                // ensureRunning 自动起核心、删在用节点停核心）后，
-                // 再调出面板开关还显示旧值（源面板同款 onChange
-                // :4860 早有这行，App 面板漏了）。
-                vpnCoreRunning = CZFVPNManager.shared.isRunning
             }
         }
     }
