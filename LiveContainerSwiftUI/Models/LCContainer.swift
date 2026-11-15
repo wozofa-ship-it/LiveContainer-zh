@@ -375,7 +375,14 @@ class LCContainer : ObservableObject, Hashable {
             }
             
             let plistData = try PropertyListSerialization.data(fromPropertyList: infoDict as Any, format: .binary, options: 0)
-            try plistData.write(to: infoDictUrl)
+            // 3.8.552（L215）：容器 plist 必须原子写——原来直接写，进程
+            // 恰在写盘那一刻被杀就留半截文件，NSDictionary(contentsOf:)
+            // 读回 nil、keychainGroupId 回落 -1（客端 SecItem.m 读到
+            // 0 走 legacy 共享组），钥匙串静默落回跨 App 共用、且
+            // 启动时没有任何一路会重分（只剩设置页旧容器迁移那处认 -1）。
+            // 组 A 其余有内容的写盘点（M:1237、S:388、S:3092）早已是 .atomic，
+            // 只剩这一处漏网（V:852 是 0 字节标记文件，无内容可撕，不算）；成功路径一字未变。
+            try plistData.write(to: infoDictUrl, options: .atomic)
         } catch {
             
         }

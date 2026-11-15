@@ -701,7 +701,11 @@ class LCAppModel: ObservableObject, Hashable {
     }
     private func czfFreeKeychainGroup(excluding container: LCContainer) -> Int {
         var used = Set<Int>()
-        for app in DataManager.shared.model.apps + DataManager.shared.model.hiddenApps {
+        // 3.8.552（L213-1）：已用组号三表全扫——原来只扫 apps +
+        // hiddenApps，漏了 arm32EmuApps（同是 LCAppModel、容器
+        // 一样带 keychainGroupId），32 位 App 占着的组号也可能
+        // 被重抽。
+        for app in DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps {
             for c in app.uiContainers where c !== container {
                 let g = c.keychainGroupId
                 if g >= 0 { used.insert(g) }
@@ -913,13 +917,17 @@ class LCAppModel: ObservableObject, Hashable {
                 let newName = NSUUID().uuidString
                 let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
                 let isMultiOpen = !czfOtherSameBundleApps().isEmpty
-                let group: Int
                 if isMultiOpen {
                     newContainer.enableMultiOpenIsolation()
-                    group = czfFreeKeychainGroup(excluding: newContainer)
-                } else {
-                    group = Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
                 }
+                // 3.8.552（L213-1）：钥匙串组是客端钥匙串命名空间的唯一
+                // 分隔（SecItem.m 按组号拼 access group）；单 App 分支
+                // 原来盲随机 0..<128，别的在用 App 占着的组号也可能抽
+                // 中，两个 App 共用一组、钥匙串条目按 service/account
+                // 互见（共用 service 名的 App 也会撞，如同款 SDK）。多开分支早就在用
+                // czfFreeKeychainGroup（全仓已用组号排除），单 App
+                // 分支也走它；128 个全占满时它内部才回落盲随机。
+                let group = czfFreeKeychainGroup(excluding: newContainer)
                 uiContainers.append(newContainer)
                 if uiSelectedContainer == nil {
                     uiSelectedContainer = newContainer;
