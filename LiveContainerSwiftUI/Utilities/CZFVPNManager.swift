@@ -1712,8 +1712,17 @@ public final class CZFVPNManager {
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
         guard isRunning, let link = runningLink else {
-            pingStoppedLink = nil
-            pingStoppedOwner = nil
+            // 3.8.587（L119）：核心没在跑就什么都不做、不清快照——
+            // 快照是谁停核心谁的：另一轮测速的 stopCoreForPing 没
+            // 停过核心，却把上一轮停核心那轮的快照清掉，上一轮
+            // 测完 restartCoreAfterPing 读到 nil 就不重启，核心
+            // 悄悄一直停着（两轮重叠：App 页与设置页各有自己的
+            // 测速标志，pingGeneration 注释已认两轮可并发；本页
+            // 与设置页的 guard 只拦各自页内重入，拦不住跨页）。
+            // 快照只由 restartCoreAfterPing 读完即清；三处调用
+            // 方都在 completion 里按 pingStoppedCore 配对调它，
+            // pingAllNodes/pingSingleNode 一定调 completion，
+            // 不留陈旧快照。
             return false
         }
         pingStoppedLink = link
