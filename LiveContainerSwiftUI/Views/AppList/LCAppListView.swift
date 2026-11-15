@@ -2747,6 +2747,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 批量自动覆盖不走这里，不弹框挡队列。
             // 预设名已落好时不弹框（恢复缺失实例自动新建用）。
             if !installOptionChosen.isReplace && !sameBundleIdApp.isEmpty && czfCustomDisplayName == nil {
+                // 3.8.590（L122）：等替换选择框消失完再弹改名输入框——
+                // 同款：上一个框消失动画没跑完时 root 仍忙，TextFieldAlertModifier
+                // 以 root 正忙丢掉本次 present、isPresented 置回 false，
+                // open() 的 continuation 永等不到 close()、安装悄悄卡死。
+                // 500ms > 动画时长。取消时按安装#2 口径抛专用取消信号。
+                do {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                } catch is CancellationError {
+                    throw CZFInstallCancelled()
+                }
                 let originalName = newAppInfo.displayName() ?? ""
                 let inputName = await installAsNewNameInput.open(initVal: originalName)
                 guard let inputName else {

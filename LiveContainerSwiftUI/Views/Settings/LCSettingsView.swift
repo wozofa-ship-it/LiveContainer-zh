@@ -1215,9 +1215,19 @@ struct LCSettingsView: View {
         guard let doImport = await certificateImportAlert.open(), doImport else {
             return
         }
+        // 3.8.590（L122）：等上一个确认框消失完再弹文件选择器——
+        // 上一个框的消失动画（约 0.35 秒）还没跑完时 root 上仍挂着它，
+        // DocModifier 的 czfIdleRootViewController 见 root 正忙就直接
+        // 丢掉本次 present、把 isPresented 置回 false，而 open() 的
+        // continuation 只有弹出来的框调 close() 才能恢复——框没出来
+        // = Task 永挂、导入悄悄卡死。500ms > 动画时长，够它消失完。
+        try? await Task.sleep(nanoseconds: 500_000_000)
         guard let certificateURL = await certificateImportFileAlert.open() else {
             return
         }
+        // 3.8.590（L122）：同款——等文件选择器消失完再弹密码输入框，
+        // 否则 TextFieldAlertModifier 同样以 root 正忙丢掉、Task 永挂。
+        try? await Task.sleep(nanoseconds: 500_000_000)
         guard let certificatePassword = await certificateImportPasswordAlert.open() else {
             return
         }
