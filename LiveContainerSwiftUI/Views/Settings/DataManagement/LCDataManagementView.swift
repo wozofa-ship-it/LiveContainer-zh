@@ -5349,6 +5349,33 @@ struct LCDataManagementView : View {
         }.value
     }
 
+    /// 3.8.553（L220）：恢复建容器组号分配——manifest 有组号且空闲时
+    /// 照它建（文件与钥匙串指向一起回来）；没组号（老备份）或组号
+    /// 已被别的在用容器占了时，现取全仓已用组号再挑空闲的，不许
+    /// 盲随机（L213-1 同根因：盲抽会撞上别的 App 在用的组，两
+    /// App 共用一组、钥匙串条目按 service/account 互见）。同一次
+    /// restoreOneApp 里先后建的几个容器，前面刚登记的已在
+    /// app.uiContainers 里，现取即已排除，不会内撞；128 个全占满
+    /// 时才回落盲随机（与 czfFreeKeychainGroup 同款）。
+    private static func czfRestoreKeychainGroup(manifestId: Int?) async -> Int {
+        let used = await MainActor.run {
+            var used = Set<Int>()
+            for app in DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps {
+                for c in app.uiContainers where c.keychainGroupId >= 0 {
+                    used.insert(c.keychainGroupId)
+                }
+            }
+            return used
+        }
+        if let m = manifestId, m >= 0, !used.contains(m) {
+            return m
+        }
+        if let free = (0..<SharedModel.keychainAccessGroupCount).filter({ !used.contains($0) }).randomElement() {
+            return free
+        }
+        return Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
+    }
+
     /// v216：downloadProgress 原样透传给三处 iCloud 等待
     /// （容器、组容器、登录态合并），调用方在主线程写文案。
     static func restoreOneApp(appFolder: URL, app: LCAppModel, loginOnly: Bool = false, downloadProgress: ((Int, Int) -> Void)? = nil) async throws -> RestoreOutcome {
@@ -5620,7 +5647,7 @@ struct LCDataManagementView : View {
                 // 3.8.544（L74）：bundleIdentifier() 读 _info，离主线程读竞态；现取。
                 let loginBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
                 if let bundleID = loginBundleID {
-                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
+                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: await Self.czfRestoreKeychainGroup(manifestId: manifestKeychainGroupId))
                 }
             }
             for folder in topFolders {
@@ -5658,13 +5685,13 @@ struct LCDataManagementView : View {
                     // makeLCContainerInfoPlist，这里漏了——没 plist
                     // 时 keychainGroupId 读 -1，宿主直写与游客桥
                     // 都往 "...shared.-1" 这个没授权的组里写，
-                    // 令牌写不进；组号照 manifest 的来，没有就随机
+                    // 令牌写不进；组号照 manifest 的来，没有就挑空闲组（L220）
                     //（与上面两处同款；写 plist 时建目录，合并随后
                     // 写文件，合并跳过 LCContainerInfo.plist 不覆盖）。
                     // 3.8.544（L74）：bundleIdentifier() 读 _info，离主线程读竞态；现取。
                     let mergeBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
                     if let bundleID = mergeBundleID {
-                        newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
+                        newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: await Self.czfRestoreKeychainGroup(manifestId: manifestKeychainGroupId))
                     }
                     target = newContainer
                 }
@@ -5730,7 +5757,7 @@ struct LCDataManagementView : View {
                 // 3.8.544（L74）：bundleIdentifier() 读 _info，离主线程读竞态；现取。
                 let keychainBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
                 if let bundleID = keychainBundleID {
-                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: manifestKeychainGroupId ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount))
+                    newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: await Self.czfRestoreKeychainGroup(manifestId: manifestKeychainGroupId))
                 }
             }
             for file in plistFiles {

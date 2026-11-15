@@ -3854,6 +3854,14 @@ struct AllAppsListView: View {
                 // 不留上次滑动的位置），搜索也一并清空。
                 proxy.scrollTo("czfAppPanelTop", anchor: .top)
                 searchText = ""
+                // 3.8.553（L222）：每次调出也刷新 VPN 开关状态——
+                // 覆盖层常驻、onAppear 只来一次（:4762 只在首次跑），
+                // 核心在别处起停（App 页开关 K2:390/:392、设置页开
+                // 关 P:505/:507、带 VPN 标记的 App 启动时
+                // ensureRunning 自动起核心、删在用节点停核心）后，
+                // 再调出面板开关还显示旧值（源面板同款 onChange
+                // :4860 早有这行，App 面板漏了）。
+                vpnCoreRunning = CZFVPNManager.shared.isRunning
             }
         }
     }
