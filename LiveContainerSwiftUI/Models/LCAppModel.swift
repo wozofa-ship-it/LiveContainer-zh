@@ -86,6 +86,38 @@ class LCAppModel: ObservableObject, Hashable {
         return entry
     }
 
+    /// F-10 回落：当前选中容器下没找到在跑窗口时，找本条目别的容器里
+    /// 唯一在跑的窗口——App 在跑时用户切了容器，当前 uuid 已不是在跑
+    /// 窗口的号；最小化/小窗口再按当前 uuid 查就查不到，会新起一个窗口
+    /// 再最小化/缩小它，旧窗口还留在台面上。只认唯一：在跑窗口的容器
+    /// 须在本条目的 uiContainers 里、归属须按路径对得上，且同包名别的
+    /// 条目都没登记过这个容器（共享容器归属说不清，宁可不回落）；零个
+    /// 或多个都返回 nil，调用方走老路新起。主线程调（读 dockManager.apps
+    /// 与 DataManager.shared.model，与 czfOwnedDockEntry 同约定）。
+    /// 3.8.550（L207）
+    @available(iOS 16.0, *)
+    private static func czfRunningEntryUnderOtherContainer(app: LCAppModel) -> DockAppModel? {
+        let myFolders = Set(app.uiContainers.map { $0.folderName })
+        guard let myPath = app.appInfo.relativeBundlePath, !myPath.isEmpty else { return nil }
+        let currentUUID = app.czfInstanceUUID
+        var found: DockAppModel?
+        for entry in MultitaskDockManager.shared.apps {
+            guard entry.appUUID != currentUUID,
+                  myFolders.contains(entry.appUUID),
+                  let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty,
+                  runningPath == myPath else { continue }
+            // 同包名别的条目也登记过这个容器时归属说不清，不回落。
+            let sharedWithOther = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).contains {
+                $0 !== app && $0.bundleIdentifier == app.bundleIdentifier
+                    && $0.uiContainers.contains { $0.folderName == entry.appUUID }
+            }
+            guard !sharedWithOther else { continue }
+            guard found == nil else { return nil }
+            found = entry
+        }
+        return found
+    }
+
     /// F-4：带回共用——banner / 网格 / 面板三处原来各写一遍。
     /// dock 里归属对得上的条目 → 带回；maximize=true 时顺手拉满，
     /// false 时顺手还原成小窗（maximizeWindow 是切换式）。
@@ -176,14 +208,33 @@ class LCAppModel: ObservableObject, Hashable {
         czfUnmaximizeWindow(uuid: uuid)
     }
 
+    /// F-10 小窗口回落：本条目别的容器里唯一在跑的窗口，直接还原成
+    /// 小窗（已是小窗或拿不到 VC 时 czfUnmaximizeWindow 本来就是空操作，
+    /// 仍返回 true、不新起——与带回路“小窗路只还原不重起”同款）。
+    /// 3.8.550（L207）
+    @available(iOS 16.0, *)
+    private static func czfSmallWindowFallback(app: LCAppModel) -> Bool {
+        guard let entry = czfRunningEntryUnderOtherContainer(app: app) else { return false }
+        czfUnmaximizeWindow(uuid: entry.appUUID)
+        return true
+    }
+
     /// F-10：最小化已在运行分支共用——banner 与面板原来各写一遍：
     /// dock 里归属对得上的条目 → 直接最小化。返回 true = 已处理。
     /// 最小化不露内容，不要认证；未运行分支的启动才要认证（调用方做）。
     static func czfMinimizeRunningWindow(_ app: LCAppModel) -> Bool {
         guard #available(iOS 16.0, *) else { return false }
-        guard let uuid = app.czfInstanceUUID,
-              czfOwnedDockEntry(app: app, uuid: uuid) != nil else { return false }
-        MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
+        if let uuid = app.czfInstanceUUID,
+           czfOwnedDockEntry(app: app, uuid: uuid) != nil {
+            MultitaskDockManager.shared.minimizeWindow(uuid: uuid)
+            return true
+        }
+        // 3.8.550（L207）：App 在跑时切了容器，当前 uuid 下没窗口；
+        // 别走未运行分支新起一个窗口再最小化它——旧窗口还留在台面上。
+        // 本条目别的容器里唯一在跑的窗口就直接最小化它；没有或多个
+        // 时走老路（多个时不猜，宁可新起）。
+        guard let entry = czfRunningEntryUnderOtherContainer(app: app) else { return false }
+        MultitaskDockManager.shared.minimizeWindow(uuid: entry.appUUID)
         return true
     }
 
@@ -315,6 +366,10 @@ class LCAppModel: ObservableObject, Hashable {
         // 已是 await MainActor.run 包着的同款写法，这里是漏掉
         // 的第三处）。
         if await MainActor.run(body: { czfBringRunningAppToFront(app, maximize: false) }) { return }
+        // 3.8.550（L207）：同最小化——App 在跑时切了容器，带回按当前
+        // uuid 查不到，直接走未运行分支会新起一个窗口再缩小、旧窗口
+        // 还留在台面上；本条目别的容器里唯一在跑的窗口就直接还原它。
+        if await MainActor.run(body: { czfSmallWindowFallback(app: app) }) { return }
         let expectedPath = app.appInfo.relativeBundlePath
         await czfLaunchThenActOnWindow(
             app: app,

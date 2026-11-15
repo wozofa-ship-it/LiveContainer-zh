@@ -4030,6 +4030,20 @@ struct LCDataManagementView : View {
     /// 来每个备份弹一次自己的结果窗，十几个备份要点掉十几层）
     func restoreAllBackups(loginOnly: Bool) async {
         let merged = mergedBackupFolders()
+        // 3.8.550（L210）：一个备份都没有时别报“完成（共 0 个）”假成功——
+        // 一键恢复全部的入口行与范围选页都没有空表守卫（多选恢复那路
+        // 有 .disabled 拦着，空选点不进来；换机向导的开始按钮也有
+        // .disabled(migrationFolders.isEmpty)），merged 为空时循环直接
+        // 跳过、尾部照常弹“完成（共 0 个备份）”成功弹窗。备份侧 L200
+        // 已定规矩：0 个走错误通道明说；恢复单个空文件夹同款已在
+        // restoreFromBackup 里走错误通道。
+        if merged.isEmpty {
+            await MainActor.run {
+                errorInfo = "没有可恢复的备份"
+                errorShow = true
+            }
+            return
+        }
         // v216：一键恢复前清空无数据文件夹（逐个恢复时追加，
         // 汇总弹窗里一次全给出来；不清空会把上次残留带进来）
         // 3.8.527（L54）：本函数从 startPendingRestore 的裸
