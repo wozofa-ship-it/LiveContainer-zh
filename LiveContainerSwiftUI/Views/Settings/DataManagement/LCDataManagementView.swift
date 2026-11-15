@@ -6515,7 +6515,7 @@ struct LCDataManagementView : View {
                 // 复/清缓存/定时三路，这里漏了）；先回主线程取
                 // Filza 的模型，bundleIdentifier() 的 _info 读也
                 // 在同一跳里，后面流程不动。
-                guard let filza = await MainActor.run { sharedModel.apps.first(where: { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }) } else { return }
+                guard let filza = await MainActor.run(body: { sharedModel.apps.first(where: { $0.appInfo.bundleIdentifier() == "com.tigisoftware.Filza" }) }) else { return }
                 guard await filza.czfAuthenticateIfLocked() else { return }
                 try await filza.runApp(urlStr: launchURLStr)
             } catch {
