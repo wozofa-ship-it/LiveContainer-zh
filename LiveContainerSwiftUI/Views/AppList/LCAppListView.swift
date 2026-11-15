@@ -3239,7 +3239,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         do {
-            let (data, response) = try await CZFVPNManager.hostSession().data(from: plistUrl)
+            // 3.8.548（L185）：plist 会变（新版上架），走 freshData 绕开 URLCache 取新鲜数据——
+            // 同 L181-1（源页/图标/订阅）机理；同一 plist URL 二次安装时 max-age 内拿缓存字节，
+            // plist 里还是旧版 IPA 地址，装上旧版（L79/L80 同款害处）。
+            let (data, response) = try await CZFVPNManager.freshData(from: plistUrl)
             // URLSession.data 只在传输错误时抛，HTTP 4xx/5xx 也会落盘
             // 成“plist”再解析；先验状态，非 2xx 按 DownloadDelegate
             // 同款文案抛错，别把 404 错误页报成“plist 解析失败”误导排查。

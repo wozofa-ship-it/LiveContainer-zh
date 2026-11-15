@@ -579,6 +579,13 @@ struct LCDataManagementView : View {
                 FolderPickerView { url in
                     saveExternalBackupFolder(url)
                     externalBackupFolderList = backupFolders(fromExternal: true)
+                    // 3.8.548（L192）：恢复 sheet 内换外部文件夹也 +1——
+                    // 删备份三路都 +1 逼 List 整体重建（3.8.335），只剩
+                    // 这里换文件夹时直接改 externalBackupFolderList、
+                    // 走 diff；iCloud 目录枚举滞后/残留时 diff 会像
+                    // 334 那样数对不上、Invalid update 闪退。onAppear
+                    // 那路不用 +1（sheet 还没挂上、没有 diff 可算）。
+                    backupListVersion += 1
                     refreshBackupSizes()
                 }
             }
