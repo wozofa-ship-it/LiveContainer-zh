@@ -188,6 +188,14 @@ extension Notification.Name {
     // 逐个清标记；关窗后 uuid 不在运行列表，豁免自然失效。
     private var czfSchedMinOpenedDay: String?
     private var czfSchedMinOpenedUUIDs: Set<String> = []
+    // 3.8.595（L128）：定时打开启动失败计数（当天有效，只记内存）——
+    // checkScheduledMinimizeOpen 先记账再打开，runApp 抛错时当天标
+    // 记已写、下一轮检查见“今天已开过”就跳过，定时打开悄悄丢一整
+    // 天；失败时清掉标记让下轮重试，但持久失败（证书过期等）每 30
+    // 秒重试一次是白耗电，3 次后当天放弃（与原来“失败即耗掉”一致，
+    // 只是先给三次重试机会）。成功起一次就清零。
+    private var czfSchedMinFailDay: String?
+    private var czfSchedMinFailCounts: [String: Int] = [:]
     // 最小化超 30 分钟自动关（CZF）：60 秒一轮，只在宿主活着时跑；
     // 宿主被彻底关掉时不跑，下次打开时运行中列表是空的，无需补查。
     // 键为 appUUID（多开同 App 不同容器各算各的），值是首次看到
@@ -1231,7 +1239,7 @@ extension Notification.Name {
                   app.appInfo.relativeBundlePath != nil else { continue }
             // 先记账再打开，防同一天重复触发
             defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
-            czfMinimizeOpenApp(app: app)
+            czfMinimizeOpenApp(app: app, bundleId: bundleId)
             break
         }
         // 一个定时都没开：停掉定时器，不再每 30 秒空扫；
@@ -1265,11 +1273,12 @@ extension Notification.Name {
 
     // 与快捷栏面板的「最小化打开」同一套路：已在运行直接最小化窗口；
     // 未运行先直启该实例，再轮询等窗口出现后最小化。
-    private func czfMinimizeOpenApp(app: LCAppModel) {
+    private func czfMinimizeOpenApp(app: LCAppModel, bundleId: String) {
         guard let dataUUID = app.appInfo.dataUUID else { return }
         czfMarkSchedMinOpened(uuid: dataUUID)
         if apps.contains(where: { $0.appUUID == dataUUID }) {
             minimizeWindow(uuid: dataUUID)
+            czfSchedMinFailCounts[bundleId] = 0
             return
         }
         // 跳错修复：不再走只带包名的 URL（按包名取首个模型，
@@ -1281,7 +1290,40 @@ extension Notification.Name {
             self?.minimizeWindow(uuid: dataUUID)
         }
         Task {
-            try? await app.runApp(containerFolderName: dataUUID)
+            do {
+                try await app.runApp(containerFolderName: dataUUID)
+                // 启动成功：失败计数清零（下次失败重新累计）。
+                await MainActor.run { self.czfSchedMinFailCounts[bundleId] = 0 }
+            } catch {
+                // 3.8.595（L128）：启动失败不能把当天的标记耗掉——
+                // 上面 check 里先记账再打开，runApp 抛错（签名失败/
+                // 容器异常）时原来 try? 直接吞掉，当天标记已写，
+                // 下一轮检查见“今天已开过”就跳过，定时打开悄悄丢
+                // 了一整天、没有任何反馈，与上面“到点没开成的下次
+                // 打开时补开”的设计口径相悖。清掉标记让下轮重试
+                //（见 czfNoteSchedMinLaunchFailed，3 次封顶）。
+                // 撞启动锁/已在运行是 runApp 的静默 return、不抛
+                // 错，不会走到这里；runApp 本身不弹人脸（锁守卫在
+                // 横幅启动路、不在 runApp 内），也不会反复弹人脸。
+                await MainActor.run { self.czfNoteSchedMinLaunchFailed(bundleId: bundleId) }
+            }
+        }
+    }
+
+    /// 定时打开启动失败记一笔（只在主线程调）：同一天同一 App
+    /// 失败 3 次后当天放弃——持久失败（证书过期等）时每 30 秒
+    /// 重试一次是白耗电；3 次内清掉当天标记，下一轮检查重新
+    /// 触发（启动进行中标记还在，不会与在途的启动重叠）。
+    private func czfNoteSchedMinLaunchFailed(bundleId: String) {
+        let today = Self.schedMinDayFormatter.string(from: Date())
+        if czfSchedMinFailDay != today {
+            czfSchedMinFailDay = today
+            czfSchedMinFailCounts.removeAll()
+        }
+        let fails = (czfSchedMinFailCounts[bundleId] ?? 0) + 1
+        czfSchedMinFailCounts[bundleId] = fails
+        if fails < 3 {
+            UserDefaults.standard.removeObject(forKey: "CZFSchedMinLastDate-\(bundleId)")
         }
     }
 

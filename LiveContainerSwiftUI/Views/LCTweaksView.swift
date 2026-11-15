@@ -702,9 +702,17 @@ struct LCTweakFolderView : View {
             return
         }
         await MainActor.run {
-            tweakItems.remove(at: indexToRename)
+            // 3.8.595（L128）：下标不能用改名前取的——改名在裸 Task
+            // 里落盘，落盘与回写之间 tweakItems 可能变（开关原位替
+            // 换不移位、导入在尾部追加不移位，但删行会让后面的下标
+            // 全前移一位、切页重扫会整表换序），旧下标指向的可能
+            // 已是另一行，remove(at:) 会删错行；回写时按原 fileUrl
+            // 再找一次，找不到说明行已不在（外部删了），只留盘上
+            // 新名、下次 onAppear 重扫收进来，不动别的行。
+            guard let idx = tweakItems.firstIndex(where: { $0.fileUrl == tweakItem.fileUrl }) else { return }
+            tweakItems.remove(at: idx)
             let newTweakItem = LCTweakItem(fileUrl: newUrl, isFolder: tweakItem.isFolder, isFramework: tweakItem.isFramework, isTweak: tweakItem.isTweak, isEnabled: tweakItem.isEnabled)
-            tweakItems.insert(newTweakItem, at: indexToRename)
+            tweakItems.insert(newTweakItem, at: idx)
 
             if isRoot {
                 let indexToRename2 = sharedModel.tweakFolderNames.firstIndex(of: tweakItem.displayName)
