@@ -1261,6 +1261,18 @@ extension Notification.Name {
             if nowTotal < target { continue }
             guard app.appInfo.dataUUID != nil,
                   app.appInfo.relativeBundlePath != nil else { continue }
+            // L142-1：启动失败后重试时用户已手动打开——别再把它最小化：
+            // 人已接手，当天不再重试（日期标记照写，与首轮“今天已开过”
+            // 同口径；多开同包名的另一实例仍按日期标记走，不受影响）。
+            // 只认“今天已失败过”的重试（czfSchedMinFailDay 须是今天，
+            // 昨天的计数不算）；首轮触发时失败计数为 0，不走这条。
+            if czfSchedMinFailDay == today,
+               (czfSchedMinFailCounts[bundleId] ?? 0) > 0,
+               let du = app.appInfo.dataUUID,
+               apps.contains(where: { $0.appUUID == du }) {
+                defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
+                continue
+            }
             // 先记账再打开，防同一天重复触发
             defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
             czfMinimizeOpenApp(app: app, bundleId: bundleId)
@@ -1311,7 +1323,11 @@ extension Notification.Name {
         // 不再 0.1 秒轮询等窗口（上限 12 秒，原轮询同款预算）；
         // 超时未出现直接放弃（原轮询到期同款，无提示）。
         czfOnWindowAppeared(uuid: dataUUID, timeout: 12) { [weak self] in
-            self?.minimizeWindow(uuid: dataUUID)
+            // L142-1：启动失败后标记已清（见下面 catch），残留回调
+            // 不再动手——用户在 12 秒内手动打开时不该被它悄悄最小化；
+            // 重试会重新记标记、重注册回调，成功路不受影响。
+            guard let self, self.czfIsSchedMinOpened(uuid: dataUUID) else { return }
+            self.minimizeWindow(uuid: dataUUID)
         }
         Task {
             do {
@@ -1329,7 +1345,13 @@ extension Notification.Name {
                 // 撞启动锁/已在运行是 runApp 的静默 return、不抛
                 // 错，不会走到这里；runApp 本身不弹人脸（锁守卫在
                 // 横幅启动路、不在 runApp 内），也不会反复弹人脸。
-                await MainActor.run { self.czfNoteSchedMinLaunchFailed(bundleId: bundleId) }
+                await MainActor.run {
+                    self.czfNoteSchedMinLaunchFailed(bundleId: bundleId)
+                    // L142-1：启动失败，当天豁免标记也要收回——L128
+                    // 只清了日期标记，这枚 dataUUID 仍算“定时打开过”，
+                    // 用户手动打开同实例后当天免于上限提醒与自动关。
+                    self.czfSchedMinOpenedUUIDs.remove(dataUUID)
+                }
             }
         }
     }
