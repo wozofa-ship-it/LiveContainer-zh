@@ -2654,7 +2654,12 @@ struct LCSourceAppDetailView: View {
         }
         if let desc = app.description,
            let range = desc.range(of: "https://github.com/[^\\s)\"']+", options: .regularExpression) {
-            return URL(string: String(desc[range]))
+            // L141-2：正则是贪心的，描述里链接后跟的句末标点（中文句号
+            // “。”最常见，英文句号/逗号/顿号同款）会被吞进 URL，
+            // 点“在 GitHub 查看”就 404。去尾部句末标点再建 URL；
+            // 无标点时与原来一字相同。
+            let raw = String(desc[range]).trimmingCharacters(in: CharacterSet(charactersIn: "。.，、；：！？."))
+            return URL(string: raw)
         }
         return nil
     }

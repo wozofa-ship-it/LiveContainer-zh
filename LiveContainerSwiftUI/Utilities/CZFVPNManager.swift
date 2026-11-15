@@ -1530,7 +1530,7 @@ public final class CZFVPNManager {
             return
         }
         if failedDelta >= 3 && proxiedDelta == 0 {
-            rotateToNextNode()
+            rotateToNextNode(for: appInfo)
         }
         scheduleRotateCheck()
     }
@@ -1572,8 +1572,19 @@ public final class CZFVPNManager {
         }
     }
 
-    private func rotateToNextNode() {
-        guard let appInfo = coreOwnerAppInfo else { return }
+    // L141-1：轮换目标必须用 rotateCheck 锁下验过的归属 App，
+    // 不能在这里无锁重读 coreOwnerAppInfo——两步之间别的 App
+    // 可能刚起核心换了归属，重读会拿着旧 App 的死节点统计、
+    // 去轮换新 App 的节点（无辜换 IP，养号最忌）；核心停了
+    // 也一样会为已关 App 把核心重起起来。入口锁下复验归属
+    // 仍是该 App 且核心在跑，否则直接返回（rotateCheck 尾部
+    // 照常重排下一轮检查）。唯一调用方是 rotateCheck（主队
+    // 列），下面 bundleIdentifier() 直读安全。
+    private func rotateToNextNode(for appInfo: LCAppInfo) {
+        vpnCoreLock.lock()
+        let stillOwner = isRunning && coreOwnerAppInfo === appInfo
+        vpnCoreLock.unlock()
+        guard stillOwner else { return }
         let links = nodeLinks
         guard links.count >= 2 else { return }
         // 3.8.520（L46）：每轮轮换从空 tried 集开始——上一轮
