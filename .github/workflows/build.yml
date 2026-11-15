@@ -147,6 +147,16 @@ jobs:
             grep "error:" archive-raw.log | head -30
           fi
           exit $code
+      # 533 两次 Archive exit 65、整份日志 0 条红字：xcpretty 流里看不到真因，
+      # archive-raw.log 又随 runner 销毁丢了；失败时把它存为 artifact，
+      # 下次红了直接下载原文定位。
+      - name: Upload raw archive log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-raw-log
+          path: archive-raw.log
+          if-no-files-found: warn
       - name: Build bundled keepalive tweak
         run: |
           clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
