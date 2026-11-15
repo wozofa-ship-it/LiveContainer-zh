@@ -1996,6 +1996,16 @@ struct LCDataManagementView : View {
         guard let result = await appFolderRemovalAlert.open(), result else {
             return
         }
+        // 3.8.584（L116）：确认框等用户点的这段时间里，恢复/新建
+        // 可能已把某个“闲置”夹重新登记成在用容器（恢复按备份里
+        // 的原文件夹名重建，不是新 UUID）；按确认前的名单删会把
+        // 刚恢复的数据连钥匙串一起清掉。动手前再取一次快照，
+        // 只删仍无人认领的（moveDanglingFolders 没有确认框等待、
+        // 快照到动手是同一口气，不用同款）。
+        let ownedNow = await MainActor.run {
+            Set((sharedModel.apps + sharedModel.hiddenApps).flatMap { $0.appInfo.containers.map { $0.folderName } })
+        }
+        foldersToDelete.removeAll(where: { ownedNow.contains($0) })
         do {
             let fm = FileManager()
             for folder in foldersToDelete {
@@ -2985,8 +2995,12 @@ struct LCDataManagementView : View {
             // 模块选择：删后恢复时写回，免得手动选的模块夹丢了重选
             "tweakFolder": snapshot.tweakFolder
         ]
+        // 3.8.584（L116）：manifest 必须原子写——非原子写中途被
+        // 杀/闪退会留半截 JSON，manifestDict 解不出就回落文件夹
+        // 名匹配，多开分身会串号；仓内同款已全是 .atomic（L111
+        // 预载文件同款），这里三处漏了。
         if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
-            try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"))
+            try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"), options: .atomic)
         }
         // 完整档才整拷 .app 本体、数据容器和组容器（体积大头
         // 全在这里）；登录态档只挑会话文件，见 else 分支
@@ -3136,8 +3150,10 @@ struct LCDataManagementView : View {
             try? fm.createDirectory(at: keychainRoot, withIntermediateDirectories: true)
             if !items.isEmpty {
                 // 写盘失败也别算成功：原来 try? 吞掉写失败、keychainCount 照加，校验又只核 Keychain 目录在不在（目录刚建好），备份会报“钥匙串 ✅ N 条”但里面根本没有快照文件，恢复时登录令牌悄悄丢了。写失败记失败清单、清掉半截文件。
+                // 3.8.584（L116）：同款原子写——半截 plist 读不出，
+                // readKeychainPlist 返 nil，恢复时这容器的令牌丢了。
                 let keychainDest = keychainRoot.appendingPathComponent(container.folderName + ".plist")
-                if (try? data.write(to: keychainDest)) != nil {
+                if (try? data.write(to: keychainDest, options: .atomic)) != nil {
                     keychainCount += items.count
                 } else {
                     loginFailed += 1
@@ -5580,8 +5596,11 @@ struct LCDataManagementView : View {
                 var queuedAny = false
                 // 3.8.544（L74）：逐点取当前值（同 :5188 注释）。
                 let queueContainers = await MainActor.run { app.uiContainers }
+                // 3.8.584（L116）：排队文件写进活容器、桥在客启动时
+                // 读——非原子写中途用户点了启动，桥会读到半截 plist、
+                // 解析失败、这次排队导入悄悄丢了；原子写堵死这一路。
                 for container in queueContainers {
-                    if (try? data.write(to: container.containerURL.appendingPathComponent("CZFKeychainImport.plist"))) != nil {
+                    if (try? data.write(to: container.containerURL.appendingPathComponent("CZFKeychainImport.plist"), options: .atomic)) != nil {
                         queuedAny = true
                     }
                 }

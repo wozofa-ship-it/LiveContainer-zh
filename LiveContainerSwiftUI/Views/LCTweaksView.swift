@@ -107,6 +107,21 @@ struct LCTweakFolderView : View {
         }
     }
 
+    // 3.8.584（L116）：`.disabled` 是开关状态后缀、不是名字本身——
+    // 用户在改名/新建框里敲了它，文件侧会造出双后缀（`Y.disabled.
+    // disabled`）：扫描按去一次后缀的 baseName 认 .dylib，双后缀
+    // 的 baseName 还带 `.disabled`、isTweak=false、不是文件夹，
+    // 直接从列表消失、磁盘上还留着；启用的改成它则行显示启用、
+    // 盘上是停用，开关撒谎。L96 只给注册表去了，文件侧漏了；
+    // 输入与基名统一先去干净，下面的 enabled 分支该加才加。
+    private static func czfCleanTweakName(_ name: String) -> String {
+        var result = name
+        while result.hasSuffix(LCTweakItem.disabledSuffix) {
+            result = String(result.dropLast(LCTweakItem.disabledSuffix.count))
+        }
+        return result
+    }
+
     var body: some View {
         List {
             // 无证书密码时工具栏签名按钮直接消失、用户不知道缺什么：
@@ -330,16 +345,23 @@ struct LCTweakFolderView : View {
         if tweakItem.isEnabled == enabled {
             return
         }
-        let displayName = tweakItem.displayName
-        let newName = enabled ? displayName : displayName + LCTweakItem.disabledSuffix
+        // 3.8.584（L116）：基名先去干净（见 czfCleanTweakName）——
+        // 旧版改名框留下的行盘错位（行显示启用、盘上已停用），
+        // displayName 只去一次后缀、enable 算出的目标名就是原
+        // 文件名本身；目标名与原文件相同时不挪文件、只把行的开
+        // 关状态纠回与盘上一致，挪到自身会抛错、行永远纠不过来。
+        let baseName = Self.czfCleanTweakName(tweakItem.displayName)
+        let newName = enabled ? baseName : baseName + LCTweakItem.disabledSuffix
         let newUrl = baseUrl.appendingPathComponent(newName)
         let fm = FileManager()
-        do {
-            try fm.moveItem(at: tweakItem.fileUrl, to: newUrl)
-        } catch {
-            errorShow = true
-            errorInfo = error.localizedDescription
-            return
+        if newUrl != tweakItem.fileUrl {
+            do {
+                try fm.moveItem(at: tweakItem.fileUrl, to: newUrl)
+            } catch {
+                errorShow = true
+                errorInfo = error.localizedDescription
+                return
+            }
         }
         guard let index = tweakItems.firstIndex(of: tweakItem) else {
             return
@@ -633,6 +655,13 @@ struct LCTweakFolderView : View {
         guard let newName = await renameFileInput.open(initVal: tweakItem.displayName), newName != "" else {
             return
         }
+        // 3.8.584（L116）：输入先去 `.disabled` 后缀（见
+        // czfCleanTweakName），只剩后缀时当取消；不然改名会造出
+        // 双后缀文件、从列表消失。
+        let cleanName = Self.czfCleanTweakName(newName)
+        guard cleanName != "" else {
+            return
+        }
 
         // 3.8.534（L61-2）：本函数从长按菜单按钮的裸 Task 调来、不在
         // 主 actor 上（L40 同款），tweakItems/sharedModel.
@@ -646,7 +675,7 @@ struct LCTweakFolderView : View {
         guard let indexToRename = indexToRename else {
             return
         }
-        let newFileName = tweakItem.isEnabled ? newName : newName + LCTweakItem.disabledSuffix
+        let newFileName = tweakItem.isEnabled ? cleanName : cleanName + LCTweakItem.disabledSuffix
         let newUrl = self.baseUrl.appendingPathComponent(newFileName)
 
         let fm = FileManager()
@@ -676,7 +705,7 @@ struct LCTweakFolderView : View {
                 // 置的菜单里 `X` 与 `X.disabled` 各一条；新名去
                 // 后缀后若已在表里（磁盘上已有 `X.disabled`），
                 // 不再插第二条，ForEach(id: \.self) 不撞重名。
-                let registryName = newName.hasSuffix(LCTweakItem.disabledSuffix) ? String(newName.dropLast(LCTweakItem.disabledSuffix.count)) : newName
+                let registryName = cleanName.hasSuffix(LCTweakItem.disabledSuffix) ? String(cleanName.dropLast(LCTweakItem.disabledSuffix.count)) : cleanName
                 if !sharedModel.tweakFolderNames.contains(registryName) {
                     sharedModel.tweakFolderNames.insert(registryName, at: indexToRename2)
                 }
@@ -715,12 +744,19 @@ struct LCTweakFolderView : View {
         guard let newName = await newFolderInput.open(), newName != "" else {
             return
         }
+        // 3.8.584（L116）：输入先去 `.disabled` 后缀（见
+        // czfCleanTweakName），只剩后缀时当取消；不然新建的夹名
+        // 字带后缀、加载器直接按停用跳过，行却显示启用。
+        let cleanName = Self.czfCleanTweakName(newName)
+        guard cleanName != "" else {
+            return
+        }
         // 3.8.534（L61-2）：本函数从菜单按钮的裸 Task 调来、不在
         // 主 actor 上（L40 同款），tweakItems/sharedModel.
         // tweakFolderNames/errorInfo/errorShow 回主线程再写；
         // 建目录本身仍在外面做。
         let fm = FileManager()
-        let dest = baseUrl.appendingPathComponent(newName)
+        let dest = baseUrl.appendingPathComponent(cleanName)
         do {
             try fm.createDirectory(at: dest, withIntermediateDirectories: false)
         } catch {
@@ -739,7 +775,7 @@ struct LCTweakFolderView : View {
                 // 就造出两个 `X`，App 设置/网格两处 ForEach(id:
                 // \.self) 撞重名；名字本身带 `.disabled` 也一样
                 // 去后缀再记，与冷启动扫描同口径。
-                let registryName = newName.hasSuffix(LCTweakItem.disabledSuffix) ? String(newName.dropLast(LCTweakItem.disabledSuffix.count)) : newName
+                let registryName = cleanName.hasSuffix(LCTweakItem.disabledSuffix) ? String(cleanName.dropLast(LCTweakItem.disabledSuffix.count)) : cleanName
                 if !sharedModel.tweakFolderNames.contains(registryName) {
                     sharedModel.tweakFolderNames.append(registryName)
                 }
