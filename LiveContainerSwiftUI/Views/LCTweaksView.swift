@@ -872,7 +872,7 @@ struct LCTweaksView: View {
     private enum TweakTab: Hashable {
         case local, shared, vpn
     }
-    @State private var selectedTab: TweakTab = .local
+    @State private var selectedTab: TweakTab = .vpn
     // R-1（3.8.453 修 453 红字）：.onChange 要读 sharedModel，
     // 但 LCTweaksView 本来没有这把 @EnvironmentObject——
     // 有它的是子视图 LCTweakFolderView。补上，TabView 层已注入
@@ -906,9 +906,9 @@ struct LCTweaksView: View {
             .navigationTitle("lc.tabView.tweaks".loc)
         }
         .navigationViewStyle(StackNavigationViewStyle())
-        // R-1：App 页盾牌菜单“前往 VPN 设置”切过来时，本地
-        // selectedTab 默认还是 .local，监听 SharedModel 的触发
-        // 计数，切到 VPN 分段。
+        // R-1：App 页盾牌菜单“前往 VPN 设置”切过来时，若当前
+        // 在本机/共享分段，监听 SharedModel 的触发计数，切到
+        // VPN 分段（默认已是 .vpn，见上面声明）。
         .onChange(of: sharedModel.czfTweakVPNRequest) { _ in
             selectedTab = .vpn
         }
