@@ -4804,7 +4804,8 @@ struct SourcesPanelView: View {
                                     // 3.8.342：源名标题去掉（用户 17:12 亲令，
                                     // “解剖自我 🅥”那行不要，App 直接列出来，
                                     // 照他发的截图那样）。
-                                    ForEach(matchedApps(for: source)) { app in
+                                    // 3.8.545（L174）：行身份走 czfStableID，不走默认 id——AltStoreSourceApp.id 是每次解码都换的 UUID，面板每次调出都刷源（:4845），刷新落地即换掉整组 App 对象；默认身份下全部行重建，行内 @State（activeSheet 的实例/历史版本单、copied）跟着丢，已打开的单自己关掉。源页同款毛病 B-9/3.8.450 已修（LCAltStoreSourcesView.swift:754/:2117 与 CZFSourceGridView.swift:251 都是 id: \.czfStableID），面板这处漏了。外层 SourceItem 的 id 是源 URL、刷新不换，只有内层行要改；B-10 解码时已按 czfStableID 去重，同源内唯一。
+                                    ForEach(matchedApps(for: source), id: \.czfStableID) { app in
                                         SourcePanelRow(app: app, onInstall: { installFromPanel(app: app) }, onDownload: { downloadFromPanel(app: app) }, onDownloadVersion: { version in downloadFromPanel(url: version.downloadURL) }, onLaunchError: { errorMessage = $0 })
                                             .padding(.horizontal)
                                     }

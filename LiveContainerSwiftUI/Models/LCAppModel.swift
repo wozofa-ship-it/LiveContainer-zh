@@ -1189,8 +1189,11 @@ class LCAppModel: ObservableObject, Hashable {
                     // isAppRunning 一直 true、App 再也点不开，只能重启
                     // LiveContainer。30 秒超时兜底，只恢复一次
                     //（CZFOnceBox，czfWaitForWindowAndRelease 同款；
-                    // 回调两路都在主线程、超时任务也跑主线程，take
-                    // 全在 MainActor 上串行，不会双恢复）。
+                    // 3.8.545（L165）：take() 自带 NSLock 互斥，不再
+                    // 依赖“回调都在主线程”的口头约定——多任务窗口
+                    // 路 pidCallback 的线程本仓验不到、L101 分支成
+                    // 功路也没包 MainActor.run，边界那一微秒双读
+                    // 到 taken == false 就会双恢复闪退）。
                     let czfPidBox = CZFOnceBox()
                     let czfPidTimeout = Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 30_000_000_000)
@@ -1702,9 +1705,25 @@ class LCAppModel: ObservableObject, Hashable {
 /// 只恢复一次的盒子（O-19）：窗口出现回调与 15 秒超时兜底
 /// 都在主队列串行跑，谁先到谁拿，另一个空转；continuation
 /// 只恢复一次，绝不 double-resume。
+/// 3.8.545（L165）：take() 加 NSLock——原来是裸 Bool，
+/// 全靠“回调两路都在主线程”的口头约定串行（L12 注释原话）：
+/// 场景路回调确在主队列（DecoratedAppSceneViewController.m
+/// :647 显式 dispatch 到 main），但多任务窗口路走
+/// MultitaskWindowManager.openAppWindowWithDisplayName 的
+/// pidCallback（仓外组件，本仓验不到它在哪个线程回调）、
+/// 无 LiveProcess 的早错路在调用方线程同步回调、L101 非 JIT
+/// 分支成功路直接在回调里 take()（没包 MainActor.run）——
+/// 客初始化正好落在 30 秒超时边界那一微秒，两路同时读到
+/// taken == false 就双恢复，CheckedContinuation 双 resume
+/// 直接闪退（3.8.476 真机同款 EXC_BAD_ACCESS）。同仓已有
+/// 带锁的双胞胎 CZFOnceFlag（LCAppListView.swift:49），照它
+/// 同款加锁；调用方一字不动，串行路行为不变。
 private final class CZFOnceBox {
     private var taken = false
+    private let lock = NSLock()
     func take() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
         guard !taken else { return false }
         taken = true
         return true
