@@ -51,8 +51,8 @@ jobs:
             sed -i '' "s/$CUR_ESC/$NEW/g" "$f"
           done
           # 验：3 个 plist 各 2 处、pbxproj 8 处，全是新版、旧版清零
-          [ "$(grep -c "$NEW" LiveContainer/Info.plist)" = 2 ] && [ "$(grep -c "$NEW" ShareExtension/Info.plist)" = 2 ] && [ "$(grep -c "$NEW" ActionExtension/Info.plist)" = 2 ] && [ "$(grep -c "$NEW" LiveContainer.xcodeproj/project.pbxproj)" = 8 ] || { echo "version bump verification failed"; exit 1; }
-          if grep -q "$CUR" LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; then echo "old version still present"; exit 1; fi
+          [ "$(grep -c -F "$NEW" LiveContainer/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ShareExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ActionExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LiveContainer.xcodeproj/project.pbxproj)" = 8 ] || { echo "version bump verification failed"; exit 1; }
+          if grep -q -F "$CUR" LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; then echo "old version still present"; exit 1; fi
           echo "version: $CUR -> $NEW"
           echo "new_version=$NEW" >> $GITHUB_OUTPUT
           echo "old_version=$CUR" >> $GITHUB_OUTPUT
