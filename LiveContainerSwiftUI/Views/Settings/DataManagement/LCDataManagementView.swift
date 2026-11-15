@@ -6529,7 +6529,16 @@ struct LCDataManagementView : View {
             
             var movedDataFolderCount = 0
             var failedDataNames: [String] = []
-            let sharedDataFolders = try fm.contentsOfDirectory(atPath: LCPath.lcGroupDataPath.path)
+            // 3.8.562（L288-1）：共享区目录只在分享流程里由 ensureAppGroupPaths 建——
+            // 从没共享过的用户点“移回闲置文件夹”，两目录都不存在，
+            // contentsOfDirectory 直接抛 Cocoa 260，走外层 catch 弹一条系统原样错；
+            // 目录不存在就是没有可移的，按空表走，下面成功路照常报“已移回 0 个”。
+            let sharedDataFolders: [String]
+            if fm.fileExists(atPath: LCPath.lcGroupDataPath.path) {
+                sharedDataFolders = try fm.contentsOfDirectory(atPath: LCPath.lcGroupDataPath.path)
+            } else {
+                sharedDataFolders = []
+            }
             for sharedDataFolder in sharedDataFolders {
                 if appDataFoldersInUse.contains(sharedDataFolder) {
                     continue
@@ -6549,7 +6558,13 @@ struct LCDataManagementView : View {
 
             var movedTweakFolderCount = 0
             var failedTweakNames: [String] = []
-            let sharedTweakFolders = try fm.contentsOfDirectory(atPath: LCPath.lcGroupTweakPath.path)
+            // 3.8.562（L288-1）：同上，模块共享区目录不存在也按空表走。
+            let sharedTweakFolders: [String]
+            if fm.fileExists(atPath: LCPath.lcGroupTweakPath.path) {
+                sharedTweakFolders = try fm.contentsOfDirectory(atPath: LCPath.lcGroupTweakPath.path)
+            } else {
+                sharedTweakFolders = []
+            }
             for tweakFolderInUse in sharedTweakFolders {
                 if tweakFoldersInUse.contains(tweakFolderInUse) || tweakFolderInUse == "TweakLoader.dylib" {
                     continue

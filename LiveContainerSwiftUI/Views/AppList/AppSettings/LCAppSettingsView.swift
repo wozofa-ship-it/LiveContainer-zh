@@ -1215,13 +1215,14 @@ struct LCAppSettingsView: View {
                     container.isShared = true
                 }
                 
-                if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
-                    // 注册表里存的是拆分后的单名，拿整串比永远删不掉。
-                    for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
-                        sharedModel.tweakFolderNames.removeAll(where: { $0 == name })
-                    }
-                }
-                
+                // 3.8.562（L315-1）：搬共享不删 tweakFolderNames——夹只是从本机根
+                // 挪到共享根，名字仍有效、运行期仍按 App 的 isShared 解析
+                // （signApp 按 isShared 拼共享根）；冷启动扫描（L96）明文把共享夹
+                // 也扫进注册表，搬共享的删除与之直接冲突。本次启动内设置选单
+                // （:399）/网格菜单/横幅菜单全读这张表，删了就看不到这个夹、
+                // 挂不上去，要等下次冷启动才回来；搬回本机那路（movePrivateDoc）
+                // 又会补回来，更加证明删除是错的。appDataFolderNames 的删除不动——
+                // 那张表只记本机数据夹（冷启动只扫 dataPath），语义不同。
                 appInfo.setBundlePath(LCPath.lcGroupBundlePath.appendingPathComponent(appInfo.relativeBundlePath).path)
                 appInfo.isShared = true
                 model.uiIsShared = true

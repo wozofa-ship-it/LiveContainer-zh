@@ -958,6 +958,17 @@ class LCAppModel: ObservableObject, Hashable {
                         // 旧 dataUUID 对不上（全新安装等）时才回落
                         // 到原来的第一个，3.8.377 的覆盖面不变。
                         let oldUUID = appInfo.dataUUID ?? ""
+                        // 3.8.562（L279-1）：回落候选必须验归属——原来取
+                        // 目录序第一个带排队文件的容器；别家 App 恢复后
+                        // 还没启动、排队文件还在时，全新安装的本 App 首
+                        // 启会把它拷进自己的新容器，桥按 service/account
+                        // 原样导进本 App 的钥匙串（同款 SDK 共用 service
+                        // 名就直接串号，L213-1 同款伤害）。只认容器 plist
+                        // 里 appIdentifier 与本 App 包名一致的候选；认
+                        // 不出的不拷——全新安装本来就没旧文件可拷，
+                        // fail-closed。旧 dataUUID 精确命中那路不动
+                        // （L93），它按文件夹名认、不读 plist。
+                        let myBundleId = appInfo.bundleIdentifier()
                         var fallbackSrc: URL?
                         var copied = false
                         for entry in entries where entry.lastPathComponent != newName {
@@ -976,7 +987,12 @@ class LCAppModel: ObservableObject, Hashable {
                                 }
                                 continue
                             }
-                            if fallbackSrc == nil { fallbackSrc = src }
+                            if fallbackSrc == nil,
+                               let myBundleId,
+                               let candidateInfo = NSDictionary(contentsOf: entry.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any],
+                               (candidateInfo["appIdentifier"] as? String) == myBundleId {
+                                fallbackSrc = src
+                            }
                         }
                         if !copied, let fallbackSrc {
                             try? FileManager.default.copyItem(at: fallbackSrc, to: dst)
