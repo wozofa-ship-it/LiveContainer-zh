@@ -2428,7 +2428,11 @@ public final class CZFVPNManager {
         }
 
         var result = "vless://\(uuid)@\(host):\(port)?"
-        result += out.map { "\($0.0)=\($0.1.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.1)" }
+        // L137-1：值不能走 .urlQueryAllowed——它不编 &，WS 路径里
+        // 的 &（如 /x?a=1&b=2）会把重建后的链接从 & 处切断，转换
+        // 器读到的 path 被截断、后面多出幻影参数，节点连不上或
+        // 走错路；L60 同款，改走 czfQueryValueAllowed（排除 &）。
+        result += out.map { "\($0.0)=\($0.1.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? $0.1)" }
             .joined(separator: "&")
         if let name = query["remarks"], !name.isEmpty {
             result += "#" + (name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name)
