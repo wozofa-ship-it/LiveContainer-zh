@@ -3833,6 +3833,13 @@ struct LCDataManagementView : View {
         return "上次选的是：" + (last ? "只恢复登录态" : "恢复全部数据") + "。\n"
     }
     private func doBackupScope(loginOnly: Bool) {
+        // 3.8.551（L212）：选页双击重入——范围选页的按钮没有 .disabled
+        // 守着，快点两下会进两次本函数、起两个 backupApps 并发跑；钥匙串
+        // 快照 3.8.318 注释写死串行才安全，并发会把 dump 写岔丢令牌，
+        // 同名备份文件夹也会被两个 Task 交错写。进度在下面同步置位，
+        // 第二次进来时已非空，直接拦掉（入口行本身也有
+        // .disabled(backupRestoreProgress != nil)，那是进选页前那层）。
+        guard backupRestoreProgress == nil else { return }
         UserDefaults.standard.set(loginOnly, forKey: "LCBackupLastLoginOnly")
         let apps = pendingBackupApps
         // 用户选了范围才关选页（选页一直盖在下面等着，
@@ -3858,6 +3865,13 @@ struct LCDataManagementView : View {
         }
     }
     private func doRestoreScope(loginOnly: Bool) {
+        // 3.8.551（L212）：同备份——选页双击会进两次本函数、起两个恢复
+        // Task 并发跑，同一 App 的容器会被两路交错写。恢复只在 Task 里
+        // 才置进度，第一次点完进度还是 nil、光 guard 拦不住第二下，
+        // 先同步占一位（循环里逐个文件夹刷新）；人脸失败/取消时在下面
+        // 清掉，不然入口行永远 disabled、直进页永远关不掉。
+        guard backupRestoreProgress == nil else { return }
+        backupRestoreProgress = "正在恢复…"
         UserDefaults.standard.set(loginOnly, forKey: "LCRestoreLastLoginOnly")
         // 锁了的备份恢复前要人脸识别才能解开（用户 13:16 令）：
         // 行恢复/预览恢复/多选恢复/一键恢复全部都走这里，集中
@@ -3876,7 +3890,12 @@ struct LCDataManagementView : View {
         if folders.contains(where: { lockedBackupNames.contains($0.lastPathComponent) }) {
             Task {
                 let ok = (try? await LCUtils.authenticateUserForced()) ?? false
-                guard ok else { return }
+                guard ok else {
+                    // 3.8.551（L212）：人脸失败/取消，恢复没开始，上面
+                    // 同步占的进度要清掉，不然入口行永远 disabled。
+                    await MainActor.run { backupRestoreProgress = nil }
+                    return
+                }
                 // 3.8.527（L54）：关页 + 起恢复含 @State 写，放
                 // 主线程跑——未锁定直调那路本来就在按钮主线程上。
                 await MainActor.run {
@@ -4039,6 +4058,13 @@ struct LCDataManagementView : View {
         // restoreFromBackup 里走错误通道。
         if merged.isEmpty {
             await MainActor.run {
+                // 3.8.551（L214）：空表早退也要清进度——doRestoreScope
+                // 在函数头同步占了一位（L212-1），这里 return 时不
+                // 清，入口行永远 disabled、备份/恢复全堵死（进度横
+                // 幅也一直挂着“正在恢复…”）；尾部 :4120 本来就清，
+                // 早退路是唯一漏清的一处（恢复其余两函数三路出口
+                // 都清，见 L210 §1）。
+                backupRestoreProgress = nil
                 errorInfo = "没有可恢复的备份"
                 errorShow = true
             }
