@@ -1991,13 +1991,24 @@ struct LCDataManagementView : View {
                 let destDate = (try? fm.attributesOfItem(atPath: destManifest.path))?[.modificationDate] as? Date
                     ?? (try? fm.attributesOfItem(atPath: dest.path))?[.modificationDate] as? Date ?? Date.distantPast
                 if destDate >= srcDate { continue }
+            }
+            // L146-2：先删后拷的换位口子（L132/L133 同款，第七处）——
+            // 拷到一半被杀，半截 dest 直接留在恢复列表里（backupFolders
+            // 只按目录列、不验完整）；且下次兜底同步看 dest 文件夹时间
+            // （刚拷出来的）比本地 manifest 新，直接跳过，半截永远不修，
+            // 要等下次备这个 App 才走每 App 同步修好。改走每 App 同步
+            // 同款：先拷到点前缀临时名（恢复列表 skipsHiddenFiles 不显示）、
+            // 拷完再删旧换上；拷一半被杀只剩隐藏 tmp、旧份还在，下次
+            // 同步清 tmp 重拷。
+            let tmp = extURL.appendingPathComponent(".czf-sync-tmp-\(src.lastPathComponent)")
+            if fm.fileExists(atPath: tmp.path) {
+                try? fm.removeItem(at: tmp)
+            }
+            guard (try? fm.copyItem(at: src, to: tmp)) != nil else { continue }
+            if fm.fileExists(atPath: dest.path) {
                 try? fm.removeItem(at: dest)
             }
-            // 拷失败不留空壳：删掉拷一半的 dest，下次同步重拷；
-            // 否则空目录会进恢复列表，点进去就是“成功 0 个”。
-            if (try? fm.copyItem(at: src, to: dest)) == nil {
-                try? fm.removeItem(at: dest)
-            }
+            try? fm.moveItem(at: tmp, to: dest)
         }
     }
         func cleanUpUnusedFolders() async {
@@ -3892,7 +3903,8 @@ struct LCDataManagementView : View {
         }
         if lines.isEmpty { return "" }
         let shown = lines.prefix(3).joined(separator: "\n")
-        let more = lines.count > 3 ? "\n等 \(lines.count) 个已有备份" : ""
+        // L146-1：“等”后面是余数（总数减已列出的 3 个），不是总数。
+        let more = lines.count > 3 ? "\n等 \(lines.count - 3) 个已有备份" : ""
         return "已有备份：\n\(shown)\(more)\n"
     }
 
@@ -7112,11 +7124,13 @@ struct LCDataManagementView : View {
                         let when = fmt.string(from: Date())
                         var failureParts: [String] = []
                         if !failedNames.isEmpty {
-                            let names = failedNames.prefix(3).joined(separator: "、") + (failedNames.count > 3 ? "等 \(failedNames.count) 个" : "")
+                            // L146-1：“等”后面是余数，不是总数。
+                            let names = failedNames.prefix(3).joined(separator: "、") + (failedNames.count > 3 ? "等 \(failedNames.count - 3) 个" : "")
                             failureParts.append("\(names)备份失败")
                         }
                         if !copyFailedNames.isEmpty {
-                            let names = copyFailedNames.prefix(3).joined(separator: "、") + (copyFailedNames.count > 3 ? "等 \(copyFailedNames.count) 个" : "")
+                            // L146-1：“等”后面是余数，不是总数。
+                            let names = copyFailedNames.prefix(3).joined(separator: "、") + (copyFailedNames.count > 3 ? "等 \(copyFailedNames.count - 3) 个" : "")
                             failureParts.append("\(names)有文件拷贝失败")
                         }
                         UserDefaults.standard.set("\(when)：\(failureParts.joined(separator: "；"))", forKey: "LCScheduleBackupLastFailure")
