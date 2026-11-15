@@ -3355,6 +3355,30 @@ struct LCDataManagementView : View {
         // 满 5 秒，那是客端写盘时机 host 侧看不见，不能拿
         // isAppRunning 一刀切（关窗竞态会读到旧 dump），不动。
         guard !containers.isEmpty else { return }
+        // 3.8.593（L126）：客没在跑时别白等满 5 秒——下面轮询只认
+        // dump mtime 前进/新出现，客死了就没有任何一方会再写
+        // dump（桥只在客启动/切后台时重写，写盘方唯一，见
+        // CZFKeychainBridge.m:721，宿主侧只读）；轮询永远等不
+        // 满、每 App 白交 5 秒，批量备份逐个调这里，10 个闲置
+        // App 就是 50 秒。L42 只敢省零容器那档、L54 只敢省无
+        // dump 那档，第三档一直漏着：dump 在、客没在跑。活不
+        // 活不认 isAppRunning——它只覆盖启动段（runApp 置位在
+        // 前、返回时复位，窗开着跑它也是 false），认 dock 条目：
+        // 窗在册上才有条目，条目在就照旧关窗+轮询；最小化窗条
+        // 目还在，照旧轮询不动。isRunning 再兜一道启动竞态：
+        // 条目还没挂上、runApp 还没返时也轮询，启动时那份新
+        // dump 还能赶上。runApp 已返、条目还没挂上的不足 1 秒
+        // 窗口不在兜里——那时跳过轮询会备到启动前的旧 dump，
+        // 下次备份再取新的一份，后果限于一份备份的钥匙串快
+        // 照旧一个会话。
+        var hasLiveWindow = false
+        if #available(iOS 16.0, *) {
+            hasLiveWindow = await MainActor.run {
+                let liveUUIDs = Set(MultitaskDockManager.shared.apps.map { $0.appUUID })
+                return containers.contains { liveUUIDs.contains($0.folderName) }
+            }
+        }
+        if !hasLiveWindow && !isRunning { return }
         let fm = FileManager.default
         var before: [URL: Date] = [:]
         for container in containers {
