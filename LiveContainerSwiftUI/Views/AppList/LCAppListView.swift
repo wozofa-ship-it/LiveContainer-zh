@@ -2514,23 +2514,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         if urlToOpen.scheme != "https" && urlToOpen.scheme != "http" {
-            var appToLaunch : LCAppModel? = nil
-            var appListsToConsider = [sharedModel.apps]
-            if sharedModel.isHiddenAppUnlocked || !LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
-                appListsToConsider.append(sharedModel.hiddenApps)
-            }
-            appLoop:
-            for appList in appListsToConsider {
-                for app in appList {
-                    if let schemes = app.appInfo.urlSchemes() {
-                        for scheme in schemes {
-                            if let scheme = scheme as? String, scheme == urlToOpen.scheme {
-                                appToLaunch = app
-                                break appLoop
+            // 3.8.578（L383-1）：本函数从多路按钮/深链的裸 Task 调来、不在主 actor 上（L44 同款）；这里读 sharedModel.apps/hiddenApps（@Published 数组）全表扫 urlSchemes，主线程安装完成/删除/显隐切换改同一份数组时与这里的读并发，Swift 数组非线程安全、可能崩（L309-1/L371-1 同款；urlSchemes() 本身读 _infoPlist、O-27 已证安全，危险的是数组本身）。一次回主线程取齐再分支，语义不动。
+            let appToLaunch: LCAppModel? = await MainActor.run {
+                var appListsToConsider = [sharedModel.apps]
+                if sharedModel.isHiddenAppUnlocked || !LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
+                    appListsToConsider.append(sharedModel.hiddenApps)
+                }
+                for appList in appListsToConsider {
+                    for app in appList {
+                        if let schemes = app.appInfo.urlSchemes() {
+                            for scheme in schemes {
+                                if let scheme = scheme as? String, scheme == urlToOpen.scheme {
+                                    return app
+                                }
                             }
                         }
                     }
                 }
+                return nil
             }
 
 
@@ -4478,28 +4479,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         if bundleId == "" {
             return false
         }
-        var appFound : LCAppModel? = nil
-        var isFoundAppLocked = false
-        for app in sharedModel.apps {
-            if app.appInfo.relativeBundlePath == bundleId {
-                appFound = app
-                // 3.8.556（L233）：isLocked 读 _info（LCAppInfo.m:714），本函数从通知/收件箱/网格启动的裸 Task 调来、不在主 actor 上；主线程 setLocked 写 _info + save 时读-写并发可能崩（L70/L72/L74 同款）。只对命中的这一条回主线程取（relativeBundlePath 是 ivar，直读安全）。
-                let locked = await MainActor.run { app.appInfo.isLocked }
-                if locked {
-                    isFoundAppLocked = true
-                }
-                break
-            }
-        }
-        if appFound == nil && !LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
-            for app in sharedModel.hiddenApps {
+        // 3.8.578（L391-1）：L233 只修了 isLocked 读、漏了这两段扫表本身——本函数从通知（:2416）/收件箱（:3996/:4005）/网格（:1769 经 czfGridLaunch 裸 Task）/深链（:4838）的裸 Task 调来，声明 :4478 头上无 @MainActor；这里 for 循环直接读 sharedModel.apps/hiddenApps（@Published 数组），主线程安装完成（:3154）/删除（:4425）/显隐切换（:4448）改同一份数组时与这里的读并发，Swift 数组非线程安全、可能崩（L383-1/L371-1 同款；relativeBundlePath 是 ivar、直读安全，危险的是数组本身）。两段扫表一次回主线程取齐再分支，顺序与匹配条件不动；命中那条的 isLocked 也在主线程上顺手取（L233 的内层 MainActor.run 不再需要），隐藏区命中仍按原义直接算锁住。
+        let foundResult: (LCAppModel?, Bool) = await MainActor.run {
+            for app in sharedModel.apps {
                 if app.appInfo.relativeBundlePath == bundleId {
-                    appFound = app
-                    isFoundAppLocked = true
-                    break
+                    return (app, app.appInfo.isLocked)
                 }
             }
+            if !LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
+                for app in sharedModel.hiddenApps {
+                    if app.appInfo.relativeBundlePath == bundleId {
+                        return (app, true)
+                    }
+                }
+            }
+            return (nil, false)
         }
+        var appFound = foundResult.0
+        var isFoundAppLocked = foundResult.1
         
         if appFound == nil && bundleId == "builtinSideStore" {
             appFound = LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared)

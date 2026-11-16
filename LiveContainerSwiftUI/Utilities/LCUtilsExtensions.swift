@@ -650,18 +650,19 @@ extension LCUtils {
                 let encodedStr = Data(launchURLStr.utf8).base64EncodedString()
 
 
-                var appToLaunch: LCAppModel? = nil
+                // 3.8.578（L384-1）：本函数从 JIT 启动按钮的裸 Task 调来、不在主 actor 上（唯一调用方 K2:4614 在 :4608 裸 Task 内；声明 :551 头上无 @MainActor）；这里读 DataManager.shared.model.apps（@Published 数组，与 K2 sharedModel 是同一单例，LiveContainerSwiftUIApp:181 注入）全表扫 urlSchemes，主线程安装完成/删除/显隐切换改同一份数组时与这里的读并发，Swift 数组非线程安全、可能崩（L383-1/L371-1 同款；urlSchemes() 本身读 _infoPlist、O-27 已证安全，危险的是数组本身）。一次回主线程取齐再分支，语义不动。
                 // find an app that can respond to stikjit://
-                appLoop:
-                for app in DataManager.shared.model.apps {
-                    if let schemes = app.appInfo.urlSchemes() {
-                        for scheme in schemes {
-                            if let scheme = scheme as? String, scheme == "stosdebug" {
-                                appToLaunch = app
-                                break appLoop
+                let appToLaunch: LCAppModel? = await MainActor.run {
+                    for app in DataManager.shared.model.apps {
+                        if let schemes = app.appInfo.urlSchemes() {
+                            for scheme in schemes {
+                                if let scheme = scheme as? String, scheme == "stosdebug" {
+                                    return app
+                                }
                             }
                         }
                     }
+                    return nil
                 }
                 guard let appToLaunch else {
                     onServerMessage?("StosDebug is not installed in LiveContainer.")
@@ -732,18 +733,19 @@ extension LCUtils {
                 let encodedStr = Data(launchURLStr.utf8).base64EncodedString()
 
 
-                var appToLaunch: LCAppModel? = nil
+                // 3.8.578（L384-1）：本函数从 JIT 启动按钮的裸 Task 调来、不在主 actor 上（唯一调用方 K2:4614 在 :4608 裸 Task 内；声明 :551 头上无 @MainActor）；这里读 DataManager.shared.model.apps（@Published 数组，与 K2 sharedModel 是同一单例，LiveContainerSwiftUIApp:181 注入）全表扫 urlSchemes，主线程安装完成/删除/显隐切换改同一份数组时与这里的读并发，Swift 数组非线程安全、可能崩（L383-1/L371-1 同款；urlSchemes() 本身读 _infoPlist、O-27 已证安全，危险的是数组本身）。一次回主线程取齐再分支，语义不动。
                 // find an app that can respond to stikjit://
-                appLoop:
-                for app in DataManager.shared.model.apps {
-                    if let schemes = app.appInfo.urlSchemes() {
-                        for scheme in schemes {
-                            if let scheme = scheme as? String, scheme == "stikjit" {
-                                appToLaunch = app
-                                break appLoop
+                let appToLaunch: LCAppModel? = await MainActor.run {
+                    for app in DataManager.shared.model.apps {
+                        if let schemes = app.appInfo.urlSchemes() {
+                            for scheme in schemes {
+                                if let scheme = scheme as? String, scheme == "stikjit" {
+                                    return app
+                                }
                             }
                         }
                     }
+                    return nil
                 }
                 guard let appToLaunch else {
                     onServerMessage?("StikDebug is not installed in LiveContainer.")
