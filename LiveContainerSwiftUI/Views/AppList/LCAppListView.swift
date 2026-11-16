@@ -2817,12 +2817,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         var outputFolder = LCPath.bundlePath.appendingPathComponent(appRelativePath)
         var appToReplace : LCAppModel? = nil
         // Folder exist! show alert for user to choose which bundle to replace
-        var sameBundleIdApp = sharedModel.apps.filter { app in
-            return app.appInfo.bundleIdentifier() == newBundleId
+        // 3.8.577（L371-1）：installIpaFile 是非隔离 async，decompress 等 await 之后在裸 Task 执行器上跑；这里 filter 全表 App 的 bundleIdentifier() 读 _info（LCAppInfo.m:188），与主线程 toggleHidden/toggleLocked 写 _info + save、runApp 容器准备写 dataUUID（M:921-1018 主线程块）并发时读-写可能崩（L299-4/L325 同款；L81 只修了 :2957 那处，这里漏了）。两路 filter 各回主线程一次取，语义不动。
+        var sameBundleIdApp = await MainActor.run {
+            sharedModel.apps.filter { app in
+                return app.appInfo.bundleIdentifier() == newBundleId
+            }
         }
         if sameBundleIdApp.count == 0 {
-            sameBundleIdApp = sharedModel.hiddenApps.filter { app in
-                return app.appInfo.bundleIdentifier() == newBundleId
+            sameBundleIdApp = await MainActor.run {
+                sharedModel.hiddenApps.filter { app in
+                    return app.appInfo.bundleIdentifier() == newBundleId
+                }
             }
             
             // we found a hidden app, we need to authenticate before proceeding

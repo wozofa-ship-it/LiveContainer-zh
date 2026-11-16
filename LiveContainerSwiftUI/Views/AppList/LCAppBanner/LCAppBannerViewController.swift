@@ -577,8 +577,12 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         var failedContainers: [String] = []
         for container in appInfo.containers {
             let dataUUID = container.folderName
+            // 3.8.577（L381-1）：删容器不能硬拼 dataPath——共享夹（isShared，LCContainer.swift:433 全按 appInfo.isShared 建）住在 lcGroupDataPath（createFolder :987、moveToAppGroup :1196、恢复 D:5664 同款），dataPath 里根本没有；原来每删一个带数据的共享 App 都报“以下容器删除失败，已保留”，其实一个没删、共享数据还以孤儿形态烂在 App Group 里（D 的悬空清理只扫 dataPath，永远扫不到它），钥匙串也没清。按 containerURL 删（isShared 走共享根、私人走 dataPath，D 全仓同款；私人夹算出的路径与原来一字不差）；书签外置夹（storageBookMark）是用户自管的外置文件夹、搬移两路也跳过它，不删、不报错。
+            if container.storageBookMark != nil {
+                continue
+            }
             do {
-                try fileManager.removeItem(at: LCPath.dataPath.appendingPathComponent(dataUUID))
+                try fileManager.removeItem(at: container.containerURL)
             } catch {
                 failedContainers.append(dataUUID)
                 continue
