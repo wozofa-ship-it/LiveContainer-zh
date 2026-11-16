@@ -75,6 +75,11 @@ public final class CZFVPNManager {
     private var rotateBaselineLink: String?
     private var rotateCooldownUntil = Date.distantPast
     private var rotateTriedLinks = Set<String>()
+    /// 无归属/无统计时探针连续失败次数（3.8.582（VPN-5））：只在主队
+    /// 列上读写——handleRotateProbeResult 跑在 MainActor.run 里，
+    /// rotateCheck 的 work item 也在主队列，与 rotateTriedLinks
+    /// 同款约束。探通清零；连续两次失败才轮换。
+    private var rotateProbeFailures = 0
     private static let autoRotateKey = "CZFVPNAutoRotate"
     // 轮换开关：键不存在 = 开（用户亲令要轮换，默认开着，随时可关）
     public static var isAutoRotateEnabled: Bool {
@@ -276,6 +281,9 @@ public final class CZFVPNManager {
         } else {
             UserDefaults.standard.set(0, forKey: Self.activeNodeKey)
         }
+        // 3.8.582（VPN-1）：清理换表，旧链接不在新表里的 override
+        // 一并清掉（见下面 helpers 注释）。
+        Self.clearStaleNodeOverrides(keeping: cleaned)
         refreshSettingsBackup()
     }
 
@@ -294,6 +302,9 @@ public final class CZFVPNManager {
         } else {
             UserDefaults.standard.set(0, forKey: Self.activeNodeKey)
         }
+        // 3.8.582（VPN-1）：订阅刷新整体换表，旧链接不在新表里
+        // 的 override 一并清掉（见下面 helpers 注释）。
+        Self.clearStaleNodeOverrides(keeping: cleaned)
         applyActiveNodeChange()
         refreshSettingsBackup()
     }
@@ -405,6 +416,10 @@ public final class CZFVPNManager {
         if let idx = newLinks.firstIndex(of: previousActive) {
             UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
         }
+        // 3.8.582（VPN-1）：只换顺序、链接一个不少，扫一遍正常是
+        // 空操作；但之前版本删节点留下的过期 override 在这里一并
+        // 清掉（见下面 helpers 注释）。
+        Self.clearStaleNodeOverrides(keeping: newLinks)
         refreshSettingsBackup()
     }
 
@@ -480,6 +495,10 @@ public final class CZFVPNManager {
         } else {
             applyActiveNodeChange()
         }
+        // 3.8.582（VPN-1）：删掉的节点若还有 App 钉死在上面，清掉
+        // override 回落全局——不然钉死的 App 永远拿已删的死链接连，
+        // 菜单里还看不见它（链接因重复行仍在列表里时 helper 不动）。
+        Self.clearStaleNodeOverrides(keeping: links)
         refreshSettingsBackup()
     }
 
@@ -637,6 +656,11 @@ public final class CZFVPNManager {
             if trimmed != oldLink {
                 Self.setNodeAlias(nil, for: oldLink)
             }
+        }
+        // 3.8.582（VPN-1）：钉死同款跟过去——别名挪了，override 不挪
+        // 的话钉死的 App 仍拿旧链接连（见上面 helpers 注释）。
+        if trimmed != oldLink {
+            Self.remapNodeOverride(from: oldLink, to: trimmed)
         }
         if wasActive {
             UserDefaults.standard.set(index, forKey: Self.activeNodeKey)
@@ -822,6 +846,36 @@ public final class CZFVPNManager {
         }
         // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
         shared.refreshSettingsBackup()
+    }
+
+    // 3.8.582（VPN-1）：钉死链接维护——override 存的是整条链接串，
+    // 节点列表变了它不会自己跟过去：改链接时钉死的 App 仍拿旧链
+    // 接连（旧密码/旧服务器已死），删节点/订阅替换后钉死的链接
+    // 也不在列表里了，设置页菜单只列当前节点，过期 override 本
+    // 身不显示，用户无从发现、无从改。改链接跟到新链接；旧链接
+    // 不在新列表里了就清掉（回落跟随全局），不让钉死的 App 永远
+    // 拿死链接连。调用方在 refreshSettingsBackup() 之前调这里，
+    // 备份里记的才是迁移后的钉死关系。
+    /// 把指着 oldLink 的 override 改指 newLink（改链接用）。
+    private static func remapNodeOverride(from oldLink: String, to newLink: String) {
+        let defaults = UserDefaults.standard
+        // dictionaryRepresentation() 是快照，边遍历边写是安全的。
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(nodeOverrideKeyPrefix) {
+            guard defaults.string(forKey: key) == oldLink else { continue }
+            defaults.set(newLink, forKey: key)
+        }
+    }
+
+    /// 清掉所有指着已不在 links 里的链接的 override（删节点/
+    /// 订阅替换/清理/重排用），回落跟随全局（setNodeOverride(nil)
+    /// 同款：删键 + 置 followGlobal）。还在列表里的不动。
+    private static func clearStaleNodeOverrides(keeping links: [String]) {
+        let defaults = UserDefaults.standard
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(nodeOverrideKeyPrefix) {
+            guard let saved = defaults.string(forKey: key), !saved.isEmpty, !links.contains(saved) else { continue }
+            defaults.removeObject(forKey: key)
+            defaults.set(true, forKey: followGlobalKeyPrefix + String(key.dropFirst(nodeOverrideKeyPrefix.count)))
+        }
     }
 
     // 这个 App 实际用的节点链接：钉死过就用钉死的，不管它还
@@ -1182,12 +1236,12 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
     }
 
-    // 经核心发一次真实请求验节点：走 HTTP 10828 代理访
-    // generate_204（空回应、最轻），拿到任何 HTTP 回应即算
-    // 通（出站失败时核心直接断连接、不回 HTTP）。不用
-    // cp.cloudflare.com 作探针——有些节点单拦 Cloudflare
-    // 那一路、实际经节点上网是通的（测速里的假不通同款教训）。
-    // 超时/抛错即不通。只读，不改核心与节点状态。
+    // 经核心发一次真实请求验节点：走 HTTP 10828 代理发真实请求，
+    // 拿到任何 HTTP 回应即算通（出站失败时核心直接断连接、不回
+    // HTTP）。不只访一个站——有些节点单拦一路、实际经节点上网
+    // 是通的（测速里的假不通同款教训），按测速顺序三目标重试
+    //（Cloudflare → gstatic → Apple）。超时/抛错即换下一个站。
+    // 只读，不改核心与节点状态。
     private func probeNodeThroughCore(timeout: TimeInterval) async -> Bool {
         let config = URLSessionConfiguration.ephemeral
         config.connectionProxyDictionary = Self.proxyDictionary()
@@ -1195,13 +1249,21 @@ public final class CZFVPNManager {
         config.timeoutIntervalForResource = timeout
         let session = URLSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
-        guard let url = URL(string: "https://www.gstatic.com/generate_204") else { return false }
-        do {
-            let (_, response) = try await session.data(from: url)
-            return response is HTTPURLResponse
-        } catch {
-            return false
+        // 3.8.582（VPN-4）：单访 gstatic 会假死——有些节点单拦一路、
+        // 实际经节点上网是通的。按测速的顺序三目标重试，任一回
+        // HTTP 即算通；三个都失败才算不通。每个目标各给足 timeout
+        //（握手本身要 4 秒，拆小了会把慢节点误判死；全死时最坏
+        // 3 倍超时，只在死节点上多等，调用方照常 fail-open）。
+        for urlString in ["https://cp.cloudflare.com/", "https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
+            guard let url = URL(string: urlString) else { continue }
+            do {
+                let (_, response) = try await session.data(from: url)
+                if response is HTTPURLResponse { return true }
+            } catch {
+                continue
+            }
         }
+        return false
     }
 
     // 多任务列表变化后由 MultitaskDockManager 调用：还在跑的
@@ -1303,6 +1365,12 @@ public final class CZFVPNManager {
         // 3.8.282：起成功了就记下“开着”，宿主重启后恢复
         // 成开着；起失败不写（状态没变）。stop() 里对称写“关着”。
         if ok { coreWasRunning = true }
+        // 3.8.582（VPN-5）：手动起成功后也排一次轮换巡检——以前
+        // 只清归属、不排巡检，死节点占着核心、之后又没开过标 VPN
+        // 的 App 时，30 秒巡检永远不排。锁是 NSRecursiveLock，
+        // 这里调 scheduleRotateCheck 不死锁；归属为 nil 时下面
+        // rotateCheck 走探针兜底。
+        if ok { scheduleRotateCheck() }
         return ok
     }
 
@@ -1528,16 +1596,17 @@ public final class CZFVPNManager {
     // MARK: - 节点自动轮换
 
     // 排一次 30 秒后的轮换检查：已排的先取消再重排，保证
-    // 同一时刻只有一个巡检在跑；核心没在跑、开关关着、
-    // 没有归属 App 时不排（下次起核心 / 开开关时再排）。
+    // 同一时刻只有一个巡检在跑；核心没在跑、开关关着时不排
+    //（下次起核心 / 开开关时再排）。3.8.582（VPN-5）：不要求
+    // 归属 App——手动起核心没有归属，归属守卫会让巡检永远排
+    // 不上；无归属时 rotateCheck 走探针兜底（见下面）。
     private func scheduleRotateCheck() {
         pendingRotateWork?.cancel()
         pendingRotateWork = nil
         vpnCoreLock.lock()
         let running = isRunning
-        let owner = coreOwnerAppInfo
         vpnCoreLock.unlock()
-        guard running, Self.isAutoRotateEnabled, owner != nil else { return }
+        guard running, Self.isAutoRotateEnabled else { return }
         let work = DispatchWorkItem { [weak self] in
             self?.rotateCheck()
         }
@@ -1563,36 +1632,120 @@ public final class CZFVPNManager {
         let link = runningLink
         let owner = coreOwnerAppInfo
         vpnCoreLock.unlock()
-        guard running, Self.isAutoRotateEnabled, !pinging,
-              let appInfo = owner,
-              let dict = Self.proxyStatsDict(for: appInfo),
-              let failed = Int64(dict["failed"] ?? ""),
-              let proxied = Int64(dict["proxied"] ?? "") else {
-            // 读不到统计（插件还没写文件等）：基线不动，下轮再看
+        guard running, Self.isAutoRotateEnabled, !pinging else {
             scheduleRotateCheck()
             return
         }
-        // 核心换节点了（手动切或上次轮换）：基线重置，不拿旧数比
-        if rotateBaselineLink != link {
-            rotateBaselineLink = link
+        // 有归属且统计可读 → 原来的增量统计路（下面 if 内，一字不动）
+        if let appInfo = owner,
+           let dict = Self.proxyStatsDict(for: appInfo),
+           let failed = Int64(dict["failed"] ?? ""),
+           let proxied = Int64(dict["proxied"] ?? "") {
+            // 核心换节点了（手动切或上次轮换）：基线重置，不拿旧数比
+            if rotateBaselineLink != link {
+                rotateBaselineLink = link
+                rotateLastFailed = failed
+                rotateLastProxied = proxied
+                rotateTriedLinks = []
+                scheduleRotateCheck()
+                return
+            }
+            let failedDelta = failed - (rotateLastFailed ?? failed)
+            let proxiedDelta = proxied - (rotateLastProxied ?? proxied)
             rotateLastFailed = failed
             rotateLastProxied = proxied
-            rotateTriedLinks = []
+            if Date() < rotateCooldownUntil {
+                scheduleRotateCheck()
+                return
+            }
+            if failedDelta >= 3 && proxiedDelta == 0 {
+                rotateToNextNode(for: appInfo)
+            }
             scheduleRotateCheck()
             return
         }
-        let failedDelta = failed - (rotateLastFailed ?? failed)
-        let proxiedDelta = proxied - (rotateLastProxied ?? proxied)
-        rotateLastFailed = failed
-        rotateLastProxied = proxied
-        if Date() < rotateCooldownUntil {
+        // 3.8.582（VPN-5）：无归属（手动起核心），或归属 App 的统计
+        // 文件读不到（插件还没落盘 / App 一直连不上）时，统计路永
+        // 远走不到轮换、死节点一直占着。改走直接探核心：连续两次
+        // 探不通才轮换（一次失败可能是瞬时抖动）；探通了计数清零。
+        // 探针是 async，这里起 Task 跑；下一轮先照常排（Task 里轮
+        // 换后还会重排，不冲突）；结果处理跳回主队列跑（与
+        // rotateCheck/rotateToNextNode 同在主队列，rotateTriedLinks
+        // 等状态仍只在主队列上碰）。
+        scheduleRotateCheck()
+        Task { [weak self] in
+            guard let self else { return }
+            let ok = await self.probeNodeThroughCore(timeout: 5)
+            await MainActor.run { self.handleRotateProbeResult(ok: ok) }
+        }
+    }
+
+    /// 探针兜底的结果处理（3.8.582（VPN-5），跑在 MainActor.run 里，
+    /// 与 rotateCheck/rotateToNextNode 同在主队列）：探通清零；
+    /// 连续两次探不通才轮换——有归属走 rotateToNextNode（它自带
+    /// 归属复验），无归属走下面的全局轮换。处理完重排下一轮。
+    private func handleRotateProbeResult(ok: Bool) {
+        if ok {
+            rotateProbeFailures = 0
             scheduleRotateCheck()
             return
         }
-        if failedDelta >= 3 && proxiedDelta == 0 {
+        rotateProbeFailures += 1
+        guard rotateProbeFailures >= 2 else {
+            scheduleRotateCheck()
+            return
+        }
+        rotateProbeFailures = 0
+        vpnCoreLock.lock()
+        let owner = coreOwnerAppInfo
+        let link = runningLink
+        let running = isRunning
+        vpnCoreLock.unlock()
+        guard running else {
+            scheduleRotateCheck()
+            return
+        }
+        if let appInfo = owner {
             rotateToNextNode(for: appInfo)
+        } else {
+            rotateGlobalNode(from: link)
         }
         scheduleRotateCheck()
+    }
+
+    /// 无归属时的全局轮换（3.8.582（VPN-5））：手动起核心没有归属
+    /// App，统计路读不到任何 App 的插件统计；探针连续失败时按
+    /// 列表顺序切下一个支持协议的节点并重启核心，只改全局活动
+    /// 节点，不碰任何钉死。起不来的继续往下一个切，一圈都不通
+    /// 就停轮换、写原因（rotateToNextNode 同款）。
+    private func rotateGlobalNode(from currentLink: String?) {
+        vpnCoreLock.lock()
+        let stillRunning = isRunning
+        let current = runningLink
+        vpnCoreLock.unlock()
+        guard stillRunning, current == currentLink, let current else { return }
+        let links = nodeLinks
+        guard links.count >= 2 else { return }
+        rotateTriedLinks = []
+        var cursor = current
+        for _ in 0..<links.count {
+            guard let target = nextSupportedNode(after: cursor, links: links) else {
+                cancelRotateCheck()
+                lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
+                return
+            }
+            rotateTriedLinks.insert(cursor)
+            rotateTriedLinks.insert(target)
+            if start(withLink: target) {
+                if let idx = nodeLinks.firstIndex(of: target) {
+                    UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+                }
+                return
+            }
+            cursor = target
+        }
+        cancelRotateCheck()
+        lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
     }
 
     // 按列表顺序切下一个支持协议的节点并重启核心：归属 App
@@ -2411,7 +2564,12 @@ public final class CZFVPNManager {
             try CZFSingBoxCore.start(configJSON: config)
         } catch {
             vpnCoreLock.unlock()
-            return links.map { _ in CZFNodePingResult(success: false, delay: 11000) }
+            // 3.8.582（VPN-3）：批量 CheckConfig 失败不能整批记 11000——
+            // 一个坏出站会让全部好节点也被“清理不通”删掉（清理删
+            // !success && !conversionFailed 的节点）。逐个起临时实例
+            // 校验：起得来的当场单测出真实延迟，起不来的标
+            // conversionFailed（“不支持”，清理不删）。
+            return validateSingBoxLinksIndividually(links: links, host: host)
         }
         vpnCoreLock.unlock()
         defer { try? CZFSingBoxCore.stop() }
@@ -2442,6 +2600,69 @@ public final class CZFVPNManager {
         }
         group.wait()
         return results.map { $0 ?? CZFNodePingResult(success: false, delay: 11000) }
+    }
+
+    /// 批量 CheckConfig 失败后的逐个校验（3.8.582（VPN-3），见上面
+    /// probeSingBoxNodes 的 catch）：每个链接单独建配置、单独起
+    /// 临时实例、单独探一次。起不来的（转换失败或 CheckConfig/
+    /// 启动失败）标 conversionFailed（“不支持”，清理不删）；起
+    /// 得来的给真实单测结果。校验中途主核心抢占时立刻停手、余下
+    /// 未验的按 conversionFailed 保底——宁可不删，不可误删。
+    /// 只在批量起失败的罕见路跑；逐个起实例比批量慢，测速本身
+    /// 在后台队列，不冻界面。锁纪律与批量路同款：只锁“检查+起
+    /// 实例”这一下，探针本身不持锁；起着时主核心的 start(withLink:)
+    /// 读到 isServiceRunning 为真会拒绝，不会抢走实例。
+    private func validateSingBoxLinksIndividually(links: [String], host: String) -> [CZFNodePingResult] {
+        var results = [CZFNodePingResult?](repeating: nil, count: links.count)
+        for i in links.indices {
+            // 主核心抢占检查：锁下看占用，被占就停手
+            vpnCoreLock.lock()
+            let occupied = isRunning || CZFSingBoxCore.isServiceRunning
+            vpnCoreLock.unlock()
+            guard !occupied else {
+                for j in links.indices where results[j] == nil {
+                    results[j] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                }
+                break
+            }
+            let link = links[i]
+            let singleConfig: String
+            do {
+                singleConfig = try CZFSingBoxConfig.configJSON(for: link, socksPort: 10927, httpPort: nil)
+            } catch {
+                results[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                continue
+            }
+            // 锁下起实例，起完再放锁
+            vpnCoreLock.lock()
+            if isRunning || CZFSingBoxCore.isServiceRunning {
+                vpnCoreLock.unlock()
+                for j in links.indices where results[j] == nil {
+                    results[j] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                }
+                break
+            }
+            do {
+                try CZFSingBoxCore.start(configJSON: singleConfig)
+            } catch {
+                vpnCoreLock.unlock()
+                results[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                continue
+            }
+            vpnCoreLock.unlock()
+            // defer 在循环体内：每次迭代结束即停掉本次实例，
+            // 不留到下个链接（下个链接起实例前必须停干净）。
+            defer { try? CZFSingBoxCore.stop() }
+            let probe = CZFSingBoxProbe.probe(port: 10927, host: host, timeout: 5)
+            if probe.success {
+                results[i] = CZFNodePingResult(success: true, delay: probe.delayMs)
+            } else if probe.rejected {
+                results[i] = CZFNodePingResult(success: false, delay: 10000)
+            } else {
+                results[i] = CZFNodePingResult(success: false, delay: 11000)
+            }
+        }
+        return results.map { $0 ?? CZFNodePingResult(success: false, delay: 10000, conversionFailed: true) }
     }
 
     // MARK: - 老格式链接翻译

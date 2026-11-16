@@ -5,6 +5,8 @@
 //  Created by s s on 2025/4/18.
 //
 
+import CryptoKit
+import SQLite3
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -3044,7 +3046,47 @@ struct LCDataManagementView : View {
     // 真身在 backupOneAppSyncLocked，这里只过串行队列，保证同一
     // 时刻只有一个备份在写临时目录。队列只在本函数里用，不存在
     // 重入（backupOneAppSyncLocked 不调自己、不回头调本函数）。
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, allowLocked: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
+    /// 3.8.582（BKP-3）：原子写 + fsync。`.atomic` 只保证“旧文件
+    /// 或新文件二选一”，不保证数据已落盘——写完被杀/断电，
+    /// 新文件可能还是空的；fsync 后才算真落盘（WCMigrate
+    /// DurableJournal 同款：.atomic + synchronize）。fsync 失
+    /// 败不影响返回值（数据已在文件里，耐久性尽力而为），
+    /// 写失败才返 false。
+    private static func czfWriteAtomicallyAndSync(data: Data, to url: URL) -> Bool {
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return false }
+        if let handle = try? FileHandle(forUpdating: url) {
+            try? handle.synchronize()
+            try? handle.close()
+        }
+        return true
+    }
+
+    /// 3.8.582（BKP-3）：内存数据的 SHA-256 hex（仓内同款拼法，
+    /// 见 CZFLocalIpaFolderView 的 SHA256 用法）。
+    private static func czfSHA256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 3.8.582（BKP-3）：文件的 SHA-256 hex，分块读（1MB 一块，
+    /// 大库也不整块进内存）。读失败返 nil（不记哈希、不验，
+    /// 不挡拷贝/合并）。
+    private static func czfSHA256HexOfFile(_ url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        do {
+            while true {
+                let chunk = try handle.read(upToCount: 1024 * 1024)
+                if chunk.isEmpty { break }
+                hasher.update(data: chunk)
+            }
+        } catch {
+            return nil
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, allowLocked: Bool = false, keychainSnapshotStale: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
         // 3.8.543（L73）：进串行队列前先取快照（见
         // CZFBackupAppSnapshot 注释）；主线程直读、后台经
         // main.sync 取（L70 同款，Thread.isMainThread 防主线
@@ -3065,11 +3107,11 @@ struct LCDataManagementView : View {
             return DispatchQueue.main.sync(execute: read)
         }()
         return try czfBackupSerialQueue.sync {
-            try Self.backupOneAppSyncLocked(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, snapshot: snapshot, allowLocked: allowLocked)
+            try Self.backupOneAppSyncLocked(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, snapshot: snapshot, allowLocked: allowLocked, keychainSnapshotStale: keychainSnapshotStale)
         }
     }
 
-    private static func backupOneAppSyncLocked(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, snapshot: CZFBackupAppSnapshot, allowLocked: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
+    private static func backupOneAppSyncLocked(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, snapshot: CZFBackupAppSnapshot, allowLocked: Bool = false, keychainSnapshotStale: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
         let appName = snapshot.appName
         // v216：同款多开各写各的文件夹（见 backupFolderName：
         // 同实例沿用旧名、新实例加实例后缀；老文件夹不改名）。
@@ -3124,14 +3166,19 @@ struct LCDataManagementView : View {
             // 列表据此打标；旧备份的 keychain（纯钥匙串）照旧认
             "scope": loginOnly ? "login" : "full",
             // 模块选择：删后恢复时写回，免得手动选的模块夹丢了重选
-            "tweakFolder": snapshot.tweakFolder
+            "tweakFolder": snapshot.tweakFolder,
+            // 3.8.582（BKP-1）：备份时快照过期标记——恢复时读它明报，
+            // 不再拿旧快照静默替换活令牌；老备份没这个键，按不过期处理。
+            "keychainSnapshotStale": keychainSnapshotStale ? "1" : "0"
         ]
         // 3.8.584（L116）：manifest 必须原子写——非原子写中途被
         // 杀/闪退会留半截 JSON，manifestDict 解不出就回落文件夹
         // 名匹配，多开分身会串号；仓内同款已全是 .atomic（L111
         // 预载文件同款），这里三处漏了。
         if let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: .prettyPrinted) {
-            try? manifestData.write(to: appBackupURL.appendingPathComponent("manifest.json"), options: .atomic)
+            // 3.8.582（BKP-3）：manifest 是恢复的唯一口径，原子写 +
+            // fsync（见 czfWriteAtomicallyAndSync）。
+            _ = Self.czfWriteAtomicallyAndSync(data: manifestData, to: appBackupURL.appendingPathComponent("manifest.json"))
         }
         // 完整档才整拷 .app 本体、数据容器和组容器（体积大头
         // 全在这里）；登录态档只挑会话文件，见 else 分支
@@ -3284,8 +3331,16 @@ struct LCDataManagementView : View {
                 // 3.8.584（L116）：同款原子写——半截 plist 读不出，
                 // readKeychainPlist 返 nil，恢复时这容器的令牌丢了。
                 let keychainDest = keychainRoot.appendingPathComponent(container.folderName + ".plist")
-                if (try? data.write(to: keychainDest, options: .atomic)) != nil {
+                // 3.8.582（BKP-3）：原子写 + fsync（见
+                // czfWriteAtomicallyAndSync）；写失败记失败清单、
+                // 清掉半截文件（原逻辑不动），成功才记条数。
+                if Self.czfWriteAtomicallyAndSync(data: data, to: keychainDest) {
                     keychainCount += items.count
+                    // 3.8.582（BKP-3）：快照哈希 sidecar——恢复时验
+                    // （见 readKeychainPlist）；sidecar 写失败不挡
+                    // 备份，没 sidecar 的当老备份、不验。
+                    let hashURL = keychainRoot.appendingPathComponent(container.folderName + ".sha256")
+                    _ = Self.czfWriteAtomicallyAndSync(data: Data(Self.czfSHA256Hex(data).utf8), to: hashURL)
                 } else {
                     loginFailed += 1
                     if loginFailedPaths.count < 50 { loginFailedPaths.append("Keychain/\(container.folderName).plist") }
@@ -3363,7 +3418,12 @@ struct LCDataManagementView : View {
     /// 恢复回滚。备份失败不挡安装，静默跳过
     static func autoBackupBeforeOverwrite(_ app: LCAppModel) async {
         // 3.8.374：备份前先刷快照，别读旧 dump（batchBackup 同款缺口）。
-        await Self.refreshKeychainSnapshot(for: app)
+        // 3.8.582（BKP-1）：过期快照也备（自动备份不挡安装），但记一
+        // 条日志 + 写进 manifest，别静默当新快照。
+        let autoRefreshResult = await Self.refreshKeychainSnapshot(for: app)
+        if autoRefreshResult == .stale {
+            print("[AutoBackup] \(Self.czfAppDisplayName(for: app)) 钥匙串快照过期（备份前 5 秒内未刷新），本次自动备份的钥匙串可能是旧令牌")
+        }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
@@ -3374,7 +3434,7 @@ struct LCDataManagementView : View {
                     // 夹名同步（多开后缀名 ≠ 显示名；原来丢弃结果
                     // 后按显示名同步，同款多开会同步错文件夹）。
                     // 备份失败时不触发同步，外部文件夹里不留半成品。
-                    if let one = try? Self.backupOneAppSync(app, backupRoot: root, fm: fm) {
+                    if let one = try? Self.backupOneAppSync(app, backupRoot: root, fm: fm, keychainSnapshotStale: autoRefreshResult == .stale) {
                         Self.syncBackupsToExternalFolder(appNames: [one.folderName], backupRoot: root)
                         // B-2：单 App 里个别文件拷失败不抛错、也算
                         // “成功”，原来只取 folderName、失败数直接
@@ -3399,7 +3459,7 @@ struct LCDataManagementView : View {
     // B-16：健康行加拷贝失败数——原来只认容器数/钥匙串，
     // 完整备份丢一个容器，健康行只显示“容器 ✅ 2 个”
     // （而不是 3 个），没有 ❌ 标记，不数数就发现不了。
-    static func backupHealthLine(name: String, loginOnly: Bool, containerCount: Int, keychainCount: Int, keychainHasSnapshot: Bool, loginFileCount: Int, containerNames: [String] = [], loginFailed: Int = 0) -> String {
+    static func backupHealthLine(name: String, loginOnly: Bool, containerCount: Int, keychainCount: Int, keychainHasSnapshot: Bool, loginFileCount: Int, containerNames: [String] = [], loginFailed: Int = 0, snapshotStale: Bool = false) -> String {
         var parts: [String] = []
         if loginOnly {
             parts.append(loginFileCount > 0 ? "会话文件 ✅ \(loginFileCount) 个" : "会话文件 ❌ 0 个")
@@ -3420,6 +3480,11 @@ struct LCDataManagementView : View {
         } else {
             parts.append("钥匙串 ❌ 无快照")
         }
+        // 3.8.582（BKP-1）：条数对上也不等于新鲜——过期快照恢复
+        // 会把活令牌换成旧的，健康行里单独标出来。
+        if snapshotStale {
+            parts.append("钥匙串 ⚠️ 快照过期")
+        }
         if loginFailed > 0 {
             parts.append("拷贝失败 ❌ \(loginFailed) 个")
         }
@@ -3432,7 +3497,19 @@ struct LCDataManagementView : View {
     /// 照抄恢复的关窗模式：关掉本次要备的各容器窗口，客 App 切后台触发 CZFKBRun
     /// 重写 dump，轮询 mtime 至多等 5 秒，前进即新鲜，超时按旧值继续（回执已报
     /// 快照时间，用户看得见）。同时解决文件侧滞后（关窗时 App 落盘再拷）。
-    static func refreshKeychainSnapshot(for app: LCAppModel) async {
+    /// 3.8.582（BKP-1）：过期快照不再静默通过。宿主侧强制触发桥重写
+    /// 已核实走不通：CZFKBRun 是桥里的 static C 函数（BundledTweaks/
+    /// CZFKeychainBridge.m:887），只在构造器/启动完成/切后台三处调，
+    /// 宿主侧没有导出可调；伪造 DidEnterBackground 通知会触发同一进
+    /// 程里所有观察者（含宿主自己的），不敢做。所以改成大声失败：
+    /// 返 stale，备份回执明报、写进 manifest，恢复侧明报（见
+    /// backupOneAppSync 的 keychainSnapshotStale 与 outcome）。
+    enum CZFKeychainSnapshotRefresh {
+        case notNeeded
+        case refreshed
+        case stale
+    }
+    static func refreshKeychainSnapshot(for app: LCAppModel) async -> CZFKeychainSnapshotRefresh {
         // 3.8.543（L73）：uiContainers/isAppRunning 是 @Published，
         // 本函数被 backupApps/覆盖前自动备份在裸 Task 上调，离主
         // 线程读是 L70 同款漏网；一次取齐再用（轮询段只读 before，
@@ -3446,7 +3523,8 @@ struct LCDataManagementView : View {
         // 零容器这一档——App 没在跑但 dump 已存在时也可能等
         // 满 5 秒，那是客端写盘时机 host 侧看不见，不能拿
         // isAppRunning 一刀切（关窗竞态会读到旧 dump），不动。
-        guard !containers.isEmpty else { return }
+        // 3.8.582（BKP-1）：不轮询 = 不期待刷新，返 notNeeded。
+        guard !containers.isEmpty else { return .notNeeded }
         // 3.8.593（L126）：客没在跑时别白等满 5 秒——下面轮询只认
         // dump mtime 前进/新出现，客死了就没有任何一方会再写
         // dump（桥只在客启动/切后台时重写，写盘方唯一，见
@@ -3470,7 +3548,8 @@ struct LCDataManagementView : View {
                 return containers.contains { liveUUIDs.contains($0.folderName) }
             }
         }
-        if !hasLiveWindow && !isRunning { return }
+        // 3.8.582（BKP-1）：不轮询 = 不期待刷新，返 notNeeded。
+        if !hasLiveWindow && !isRunning { return .notNeeded }
         let fm = FileManager.default
         var before: [URL: Date] = [:]
         for container in containers {
@@ -3485,7 +3564,8 @@ struct LCDataManagementView : View {
         // 时 refreshed 永远成不了 true；App 没跑时关窗是空操
         // 作、没有任何一方会新建 dump，白等满 5 秒。只敢省这
         // 一档：dump 已存在时保留等待（L42 注释的关窗竞态）。
-        if before.isEmpty && !isRunning { return }
+        // 3.8.582（BKP-1）：不轮询 = 不期待刷新，返 notNeeded。
+        if before.isEmpty && !isRunning { return .notNeeded }
         if #available(iOS 16.0, *) {
             for container in containers {
                 MultitaskDockManager.shared.closeAppWindow(uuid: container.folderName)
@@ -3505,9 +3585,13 @@ struct LCDataManagementView : View {
                     }
                 }
             }
-            if refreshed { return }
+            // 3.8.582（BKP-1）：轮询到刷新返 refreshed；满 5 秒
+            // 没动静返 stale——关窗没触发桥重写，快照过期，
+            // 调用方明报（不再静默按旧值继续）。
+            if refreshed { return .refreshed }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
+        return .stale
     }
 
     func backupApps(_ apps: [LCAppModel], loginOnly: Bool = false, allowLocked: Bool = false) async {
@@ -3532,8 +3616,11 @@ struct LCDataManagementView : View {
             return
         }
         // 3.8.374：备份前先刷快照（见 refreshKeychainSnapshot），别读旧 dump
+        // 3.8.582（BKP-1）：刷新结果按 App 顺序记下来——轮询满 5 秒
+        // 没刷新到的是过期快照，下面备份时写进 manifest、回执里明报。
+        var refreshResults: [CZFKeychainSnapshotRefresh] = []
         for app in apps {
-            await Self.refreshKeychainSnapshot(for: app)
+            refreshResults.append(await Self.refreshKeychainSnapshot(for: app))
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
         // 初始进度也写清第一个 App 的名字（循环里每 App 都会
@@ -3551,7 +3638,7 @@ struct LCDataManagementView : View {
         // 能把主线程堵死几分钟（整 App 容器逐个 copyItem，都是 GB 级），
         // 界面点不动也划不动。挪后台后备份照跑，界面不卡；结果回主线程
         // 再更新成功/失败提示。用 GCD+continuation 桥接，不挑并发模式。
-        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames, loginFailedTotal, loginFailedPathsTotal): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String], [String], [String], [String], [String], Int, [String]) = await withCheckedContinuation { continuation in
+        let (count, failure, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames, loginFailedTotal, loginFailedPathsTotal, staleSnapshotNames): (Int, Error?, Int, Bool, [String], Int, [String: Int], Int, [String], [String], [String], [String], [String], Int, [String], [String]) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let fm = FileManager.default
                 do {
@@ -3561,6 +3648,9 @@ struct LCDataManagementView : View {
                     var failedNames: [String] = []
                     // 3.8.281：跳过未重复备的（锁了的 / 今天已备过登录态的）
                     var skippedNames: [String] = []
+                    // 3.8.582（BKP-1）：快照过期的 App（下面循环里只记
+                    // 真备上的，跳过的进 skippedNames、不重复报）。
+                    var staleSnapshotNames: [String] = []
                     // v216：每 App 健康行（成功才记，失败的走失败清单）
                     var healthLines: [String] = []
                     var keychainTotal = 0
@@ -3604,7 +3694,7 @@ struct LCDataManagementView : View {
                             continue
                         }
                         do {
-                            let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, allowLocked: allowLocked)
+                            let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, allowLocked: allowLocked, keychainSnapshotStale: refreshResults[index] == .stale)
                             keychainTotal += one.keychainCount
                             loginFileTotal += one.loginFileCount
                             for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
@@ -3626,7 +3716,12 @@ struct LCDataManagementView : View {
                             // v216：同步按实际文件夹名（多开后缀名 ≠
                             // 显示名），健康行跟成功数一起回主线程
                             backedUpFolderNames.append(one.folderName)
-                            healthLines.append(Self.backupHealthLine(name: name, loginOnly: loginOnly, containerCount: one.containerCount, keychainCount: one.keychainCount, keychainHasSnapshot: one.keychainHasSnapshot, loginFileCount: one.loginFileCount, containerNames: one.containerNames, loginFailed: one.loginFailed))
+                            healthLines.append(Self.backupHealthLine(name: name, loginOnly: loginOnly, containerCount: one.containerCount, keychainCount: one.keychainCount, keychainHasSnapshot: one.keychainHasSnapshot, loginFileCount: one.loginFileCount, containerNames: one.containerNames, loginFailed: one.loginFailed, snapshotStale: refreshResults[index] == .stale))
+                            // 3.8.582（BKP-1）：真备上的过期快照记下来，
+                            // 回执里单列明报（见下面 czfSuccessText）。
+                            if refreshResults[index] == .stale {
+                                staleSnapshotNames.append(name)
+                            }
                         } catch {
                             failedNames.append("\(name)：\(LCUtils.czfFriendlyError(error))")
                         }
@@ -3638,9 +3733,9 @@ struct LCDataManagementView : View {
                     Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackupDebounced()
-                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames, loginFailedTotal, loginFailedPathsTotal))
+                    continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames, loginFailedTotal, loginFailedPathsTotal, staleSnapshotNames))
                 } catch {
-                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], [], [], [], [], 0, []))
+                    continuation.resume(returning: (0, error, 0, false, [], 0, [:], 0, [], [], [], [], [], 0, [], []))
                 }
             }
         }
@@ -3730,6 +3825,12 @@ struct LCDataManagementView : View {
             if !snapshotDates.isEmpty {
                 czfSuccessText += "\n—— 钥匙串快照时间 ——\n" + snapshotDates.joined(separator: "\n")
                 czfSuccessText += "\n（快照是 App 打开/切后台时由桥写的；若之后登录过，先打开 App 切一次后台再备份）"
+            }
+            // 3.8.582（BKP-1）：过期快照单列明报——这份备份的钥匙串
+            // 是旧令牌，恢复会把活令牌换成旧的；用户照提示重备一次
+            // 拿新快照，而不是拿着旧备份去恢复才发现登录过期。
+            if !staleSnapshotNames.isEmpty {
+                czfSuccessText += "\n⚠️ 以下 App 的钥匙串快照过期（备份时 5 秒内没刷新到新快照，恢复会用旧令牌替换当前登录）：\n" + staleSnapshotNames.joined(separator: "\n") + "\n（先打开 App 切一次后台，再备份一次拿新快照）"
             }
             if !failedNames.isEmpty {
                 czfSuccessText += "\n—— 以下 App 备份失败（已跳过，继续备了后面的）——\n" + failedNames.joined(separator: "\n")
@@ -4311,9 +4412,26 @@ struct LCDataManagementView : View {
     // 第 4 步显示，父页的 success 弹窗压住（同一次 Task 内
     // 同步关掉，不会闪出来）。
     private func startMigrationRestore() {
+        // 3.8.582（BKP-2）：换机向导不走 doRestoreScope 的人脸关口——
+        // 含锁住备份时先过一次人脸（照 doRestoreScope 同款：含锁定
+        // 才弹、整批只弹一次；失败/取消不开始）。自动恢复不走这里，
+        // 不弹人脸（doRestoreScope 注释同款）。
+        let folders = migrationFolders
+        if folders.contains(where: { lockedBackupNames.contains($0.lastPathComponent) }) {
+            Task {
+                let ok = (try? await LCUtils.authenticateUserForced()) ?? false
+                guard ok else { return }
+                await MainActor.run { self.czfStartMigrationRestoreAfterAuth(folders: folders) }
+            }
+            return
+        }
+        czfStartMigrationRestoreAfterAuth(folders: folders)
+    }
+
+    /// startMigrationRestore 的后半段（3.8.582（BKP-2））：人脸关口通过（或无需关口）后才进。
+    private func czfStartMigrationRestoreAfterAuth(folders: [URL]) {
         migrationStep = 2
         migrationRunning = true
-        let folders = migrationFolders
         Task {
             await restoreSelectedBackups(folders: folders, loginOnly: false)
             // 3.8.516（L40）：本 Task 是裸 Task、不在主 actor 上
@@ -4576,6 +4694,8 @@ struct LCDataManagementView : View {
             var downloadIncompleteApps: [String] = []
             // 3.8.581（L438-2）：恢复后保留的空容器（钥匙串组仍有登录态）——报告单列。
             var keptEmptyApps: [String] = []
+            // 3.8.582（BKP-1）：备份时快照已过期的 App——报告单列明报。
+            var staleSnapshotApps: [String] = []
             var versionMismatchApps: [String] = []
             var missingFolders: [URL] = []
             // v216：无数据文件夹（与 noDataApps 文本并行）：结果
@@ -4776,6 +4896,11 @@ struct LCDataManagementView : View {
                     // 3.8.581（L438-2）：空容器已保留（钥匙串组仍有登录态）进报告。
                     if !outcome.keptEmptyContainers.isEmpty {
                         keptEmptyApps.append("\(reportName)（\(outcome.keptEmptyContainers.count) 个空容器已保留，钥匙串组仍有登录态）")
+                    }
+                    // 3.8.582（BKP-1）：过期快照恢复进报告（见
+                    // outcome.keychainSnapshotStale）。
+                    if outcome.keychainSnapshotStale {
+                        staleSnapshotApps.append(reportName)
                     }
                     // B-6：会话文件合并失败进报告（原文件未动，
                     // 可再恢复一次；路径带 App 名前缀，跨 App
@@ -4985,6 +5110,10 @@ struct LCDataManagementView : View {
                     if !outcome2.keptEmptyContainers.isEmpty {
                         keptEmptyApps.append("\(wait.name)（\(outcome2.keptEmptyContainers.count) 个空容器已保留，钥匙串组仍有登录态）")
                     }
+                    // 3.8.582（BKP-1）：过期快照恢复进报告（同主循环）。
+                    if outcome2.keychainSnapshotStale {
+                        staleSnapshotApps.append(wait.name)
+                    }
                     // B-6：会话文件合并失败进报告（同主循环）。
                     if outcome2.mergedLoginFailed > 0 {
                         mergeFailedTotal += outcome2.mergedLoginFailed
@@ -5124,6 +5253,12 @@ struct LCDataManagementView : View {
             if !keptEmptyApps.isEmpty {
                 msg += "\n\n空容器已保留（钥匙串组仍有登录态，恢复后未删除）：\n" + keptEmptyApps.joined(separator: "\n")
             }
+            // 3.8.582（BKP-1）：过期快照恢复单列明报——这份备份的钥匙串
+            // 是旧令牌，恢复已把它写回去；若恢复后登录过期，重新登录
+            // 后备份一次拿新快照。
+            if !staleSnapshotApps.isEmpty {
+                msg += "\n\n⚠️ 以下 App 的备份钥匙串快照在备份时已过期（恢复会用旧令牌替换当前登录）：\n" + staleSnapshotApps.joined(separator: "\n")
+            }
             if !versionMismatchApps.isEmpty {
                 msg += "\n\n备份版本与当前 App 版本不同的（数据已整套按备份时刻恢复；打开后若仍有个别信息异常，是新版读旧数据的兼容问题）：\n" + versionMismatchApps.joined(separator: "\n")
             }
@@ -5167,6 +5302,7 @@ struct LCDataManagementView : View {
             if mergeFailedTotal > 0 { issues.append("会话合并失败 \(mergeFailedTotal) 个") }
             if !downloadIncompleteApps.isEmpty { issues.append("iCloud 未下完 \(downloadIncompleteApps.count) 个") }
             if !keptEmptyApps.isEmpty { issues.append("空容器已保留 \(keptEmptyApps.count) 个") }
+            if !staleSnapshotApps.isEmpty { issues.append("快照过期 \(staleSnapshotApps.count) 个") }
             if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
             if !issues.isEmpty {
                 line += "（" + issues.joined(separator: "、") + "）"
@@ -5261,6 +5397,9 @@ struct LCDataManagementView : View {
         var downloadIncomplete = false
         // 3.8.581（L438-2）：恢复后保留的空容器文件夹名（文件夹空、但钥匙串组里还有该容器的登录态，不能删；报告单列）。
         var keptEmptyContainers: [String] = []
+        // 3.8.582（BKP-1）：备份的 manifest 记了 keychainSnapshotStale=1——
+        // 备份时快照已过期，恢复会把旧令牌写回去；报告里明报，别静默换。
+        var keychainSnapshotStale = false
         // 备份 Keychain 目录里的 plist 文件数（不管条目数）：
         // 0 = 目录缺/空；>0 但 keychainFound=0 = 快照文件在
         // 但读出 0 条（空快照，或文件未同步完/已损坏）。
@@ -5415,9 +5554,70 @@ struct LCDataManagementView : View {
         }.value
     }
 
+    /// 3.8.582（BKP-3）：恢复前 SQLite quick_check（WCMigrate
+    /// DatabaseInspector 同款思路）——只验 .db/.sqlite/.sqlite3
+    /// 后缀的文件；非 SQLite 库（无 magic）与打不开的不判，
+    /// 只把 quick_check 真失败的记下来。返回要跳过的相对路径集合。
+    private static func czfQuickCheckDatabases(in src: URL, fm: FileManager) -> Set<String> {
+        var bad = Set<String>()
+        for e in Self.loginStateEntries(in: src, fm: fm) {
+            let lower = e.rel.lowercased()
+            guard lower.hasSuffix(".db") || lower.hasSuffix(".sqlite") || lower.hasSuffix(".sqlite3") else { continue }
+            if !Self.czfSQLiteQuickCheckOK(e.src, fm: fm) {
+                bad.insert(e.rel)
+            }
+        }
+        return bad
+    }
+
+    /// 单库 quick_check：magic 不对（不是 SQLite 库）或打不开
+    /// 时返 true（不判）；quick_check 非 "ok" 才返 false。
+    /// 拷到一次性 tmp 目录上验（-wal/-shm 一起拷），读写方式打
+    /// 开——只读打开带 -wal 的库可能因 -shm 建不出来而失败，
+    /// tmp 拷是抛弃的，读写开才验得准；验完整个目录删掉。
+    /// 注意：import SQLite3 在仓内无先例（只有 Dead10ccFix.m
+    /// 里 dlsym 用 sqlite3），是公开系统库的标准用法，CI 为 verdict。
+    private static func czfSQLiteQuickCheckOK(_ dbURL: URL, fm: FileManager) -> Bool {
+        do {
+            let handle = try FileHandle(forReadingFrom: dbURL)
+            defer { try? handle.close() }
+            let magic = try handle.read(upToCount: 16)
+            guard magic.count == 16, magic == Data("SQLite format 3\0".utf8) else { return true }
+        } catch {
+            return true
+        }
+        let tmp = fm.temporaryDirectory.appendingPathComponent("czf-quickcheck-\(UUID().uuidString)")
+        guard (try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil else { return true }
+        defer { try? fm.removeItem(at: tmp) }
+        let tmpDB = tmp.appendingPathComponent("check.db")
+        guard (try? fm.copyItem(at: dbURL, to: tmpDB)) != nil else { return true }
+        for suffix in ["-wal", "-shm"] {
+            let side = URL(fileURLWithPath: dbURL.path + suffix)
+            if fm.fileExists(atPath: side.path) {
+                try? fm.copyItem(at: side, to: URL(fileURLWithPath: tmpDB.path + suffix))
+            }
+        }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(tmpDB.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let openedDB = db else { return true }
+        defer { _ = sqlite3_close(openedDB) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(openedDB, "PRAGMA quick_check(1)", -1, &stmt, nil) == SQLITE_OK,
+              let checkStmt = stmt else { return false }
+        defer { _ = sqlite3_finalize(checkStmt) }
+        guard sqlite3_step(checkStmt) == SQLITE_ROW,
+              let textPtr = sqlite3_column_text(checkStmt, 0) else { return false }
+        let result = textPtr.withMemoryRebound(to: CChar.self, capacity: 1) { ptr in String(cString: ptr) }
+        return result == "ok"
+    }
+
     static func mergeLoginStateOffMain(from src: URL, to dest: URL, mirrorGroupToHost: URL? = nil) async -> (merged: Int, failed: Int, failedPaths: [String]) {
         await Task.detached {
-            Self.mergeLoginStateFiles(from: src, to: dest, fm: FileManager.default, mirrorGroupToHost: mirrorGroupToHost)
+            // 3.8.582（BKP-3）：恢复前验库——撕裂的 SQLite 会话库
+            // 在合并前拦下（见 czfQuickCheckDatabases），不盖掉
+            // live 的好库；坏库记失败进报告。
+            let skip = Self.czfQuickCheckDatabases(in: src, fm: FileManager.default)
+            return Self.mergeLoginStateFiles(from: src, to: dest, fm: FileManager.default, mirrorGroupToHost: mirrorGroupToHost, skipPaths: skip)
         }.value
     }
 
@@ -5445,6 +5645,16 @@ struct LCDataManagementView : View {
         await Task.detached {
             guard let data = try? Data(contentsOf: file),
                   let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { return nil }
+            // 3.8.582（BKP-3）：快照哈希校验——备份时写了 sidecar
+            // 才验（没 sidecar 的老备份不验）；哈希不符 = 拷撕裂/
+            // 同步截断，返 nil 当读不出（调用方重试 5 秒后跳过，
+            // 不拿撕裂快照写回活令牌）。
+            let hashURL = file.deletingPathExtension().appendingPathExtension("sha256")
+            if let expected = try? String(contentsOf: hashURL, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !expected.isEmpty,
+               expected != Self.czfSHA256Hex(data) {
+                return nil
+            }
             return (data, items)
         }.value
     }
@@ -5540,12 +5750,16 @@ struct LCDataManagementView : View {
         var manifestDataUUID = ""
         var manifestKeychainGroupId: Int? = nil
         var manifestTweakFolder = ""
+        // 3.8.582（BKP-1）：manifest 里过期快照的标记（备份时写的），
+        // 结尾写进 outcome.keychainSnapshotStale，报告里明报。
+        var manifestSnapshotStale = false
         if let json = manifestJSON {
             manifestDataUUID = json["dataUUID"] ?? ""
             if let g = json["keychainGroupId"], let gv = Int(g) {
                 manifestKeychainGroupId = gv
             }
             manifestTweakFolder = json["tweakFolder"] ?? ""
+            manifestSnapshotStale = json["keychainSnapshotStale"] == "1"
         }
         var restoredContainers = 0
         // 3.8.294（P0-4）：本次恢复里任一段 iCloud 下载超时
@@ -5903,6 +6117,8 @@ struct LCDataManagementView : View {
         // 同名容器的组里（组号取目标容器自己的，删后重装时
         // 与备份一致；同名覆盖时按现有容器走，不串号）
         var outcome = RestoreOutcome()
+        // 3.8.582（BKP-1）：过期快照标记进 outcome，报告里明报。
+        outcome.keychainSnapshotStale = manifestSnapshotStale
         // 完整备份登录态恢复时 containerFolders 本来就是空
         // （结构 0），容器数取合并循环的顶层文件夹数才是实数；
         // 其余两路 loginMergeFolderCount=0，结果不变。
@@ -6016,7 +6232,9 @@ struct LCDataManagementView : View {
                 // 读——非原子写中途用户点了启动，桥会读到半截 plist、
                 // 解析失败、这次排队导入悄悄丢了；原子写堵死这一路。
                 for container in queueContainers {
-                    if (try? data.write(to: container.containerURL.appendingPathComponent("CZFKeychainImport.plist"), options: .atomic)) != nil {
+                    // 3.8.582（BKP-3）：原子写 + fsync（见
+                    // czfWriteAtomicallyAndSync；3.8.584 只做了原子写）。
+                    if Self.czfWriteAtomicallyAndSync(data: data, to: container.containerURL.appendingPathComponent("CZFKeychainImport.plist")) {
                         queuedAny = true
                     }
                 }
@@ -6254,7 +6472,11 @@ struct LCDataManagementView : View {
                     continue
                 }
                 guard v.isRegularFile == true else { continue }
+                // 3.8.582（BKP-3）：login-hashes.json 是备份时写在备
+                // 份目录里的哈希清单（见 copyLoginStateFiles），不是
+                // 容器数据——恢复枚举时跳过，免得把它合进活容器。
                 if !rel.contains("/") && bridgeFiles.contains(rel) { continue }
+                if !rel.contains("/") && rel == "login-hashes.json" { continue }
                 out.append((rel, item, v.fileSize ?? 0))
             }
         }
@@ -6302,6 +6524,10 @@ struct LCDataManagementView : View {
         var failed = 0
         var failedPaths: [String] = []
         var copied: [String] = []
+        // 3.8.582（BKP-3）：登录关键文件的源文件 SHA-256（恢复时
+        // 验，见 mergeLoginStateFiles）；只记关键文件，普通文件
+        // 是预算内的尽力拷贝，不记。
+        var hashes: [String: String] = [:]
         // 3.8.312：登录关键文件优先——以前按大小升序拷、300MB
         // 封顶，假设“会话文件普遍小”。但红果这类 App 的登录态
         // 落在单个大文件里（大 SQLite 库 / WebView 存储），按大
@@ -6327,6 +6553,12 @@ struct LCDataManagementView : View {
             try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
             if (try? fm.copyItem(at: e.src, to: d)) != nil {
                 copied.append(e.rel)
+                // 3.8.582（BKP-3）：拷前读源文件哈希——拷撕裂/同步
+                // 截断在恢复时能发现（见 mergeLoginStateFiles）。
+                // 读失败不记（当老备份、不验），不挡拷贝。
+                if let hex = Self.czfSHA256HexOfFile(e.src) {
+                    hashes[e.rel] = hex
+                }
                 if e.rel != "LCContainerInfo.plist" {
                     count += 1
                 }
@@ -6360,6 +6592,13 @@ struct LCDataManagementView : View {
                 // B-3/B-4 同款：拷失败的半截文件清掉，别让它进备份（同上，恢复时会盖掉 live 的好文件）。
                 try? fm.removeItem(at: d)
             }
+        }
+        // 3.8.582（BKP-3）：哈希清单随备份走（恢复时验）；写失败
+        // 不挡备份（没清单当老备份、不验）。清单本身不进下次
+        // 备份的枚举（见 loginStateEntries 排除）。
+        if !hashes.isEmpty,
+           let hashData = try? JSONSerialization.data(withJSONObject: hashes, options: []) {
+            _ = Self.czfWriteAtomicallyAndSync(data: hashData, to: dst.appendingPathComponent("login-hashes.json"))
         }
         return (count, loginStateDirBreakdown(for: copied), skipped, skippedPaths, failed, failedPaths)
     }
@@ -6402,14 +6641,41 @@ struct LCDataManagementView : View {
         return true
     }
 
-    static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager, mirrorGroupToHost: URL? = nil) -> (merged: Int, failed: Int, failedPaths: [String]) {
+    static func mergeLoginStateFiles(from src: URL, to dst: URL, fm: FileManager, mirrorGroupToHost: URL? = nil, skipPaths: Set<String> = []) -> (merged: Int, failed: Int, failedPaths: [String]) {
         var count = 0
         // B-6：合并失败数与路径（与备份侧 #13 对称）。
         var failed = 0
         var failedPaths: [String] = []
+        // 3.8.582（BKP-3）：哈希清单在源目录里（备份时 copyLoginStateFiles
+        // 写的 login-hashes.json）；没有的老备份不验。清单本身不进
+        // 枚举（见 loginStateEntries 排除）。
+        let hashes: [String: String]? = {
+            let url = src.appendingPathComponent("login-hashes.json")
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return nil }
+            return json
+        }()
         for e in loginStateEntries(in: src, fm: fm) {
             let rel = e.rel
             if rel == "LCContainerInfo.plist" { continue }
+            // 3.8.582（BKP-3）：quick_check 坏库已在
+            // mergeLoginStateOffMain 里拦下，跳过不合并（live 的
+            // 好库不动），记失败进报告。
+            if skipPaths.contains(rel) {
+                failed += 1
+                if failedPaths.count < 50 { failedPaths.append(rel + "（数据库损坏，已跳过）") }
+                continue
+            }
+            // 3.8.582（BKP-3）：哈希不符 = 备份里的文件撕裂/截断，
+            // 跳过不合并（live 的好文件不动），记失败进报告。
+            if let expected = hashes?[rel] {
+                let actual = Self.czfSHA256HexOfFile(e.src)
+                if actual != expected {
+                    failed += 1
+                    if failedPaths.count < 50 { failedPaths.append(rel + "（哈希不符，已跳过）") }
+                    continue
+                }
+            }
             let s = e.src
             let d = dst.appendingPathComponent(rel)
             try? fm.createDirectory(at: d.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -7485,8 +7751,12 @@ struct LCDataManagementView : View {
             toRefresh = selected.filter { !czfScheduledSkippedLocked($0) }
         }
         // 3.8.374：定时备份同样先刷快照，别读旧 dump
+        // 3.8.582（BKP-1）：刷新结果按实例记下来（下面循环按
+        // selected 跑，toRefresh 是它的子集，按下标对不上），
+        // 过期快照写进 manifest + 失败记录里留痕。
+        var scheduledRefresh: [ObjectIdentifier: CZFKeychainSnapshotRefresh] = [:]
         for app in toRefresh {
-            await Self.refreshKeychainSnapshot(for: app)
+            scheduledRefresh[ObjectIdentifier(app)] = await Self.refreshKeychainSnapshot(for: app)
         }
         let (didBackup, hadFailure): (Bool, Bool) = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -7500,6 +7770,9 @@ struct LCDataManagementView : View {
                 // backupOneAppSyncLocked 会直接抛“备份已锁定”，
                 // 下面循环里记 skippedLockedCount、不算结算。
                 var skippedLockedCount = 0
+                // 3.8.582（BKP-1）：快照过期的 App（下面循环里只记
+                // 真备上的，失败记录里留痕）。
+                var staleSnapshotNames: [String] = []
                 // 3.8.306：定时备份失败别静默——原来失败用 try?
                 // 吞掉，整批全失败也不留痕、第二天照常重试，
                 // 用户根本不知道没备上。失败的 App 记下来，
@@ -7534,8 +7807,13 @@ struct LCDataManagementView : View {
                         // v216：同步按返回的实际文件夹名（多开后缀名
                         // ≠ 显示名），不按显示名猜
                         do {
-                            let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
+                            let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, keychainSnapshotStale: scheduledRefresh[ObjectIdentifier(app)] == .stale)
                             backedUpFolderNames.append(one.folderName)
+                            // 3.8.582（BKP-1）：真备上的过期快照记下来，
+                            // 失败记录里留痕（见下面 failureParts）。
+                            if scheduledRefresh[ObjectIdentifier(app)] == .stale {
+                                staleSnapshotNames.append(Self.czfAppDisplayName(for: app))
+                            }
                             if one.loginFailed > 0 {
                                 copyFailedNames.append("\(Self.czfAppDisplayName(for: app))（\(one.loginFailed) 个文件拷贝失败）")
                             }
@@ -7547,7 +7825,7 @@ struct LCDataManagementView : View {
                         Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
                         Self.writeCZFSettingsBackupDebounced()
                     }
-                    if !failedNames.isEmpty || !copyFailedNames.isEmpty || skippedLockedCount > 0 {
+                    if !failedNames.isEmpty || !copyFailedNames.isEmpty || skippedLockedCount > 0 || !staleSnapshotNames.isEmpty {
                         let fmt = DateFormatter()
                         fmt.dateFormat = "MM月d日 HH:mm"
                         let when = fmt.string(from: Date())
@@ -7567,6 +7845,14 @@ struct LCDataManagementView : View {
                         if skippedLockedCount > 0 {
                             failureParts.append("\(skippedLockedCount) 个已锁定未备份（定时备份跳过锁定备份，手动备份时过人脸即可备份）")
                         }
+                        // 3.8.582（BKP-1）：过期快照也留痕——备份本身
+                        // 成了，但钥匙串是旧令牌；记录挂着，直到某轮
+                        // 备出新快照（hadFailure 含它，见下面 resume）。
+                        if !staleSnapshotNames.isEmpty {
+                            // L146-1：“等”后面是余数，不是总数。
+                            let names = staleSnapshotNames.prefix(3).joined(separator: "、") + (staleSnapshotNames.count > 3 ? "等 \(staleSnapshotNames.count - 3) 个" : "")
+                            failureParts.append("\(names)钥匙串快照过期（备份时未刷新到新快照，恢复会用旧令牌）")
+                        }
                         UserDefaults.standard.set("\(when)：\(failureParts.joined(separator: "；"))", forKey: "LCScheduleBackupLastFailure")
                         UserDefaults.standard.synchronize()
                     }
@@ -7578,7 +7864,7 @@ struct LCDataManagementView : View {
                 // 失败记录里那行“X 个已锁定未备”也一直挂着提醒。
                 // 失败记录有锁定跳过时也不清（hadFailure 含它），
                 // 直到某轮不再跳过锁定项（解锁或取消定时勾选）。
-                continuation.resume(returning: (!backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount == selected.count && skippedLockedCount == 0), !failedNames.isEmpty || !copyFailedNames.isEmpty || skippedLockedCount > 0))
+                continuation.resume(returning: (!backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount == selected.count && skippedLockedCount == 0), !failedNames.isEmpty || !copyFailedNames.isEmpty || skippedLockedCount > 0 || !staleSnapshotNames.isEmpty))
             }
         }
         if didBackup {

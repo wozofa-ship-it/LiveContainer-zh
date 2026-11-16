@@ -234,10 +234,20 @@ public enum CZFSingBoxConfig {
             "password": password,
         ]
         if let cc = CZFSingBoxRouting.firstQuery(map, "congestion_control"), !cc.isEmpty {
-            out["congestion_control"] = cc
+            // 3.8.582（VPN-2）：congestion_control 只认 cubic/new_reno/bbr——原来原样直通，非法值进配置后 LibboxCheckConfig 失败、节点起不来；先 trim+lowercased 再校验，非法直接抛 invalidValue，让节点在测速/启动前就显示“不支持”，不写该键的仍是空串（firstQuery 空值返回 nil）。
+            let kind = cc.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard ["cubic", "new_reno", "bbr"].contains(kind) else {
+                throw CZFSingBoxConfigError.invalidValue("congestion_control")
+            }
+            out["congestion_control"] = kind
         }
         if let mode = CZFSingBoxRouting.firstQuery(map, "udp_relay_mode"), !mode.isEmpty {
-            out["udp_relay_mode"] = mode
+            // 3.8.582（VPN-2）：udp_relay_mode 只认 native/quic，同款——非法值原样直通会让 CheckConfig 失败、节点起不来；非法直接抛 invalidValue。
+            let relayMode = mode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard relayMode == "native" || relayMode == "quic" else {
+                throw CZFSingBoxConfigError.invalidValue("udp_relay_mode")
+            }
+            out["udp_relay_mode"] = relayMode
         }
         out["tls"] = tlsBlock(serverName: tlsP.serverName, alpn: tlsP.alpn, insecure: tlsP.insecure)
         return out
@@ -301,15 +311,16 @@ public enum CZFSingBoxConfig {
             // O-6：obfs 只认 salamander / gecko（gecko 与
             // salamander 同款 type+password）；其它值直接抛错，
             // 让节点在测速/启动前就显示“不支持”，而不是生成
-            // 一个没 obfs 块的配置假装能连。salamander / gecko
-            // 没给密码时沿用老行为：不写 obfs 块、不抛错。
+            // 一个没 obfs 块的配置假装能连。
+            // 3.8.582（VPN-2）：salamander / gecko 没给 obfs-password 时不再静默跳过——服务端要求 obfs 时，没 obfs 块的配置握手失败、核心“起来了但没流量”；有 obfs 值、无密码直接抛 invalidValue("obfs-password")。obfs 键本身不存在时上面 if let 就不进，不抛。
             let kind = obfs.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard kind == "salamander" || kind == "gecko" else {
                 throw CZFSingBoxConfigError.invalidValue("obfs")
             }
-            if let obfsPwd = CZFSingBoxRouting.firstQuery(map, "obfs-password", "obfs_password"), !obfsPwd.isEmpty {
-                out["obfs"] = ["type": kind, "password": obfsPwd] as [String: Any]
+            guard let obfsPwd = CZFSingBoxRouting.firstQuery(map, "obfs-password", "obfs_password"), !obfsPwd.isEmpty else {
+                throw CZFSingBoxConfigError.invalidValue("obfs-password")
             }
+            out["obfs"] = ["type": kind, "password": obfsPwd] as [String: Any]
         }
         if let up = CZFSingBoxRouting.firstQuery(map, "up_mbps", "up"), let upInt = Int(up) {
             out["up_mbps"] = upInt

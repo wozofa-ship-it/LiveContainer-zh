@@ -389,7 +389,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         if vpnCoreRunning {
             CZFVPNManager.shared.stop()
         } else {
-            _ = CZFVPNManager.shared.start()
+            // 3.8.582（VPN-6）：起失败以前只把开关留在关态、不显示
+            // 原因，用户无从查（lastError 只有 VPN 设置页读）。失败
+            // 时把原因弹出来，走已有的 errorShow/errorInfo 通用报错
+            // 框（L121 移到 background 叶子，sheet 盖不住）。
+            let ok = CZFVPNManager.shared.start()
+            if !ok {
+                errorInfo = CZFVPNManager.shared.lastError ?? "核心启动失败"
+                errorShow = true
+            }
         }
         vpnCoreRunning = CZFVPNManager.shared.isRunning
     }
