@@ -901,6 +901,8 @@ struct LCTweakFolderView : View {
                 if firstError == nil { firstError = error.localizedDescription }
             }
         }
+        // 3.8.570（L328-1）：新文件进夹后内存“已验过”要作废——正常启动 signApp(force:false)，signTweaks 见已验过直接 return（LCUtilsExtensions:148），本轮内已验过的夹再起 App 时新文件不签、游客 dlopen 报签名无效（TweakLoader.m:61；CZFVPN 单签同款先例 M:1591）。导入成功才清表，下次启动指纹逐文件重验、只签新文件。
+        if failedNames.count < urls.count { LCUtils.czfInvalidateVerifiedTweakFolders() }
         await MainActor.run {
             isTweakInstalling = false
             if !failedNames.isEmpty {

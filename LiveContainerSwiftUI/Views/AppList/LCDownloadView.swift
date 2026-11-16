@@ -75,6 +75,8 @@ public final class DownloadHelper : ObservableObject {
                 } else {
                     try await downloadOnce(url: url, to: to, resumeData: nil)
                 }
+                // 3.8.570（L327-1）：取消后 download() 不能正常返回——cancel() 只 resume 了 continuation、不置错，downloadOnce 的 ansError 仍是 nil，直接 return 会让调用方当成下载成功；installFromUrl 有 cancelled 兜底、installTweak/预取走独立实例无取消路，唯独源页 czfDownloadVersionTo 覆盖确认路：旧文件仍在 destURL，魔数校验放过旧包，取消后仍弹分享表（分享的是旧版）。下完先查取消（读走 MainActor.run，L50-1 同款），取消就抛 CancellationError——四处调用方已按 cancelled 分流，不弹错。
+                if await MainActor.run(body: { cancelled }) { throw CancellationError() }
                 return
             } catch {
                 lastError = error

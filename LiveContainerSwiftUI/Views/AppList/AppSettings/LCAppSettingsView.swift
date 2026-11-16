@@ -980,8 +980,10 @@ struct LCAppSettingsView: View {
             return
         }
         let fm = FileManager()
+        // 3.8.570（L326-1）：uiIsShared 是 @Published（M:478），本函数在裸 Task 上读了两次（下行定 dest、末尾定新容器 isShared），中间 :1008 的 await MainActor.run 是挂起点——搬移 Task 的尾部记账（moveToAppGroup :1242 / movePrivateDoc :1323）正好落在这里时，两读取到不同值：dest 按旧值算根目录、新容器按新值记 isShared，记录与磁盘位置错位（共享旗的夹落在私人根、或反过来）。三个 alert 是三个独立 AlertHelper 实例（renameFolderInput / moveToAppGroupAlert / moveToPrivateDocAlert），L312-1 的单槽守卫只拦同一实例双开，拦不住搬移在途时再开新建；搬移 Task 在 alert 返回后还做磁盘搬移、尾部才翻值（L325 判了不修第 3 项的“模态 alert 互斥、不可能同时在途”不成立）。主线程取一次快照、两处同值用；取后只用本地量，中间挂起点不影响。
+        let czfIsShared = await MainActor.run { model.uiIsShared }
         let dest : URL
-        if model.uiIsShared {
+        if czfIsShared {
             dest = LCPath.lcGroupDataPath.appendingPathComponent(newName)
         } else {
             dest = LCPath.dataPath.appendingPathComponent(newName)
@@ -1006,7 +1008,7 @@ struct LCAppSettingsView: View {
         await MainActor.run {
             sharedModel.appDataFolderNames.append(newName)
         }
-        let newContainer = LCContainer(folderName: newName, name: displayName, isShared: model.uiIsShared)
+        let newContainer = LCContainer(folderName: newName, name: displayName, isShared: czfIsShared)
         // assign keychain group
         var keychainGroupSet : Set<Int> = Set(minimumCapacity: 3)
         for i in 0..<SharedModel.keychainAccessGroupCount {
