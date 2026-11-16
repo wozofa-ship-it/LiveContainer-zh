@@ -3076,8 +3076,7 @@ struct LCDataManagementView : View {
         var hasher = SHA256()
         do {
             while true {
-                let chunk = try handle.read(upToCount: 1024 * 1024)
-                if chunk.isEmpty { break }
+                guard let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty else { break }
                 hasher.update(data: chunk)
             }
         } catch {
@@ -5581,8 +5580,7 @@ struct LCDataManagementView : View {
         do {
             let handle = try FileHandle(forReadingFrom: dbURL)
             defer { try? handle.close() }
-            let magic = try handle.read(upToCount: 16)
-            guard magic.count == 16, magic == Data("SQLite format 3\0".utf8) else { return true }
+            guard let magic = try handle.read(upToCount: 16), magic.count == 16, magic == Data("SQLite format 3\0".utf8) else { return true }
         } catch {
             return true
         }
@@ -5650,7 +5648,7 @@ struct LCDataManagementView : View {
             // 同步截断，返 nil 当读不出（调用方重试 5 秒后跳过，
             // 不拿撕裂快照写回活令牌）。
             let hashURL = file.deletingPathExtension().appendingPathExtension("sha256")
-            if let expected = try? String(contentsOf: hashURL, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            if let expected = try? String(contentsOf: hashURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
                !expected.isEmpty,
                expected != Self.czfSHA256Hex(data) {
                 return nil
