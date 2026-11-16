@@ -960,11 +960,24 @@ extension LCUtils {
         return error.localizedDescription
     }
 
-    static func openSideStore(delegate: LCAppModelDelegate? = nil, urlStr: String? = nil) {
+    // 3.8.568（L321-1）：原来裸 Task + try await、抛错没人接——
+    // runApp 会抛（签名失败 M:1150、gate M:1209、预载写盘
+    // M:1259、客端初始化 continuation M:1269/:1338），点 SideStore
+    // 图标/走 sidestore:// 链接/多 LC 分享过去时失败就静默无事。
+    // 全仓 18 处 try await runApp 里其余 17 处全是 do/catch +
+    // 报出来（K2:1671、S:2568、BannerVC:236 同款；L62-3 在 K
+    // 源面板修过同款“点了没反应”），这里是唯一吞掉的口子。
+    // 加 onError（默认 nil，老调用方不改也编得过），catch 里调它；
+    // onError 在 Task 执行器上调，调用方自己回主线程写 @State。
+    static func openSideStore(delegate: LCAppModelDelegate? = nil, urlStr: String? = nil, onError: ((Error) -> Void)? = nil) {
         let sideStoreApp = LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared, delegate: delegate)
         
         Task {
-            try await sideStoreApp.runApp(bundleIdOverride: "builtinSideStore", urlStr: urlStr)
+            do {
+                try await sideStoreApp.runApp(bundleIdOverride: "builtinSideStore", urlStr: urlStr)
+            } catch {
+                onError?(error)
+            }
         }
     }
 }

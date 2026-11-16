@@ -649,7 +649,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // App 页顶栏不再放文件夹入口。
                 if(UserDefaults.sideStoreExist()) {
                     Button {
-                        LCUtils.openSideStore(delegate: self)
+                        // 启动失败要报出来，别静默吞掉（见 openSideStore 的 onError）。
+                        LCUtils.openSideStore(delegate: self) { error in
+                            Task {
+                                await MainActor.run {
+                                    errorInfo = error.localizedDescription
+                                    errorShow = true
+                                }
+                            }
+                        }
                     } label: {
                         IconImageView(icon: BuiltInSideStoreAppInfo.shared.iconIsDarkIcon(darkModeIcon))
                             .frame(width: UIFont.preferredFont(forTextStyle: .body).lineHeight, height: UIFont.preferredFont(forTextStyle: .body).lineHeight)
@@ -1171,6 +1179,44 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 } else {
                     czfExtIndex.append((folder, "", "", ""))
                 }
+            }
+        }
+        // 3.8.568（L317-2）：App 页批量恢复不走 doRestoreScope，restoreOneApp
+        // 内 isBackupLocked/lockedBackupNames 出现 0 次——锁定备份恢复不弹
+        // 人脸。门在批量头：本地算名（czfHasLockedBackup，D 侧同款）+ 外部
+        // 索引里与选中 App 配对的文件夹名（本地为空时本地算名只剩显示名，
+        // 多开分身的“名（UUID8）”对不上，见上面外部索引注释；只认与选中
+        // App 配对的外部夹，不认整表，免得未选中 App 的锁定备份误 gate；
+        // 多候选时循环记失败不恢复，gate 侧也放过，免得误弹）。
+        // 失败/取消清 batchBusy、不开始，已选状态不动。
+        var czfRestoreHasLocked = LCDataManagementView.czfHasLockedBackup(in: apps)
+        if !czfRestoreHasLocked {
+            let czfLockedNames = LCDataManagementView.lockedBackupNameSet()
+            if !czfLockedNames.isEmpty {
+                for app in apps {
+                    let czfName = LCDataManagementView.czfAppDisplayName(for: app)
+                    let (czfUUID, czfBid) = await MainActor.run { (app.appInfo.dataUUID ?? "", app.appInfo.bundleIdentifier() ?? "") }
+                    if let czfExact = czfExtIndex.first(where: { !$0.dataUUID.isEmpty && !czfUUID.isEmpty && $0.dataUUID == czfUUID }) {
+                        if czfLockedNames.contains(czfExact.folder.lastPathComponent) { czfRestoreHasLocked = true; break }
+                    } else {
+                        let czfCandidates = czfExtIndex.filter { entry in
+                            if entry.displayName.isEmpty && entry.bundleID.isEmpty {
+                                return entry.folder.lastPathComponent == czfName
+                            }
+                            return !entry.bundleID.isEmpty && entry.bundleID == czfBid && !entry.displayName.isEmpty && entry.displayName == czfName
+                        }
+                        if czfCandidates.count == 1 && czfLockedNames.contains(czfCandidates[0].folder.lastPathComponent) {
+                            czfRestoreHasLocked = true; break
+                        }
+                    }
+                }
+            }
+        }
+        if czfRestoreHasLocked {
+            let czfAuthOK = (try? await LCUtils.authenticateUserForced()) ?? false
+            guard czfAuthOK else {
+                await MainActor.run { batchBusy = false }
+                return
             }
         }
         var ok: [String] = []
@@ -4289,6 +4335,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             sharedModel.arm32EmuApps.removeAll { now in
                 return app == now
             }
+            // 3.8.568（L322-1）：删 App 也要取消它排进 deferredEnsureApps 的启动请求——L295-1 只修了关窗那路（K:591）；测速窗口内起 App 后删掉它，收尾补跑会把核心起在已删 App 的节点上，起后无人能停（V:1050-1061 注释自述）。删只走 removeApp 这一个漏斗（单删/批量/网格三路全经它），用传入 model 自身的 appInfo 取消，不查表；没排进的取消是空操作。
+            CZFVPNManager.shared.cancelDeferredEnsure(for: app.appInfo)
             // 删 App 后 AppInfo 缓存与 dock 残留条目一起清，否
             // 则删掉的 App 还会按旧 LCAppInfo 被解析、旧 dock
             // 条目还会被顶回前台（MultitaskDockManager 是
@@ -4629,7 +4677,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         
         if url.scheme == "sidestore" && UserDefaults.sideStoreExist() {
             UserDefaults.standard.setValue(url.absoluteString, forKey: "launchAppUrlScheme")
-            LCUtils.openSideStore(delegate: self)
+            // 启动失败要报出来，别静默吞掉（见 openSideStore 的 onError）。
+            LCUtils.openSideStore(delegate: self) { error in
+                Task {
+                    await MainActor.run {
+                        errorInfo = error.localizedDescription
+                        errorShow = true
+                    }
+                }
+            }
             return
         }
         // 设置低 #48：sidestore 链接但没装 SideStore，原来静默

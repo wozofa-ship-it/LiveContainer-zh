@@ -5570,6 +5570,42 @@ struct LCDataManagementView : View {
                 // （见 replaceContainerOffMain），失败原数据保留、
                 // 照常 throw。
                 try await Self.replaceContainerOffMain(from: containerFolder, to: live.containerURL)
+                // 3.8.568（L319-1）：原地覆盖把磁盘 plist 整份换成备份里的，
+                // 但 live.keychainGroupId 读的是缓存的 infoDict（只在
+                // nil 时读盘、无失效）——备份组号与现组号不同时
+                // （备份后隔离 pass 在组碰撞时重分过），内存仍是旧组、
+                // 磁盘已是备份组；后头钥匙串直写（importKeychainItems）
+                // 与同恢复内后建容器的组号校验（czfRestoreKeychainGroup
+                // 的 used 集）都读缓存，令牌写进错组、下次冷启动读盘
+                // 又回到备份组。只在两组不同时动，相等时原样不动。
+                // 顺序讲究：先验组再对齐——czfRestoreKeychainGroup
+                // 的 used 集含 live 自身，reload 后 live 读备份组、
+                // used 里必有它，验组永远判撞、白白重分。先验：used
+                // 里有备份组才是真撞（别家容器占着）；不撞只 reload
+                // 对齐内存；撞了就地重分（makeLCContainerInfoPlist，
+                // 内存+磁盘一起改，L315-2 同款）。
+                // 以哪边为准：撞了重分时写盘用 live 值
+                // （makeLCContainerInfoPlist 按 live 属性重建）——
+                // live 的隔离/伪装值是隔离 pass 按当前拓扑定的，
+                // 备份里的旧值盖回来会把已隔离的容器打回未隔离，
+                // 且 pass 已记它处理过、不会再跑，等于永久失隔离；
+                // 不撞时磁盘保留备份 plist 原样（只 reload 对齐内存），
+                // 不碰 live 的 name（现名是用户改过的）。
+                // （reloadInfoPlist 只换 infoDict，不动 isolateAppGroup/
+                // spoof* 等 live 属性；applyPlistInfo 是 private，
+                // D 侧调不到——故不撞时不写盘、不重建，只刷缓存。）
+                let backupGroup = (NSDictionary(contentsOf: containerFolder.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["keychainGroupId"] as? Int
+                if let backupGroup, backupGroup != live.keychainGroupId {
+                    let freshGroup = await Self.czfRestoreKeychainGroup(manifestId: backupGroup)
+                    if freshGroup == backupGroup {
+                        live.reloadInfoPlist()
+                    } else {
+                        let backupBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
+                        if let backupBundleID {
+                            live.makeLCContainerInfoPlist(appIdentifier: backupBundleID, keychainGroupId: freshGroup)
+                        }
+                    }
+                }
                 restoredContainers += 1
                 restoredFolderNames.insert(folderName)
                 continue

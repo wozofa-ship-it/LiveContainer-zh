@@ -238,7 +238,15 @@ struct LCMultiLCManagementView : View, InstallAnotherLCButtonDelegate {
                     relativeTo: nil
                 )
                 LCUtils.appGroupUserDefault.set(bookmark, forKey: "LCLaunchExtensionFileBookmark")
-                LCUtils.openSideStore(urlStr: launchURLStr)
+                // 启动失败要报出来，别静默吞掉（见 openSideStore 的 onError）。
+                LCUtils.openSideStore(urlStr: launchURLStr) { error in
+                    Task {
+                        await MainActor.run {
+                            errorInfo = error.localizedDescription
+                            errorShow = true
+                        }
+                    }
+                }
                 return
             }
             
