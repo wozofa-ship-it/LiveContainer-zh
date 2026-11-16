@@ -3115,9 +3115,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let bgID = UIApplication.shared.beginBackgroundTask { }
         defer { UIApplication.shared.endBackgroundTask(bgID) }
         let fm = FileManager.default
-        let bundleID = app.appInfo.bundleIdentifier() ?? ""
-        let name = app.appInfo.displayName() ?? bundleID
-        let appUUID = app.appInfo.dataUUID ?? ""
+        // 3.8.566（L299-4）：bundleIdentifier()/displayName() 读 _info（LCAppInfo.m:188/:139），
+        // 本函数在裸 Task 里跑（下面 L54 注释同款），主线程 toggleHidden/toggleLocked 写 _info +
+        // save 时读-写并发可能崩（L289-1/L233-1 同款；L54 只把其他实例的 dataUUID 快照回了
+        // 主线程取，本 App 这三行漏了）。入口一次取齐；dataUUID 是 ivar 属性、不读 _info，
+        // 顺手同跳取，不另起一跳。回落语义一字不动（name 取不到时仍回落 bundleID）。
+        let (bundleID, name, appUUID) = await MainActor.run {
+            let bid = app.appInfo.bundleIdentifier() ?? ""
+            let nm = app.appInfo.displayName() ?? bid
+            return (bid, nm, app.appInfo.dataUUID ?? "")
+        }
         guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return
         }
@@ -3276,6 +3283,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
 
+        // 3.8.566（L299-3）：.plist 项没走 installFromUrl 的 defer——下载/解析/取消
+        // 任一处提前 return 都不续排，队里剩下的要等下一次安装才接着排（“排队中”
+        // 一直挂着）。交接标志只在真正把活交给内层 installFromUrl（它的 defer 会
+        // 续排）时才立；没交接的 return 路一律由本函数 defer 补排。忙时排队那
+        // 条 return 在 defer 注册之前：它只是入队，正在装的那一项的 defer 会续排，
+        // 这里不抢排。
+        var czfHandedOff = false
+        defer { if !czfHandedOff { drainPendingInstalls() } }
+
         var plistUrlStr = urlStr.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if plistUrlStr.lowercased().hasPrefix("itms-services://") {
@@ -3346,10 +3362,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return
             }
             
+            // 3.8.566（L299-3）：下载窗口里点的取消——内层 installFromUrl 入口取走
+            // 标志、defer 没跑，上面 drainPendingInstalls 的起跑预检（L42）只盖 .url
+            // 项，不管这条；这里下载完先取一次，取到就当取消 return、defer 补排下
+            // 一项。取不到再调内层，中间没有挂起点、标志变不了。
             // 3.8.560（L311-1）：czfTakeInstallCancel 读写 @State 标志，回主线程取（body: 标签，610 同款）。
             if await MainActor.run(body: { czfTakeInstallCancel() }) {
                 return
             }
+            czfHandedOff = true
             await installFromUrl(urlStr: ipaUrlStr)
             
         } catch {

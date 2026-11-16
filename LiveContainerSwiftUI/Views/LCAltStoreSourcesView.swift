@@ -2743,7 +2743,14 @@ struct LCSourceAppDetailView: View {
             // “。”最常见，英文句号/逗号/顿号同款）会被吞进 URL，
             // 点“在 GitHub 查看”就 404。去尾部句末标点再建 URL；
             // 无标点时与原来一字相同。
-            let raw = String(desc[range]).trimmingCharacters(in: CharacterSet(charactersIn: "。.，、；：！？."))
+            // 3.8.566（L299-1）：L141-2 的集里只有中文标点 + 英文句号，
+            // 英文逗号/冒号/分号/感叹号/问号还在集外——注释自称
+            // “英文逗号同款”并不成立（实测集内无 ASCII , : ; ! ?）。
+            // 描述里 "…https://github.com/foo/bar, it's great" 这种
+            // 英文句式，正则（只挡空白/)/"/'）会把逗号吞进 URL、点
+            // 开 404；冒号/分号/感叹号同款。去尾只动末尾字符，带查
+            // 询串的链接（末尾不是标点）一字不动。
+            let raw = String(desc[range]).trimmingCharacters(in: CharacterSet(charactersIn: "。.，、；：！？.,:;!?"))
             return URL(string: raw)
         }
         return nil

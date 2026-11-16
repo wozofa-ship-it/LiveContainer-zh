@@ -200,6 +200,13 @@ struct CZFVPNSettingsView: View {
             }
         )
         .onAppear {
+            // 3.8.566（L299-2）：订阅地址只在 @State 初始化时从 UserDefaults 读过一次；
+            // 模块页是 Tab 内的条件视图，切走不卸载——去设置页恢复/导入设置（订阅地址是
+            // CZF* 键，备份/恢复全量写回，见 LCDataManagementView.applySettingsDictionary）
+            // 后切回来，onAppear 再跑但 vpnSubURL 仍是恢复前的旧地址：字段显示旧地址，
+            // 点“导入订阅”/自动更新都会拉旧订阅。出现时从现值同步一次；只放 onAppear，
+            // 不放 refreshVPNState——后者在点节点/拨开关时也跑，会把正在输的地址冲掉。
+            vpnSubURL = UserDefaults.standard.string(forKey: "CZFVPNSubscriptionURL") ?? ""
             refreshVPNState()
             autoUpdateSubscriptionIfNeeded()
         }
