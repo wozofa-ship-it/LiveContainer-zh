@@ -168,29 +168,6 @@ void hook_readyPlugIns(id self, SEL _cmd, NSArray<PKHostPlugIn*>* plugins, bool 
 
 @end
 
-void NSExtensionGuestHooksInit(NSURL *appURL, NSURL *containerURL) {
-//    if (NSUserDefaults.isLiveProcess) return;
-    dlopen("/System/Library/Frameworks/ExtensionFoundation.framework/ExtensionFoundation", RTLD_LAZY | RTLD_GLOBAL);
-
-    guestExtensionsAppURL = appURL;
-    guestExtensionsContainerURL = containerURL;
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wincompatible-function-pointer-types"
-    Class PKHostClass = NSClassFromString(@"PKHost");
-    
-    Method m1 = class_getInstanceMethod(PKHostClass, @selector(discoverPlugInsForAttributes:flags:found:));
-    orig_discoverPlugInsForAttributes = method_getImplementation(m1);
-    method_setImplementation(m1, hook_discoverPlugInsForAttributes);
-    
-    Method m2 = class_getInstanceMethod(PKHostClass, @selector(readyPlugIns:synchronously:environment:languages:persona:sandbox:ready:));
-    orig_readyPlugIns = method_getImplementation(m2);
-    method_setImplementation(m2, hook_readyPlugIns);
-
-#pragma clang diagnostic pop
-    
-}
-
 @implementation NSXPCListener(hook)
 
 - (instancetype)hook_initWithMachServiceName:(NSString*)serviceName {
