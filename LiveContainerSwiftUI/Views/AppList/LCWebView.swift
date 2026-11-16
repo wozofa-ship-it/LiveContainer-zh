@@ -508,6 +508,25 @@ struct LCWebView: View {
             Task { @MainActor in await handler(url.absoluteString) }
             return
         }
+        // 3.8.575（L357-1）：sidestore:// 链接在网页里点下去报“打不开”——本函数只按已装 App 的自定义 scheme 找，内置 SideStore 不在 apps/hiddenApps 列表里（框架，不是客 App），永远匹配不上；App 页 handleURL（K2:4736）有 sidestore 专支：装了就走 openSideStore（launchAppUrlScheme 键带链接）、没装就报“未安装 SideStore”。网页照它：先认 sidestore，再走通用搜 App。close() 照 itms-services 支同款（点了就是要离开网页）；启动失败走 onError 报出来，不静默吞（L321-1 同款，onError 在 Task 执行器上调，调用方自己回主线程写 @State）。
+        if url.scheme == "sidestore" {
+            if UserDefaults.sideStoreExist() {
+                UserDefaults.standard.setValue(url.absoluteString, forKey: "launchAppUrlScheme")
+                close()
+                LCUtils.openSideStore { error in
+                    Task {
+                        await MainActor.run {
+                            errorInfo = error.localizedDescription
+                            errorShow = true
+                        }
+                    }
+                }
+                return
+            }
+            errorInfo = "未安装 SideStore，无法打开此链接"
+            errorShow = true
+            return
+        }
         
         if sharedModel.isHiddenAppUnlocked || !LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
             appListsToConsider.append(sharedModel.hiddenApps)

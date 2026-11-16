@@ -1229,6 +1229,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         var czfKeychainImportedTotal = 0
         var czfKeychainUnwritableTotal = 0
         var czfKeychainQueuedApps: [String] = []
+        // 3.8.575（L360-1）：批量恢复汇总还丢 outcome.downloadIncomplete——iCloud 备份 120 秒没下完也算恢复成功（D:6029 只看容器，P0-4 在 D 侧已单列进报告），App 页汇总只说“成功 N 个”，用户以为全好了。循环里仿 D:4784–4785 无条件累加，汇总处仿 D:5110 追加说法；自动恢复成功分支同款漏（L356-1 刚补了钥匙串说法，下载未完仍没提）。
+        var czfDownloadIncompleteApps: [String] = []
         for app in apps {
             // 3.8.544（L74）：batchRestore 跑裸 Task（L61-4 注释），离主线程读 _info；L73 helper 同款 main.sync 取。
             let name = LCDataManagementView.czfAppDisplayName(for: app)
@@ -1271,6 +1273,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 czfKeychainUnwritableTotal += outcome.keychainUnwritable
                 if outcome.keychainQueued > 0 {
                     czfKeychainQueuedApps.append(name)
+                }
+                // L360-1：下载未完成仍算恢复成功（D:6029），单列进汇总，不进 failed（D:4784 同款，无条件记）。
+                if outcome.downloadIncomplete {
+                    czfDownloadIncompleteApps.append(name)
                 }
                 if outcome.ok {
                     ok.append(name)
@@ -1317,6 +1323,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             if !czfKeychainQueuedApps.isEmpty {
                 summary += "；请逐个打开一次以下 App 完成登录态写回：" + czfKeychainQueuedApps.joined(separator: "、")
+            }
+            // L360-1：措辞仿 D:5110，ok 非空分支才追加。
+            if !czfDownloadIncompleteApps.isEmpty {
+                summary += "；iCloud 未下完，恢复可能不完整的 App（已恢复的部分数据可用；等 iCloud 同步完再恢复一次可补全）：\n" + czfDownloadIncompleteApps.joined(separator: "\n")
             }
             await MainActor.run {
                 installInfo = summary
@@ -3336,7 +3346,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let outcome = try? await LCDataManagementView.restoreOneApp(appFolder: found, app: app)
         await MainActor.run {
             if outcome?.ok == true {
-                installInfo = "「\(name)」已恢复备份记录"
+                // 3.8.575（L356-1）：自动恢复的成功分支原来只说“已恢复备份记录”——outcome.ok 只看容器（D:6029），钥匙串与 ok 无关；备份里没钥匙串快照、或快照 0 条时登录态根本没回来，用户看一句“已恢复”以为全好了。D 侧单恢复（L318-2）与 App 页批量恢复（L353-1）都已补 0 条说法，自动恢复是最后一条漏的路。措辞仿 L353-1（:1305–1320）：found>0 拼正向行 + 不注入条数 + 排队提醒，0 条时写清登录态未恢复；失败分支已有各自说法，不动。
+                var msg = "「\(name)」已恢复备份记录"
+                if let outcome {
+                    if outcome.keychainFound > 0 {
+                        msg += "；钥匙串备份含 \(outcome.keychainFound) 条，已排队 \(outcome.keychainQueued) 条，宿主直写 \(outcome.keychainImported) 条"
+                        if outcome.keychainUnwritable > 0 {
+                            msg += "，\(outcome.keychainUnwritable) 条不注入无法写回"
+                        }
+                        if outcome.keychainQueued > 0 {
+                            msg += "；请打开一次「\(name)」完成登录态写回"
+                        }
+                    } else if outcome.keychainPlistFiles > 0 {
+                        msg += "；钥匙串快照在但读出 0 条，登录态未恢复"
+                    } else {
+                        msg += "；钥匙串无快照，登录态未恢复"
+                    }
+                    // L360-1：成功分支也可能下载未完——outcome.ok 只看容器（D:6029），iCloud 120 秒没下完也算成功；仿 D:5110 补一句，失败分支不动。
+                    if outcome.downloadIncomplete {
+                        msg += "；iCloud 未下完，恢复可能不完整，等 iCloud 同步完再恢复一次可补全"
+                    }
+                }
+                installInfo = msg
             } else if let outcome, outcome.keychainFound > 0 {
                 // 备份里明明有钥匙串却恢复失败：把条数和错误码
                 // 亮出来，卡在哪一环一眼可辨，不再误报"没数据"
