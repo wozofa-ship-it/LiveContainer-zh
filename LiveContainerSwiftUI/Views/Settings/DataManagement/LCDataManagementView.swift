@@ -5458,9 +5458,43 @@ struct LCDataManagementView : View {
         return Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
     }
 
+    // 3.8.571（L336-1）：恢复一次只跑一个——自动恢复（安装完成
+    // 后裸 Task，K2:3148）与手动/批量恢复（D 的 backupRestoreProgress
+    // 单槽、K2 的 batchBusy）互不可见，同一 App 的两路 restoreOneApp
+    // 能同时跑：同备份是重复拷 GB + 双份弹窗，不同备份是每容器
+    // 末写者胜的混搭；不同 App 并发时 czfRestoreKeychainGroup 的
+    // 现取已用组再挑空闲也不是原子的，两容器可分到同一钥匙串组
+    // （L220 同款伤害）。串行化与 withSerializedTweakSign 同款
+    // （串行队列 + 信号量 + Task）：restoreOneApp 从不递归调自己，
+    // 不用重入检测；队里一次只跑一个，调用方不用改。
+    private static let czfRestoreSerialQueue = DispatchQueue(label: "czf.restore.serial")
+    private static func withSerializedRestore<T>(_ work: @escaping () async throws -> T) async throws -> T {
+        return try await withCheckedThrowingContinuation { cont in
+            czfRestoreSerialQueue.async {
+                let sema = DispatchSemaphore(value: 0)
+                Task {
+                    do {
+                        let result = try await work()
+                        cont.resume(returning: result)
+                    } catch {
+                        cont.resume(throwing: error)
+                    }
+                    sema.signal()
+                }
+                sema.wait()
+            }
+        }
+    }
+
     /// v216：downloadProgress 原样透传给三处 iCloud 等待
     /// （容器、组容器、登录态合并），调用方在主线程写文案。
     static func restoreOneApp(appFolder: URL, app: LCAppModel, loginOnly: Bool = false, downloadProgress: ((Int, Int) -> Void)? = nil) async throws -> RestoreOutcome {
+        return try await Self.withSerializedRestore {
+            try await Self.restoreOneAppImpl(appFolder: appFolder, app: app, loginOnly: loginOnly, downloadProgress: downloadProgress)
+        }
+    }
+
+    private static func restoreOneAppImpl(appFolder: URL, app: LCAppModel, loginOnly: Bool = false, downloadProgress: ((Int, Int) -> Void)? = nil) async throws -> RestoreOutcome {
         let fm = FileManager.default
         // 登录态备份的容器里只有半套会话文件，恢复走合并（见
         // 循环内分支）；完整备份整套替换；只恢复登录态时完整

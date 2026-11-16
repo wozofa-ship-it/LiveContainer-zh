@@ -27,6 +27,10 @@
 @property(nonatomic) NSString *sceneID;
 @property(nonatomic) NSExtension* extension;
 @property(nonatomic) bool isAppTerminationCleanUpCalled;
+// 3.8.571（L334-1）：注册 settings diff 动作时的宿主 windowScene——
+// viewDidMoveToWindow:nil 里 self.view.window 已是 nil，拿它取
+// scene 再注销永远是空操作；记下注册时的 scene，关窗时真注销。
+@property(nonatomic, weak) UIWindowScene *czfRegisteredWindowScene;
 @end
 
 @implementation AppSceneViewController
@@ -236,6 +240,7 @@
     self.contentView.layer.position = CGPointMake(0, 0);
     
     [self.view.window.windowScene _registerSettingsDiffActionArray:@[self] forKey:self.sceneID];
+    self.czfRegisteredWindowScene = self.view.window.windowScene;
 }
 
 - (void)terminate {
@@ -403,7 +408,11 @@
     [super viewDidMoveToWindow:newWindow shouldAppearOrDisappear:appear];
     if(!newWindow) {
         if(self.sceneID) {
-            [self.view.window.windowScene _unregisterSettingsDiffActionArrayForKey:self.sceneID];
+            // 不能拿 self.view.window.windowScene——
+            // viewDidMoveToWindow:nil 时 window 已是 nil，这行原来
+            // 永远是空操作，注册留在宿主 scene 里、VC 随窗口泄漏。
+            // 用注册时记下的 scene 注销。
+            [self.czfRegisteredWindowScene _unregisterSettingsDiffActionArrayForKey:self.sceneID];
         }
         self.delegate = nil;
     }
