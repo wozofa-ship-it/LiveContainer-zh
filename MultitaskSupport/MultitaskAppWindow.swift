@@ -295,7 +295,11 @@ class MultitaskRelaunchManager: NSObject {
     }
     
     private static func relaunchApp(bundleId: String, dataUUID: String) async {
-        guard let appModel = await MainActor.run(body: { lookupAppModel(bundleId: bundleId) }),
+        // 3.8.569（L324-1）：lastLaunched 的 getter 只读 _info（LCAppInfo.m:1034-1035），NSMutableDictionary 不是线程安全的；写方 L72 已收回主线程（M:1394），但这里节流读在裸 Task 执行器上——lookup 只包了 MainActor.run，guard 第二条件在 run 外面算，读-写并发可能崩（L233-1 同款；L72 注释称此处读在 MainActor.run 内是旧数，HEAD 版就已在外面）。一次 MainActor.run 取齐 model + lastLaunched（K2:3188 / M:319 元组同款）。
+        guard let (appModel, lastLaunched) = await MainActor.run(body: { () -> (LCAppModel, Date?)? in
+            guard let model = lookupAppModel(bundleId: bundleId) else { return nil }
+            return (model, model.appInfo.lastLaunched)
+        }),
               // 3.8.559（L250-1）：lastLaunched 是没标 nullability 的
               // ObjC 属性（LCAppInfo.h:51），Swift 里是 Date!；getter
               // 只读 _info（LCAppInfo.m:1034-1035），从没成功启动过
@@ -306,7 +310,7 @@ class MultitaskRelaunchManager: NSObject {
               // 条“每次启动都写、trap 不可达”只对成功路成立）。
               // nil = 没成功启动过、无“刚启动过”可节流，放行重起；
               // 最近启动排序（LCAppSortManager:292/:299）同款认 nil。
-              (appModel.appInfo.lastLaunched?.distance(to: .now) ?? .infinity) > 2
+              (lastLaunched?.distance(to: .now) ?? .infinity) > 2
         else {
             return
         }

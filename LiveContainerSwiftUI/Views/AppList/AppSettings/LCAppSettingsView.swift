@@ -1012,7 +1012,9 @@ struct LCAppSettingsView: View {
         for i in 0..<SharedModel.keychainAccessGroupCount {
             keychainGroupSet.insert(i)
         }
-        for container in model.uiContainers {
+        // 3.8.569（L325-2）：与 L325-1 同根——本函数从按钮的裸 Task 调来（L40 同款），uiContainers 是 @Published（M:480），这里在 MainActor.run 外面读，主线程别处改容器列表（新建/导入/解绑/恢复）时读-写并发可能崩；快照与使用之间无挂起点，语义不变。
+        let uiContainers = await MainActor.run { model.uiContainers }
+        for container in uiContainers {
             keychainGroupSet.remove(container.keychainGroupId)
         }
         guard let freeKeyChainGroup = keychainGroupSet.randomElement() else {
@@ -1039,7 +1041,9 @@ struct LCAppSettingsView: View {
             }
             appInfo.containers = model.uiContainers;
         }
-        newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: freeKeyChainGroup)
+        // 3.8.569（L325-2）：bundleIdentifier() 读 _info（doUseLCBundleId 时读 LCOrignalBundleIdentifier，LCAppInfo.m:188；L75 的 V:767 helper 就是为它建的），这里在裸 Task 上离主线程读；主线程取一次再用（bundleIdentifier 永不返 nil，! 安全）。
+        let czfBid = await MainActor.run { appInfo.bundleIdentifier()! }
+        newContainer.makeLCContainerInfoPlist(appIdentifier: czfBid, keychainGroupId: freeKeyChainGroup)
     }
     
     func importDataStorage(result: Result<URL, any Error>) async {
@@ -1103,7 +1107,9 @@ struct LCAppSettingsView: View {
                 for i in 0..<SharedModel.keychainAccessGroupCount {
                     keychainGroupSet.insert(i)
                 }
-                for container in model.uiContainers {
+                // 3.8.569（L325-2）：与 L325-1 同根——本函数从 fileImporter 的裸 Task 调来（L40 同款），uiContainers 是 @Published（M:480），这里在 MainActor.run 外面读；快照与使用之间无挂起点，语义不变。
+                let uiContainers = await MainActor.run { model.uiContainers }
+                for container in uiContainers {
                     keychainGroupSet.remove(container.keychainGroupId)
                 }
                 guard let freeKeyChainGroup = keychainGroupSet.randomElement() else {
@@ -1116,7 +1122,9 @@ struct LCAppSettingsView: View {
                 
 //                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     if container!.bookmarkResolved {
-                        container!.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: freeKeyChainGroup)
+                        // 3.8.569（L325-2）：同上，bundleIdentifier() 离主线程读 _info；主线程取一次再用（永不返 nil，! 安全）。
+                        let czfBid = await MainActor.run { appInfo.bundleIdentifier()! }
+                        container!.makeLCContainerInfoPlist(appIdentifier: czfBid, keychainGroupId: freeKeyChainGroup)
                     }
 //                }
             }
@@ -1147,7 +1155,9 @@ struct LCAppSettingsView: View {
     }
 
     func moveToAppGroup() async {
-        for container in appInfo.containers {
+        // 3.8.569（L325-1）：本函数从按钮的裸 Task 调来、不在主 actor 上（L40 同款）；containers 的 getter 读 _info 两次（dataUUID + LCContainers，LCContainer.swift:414，旧格式升级路径还会写 _info + 落盘）、tweakFolder 读 _info（LCAppInfo.m:209），uiContainers 是 @Published（M:480）——三处都在 MainActor.run 外面读，主线程每启动一次 App 就写 lastLaunched（M:1394）、同页隐藏/锁定开关也写 _info，读-写并发可能崩（L233-1/L303-2/L307-1 同款；L40 只包了尾部记账，前面这两处读漏了）。快照与使用之间无挂起点，值不会变，语义不变。
+        let containers = await MainActor.run { appInfo.containers }
+        for container in containers {
             if let runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
                 // 3.8.516（L40）：本函数从按钮的裸 Task 调来、不在
                 // 主 actor 上（L40-1 同款），errorInfo/errorShow
@@ -1167,12 +1177,14 @@ struct LCAppSettingsView: View {
         do {
             try LCPath.ensureAppGroupPaths()
 
+            // 3.8.569（L325-1）：同上，moves 清单用的 uiContainers + tweakFolder 也在 run 外面读；一次 MainActor.run 取齐（K2:3188 / M:319 元组同款）。bundlePath/relativeBundlePath 只是初始化后不再变的 ivar 指针读（setBundlePath 只在这两函数尾部记账里调），不动。
+            let (uiContainers, tweakFolder) = await MainActor.run { (model.uiContainers, appInfo.tweakFolder) }
             var moves: [(URL, URL)] = [];
             moves.append((
                 URL(fileURLWithPath: appInfo.bundlePath()),
                 LCPath.lcGroupBundlePath.appendingPathComponent(appInfo.relativeBundlePath)
             ))
-            for container in model.uiContainers {
+            for container in uiContainers {
                 if container.storageBookMark != nil {
                     continue
                 }
@@ -1186,7 +1198,7 @@ struct LCAppSettingsView: View {
             // 必然撞上 sourceDoesNotExist，整个转换直接失败。
             // 磁盘上没有的目录（比如还没落盘的 CZFVPN）直接跳过，
             // 有东西的才搬，不丢、不报错；.disabled 的停用态也一起搬。
-            if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
+            if let tweakFolder = tweakFolder, tweakFolder.count > 0 {
                 for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
                     for candidate in [name, name + ".disabled"] {
                         let src = LCPath.tweakPath.appendingPathComponent(candidate)
@@ -1237,7 +1249,9 @@ struct LCAppSettingsView: View {
     }
     
     func movePrivateDoc() async {
-        for container in appInfo.containers {
+        // 3.8.569（L325-1）：与 moveToAppGroup 同根——裸 Task 上读 containers（_info 两次 + 升级写）/ uiContainers（@Published）/ tweakFolder（_info），L40 只包了尾部记账；快照与使用之间无挂起点，语义不变。
+        let containers = await MainActor.run { appInfo.containers }
+        for container in containers {
             if let runningLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {                
                 await MainActor.run {
                     errorInfo = "lc.appSettings.appOpenInOtherLc %@ %@".localizeWithFormat(runningLC, runningLC)
@@ -1252,12 +1266,14 @@ struct LCAppSettingsView: View {
         }
         
         do {
+            // 3.8.569（L325-1）：同上，moves 清单用的 uiContainers + tweakFolder 也在 run 外面读；一次 MainActor.run 取齐（K2:3188 / M:319 元组同款）。
+            let (uiContainers, tweakFolder) = await MainActor.run { (model.uiContainers, appInfo.tweakFolder) }
             var moves: [(URL, URL)] = [];
             moves.append((
                 URL(fileURLWithPath: appInfo.bundlePath()),
                 LCPath.bundlePath.appendingPathComponent(appInfo.relativeBundlePath)
             ))
-            for container in model.uiContainers {
+            for container in uiContainers {
                 if container.storageBookMark != nil {
                     continue
                 }
@@ -1267,7 +1283,7 @@ struct LCAppSettingsView: View {
                 ))
             }
             // 回搬同样逐个搬，磁盘上没有的目录跳过，.disabled 停用态一起搬。
-            if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
+            if let tweakFolder = tweakFolder, tweakFolder.count > 0 {
                 for name in LCAppModel.czfSplitTweakFolders(tweakFolder) {
                     for candidate in [name, name + ".disabled"] {
                         let src = LCPath.lcGroupTweakPath.appendingPathComponent(candidate)
