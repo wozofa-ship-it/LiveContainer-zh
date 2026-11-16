@@ -269,6 +269,10 @@ class MultitaskRelaunchManager: NSObject {
               !isManualTermination else { return }
         
         let key = "\(bundleId)#\(dataUUID)"
+        // L350-1：先记这次退出——短命运行才算失败（见下面 czfRecordRelaunchExit）。
+        czfRecordRelaunchExit(key: key)
+        // L350-1 熔断检查——见下面 czfRelaunchBreakerAllows。
+        guard czfRelaunchBreakerAllows(key: key) else { return }
         guard markPendingIfNeeded(key: key) else { return }
         
         Task {
@@ -292,6 +296,49 @@ class MultitaskRelaunchManager: NSObject {
         pendingLock.lock()
         pendingKeys.remove(key)
         pendingLock.unlock()
+    }
+
+    // 3.8.574（L350-1）：连续失败熔断——runApp 的 continuation 在客端
+    // 初始化完成时就恢复（PID 回调在 onAppInitialize 里取走，M:1313/
+    // :1363），初始化完、几秒后才崩的客 App，每次重起都记“成功”、
+    // 计数永远清零，熔断永不触发；2 秒节流也只拦“刚启动过”的重起
+    // （lastLaunched 只在启动成功时才写，M:1394）。唯一能看见循环
+    // 的地方是退出点：短命运行（60 秒内退出）记一次，满 3 次停
+    // 10 分钟，期间退出不再重起；10 分钟后下次退出再试一次（自愈）；
+    // 跑满 60 秒的退出清零。没戳（手动启动的 App）不记不罚，下次
+    // 重起成功才开始戳。只在 pendingLock 下碰，与 pendingKeys 同锁。
+    private static var failedRelaunchCounts: [String: Int] = [:]
+    private static var lastRelaunchFailedAt: [String: Date] = [:]
+    private static var lastRelaunchStartedAt: [String: Date] = [:]
+    private static let czfRelaunchMaxConsecutiveFailures = 3
+    private static let czfRelaunchCooldownSeconds: TimeInterval = 600
+    private static let czfRelaunchShortLivedSeconds: TimeInterval = 60
+
+    private static func czfRelaunchBreakerAllows(key: String) -> Bool {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        let count = failedRelaunchCounts[key] ?? 0
+        guard count >= czfRelaunchMaxConsecutiveFailures else { return true }
+        if let last = lastRelaunchFailedAt[key], Date().timeIntervalSince(last) < czfRelaunchCooldownSeconds {
+            return false
+        }
+        failedRelaunchCounts.removeValue(forKey: key)
+        lastRelaunchFailedAt.removeValue(forKey: key)
+        return true
+    }
+
+    private static func czfRecordRelaunchExit(key: String) {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        guard let startedAt = lastRelaunchStartedAt[key] else { return }
+        lastRelaunchStartedAt.removeValue(forKey: key)
+        if Date().timeIntervalSince(startedAt) < czfRelaunchShortLivedSeconds {
+            failedRelaunchCounts[key] = (failedRelaunchCounts[key] ?? 0) + 1
+            lastRelaunchFailedAt[key] = Date()
+        } else {
+            failedRelaunchCounts.removeValue(forKey: key)
+            lastRelaunchFailedAt.removeValue(forKey: key)
+        }
     }
     
     private static func relaunchApp(bundleId: String, dataUUID: String) async {
@@ -323,7 +370,16 @@ class MultitaskRelaunchManager: NSObject {
             } else {
                 try await appModel.runApp(multitask: true, containerFolderName: dataUUID)
             }
+            // L350-1：重起成功，戳上启动时间——下次退出时算寿命。
+            pendingLock.lock()
+            defer { pendingLock.unlock() }
+            lastRelaunchStartedAt["\(bundleId)#\(dataUUID)"] = Date()
         } catch {
+            // L350-1：重起失败（没跑起来、无退出可记），清掉旧戳，
+            // 免得下次手动启动的退出被旧戳算成长命而清掉计数。
+            pendingLock.lock()
+            defer { pendingLock.unlock() }
+            lastRelaunchStartedAt.removeValue(forKey: "\(bundleId)#\(dataUUID)")
             print("Failed to restart \(bundleId): \(error)")
         }
     }

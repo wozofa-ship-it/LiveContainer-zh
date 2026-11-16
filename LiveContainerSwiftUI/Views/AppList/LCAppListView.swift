@@ -1222,6 +1222,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         var ok: [String] = []
         var failed: [String] = []
         var noBackup: [String] = []
+        // 3.8.574（L353-1）：批量恢复汇总只读 outcome.ok，钥匙串计数全丢弃——数据回来了、登录态 0 条时汇总照说“成功”，与 D 侧一键汇总同款毛病（L318-2 修过 D 侧，K2 这路漏了）。循环里仿 D:4755–4759 累加 5 个总量 + 排队 App 名，汇总处仿 D:5164–5180 追加说法；outcome.ok 语义（:6029，只看容器）不动。
+        var czfKeychainFoundTotal = 0
+        var czfKeychainPlistTotal = 0
+        var czfKeychainQueuedTotal = 0
+        var czfKeychainImportedTotal = 0
+        var czfKeychainUnwritableTotal = 0
+        var czfKeychainQueuedApps: [String] = []
         for app in apps {
             // 3.8.544（L74）：batchRestore 跑裸 Task（L61-4 注释），离主线程读 _info；L73 helper 同款 main.sync 取。
             let name = LCDataManagementView.czfAppDisplayName(for: app)
@@ -1257,6 +1264,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             do {
                 let outcome = try await LCDataManagementView.restoreOneApp(appFolder: folderURL, app: app, loginOnly: loginOnly)
+                czfKeychainFoundTotal += outcome.keychainFound
+                czfKeychainPlistTotal += outcome.keychainPlistFiles
+                czfKeychainQueuedTotal += outcome.keychainQueued
+                czfKeychainImportedTotal += outcome.keychainImported
+                czfKeychainUnwritableTotal += outcome.keychainUnwritable
+                if outcome.keychainQueued > 0 {
+                    czfKeychainQueuedApps.append(name)
+                }
                 if outcome.ok {
                     ok.append(name)
                 } else {
@@ -1286,6 +1301,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             if !noBackup.isEmpty {
                 summary += "，无备份 \(noBackup.count) 个：\n" + noBackup.joined(separator: "\n")
+            }
+            // L353-1：ok 非空才追加钥匙串说法——失败路已有各自说法；措辞仿 D 侧一键汇总（:5164–5180），0 条时也要写清登录态没回来。
+            if czfKeychainFoundTotal > 0 {
+                summary += "；钥匙串备份含 \(czfKeychainFoundTotal) 条，已排队 \(czfKeychainQueuedTotal) 条，宿主直写 \(czfKeychainImportedTotal) 条"
+                if czfKeychainUnwritableTotal > 0 {
+                    summary += "，\(czfKeychainUnwritableTotal) 条不注入无法写回"
+                }
+            } else {
+                if czfKeychainPlistTotal > 0 {
+                    summary += "；钥匙串快照在但读出 0 条，登录态未恢复"
+                } else {
+                    summary += "；钥匙串无快照，登录态未恢复"
+                }
+            }
+            if !czfKeychainQueuedApps.isEmpty {
+                summary += "；请逐个打开一次以下 App 完成登录态写回：" + czfKeychainQueuedApps.joined(separator: "、")
             }
             await MainActor.run {
                 installInfo = summary
@@ -2613,9 +2644,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             await czfFinishInstall()
         } catch is CZFInstallCancelled {
             // 3.8.428 安装#2：用户取消安装，不弹错误提示。
+            // 3.8.574（L351-1）：取消也清 asCopy 临时副本——忙时路 drain 里三 outcomes 都清表（L54/L341-1），非忙时路原来只成功才删。
+            try? FileManager.default.removeItem(at: fileUrl)
             // 3.8.560（L311-1）：收尾走 czfFinishInstall()。
             await czfFinishInstall()
         } catch {
+            // L351-1：失败同款清 tmp 副本（原件在“文件”里，重选即重试）。
+            try? FileManager.default.removeItem(at: fileUrl)
             // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写；收尾走 czfFinishInstall()。
             await MainActor.run {
                 errorInfo = error.localizedDescription
