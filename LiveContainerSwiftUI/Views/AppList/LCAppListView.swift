@@ -1231,6 +1231,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         var czfKeychainQueuedApps: [String] = []
         // 3.8.575（L360-1）：批量恢复汇总还丢 outcome.downloadIncomplete——iCloud 备份 120 秒没下完也算恢复成功（D:6029 只看容器，P0-4 在 D 侧已单列进报告），App 页汇总只说“成功 N 个”，用户以为全好了。循环里仿 D:4784–4785 无条件累加，汇总处仿 D:5110 追加说法；自动恢复成功分支同款漏（L356-1 刚补了钥匙串说法，下载未完仍没提）。
         var czfDownloadIncompleteApps: [String] = []
+        // 3.8.581（L438-2）：恢复后保留的空容器（钥匙串组仍有登录态）——汇总单列。
+        var czfKeptEmptyApps: [String] = []
         for app in apps {
             // 3.8.544（L74）：batchRestore 跑裸 Task（L61-4 注释），离主线程读 _info；L73 helper 同款 main.sync 取。
             let name = LCDataManagementView.czfAppDisplayName(for: app)
@@ -1277,6 +1279,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // L360-1：下载未完成仍算恢复成功（D:6029），单列进汇总，不进 failed（D:4784 同款，无条件记）。
                 if outcome.downloadIncomplete {
                     czfDownloadIncompleteApps.append(name)
+                }
+                // 3.8.581（L438-2）：空容器已保留进汇总（D 侧同款）。
+                if !outcome.keptEmptyContainers.isEmpty {
+                    czfKeptEmptyApps.append("\(name)（\(outcome.keptEmptyContainers.count) 个空容器已保留，钥匙串组仍有登录态）")
                 }
                 if outcome.ok {
                     ok.append(name)
@@ -1327,6 +1333,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // L360-1：措辞仿 D:5110，ok 非空分支才追加。
             if !czfDownloadIncompleteApps.isEmpty {
                 summary += "；iCloud 未下完，恢复可能不完整的 App（已恢复的部分数据可用；等 iCloud 同步完再恢复一次可补全）：\n" + czfDownloadIncompleteApps.joined(separator: "\n")
+            }
+            if !czfKeptEmptyApps.isEmpty {
+                summary += "；空容器已保留（钥匙串组仍有登录态）：\n" + czfKeptEmptyApps.joined(separator: "\n")
             }
             await MainActor.run {
                 installInfo = summary
@@ -3389,6 +3398,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // L360-1：成功分支也可能下载未完——outcome.ok 只看容器（D:6029），iCloud 120 秒没下完也算成功；仿 D:5110 补一句，失败分支不动。
                     if outcome.downloadIncomplete {
                         msg += "；iCloud 未下完，恢复可能不完整，等 iCloud 同步完再恢复一次可补全"
+                    }
+                    // 3.8.581（L438-2）：空容器已保留进提示（D 侧同款）。
+                    if !outcome.keptEmptyContainers.isEmpty {
+                        msg += "；\(outcome.keptEmptyContainers.count) 个空容器已保留（钥匙串组仍有登录态）"
                     }
                 }
                 installInfo = msg

@@ -1291,17 +1291,23 @@ struct LCSourcesView: View {
                     case .notDylib:
                         break
                     case .succeeded:
-                        cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
-                        updatableCountBadge = cachedUpdatableApps.count
+                        // 3.8.581（L411-1）：本闭包唯一调用方是 sheet 行按钮的裸 Task（:794，Swift 5.0 靶下 Button 闭包的 Task 不继承 MainActor），await 之后在全局执行器上跑；cachedUpdatableApps 是 @State（:886）、updatableCountBadge 是 @AppStorage（:881），离主线程写报 Publishing changes、更新完的行可能不消失、红标可能不刷新（L40/L44/L395-1 同款——L161 只包了调用方 Task 自己的 updatingIDs/sheetError 写，闭包内部这两处漏了）。回主线程再写。
+                        await MainActor.run {
+                            cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                            updatableCountBadge = cachedUpdatableApps.count
+                        }
                         return nil
                     case .failed(let error):
                         return error.localizedDescription
                     }
-                    install(app: app)
-                    cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
-                    // 单行更新也同步红点：不写这里 Tab 红标就一直挂着，
-                    // 跟跳过同款毛病（只删名单不改 CZFUpdatableAppCount）。
-                    updatableCountBadge = cachedUpdatableApps.count
+                    // 3.8.581（L411-1）：同上，install(app:) 在这里直接调；它里面写 @Published selectedTab（切 App 页）+ 无锁静态数组 CZFSourcePendingInstall.append（与 App 页 onAppear/onReceive 的主线程排空竞态），必须回主线程再调；后面的名单/红标写同款包进同一跳。另两处（:1032/:1059）是传给网格/列表行的 onInstall，行按钮是主线程同步动作，不走这条裸 Task 路。
+                    await MainActor.run {
+                        install(app: app)
+                        cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                        // 单行更新也同步红点：不写这里 Tab 红标就一直挂着，
+                        // 跟跳过同款毛病（只删名单不改 CZFUpdatableAppCount）。
+                        updatableCountBadge = cachedUpdatableApps.count
+                    }
                     return nil
                 },
                 onUpdateAll: {

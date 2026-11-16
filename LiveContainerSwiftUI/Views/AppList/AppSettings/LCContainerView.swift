@@ -514,7 +514,7 @@ struct LCContainerView : View {
             return
         }
         
-        LCUtils.removeAppKeychain(dataUUID: container.folderName)
+        LCUtils.removeAppKeychain(dataUUID: container.folderName, keychainGroupId: container.keychainGroupId)
     }
     
     func deleteData() async {

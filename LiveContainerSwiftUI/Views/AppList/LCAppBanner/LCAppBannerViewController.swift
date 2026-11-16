@@ -587,7 +587,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 failedContainers.append(dataUUID)
                 continue
             }
-            LCUtils.removeAppKeychain(dataUUID: dataUUID)
+            LCUtils.removeAppKeychain(dataUUID: dataUUID, keychainGroupId: container.keychainGroupId)
             DataManager.shared.model.appDataFolderNames.removeAll { $0 == dataUUID }
         }
         // 删 App 及其数据时清本地备份（用户定）：锁了的留着，

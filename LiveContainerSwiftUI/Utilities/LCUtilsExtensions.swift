@@ -509,16 +509,37 @@ extension LCUtils {
         }
     }
     
-    public static func removeAppKeychain(dataUUID label: String) {
-        [kSecClassGenericPassword, kSecClassInternetPassword, kSecClassCertificate, kSecClassKey, kSecClassIdentity].forEach {
-          let status = SecItemDelete([
-            kSecClass as String: $0,
-            "alis": label,
-          ] as CFDictionary)
-          if status != errSecSuccess && status != errSecItemNotFound {
-              //Error while removing class $0
-              NSLog("[LC] Failed to find keychain items: \(status)")
-          }
+    /// 钥匙串组名：与游客侧 SecItem.m 的拼法一致（组号 0 无后缀）；D 的同名函数已改走这里，全仓只此一份。
+    public static func keychainGroupString(groupId: Int) -> String {
+        let team = LCSharedUtils.teamIdentifier() ?? ""
+        if groupId == 0 {
+            return "\(team).com.kdt.livecontainer.shared"
+        }
+        return "\(team).com.kdt.livecontainer.shared.\(groupId)"
+    }
+
+    public static func removeAppKeychain(dataUUID label: String, keychainGroupId: Int? = nil) {
+        // 3.8.581（L438-1）：删钥匙串必须带 access group——游客写钥匙串时 SecItem.m 把每条都写进 <team>.com.kdt.livecontainer.shared[.N] 并盖 alis=文件夹名；原来查询只带 alis 不带组，只在宿主默认组里找，组号 >0 的分身令牌全残留，删分身后新分身抽中同组号就继承旧登录态（G5 同款组号复用）。组号从本容器自身数据来（调用方传 container.keychainGroupId，-1 归一到 0，与客端读 nil 得 0 一致）；不知道组号时（悬空夹，文件夹已删、plist 没了）128 组各扫一次，alis 只认本夹、绝不碰别家。同步属性带 Any（D:2117 同款），免得 iCloud 同步过的条目漏网。
+        let groupIds: [Int]
+        if let gid = keychainGroupId {
+            groupIds = [gid < 0 ? 0 : gid]
+        } else {
+            groupIds = Array(0..<SharedModel.keychainAccessGroupCount)
+        }
+        for groupId in groupIds {
+            let group = keychainGroupString(groupId: groupId)
+            [kSecClassGenericPassword, kSecClassInternetPassword, kSecClassCertificate, kSecClassKey, kSecClassIdentity].forEach {
+                let status = SecItemDelete([
+                    kSecClass as String: $0,
+                    "alis": label,
+                    kSecAttrAccessGroup as String: group,
+                    kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+                ] as CFDictionary)
+                if status != errSecSuccess && status != errSecItemNotFound {
+                    //Error while removing class $0
+                    NSLog("[LC] Failed to find keychain items: \(status)")
+                }
+            }
         }
     }
     

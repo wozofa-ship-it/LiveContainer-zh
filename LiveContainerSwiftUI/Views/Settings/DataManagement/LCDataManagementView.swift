@@ -2081,9 +2081,11 @@ struct LCDataManagementView : View {
         // 名单都不动（仍在原处），下次再点可重来。
         var failedFolders: [String] = []
         for folder in foldersToDelete {
+            // 3.8.581（L438-1）：先读组号再删文件夹（删完 plist 就没了）；读不到时不传组号、removeAppKeychain 走 128 组全扫。
+            let danglingGroup = (NSDictionary(contentsOf: LCPath.dataPath.appendingPathComponent(folder).appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["keychainGroupId"] as? Int
             do {
                 try fm.removeItem(at: LCPath.dataPath.appendingPathComponent(folder))
-                LCUtils.removeAppKeychain(dataUUID: folder)
+                LCUtils.removeAppKeychain(dataUUID: folder, keychainGroupId: danglingGroup)
                 await MainActor.run {
                     sharedModel.appDataFolderNames.removeAll(where: { s in
                         return s == folder
@@ -4572,6 +4574,8 @@ struct LCDataManagementView : View {
             // App（仍算恢复成功计入 restoredCount，单列提示，
             // 不进 noDataApps——数据确实部分恢复了）
             var downloadIncompleteApps: [String] = []
+            // 3.8.581（L438-2）：恢复后保留的空容器（钥匙串组仍有登录态）——报告单列。
+            var keptEmptyApps: [String] = []
             var versionMismatchApps: [String] = []
             var missingFolders: [URL] = []
             // v216：无数据文件夹（与 noDataApps 文本并行）：结果
@@ -4768,6 +4772,10 @@ struct LCDataManagementView : View {
                     // 3.8.286：组容器失败进报告（旧数据已保留）
                     if !outcome.groupRestoreFailed.isEmpty {
                         groupFailedApps.append("\(reportName)（组容器 \(outcome.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
+                    }
+                    // 3.8.581（L438-2）：空容器已保留（钥匙串组仍有登录态）进报告。
+                    if !outcome.keptEmptyContainers.isEmpty {
+                        keptEmptyApps.append("\(reportName)（\(outcome.keptEmptyContainers.count) 个空容器已保留，钥匙串组仍有登录态）")
                     }
                     // B-6：会话文件合并失败进报告（原文件未动，
                     // 可再恢复一次；路径带 App 名前缀，跨 App
@@ -4973,6 +4981,10 @@ struct LCDataManagementView : View {
                     if !outcome2.groupRestoreFailed.isEmpty {
                         groupFailedApps.append("\(wait.name)（组容器 \(outcome2.groupRestoreFailed.joined(separator: "、")) 未恢复，旧数据已保留）")
                     }
+                    // 3.8.581（L438-2）：空容器已保留（钥匙串组仍有登录态）进报告。
+                    if !outcome2.keptEmptyContainers.isEmpty {
+                        keptEmptyApps.append("\(wait.name)（\(outcome2.keptEmptyContainers.count) 个空容器已保留，钥匙串组仍有登录态）")
+                    }
                     // B-6：会话文件合并失败进报告（同主循环）。
                     if outcome2.mergedLoginFailed > 0 {
                         mergeFailedTotal += outcome2.mergedLoginFailed
@@ -5109,6 +5121,9 @@ struct LCDataManagementView : View {
             if !downloadIncompleteApps.isEmpty {
                 msg += "\n\niCloud 未下完，恢复可能不完整的 App（已恢复的部分数据可用；等 iCloud 同步完再恢复一次可补全）：\n" + downloadIncompleteApps.joined(separator: "\n")
             }
+            if !keptEmptyApps.isEmpty {
+                msg += "\n\n空容器已保留（钥匙串组仍有登录态，恢复后未删除）：\n" + keptEmptyApps.joined(separator: "\n")
+            }
             if !versionMismatchApps.isEmpty {
                 msg += "\n\n备份版本与当前 App 版本不同的（数据已整套按备份时刻恢复；打开后若仍有个别信息异常，是新版读旧数据的兼容问题）：\n" + versionMismatchApps.joined(separator: "\n")
             }
@@ -5151,6 +5166,7 @@ struct LCDataManagementView : View {
             if !groupFailedApps.isEmpty { issues.append("组容器失败 \(groupFailedApps.count) 个") }
             if mergeFailedTotal > 0 { issues.append("会话合并失败 \(mergeFailedTotal) 个") }
             if !downloadIncompleteApps.isEmpty { issues.append("iCloud 未下完 \(downloadIncompleteApps.count) 个") }
+            if !keptEmptyApps.isEmpty { issues.append("空容器已保留 \(keptEmptyApps.count) 个") }
             if !versionMismatchApps.isEmpty { issues.append("版本不同 \(versionMismatchApps.count) 个") }
             if !issues.isEmpty {
                 line += "（" + issues.joined(separator: "、") + "）"
@@ -5243,6 +5259,8 @@ struct LCDataManagementView : View {
         // true；本地文件夹、无文件、全部已下完时为 false。
         // 恢复可能只拷了一部分，报告里单列提示，不静默报成功。
         var downloadIncomplete = false
+        // 3.8.581（L438-2）：恢复后保留的空容器文件夹名（文件夹空、但钥匙串组里还有该容器的登录态，不能删；报告单列）。
+        var keptEmptyContainers: [String] = []
         // 备份 Keychain 目录里的 plist 文件数（不管条目数）：
         // 0 = 目录缺/空；>0 但 keychainFound=0 = 快照文件在
         // 但读出 0 条（空快照，或文件未同步完/已损坏）。
@@ -6051,6 +6069,61 @@ struct LCDataManagementView : View {
                 }
             }
         }
+        // 3.8.581（L438-2）：恢复后清掉安装建的空容器——删后重装时安装先建一个随机名空容器，恢复再把备份旧容器补回来并设为默认，安装建的那个空着留在列表里（G6；原来 0 处移除）。只清同时满足五条的：本次恢复没动过（restoredFolderNames 之外——刚恢复的容器不动）、名字不在备份里（安装建的是随机名，备份里的容器名不碰）、不是当前选中/默认容器、文件夹里除 LCContainerInfo.plist 外什么都没有、钥匙串组（组号 + alis=文件夹名双条件查，只查组会撞别家分身同组号的条目）里一条都没有。文件夹空不等于无登录态，令牌在钥匙串组里：组里还有条目时绝不删，记 outcome.keptEmptyContainers、报告注明。外置书签夹（用户自管的文件夹）与空名容器不碰；文件夹删失败时注册不动，下次恢复可重来。组查询每次最多 5 条 limit-1 索引查，不走 detached（三件套是整快照批量）。
+        let backupNames = Set(containerFolders.map { $0.lastPathComponent })
+        let (g6Containers, g6Selected, g6Default) = await MainActor.run { (app.uiContainers, app.uiSelectedContainer?.folderName, app.uiDefaultDataFolder) }
+        var g6Removed: [String] = []
+        var keptEmpty: [String] = []
+        for container in g6Containers {
+            let name = container.folderName
+            if name.isEmpty || container.storageBookMark != nil { continue }
+            if restoredFolderNames.contains(name) || backupNames.contains(name) { continue }
+            if name == g6Selected || name == g6Default { continue }
+            guard let entries = try? fm.contentsOfDirectory(at: container.containerURL, includingPropertiesForKeys: nil) else { continue }
+            guard entries.allSatisfy { $0.lastPathComponent == "LCContainerInfo.plist" } else { continue }
+            let gid = container.keychainGroupId < 0 ? 0 : container.keychainGroupId
+            let group = Self.keychainGroupString(groupId: gid)
+            var hasItems = false
+            for cls in [kSecClassGenericPassword, kSecClassInternetPassword, kSecClassCertificate, kSecClassKey, kSecClassIdentity] {
+                var found: CFTypeRef?
+                let status = SecItemCopyMatching([
+                    kSecClass as String: cls,
+                    kSecAttrAccessGroup as String: group,
+                    "alis": name,
+                    kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+                    kSecMatchLimit as String: kSecMatchLimitOne,
+                    kSecReturnAttributes as String: true,
+                ] as CFDictionary, &found)
+                if status == errSecSuccess {
+                    hasItems = true
+                    break
+                }
+            }
+            if hasItems {
+                keptEmpty.append(name)
+                continue
+            }
+            if (try? fm.removeItem(at: container.containerURL)) != nil {
+                g6Removed.append(name)
+            }
+        }
+        if !g6Removed.isEmpty {
+            // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
+            await MainActor.run {
+                let remaining = app.uiContainers.filter { !g6Removed.contains($0.folderName) }
+                app.uiContainers = remaining
+                app.appInfo.containers = remaining
+                if let selected = app.uiSelectedContainer, !remaining.contains(selected) {
+                    let fallback = newDefaultContainer ?? remaining.first
+                    app.uiSelectedContainer = fallback
+                    if let fallback {
+                        app.uiDefaultDataFolder = fallback.folderName
+                        app.appInfo.dataUUID = fallback.folderName
+                    }
+                }
+            }
+        }
+        outcome.keptEmptyContainers = keptEmpty
         // 恢复免登录修正（2026-10-25）：钥匙串恢复只是把快照排队成
         // CZFKeychainImport.plist，真正写回在游客下次全新启动时由桥
         // 完成；恢复本身不杀已运行的游客，用户直接切回看到的还是未
@@ -6379,13 +6452,9 @@ struct LCDataManagementView : View {
         return backupVersion != currentVersion
     }
 
-    /// 钥匙串组名：与游客侧 SecItem.m 的拼法一致（组号 0 无后缀）
+    /// 钥匙串组名：与游客侧 SecItem.m 的拼法一致（组号 0 无后缀）；唯一实现在 LCUtils.keychainGroupString，这里只转调，免得两份拼法漂移。
     static func keychainGroupString(groupId: Int) -> String {
-        let team = LCSharedUtils.teamIdentifier() ?? ""
-        if groupId == 0 {
-            return "\(team).com.kdt.livecontainer.shared"
-        }
-        return "\(team).com.kdt.livecontainer.shared.\(groupId)"
+        LCUtils.keychainGroupString(groupId: groupId)
     }
 
     /// 读一个 App 的组容器 ID 列表：从它的可执行文件签名权限里取。
