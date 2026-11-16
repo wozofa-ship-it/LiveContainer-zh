@@ -145,9 +145,6 @@ extension LCUtils {
         guard LCSharedUtils.certificatePassword() != nil else {
             return
         }
-        if !force, isTweakFolderVerified(tweakFolderUrl) {
-            return
-        }
         // 落盘验签指纹（按证书 Team 分键）：指纹对得上的文件
         // 就是本 Team 签过的，直接跳过——插件文件夹文件一多，
         // 这是冷启后第一次打开 App 的主要耗时之一。注意：绝不
@@ -256,6 +253,14 @@ extension LCUtils {
             } else {
                 nestedFiles.append(fileURL)
             }
+        }
+
+        // 3.8.573（L346-1）：已验过不能直接 return——Files 直拷/iCloud 同步/他 App 写共享夹都
+        // 不走 startInstallTweak 的清表（L328-1 只盖了模块页导入那条路），本轮内已验过的夹再
+        // 起 App 时新文件不签、游客 dlopen 报签名无效。枚举已按指纹筛过（!force 时指纹对得上
+        // 的 continue），两表都空才说明盘上没新文件、直接 return；任一表非空就落到下面只签新文件。
+        if !force, isTweakFolderVerified(tweakFolderUrl), topFiles.isEmpty, nestedFiles.isEmpty {
+            return
         }
 
         if !topFiles.isEmpty {

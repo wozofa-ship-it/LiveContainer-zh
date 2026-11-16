@@ -261,8 +261,9 @@ public enum CZFSingBoxConfig {
     /// 明服务端证书不是公开可验的，留 insecure=false 会握手
     /// 失败，只能跳过验证才能连上——宁可连上也不让节点继续
     /// 显示“不支持”。mport=61000-62000 → server_ports=
-    /// ["61000:62000"]（分隔符 hyphen 变 colon）；格式不对就
-    /// 跳过，只用主端口。
+    /// ["61000-62000"]（分隔符就是 hyphen；sing-box v1.14.4
+    /// 的 server_ports 只认端口或 hyphen 区间，见
+    /// option/hysteria2.go；格式不对就跳过，只用主端口）。
     /// tag 默认 node-out；多出站测速时调用方传 node-out-<i>。
     static func hysteria2Outbound(link: String, tag: String = CZFSingBoxRouting.nodeTag) throws -> [String: Any] {
         guard let comps = components(of: link), ["hysteria2", "hy2"].contains(comps.scheme?.lowercased() ?? "") else {
@@ -292,7 +293,8 @@ public enum CZFSingBoxConfig {
             let parts = mport.split(separator: "-").map { $0.trimmingCharacters(in: .whitespaces) }
             if parts.count == 2, let lo = Int(parts[0]), let hi = Int(parts[1]),
                (1...65535).contains(lo), (1...65535).contains(hi), lo <= hi {
-                out["server_ports"] = ["\(lo):\(hi)"]
+                // 3.8.573（L343-1）：server_ports 的区间分隔符是 hyphen 不是 colon——原来写 "\(lo):\(hi)"，sing-box v1.14.4 的 server_ports 只认端口或 hyphen 区间（option/hysteria2.go，例 "20000-20100"），冒号版过不了 LibboxCheckConfig，带 mport 的 hysteria2 节点起不来、测速也全记超时；主端口本身没错，错的只是这一处分隔符。
+                out["server_ports"] = ["\(lo)-\(hi)"]
             }
         }
         if let obfs = CZFSingBoxRouting.firstQuery(map, "obfs") {

@@ -852,7 +852,31 @@ struct LCTweakFolderView : View {
                     throw "lc.tweakView.notFileError %@".localizeWithFormat(fileUrl.lastPathComponent)
                 }
                 let toPath = self.baseUrl.appendingPathComponent(fileUrl.lastPathComponent)
-                try fm.moveItem(at: fileUrl, to: toPath)
+                // 3.8.573（L348-1）：同名文件已在夹里时 moveItem 直接抛 Cocoa 516，整项报导入失败——
+                // 源页（S:1788）与坞面板（K:4969）走 czfReplaceTweakFile（旧文件挪 .bak、失败回滚），
+                // 模块页这里是唯一裸 moveItem 的导入路，重导新版插件必须先手动删旧的。照同款做备份换：
+                // 旧的先挪 .bak（.bak 不以 .dylib/.framework 结尾，signTweaks 枚举不会把它也签了），
+                // 移入失败就把旧的挪回来再抛（外层 catch 记失败，旧文件还在）；成功再删备份。签名仍按
+                // 本函数原口径留到启动时——不像 czfReplaceTweakFile 那样当场 force 全签，批量导入每件
+                // 都全签一遍太贵；L328-1 的清表已保证下次启动只签新文件（新文件指纹与旧表对不上，枚举
+                // 一定把它放进待签表，L346-1 已核）。
+                let backupURL = toPath.appendingPathExtension("bak")
+                var oldBackedUp = false
+                if fm.fileExists(atPath: toPath.path) {
+                    try? fm.removeItem(at: backupURL)
+                    try fm.moveItem(at: toPath, to: backupURL)
+                    oldBackedUp = true
+                }
+                do {
+                    try fm.moveItem(at: fileUrl, to: toPath)
+                } catch {
+                    try? fm.removeItem(at: toPath)
+                    if oldBackedUp {
+                        try? fm.moveItem(at: backupURL, to: toPath)
+                    }
+                    throw error
+                }
+                try? fm.removeItem(at: backupURL)
 
                 let isFramework = toPath.lastPathComponent.hasSuffix(".framework")
                 let isTweak = toPath.lastPathComponent.hasSuffix(".dylib")
