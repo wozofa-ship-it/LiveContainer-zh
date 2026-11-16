@@ -1931,6 +1931,36 @@ extension Notification.Name {
     @discardableResult
     private func processGlobalSwipe(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat, velocityX: CGFloat) -> Bool {
         let draggingRight = translation.x > 0
+        // 3.8.583（GEST-1）：右边缘斜滑——左滑往上拉满、左滑往下小窗口。
+        // 只认右边缘（startEdge == 2）普通带内起手；与现有横滑严格不重叠：
+        // 横滑守卫要求 |dx| > 1.5|dy|（即 |dy|/|dx| < 0.67），斜滑带取
+        // |dy|/|dx| ∈ [0.7, 1.5]，中间留 [0.67, 0.7) 死区；>1.5 的近竖滑
+        // 不认。距离门槛照抄往里拖的 24*s（低档 33.6pt / 默认 24pt /
+        // 高档 14.4pt）。放横滑守卫之前——守卫会把斜滑直接 return 掉。
+        // 面板开着时不触发（与 czfSwitchRunningApp 同款守卫）；边缘手势
+        // 总开关关着时不触发。拉满走 maximizeFrontmostWindow（强制拉满，
+        // 已拉满无操作）；小窗口走 restoreSmallWindow（已最大化才还原，
+        // 本来小窗无操作）——都只动台前已在跑的窗口，不新起窗口。
+        // 兜底（.ended/.cancelled）本版不加：兜底的往里分支已占
+        // |dy|/|dx| < 1.25，斜滑带与之重叠，加进去会抢切 App；中途触发
+        // 已覆盖一笔画的斜滑，先横后竖的变向路径待真机调。
+        if startEdge == 2, !draggingRight, startInBand,
+           Self.czfEdgeGesturesEnabled, !isAppPanelOpen, !isSourcesPanelOpen {
+            let s = Self.czfThresholdScale
+            let adx = abs(translation.x)
+            let ady = abs(translation.y)
+            if adx > 24 * s, ady > 24 * s {
+                let ratio = ady / adx
+                if ratio >= 0.7, ratio <= 1.5, let front = czfFrontmostApp() {
+                    if translation.y < 0 {
+                        fireDockAction { self.maximizeFrontmostWindow() }
+                    } else {
+                        fireDockAction { self.restoreSmallWindow(uuid: front.appUUID) }
+                    }
+                    return true
+                }
+            }
+        }
         // 往外弹（左缘左移/右缘右移）物理行程就只有起手那几十
         // 点：手指几毫米就出屏，拇指走的还是弧线、纵向分量大，
         // 方向比按 1.5 卡会把大半次弹滑判掉（用户真机反馈左缘
