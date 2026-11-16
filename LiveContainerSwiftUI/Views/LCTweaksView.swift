@@ -74,6 +74,13 @@ struct LCTweakFolderView : View {
     // 要重进模块才出现；onAppear 每现一次就重扫一遍。
     private static func scanTweakItems(at baseUrl: URL) -> Result<[LCTweakItem], Error> {
         let fm = FileManager()
+        // 3.8.565（L294-1）：共享区目录只在分享流程里由 ensureAppGroupPaths 建——
+        // 从没分享过的用户点“共享”分段时这里根本没目录，contentsOfDirectory
+        // 直接抛 Cocoa 260、init 把 _errorShow 置真，弹一条系统原样错
+        //（L288-1 同款，数据页“移回闲置文件夹”那路）；目录不存在就是
+        // “还没有插件”，空表是正确语义。子文件夹视图只从已存在的行点进去，
+        // 目录必存在，这道守卫只改缺目录的根分段。
+        guard fm.fileExists(atPath: baseUrl.path) else { return .success([]) }
         do {
             let files = try fm.contentsOfDirectory(atPath: baseUrl.path)
             var items: [LCTweakItem] = []

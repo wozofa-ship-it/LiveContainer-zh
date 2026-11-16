@@ -3032,7 +3032,7 @@ struct LCDataManagementView : View {
     // 真身在 backupOneAppSyncLocked，这里只过串行队列，保证同一
     // 时刻只有一个备份在写临时目录。队列只在本函数里用，不存在
     // 重入（backupOneAppSyncLocked 不调自己、不回头调本函数）。
-    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
+    static func backupOneAppSync(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, allowLocked: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
         // 3.8.543（L73）：进串行队列前先取快照（见
         // CZFBackupAppSnapshot 注释）；主线程直读、后台经
         // main.sync 取（L70 同款，Thread.isMainThread 防主线
@@ -3053,11 +3053,11 @@ struct LCDataManagementView : View {
             return DispatchQueue.main.sync(execute: read)
         }()
         return try czfBackupSerialQueue.sync {
-            try Self.backupOneAppSyncLocked(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, snapshot: snapshot)
+            try Self.backupOneAppSyncLocked(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, snapshot: snapshot, allowLocked: allowLocked)
         }
     }
 
-    private static func backupOneAppSyncLocked(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, snapshot: CZFBackupAppSnapshot) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
+    private static func backupOneAppSyncLocked(_ app: LCAppModel, backupRoot: URL, fm: FileManager, loginOnly: Bool = false, snapshot: CZFBackupAppSnapshot, allowLocked: Bool = false) throws -> (keychainCount: Int, keychainHasSnapshot: Bool, bridgeStatus: String?, loginFileCount: Int, loginBreakdown: [String: Int], loginSkipped: Int, keychainSnapshotDate: Date?, loginSkippedPaths: [String], folderName: String, containerCount: Int, containerNames: [String], loginFailed: Int, loginFailedPaths: [String]) {
         let appName = snapshot.appName
         // v216：同款多开各写各的文件夹（见 backupFolderName：
         // 同实例沿用旧名、新实例加实例后缀；老文件夹不改名）。
@@ -3065,7 +3065,10 @@ struct LCDataManagementView : View {
         let folderName = Self.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
         // 3.8.281：锁了的备份不覆盖（批量/定时/自动备份三处调用前
         // 已跳过，这里是兜底：直接调本函数也盖不掉锁定的备份）。
-        if Self.isBackupLocked(folderName) {
+        // 3.8.565（L318-1）：显式备份在 doBackupScope 里先过人脸，
+        // 通过后 allowLocked=true 才放行；其余路（定时/自动备份）
+        // 不传，仍走兜底抛错。
+        if Self.isBackupLocked(folderName) && !allowLocked {
             throw NSError(domain: "LiveContainerBackup", code: 1, userInfo: [NSLocalizedDescriptionKey: "备份已锁定"])
         }
         // 防丢：先写到文稿根目录下的临时文件夹（带点前缀，
@@ -3495,7 +3498,7 @@ struct LCDataManagementView : View {
         }
     }
 
-    func backupApps(_ apps: [LCAppModel], loginOnly: Bool = false) async {
+    func backupApps(_ apps: [LCAppModel], loginOnly: Bool = false, allowLocked: Bool = false) async {
         // 6 计时（备份只加计时，不改并行）：串行队列是正确性
         // 要求（3.8.318 注释写死，钥匙串两遍全量并发会把
         // dump 和回执写岔、令牌丢了），提速动不了，只量耗时。
@@ -3571,12 +3574,16 @@ struct LCDataManagementView : View {
                         // 所有 App，还把已备好的 count 清零报 0——“好多都没
                         // 备份上”就是这么来的。单个失败记下来继续备后面的，
                         // 最后在报告里列出失败的。
-                        // 3.8.281：跳过不重复备——锁了的（报已锁定）和
-                        // 批量登录态今天已备过的（报今日已备过）都不
-                        // 重跑；单个明确备份（只选 1 个）不跳过，点了
-                        // 就是要重备。跳过的记 skippedNames，报告里单列。
+                        // 3.8.565（L318-1）：锁了的备份只在没过人脸时
+                        // 跳过——旧注释称“单个明确备份（只选 1 个）
+                        // 不跳过”是错的：代码根本没有 apps.count == 1
+                        // 豁免，锁了就 continue，单备也被跳过，备份
+                        // 冻在锁定那一刻。显式备份在 doBackupScope
+                        // 里先过人脸，通过后 allowLocked=true 整批
+                        // 放行；定时/自动备份不走那路，仍跳过。
+                        // 跳过的记 skippedNames，报告里单列。
                         let fname = Self.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
-                        if Self.isBackupLocked(fname) {
+                        if Self.isBackupLocked(fname) && !allowLocked {
                             skippedNames.append("\(name)（已锁定）")
                             continue
                         }
@@ -3585,7 +3592,7 @@ struct LCDataManagementView : View {
                             continue
                         }
                         do {
-                            let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
+                            let one = try Self.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, allowLocked: allowLocked)
                             keychainTotal += one.keychainCount
                             loginFileTotal += one.loginFileCount
                             for (k, v) in one.loginBreakdown { loginBreakdownTotal[k, default: 0] += v }
@@ -3859,6 +3866,34 @@ struct LCDataManagementView : View {
         guard backupRestoreProgress == nil else { return }
         UserDefaults.standard.set(loginOnly, forKey: "LCBackupLastLoginOnly")
         let apps = pendingBackupApps
+        // 3.8.565（L318-1）：集合里含锁定备份，显式备份先过一次
+        // 人脸（复用 doRestoreScope 的 gate 写法：含锁定才弹，
+        // 整批只弹一次；失败/取消不开始并清进度）。人脸弹在
+        // 选页还盖着时：失败/取消不关选页、不开始备份；进度
+        // 先占位防 L212 双击重入，失败时清掉，不然入口行
+        // 永远 disabled、直进页永远关不掉。
+        if Self.czfHasLockedBackup(in: apps) {
+            backupRestoreProgress = "正在备份…"
+            Task {
+                let ok = (try? await LCUtils.authenticateUserForced()) ?? false
+                guard ok else {
+                    await MainActor.run { backupRestoreProgress = nil }
+                    return
+                }
+                await MainActor.run {
+                    self.czfStartBackupApps(apps: apps, loginOnly: loginOnly, allowLocked: true)
+                }
+            }
+            return
+        }
+        czfStartBackupApps(apps: apps, loginOnly: loginOnly, allowLocked: false)
+    }
+
+    // doBackupScope 的后半段：关选页、同步置进度、起备份 Task。
+    // 12：进度必须同步置（backupApps 里也会置，但 Task 是异步的；
+    // 直进收尾的 0.3 秒关页可能抢在 Task 启动前，误把进行中的
+    // 备份关掉）。人脸 gate 通过后也走这里（allowLocked=true）。
+    private func czfStartBackupApps(apps: [LCAppModel], loginOnly: Bool, allowLocked: Bool) {
         // 用户选了范围才关选页（选页一直盖在下面等着，
         // 点取消就回到选页接着挑，不丢已勾的 App）。
         showBackupSelect = false
@@ -3873,7 +3908,7 @@ struct LCDataManagementView : View {
             backupRestoreProgress = "正在备份（0/\(apps.count)）…"
         }
         Task {
-            await backupApps(apps, loginOnly: loginOnly)
+            await backupApps(apps, loginOnly: loginOnly, allowLocked: allowLocked)
             // 12：跑完后调收尾——此时结果弹窗正弹着，收尾里
             // 的 guard 会拦住；等用户点掉弹窗，onChange 再调
             // 收尾，关页（见 1193 附近 successShow/errorShow
@@ -3988,7 +4023,8 @@ struct LCDataManagementView : View {
             case "keychain": scopeText = "仅钥匙串"
             default: scopeText = "未知范围"
             }
-            let lockText = Self.isBackupLocked(folderName) ? " · 🔒已锁定（备份时会跳过）" : ""
+            // 3.8.565（L318-1）：锁了不再跳过——显式备份过人脸就备，定时仍跳过。
+            let lockText = Self.isBackupLocked(folderName) ? " · 🔒已锁定（备份时需人脸识别）" : ""
             lines.append("• \(name)：已有备份 \(info.backupDate) · \(scopeText)\(lockText)")
         }
         if lines.isEmpty { return "" }
@@ -6786,6 +6822,14 @@ struct LCDataManagementView : View {
     static func isBackupLocked(_ folderName: String) -> Bool {
         (UserDefaults.standard.stringArray(forKey: lockedBackupsKey) ?? []).contains(folderName)
     }
+    // 3.8.565（L318-1）：集合里有没有已锁定的备份（doBackupScope
+    // 的人脸 gate 用；定时备份不用——无人值守弹不了人脸）。
+    static func czfHasLockedBackup(in apps: [LCAppModel]) -> Bool {
+        let fm = FileManager.default
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        let backupRoot = docsURL.appendingPathComponent("Backups")
+        return apps.contains { Self.isBackupLocked(Self.backupFolderName(for: $0, backupRoot: backupRoot, fm: fm)) }
+    }
     static func setBackupLocked(_ folderName: String, locked: Bool) {
         var names = UserDefaults.standard.stringArray(forKey: lockedBackupsKey) ?? []
         if locked {
@@ -7236,10 +7280,12 @@ struct LCDataManagementView : View {
         // 手动备份改了状态，循环里会重新判定，最多白关一次窗口，
         // 与现在一致）。非登录态备份不跳过任何 App，照旧全刷。
         let fmForFilter = FileManager.default
-        // 锁了的备份定时也不备（手动备份同款跳过）：先摘掉，
-        // 别为它关客窗口、也别把它记成失败（见下面循环里
-        // skippedLockedCount；否则锁一个 App 就天天报失败、
-        // 失败记录永远不清、日期永远不结算）。
+        // 锁了的备份定时也不备（无人值守弹不了人脸）：先摘掉，
+        // 别为它关客窗口。3.8.565（L318-1）：锁定跳过不再算
+        // 结算（见下面 skippedLockedCount），并以“X 个已锁定
+        // 未备”记进 LCScheduleBackupLastFailure，设置页定时
+        // 备份区直接显示——原来算结算且不留痕，锁定的 App
+        // 永远不再被定时备，用户也不知道。
         let filterRoot = fmForFilter.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("Backups")
         func czfScheduledSkippedLocked(_ app: LCAppModel) -> Bool {
             guard let backupRoot = filterRoot else { return false }
@@ -7263,9 +7309,9 @@ struct LCDataManagementView : View {
                 // 全跳过且无失败时当天同样算结算（原来只看有没有备
                 // 上，永不结算，每次进页都重跑、还关客 App 窗口）。
                 var skippedFullCount = 0
-                // 锁了的备份定时也不备（手动备份同款跳过）：
+                // 锁了的备份定时也不备（显式备份过人脸才备）：
                 // backupOneAppSyncLocked 会直接抛“备份已锁定”，
-                // 不摘的话每天记一次失败、失败记录永远不清。
+                // 下面循环里记 skippedLockedCount、不算结算。
                 var skippedLockedCount = 0
                 // 3.8.306：定时备份失败别静默——原来失败用 try?
                 // 吞掉，整批全失败也不留痕、第二天照常重试，
@@ -7281,9 +7327,10 @@ struct LCDataManagementView : View {
                     let backupRoot = docs.appendingPathComponent("Backups")
                     try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                     for app in selected {
-                        // 锁了的备份不覆盖（手动备份同款跳过；上面
-                        // toRefresh 已摘，这里是兜底——两处之间若有
-                        // 手动备份改了状态，循环里重新判定）。
+                        // 锁了的备份不覆盖（显式备份过人脸才备，定时
+                        // 弹不了人脸故跳过；上面 toRefresh 已摘，这
+                        // 里是兜底——两处之间若有手动备份改了状态，
+                        // 循环里重新判定）。
                         if Self.isBackupLocked(Self.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)) {
                             skippedLockedCount += 1
                             continue
@@ -7313,7 +7360,7 @@ struct LCDataManagementView : View {
                         Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
                         Self.writeCZFSettingsBackupDebounced()
                     }
-                    if !failedNames.isEmpty || !copyFailedNames.isEmpty {
+                    if !failedNames.isEmpty || !copyFailedNames.isEmpty || skippedLockedCount > 0 {
                         let fmt = DateFormatter()
                         fmt.dateFormat = "MM月d日 HH:mm"
                         let when = fmt.string(from: Date())
@@ -7328,14 +7375,23 @@ struct LCDataManagementView : View {
                             let names = copyFailedNames.prefix(3).joined(separator: "、") + (copyFailedNames.count > 3 ? "等 \(copyFailedNames.count - 3) 个" : "")
                             failureParts.append("\(names)有文件拷贝失败")
                         }
+                        // 3.8.565（L318-1）：锁定跳过也留痕——原来只在
+                        // 有失败时才写记录，锁定跳过永远不留痕。
+                        if skippedLockedCount > 0 {
+                            failureParts.append("\(skippedLockedCount) 个已锁定未备份（定时备份跳过锁定备份，手动备份时过人脸即可备份）")
+                        }
                         UserDefaults.standard.set("\(when)：\(failureParts.joined(separator: "；"))", forKey: "LCScheduleBackupLastFailure")
                         UserDefaults.standard.synchronize()
                     }
                 }
                 // 全跳过且无失败时当天同样算结算（见上面 skippedFullCount），
-                // 真失败时不结算，第二天照常重试。锁了的跳过与完整
-                // 备份的跳过同款计入结算。
-                continuation.resume(returning: (!backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount + skippedLockedCount == selected.count), !failedNames.isEmpty || !copyFailedNames.isEmpty))
+                // 真失败时不结算，第二天照常重试。3.8.565（L318-1）：
+                // 锁定跳过不再计入结算——锁定的 App 定时永远备不上，
+                // 算结算等于把它永久漏掉；不结算则第二天照常重试，
+                // 失败记录里那行“X 个已锁定未备”也一直挂着提醒。
+                // 失败记录有锁定跳过时也不清（hadFailure 含它），
+                // 直到某轮不再跳过锁定项（解锁或取消定时勾选）。
+                continuation.resume(returning: (!backedUpFolderNames.isEmpty || (failedNames.isEmpty && skippedFullCount == selected.count && skippedLockedCount == 0), !failedNames.isEmpty || !copyFailedNames.isEmpty || skippedLockedCount > 0))
             }
         }
         if didBackup {

@@ -216,7 +216,16 @@ public final class CZFVPNManager {
     public var nodeLink: String {
         let links = nodeLinks
         guard !links.isEmpty else { return "" }
-        return links[activeNodeIndex]
+        // 3.8.565（L293-1）：原来 return links[activeNodeIndex]——
+        // activeNodeIndex 内部又读一次 nodeLinks 再夹下标；列表在
+        // 两次读之间变长（加节点/订阅刷新整体替换写 UserDefaults）
+        // 时，夹好的下标可能越过第一次快照的尾，下标越界直接崩。
+        // 读一次快照、同快照内夹下标；列表稳定时结果与原来一字
+        // 不差。后台读点：测速块（:2011/:2082/:2162/:2193）与
+        // Task.detached 调来的 ensureRunning（M:1148）都会读它，
+        // 写点全在主线程，两读之间没有锁。
+        let idx = UserDefaults.standard.integer(forKey: Self.activeNodeKey)
+        return links[min(max(idx, 0), links.count - 1)]
     }
 
     // 节点变了就刷新设置备份：导入导出配置（CZFSettingsBackup.json）
