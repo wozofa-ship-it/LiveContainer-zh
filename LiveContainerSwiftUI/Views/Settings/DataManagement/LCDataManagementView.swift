@@ -6080,7 +6080,7 @@ struct LCDataManagementView : View {
             if restoredFolderNames.contains(name) || backupNames.contains(name) { continue }
             if name == g6Selected || name == g6Default { continue }
             guard let entries = try? fm.contentsOfDirectory(at: container.containerURL, includingPropertiesForKeys: nil) else { continue }
-            guard entries.allSatisfy { $0.lastPathComponent == "LCContainerInfo.plist" } else { continue }
+            guard entries.allSatisfy({ $0.lastPathComponent == "LCContainerInfo.plist" }) else { continue }
             let gid = container.keychainGroupId < 0 ? 0 : container.keychainGroupId
             let group = Self.keychainGroupString(groupId: gid)
             var hasItems = false
