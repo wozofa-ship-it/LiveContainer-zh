@@ -178,8 +178,11 @@ final class AltStoreSourcesViewModel: ObservableObject {
     private let defaultsKey = "LCAltStoreSourceURLs"
 
     private let cacheDirectoryName = "AltStoreSourceCache"
+    private var hasLoadedSources = false
     
-    init() {
+    func loadSourcesIfNeeded() {
+        guard !hasLoadedSources else { return }
+        hasLoadedSources = true
         loadStoredSources()
         Task {
             // O-28：缓存解码先于刷新（顺序与原来同步版一致：
@@ -1354,6 +1357,7 @@ struct LCSourcesView: View {
         .searchable(text: $searchContext.query)
 
         .onAppear {
+            viewModel.loadSourcesIfNeeded()
             czfMigrateSourceGridKeys()
             refreshUpdatableCache()
             autoRefreshSourcesIfNeeded()
@@ -1375,6 +1379,11 @@ struct LCSourcesView: View {
                 guard sharedModel.selectedTab == .sources, let link = sharedModel.deepLink else { return }
                 sharedModel.deepLink = nil
                 handleURL(url: link)
+            }
+        }
+        .onChange(of: sharedModel.selectedTab) { tab in
+            if tab == .sources {
+                viewModel.loadSourcesIfNeeded()
             }
         }
         .onChange(of: viewModel.sources) { newSources in

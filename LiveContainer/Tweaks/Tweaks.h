@@ -29,6 +29,7 @@ void DeviceFingerprintHookInit(NSString *advertisingIdentifier, NSString *device
 #define CZF_PROXY_KEY_HTTPS_PROXY @"HTTPSProxy"
 #define CZF_PROXY_KEY_HTTPS_PORT @"HTTPSPort"
 void NSExtensionGuestHooksInit(NSURL *appURL, NSURL *containerURL);
+void GuestExtensionHooksInit(void);
 int LCRunGuestExtension(NSDictionary *request, NSExtensionContext *context);
 NSString *LCPrepareGuestExtension(NSDictionary *request);
 

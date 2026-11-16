@@ -39,7 +39,7 @@ bool sideStoreExist = false;
     return lcUserDefaults;
 }
 + (instancetype)lcSharedDefaults {
-    if(!lcUserDefaults) {
+    if(!lcSharedDefaults) {
         lcSharedDefaults = [[NSUserDefaults alloc] initWithSuiteName: [LCSharedUtils appGroupID]];
     }
     return lcSharedDefaults;
@@ -319,6 +319,80 @@ NSString *LCPrepareGuestExtension(NSDictionary *request) {
         return error ? @(error) : @"Unable to load the guest extension";
     }
     appExecutableHandle = handle;
+    return nil;
+}
+
+NSString *LCRunGuestExtensionWithArgs(NSDictionary *request, int argc, char *argv[], char *envp[], char *apple[]) {
+    lcMainBundle = NSBundle.mainBundle;
+    lcUserDefaults = NSUserDefaults.standardUserDefaults;
+    [LCSharedUtils certificatePassword];
+    isLiveProcess = true;
+    lcAppUrlScheme = @"liveprocess";
+    lcSharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:LCSharedUtils.appGroupID];
+    lcAppGroupPath = [request[@"appGroupPath"] length] ? request[@"appGroupPath"] : nil;
+    guestAppInfo = request[@"guestAppInfo"];
+    guestContainerInfo = request[@"guestContainerInfo"];
+
+    static NSMutableArray<NSURL *> *accessedURLs;
+    accessedURLs = [NSMutableArray array];
+    for (NSData *bookmark in request[@"bookmarks"]) {
+        NSError *error = nil;
+        BOOL stale = NO;
+        NSURL *url = [NSURL URLByResolvingBookmarkData:bookmark options:0 relativeToURL:nil bookmarkDataIsStale:&stale error:&error];
+        if (!url || ![url startAccessingSecurityScopedResource]) {
+            return error.localizedDescription ?: @"Unable to access the guest extension or its container";
+        }
+        [accessedURLs addObject:url];
+    }
+    NSString *bundlePath = request[@"bundlePath"];
+    NSString *homePath = request[@"containerPath"];
+    NSString *lcHomePath = request[@"lcHomePath"];
+
+    NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
+
+    lcGuestAppId = bundle.bundleIdentifier;
+    NSString *originalHome = NSHomeDirectory();
+    setenv("LP_HOME_PATH", originalHome.fileSystemRepresentation, 1);
+    setenv("LC_HOME_PATH", lcHomePath.fileSystemRepresentation, 1);
+    setenv("HOME", homePath.fileSystemRepresentation, 1);
+    setenv("CFFIXED_USER_HOME", homePath.fileSystemRepresentation, 1);
+    setenv("TMPDIR", [[homePath stringByAppendingPathComponent:@"tmp"] stringByAppendingString:@"/"].fileSystemRepresentation, 1);
+    overwriteMainNSBundle(bundle);
+    overwriteMainCFBundle();
+    const char *executablePath = strdup(bundle.executablePath.fileSystemRepresentation);
+    *_CFGetProcessPath() = executablePath;
+    overwriteExecPath(executablePath);
+    NUDGuestHooksInit();
+    NSFMGuestExtensionHooksInit(request[@"parentContainerPath"]);
+    NSURLSCGuestHooksInit();
+    GuestExtensionHooksInit();
+
+    if (checkJITEnabled()) init_bypassDyldLibValidation();
+    DyldHooksInit(false, true, 0);
+    appMainImageIndex = _dyld_image_count();
+    __block void *handle = NULL;
+    void (^load)(void) = ^{
+        handle = dlopen_nolock(bundle.executablePath.fileSystemRepresentation, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
+    };
+    NSDictionary *patchInfo = [NSDictionary dictionaryWithContentsOfFile:[bundlePath stringByAppendingPathComponent:@"LCAppExtension.plist"]];
+    if (@available(iOS 27.0, *)) {
+        if ([patchInfo[@"segCountMismatch"] boolValue]) bypass_seg_count_check(load);
+        else load();
+    } else {
+        load();
+    }
+    if (!handle) {
+        const char *error = dlerror();
+        return error ? @(error) : @"Unable to load the guest extension";
+    }
+    appExecutableHandle = handle;
+
+    appMain = getAppEntryPoint(handle);
+    if (!appMain) {
+        return @"Could not find the main entry point";
+    }
+    appMain(argc, argv, envp);
+
     return nil;
 }
 
@@ -1038,3 +1112,4 @@ int callAppMain(int argc, char *argv[], char *envp[]) {
     __attribute__((musttail)) return appMain(argc, argv, envp);
 }
 #endif
+
