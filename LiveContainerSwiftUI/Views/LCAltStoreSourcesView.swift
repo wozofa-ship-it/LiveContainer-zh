@@ -1551,6 +1551,17 @@ struct LCSourcesView: View {
     // 方法，普通存储属性写不进去；@State 的 setter 是
     // nonmutating，同一视图身份下各次调用共用同一份表。
     // 3.8.542（L157）
+    // 3.8.572（L340-1）：在途表是 @State 字典（主线程状态），
+    // 但本方法没标 @MainActor——可更新 sheet 的裸 Task（:795，
+    // L161 注释自认不在主 actor 上）经 onUpdateOne 调进来时，
+    // 查表与记表都在全局执行器上跑；两行连点、或撞上主线程的
+    // installBatch 路时，两路同时读写同一份 Dictionary（非线
+    // 程安全），查-置不是原子的，去重失效还可能直接闪退。
+    // 标 @MainActor：查表、记表、事后清表全在主线程上串行，
+    // 与面板 downloadFromPanel/installTweakFromPanel 同款
+    // （K:4938/:5000 都是函数本身 @MainActor）；调用方本来
+    // 就 await，不改签名、不改行为。
+    @MainActor
     private func installTweakIfDylib(app: AltStoreSourceApp) async -> CZFDylibInstallOutcome {
         guard let downloadURL = app.latestVersion?.downloadURL,
               downloadURL.pathExtension.lowercased() == "dylib" else {

@@ -41,13 +41,17 @@ public final class DownloadHelper : ObservableObject {
     private var czfDownloadInFlight = false
 
     func download(url: URL, to: URL) async throws {
-        // L50-1：等在途的下载走完再下自己的；检查与置位都
-        // 在主线程做，防两路同时读到空闲。defer 里不能 await，
-        // 清标志放主线程 Task，只晚半个轮询周期。
-        while await MainActor.run(body: { czfDownloadInFlight }) {
+        // 3.8.572（L339-1）：L50-1 的查与置是两次 MainActor.run、中间隔一次 await——都在主线程跑不等于原子：两路同时等时都能读到空闲、都置真并行下，单槽 continuation/downloadTask 被盖掉，后完成那路见 continuation 已空、永远不恢复（L50-1 原文说的挂起，安装队停摆、只能杀 App）。
+        // 触发口子是现成的：重试 2 秒间隙里 isDownloading 已是 false（completeCallback 清的）、标志仍占着，源页守门 S:1834 只认 isDownloading、覆盖确认 S:1262 根本没门，两路都能进轮询等；安装队尾那路同款。查与置必须同一次 MainActor.run 内原子完成；defer 里不能 await，清标志仍放主线程 Task。
+        while true {
+            let acquired = await MainActor.run {
+                if czfDownloadInFlight { return false }
+                czfDownloadInFlight = true
+                return true
+            }
+            if acquired { break }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
-        await MainActor.run { czfDownloadInFlight = true }
         defer {
             Task { @MainActor in czfDownloadInFlight = false }
         }

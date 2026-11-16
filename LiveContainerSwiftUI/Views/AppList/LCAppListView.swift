@@ -3759,7 +3759,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 副本（installFromUrl 的 file 分支不删它）；不
                 // 在表里的地址（源页/收件箱/直链）原样不动。
                 // 3.8.560（L311-1）：同上，删表回主线程。
-                await MainActor.run { Self.czfDeleteFileImporterTmp(s) }
+                // 3.8.572（L341-1）：忙时 installFromUrl 会把这一项重新排回 pendingInstalls（根本没装）——这时不能删 asCopy 临时副本，删了轮到它时文件已不在、装失败还得重选。
+                // 触发口子现成：installFromPlist 的 defer 也调 drain，plist 下载要几秒、期间别的安装能起（plist 门只读 flag、不置 flag），defer 的 drain 正撞上忙时门；czfFinishInstall 后的 drain 同款（竞争安装落在清 flag 与门之间）。
+                // 只在这一项不在队里了（装完/取消/校验失败都已出队）才删；查队回主线程做（pendingInstalls 是 @State）。
+                let czfStillPending = await MainActor.run { pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: s, autoReplace: r, preview: p, forceAsNew: f, customDisplayName: n, as: $0) }) }
+                if !czfStillPending {
+                    await MainActor.run { Self.czfDeleteFileImporterTmp(s) }
+                }
             case .plist(let s):
                 await installFromPlist(urlStr: s)
             }
