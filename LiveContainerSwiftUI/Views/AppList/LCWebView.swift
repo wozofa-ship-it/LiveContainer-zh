@@ -987,6 +987,7 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         let key = ObjectIdentifier(download)
+        let liveWebView = Self.czfLiveWebViews[key]
         Self.czfLiveWebViews.removeValue(forKey: key)
         Self.czfLiveDelegates.removeValue(forKey: key)
         if let dest = Self.downloadDestinations.removeValue(forKey: key) {
@@ -994,10 +995,18 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
             //（半截文件 + 空目录一起清，与旧的“删文件”同款效果）。
             try? FileManager.default.removeItem(at: dest.deletingLastPathComponent())
         }
-        self.loadStatus.wrappedValue = 1.0
+        // 3.8.576（L363-1）：L72 漏的另一半——下载中途最小化再恢复，onViewAppear 已建新 delegate 并接管 navigationDelegate（新 @State），下载的 delegate 仍是旧的；downloadDidFinish 转给了新 delegate，didFail 却还往旧 delegate 自己的 errorInfo/errorShow/loadStatus 写，恢复重建后 @State 全是新的，写了也看不见：下载失败静默无声、进度条还卡在半截。
+        // 先取 liveWebView 的当前 navigationDelegate，是另一个 delegate 就往它身上写（private 同文件内实例间可访，L72 同款）；是自己/没了就照旧。取消路同款：loadStatus 照常回满、不弹错。
+        let target: WebViewDelegate
+        if let live = liveWebView?.navigationDelegate as? WebViewDelegate, live !== self {
+            target = live
+        } else {
+            target = self
+        }
+        target.loadStatus.wrappedValue = 1.0
         if (error as NSError).code == NSURLErrorCancelled { return }
-        self.errorInfo.wrappedValue = error.localizedDescription
-        self.errorShow.wrappedValue = true
+        target.errorInfo.wrappedValue = error.localizedDescription
+        target.errorShow.wrappedValue = true
     }
 
     

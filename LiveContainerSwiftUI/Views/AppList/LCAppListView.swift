@@ -3343,7 +3343,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 弹一次纯属打扰；有备份才弹窗（恢复结果在下面）
             return
         }
-        let outcome = try? await LCDataManagementView.restoreOneApp(appFolder: found, app: app)
+        // 3.8.576（L366-1）：原来 try? 把 restoreOneApp 的抛错整个
+        // 吞掉（D:5517 读备份目录、D:5606/:5668 拷容器失败都会抛，
+        // 如磁盘满、iCloud 占位未下完），outcome 变 nil 后报告链
+        // 一路掉到底，报“没有可恢复的数据”——备份明明有数据，
+        // 只是恢复失败，用户可能就此删备份或放弃重试。D 侧单恢复
+        // （:4747 do/catch）与本页批量恢复（:1268 + :1085
+        // czfFriendlyError）都报真错，只有自动恢复这条路撒谎。
+        // do/catch 接住真错，报告里单列一支；空备份仍报原话。
+        let outcome: LCDataManagementView.RestoreOutcome?
+        let restoreError: Error?
+        do {
+            outcome = try await LCDataManagementView.restoreOneApp(appFolder: found, app: app)
+            restoreError = nil
+        } catch {
+            outcome = nil
+            restoreError = error
+        }
         await MainActor.run {
             if outcome?.ok == true {
                 // 3.8.575（L356-1）：自动恢复的成功分支原来只说“已恢复备份记录”——outcome.ok 只看容器（D:6029），钥匙串与 ok 无关；备份里没钥匙串快照、或快照 0 条时登录态根本没回来，用户看一句“已恢复”以为全好了。D 侧单恢复（L318-2）与 App 页批量恢复（L353-1）都已补 0 条说法，自动恢复是最后一条漏的路。措辞仿 L353-1（:1305–1320）：found>0 拼正向行 + 不注入条数 + 排队提醒，0 条时写清登录态未恢复；失败分支已有各自说法，不动。
@@ -3372,6 +3388,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 备份里明明有钥匙串却恢复失败：把条数和错误码
                 // 亮出来，卡在哪一环一眼可辨，不再误报"没数据"
                 installInfo = "「\(name)」找到备份记录，钥匙串有 \(outcome.keychainFound) 条但写回失败（错误码 \(outcome.keychainStatus)）"
+            } else if let restoreError {
+                // L366-1：restoreOneApp 抛错（不是空备份）——报真错，
+                // 不再谎报“没有可恢复的数据”；措辞仿 D 侧单恢复的
+                // “恢复失败（czfFriendlyError）”同款。
+                installInfo = "「\(name)」找到备份记录，恢复失败：\(LCUtils.czfFriendlyError(restoreError))"
             } else {
                 installInfo = "「\(name)」找到备份记录，但没有可恢复的数据"
             }

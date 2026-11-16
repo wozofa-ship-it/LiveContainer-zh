@@ -1219,7 +1219,8 @@ struct LCAppSettingsView: View {
             // 的 @Published，离主线程写报 Publishing changes；搬完
             // 后的记账包进 MainActor.run。搬文件仍在外面。
             await MainActor.run {
-                for container in model.uiContainers {
+                // 3.8.576（L361-1）：尾部记账不能再读 live 的 model.uiContainers——moves 清单是搬前快照 uiContainers，搬文件要几秒、页面不锁（按钮只发裸 Task，:432），用户这时新建容器（createFolder 直接 append 进 model.uiContainers，L326-1 注释已证实搬移尾部记账能落进新建流程）会让没搬过的夹也被记成 shared：夹还在私人根、名已从 appDataFolderNames 删掉，App 按共享根找、数据看不见；删了这个“空”夹就真丢数据。只记账快照里那批（同 moves 的 storageBookMark 跳过口径），中途新建的夹保持原状。
+                for container in uiContainers {
                     if container.storageBookMark != nil {
                         continue
                     }
@@ -1305,11 +1306,14 @@ struct LCAppSettingsView: View {
             // 离主线程写报 Publishing changes；搬完后的记账包进
             // MainActor.run。搬文件仍在外面。
             await MainActor.run {
-                for container in model.uiContainers {
+                // 3.8.576（L361-1）：同 moveToAppGroup——尾部记账按搬前快照 uiContainers，不读 live 列表；中途新建的夹本就在私人根、不用补记（createFolder 自己已登记），live 列表会把它重复登记进 appDataFolderNames；中途删掉的夹名仍在表里（unbind 不清名），用 contains 守卫防重（下行 tweakFolder 循环同款口径）。
+                for container in uiContainers {
                     if container.storageBookMark != nil {
                         continue
                     }
-                    sharedModel.appDataFolderNames.append(container.folderName)
+                    if !sharedModel.appDataFolderNames.contains(container.folderName) {
+                        sharedModel.appDataFolderNames.append(container.folderName)
+                    }
                 }
                 if let tweakFolder = appInfo.tweakFolder, tweakFolder.count > 0 {
                     for name in LCAppModel.czfSplitTweakFolders(tweakFolder) where !sharedModel.tweakFolderNames.contains(name) {
@@ -1321,7 +1325,7 @@ struct LCAppSettingsView: View {
                 appInfo.setBundlePath(LCPath.bundlePath.appendingPathComponent(appInfo.relativeBundlePath).path)
                 appInfo.isShared = false
                 model.uiIsShared = false
-                for container in model.uiContainers {
+                for container in uiContainers {
                     container.isShared = false
                 }
             }
