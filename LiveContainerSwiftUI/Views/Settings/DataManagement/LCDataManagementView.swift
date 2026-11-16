@@ -674,7 +674,7 @@ struct LCDataManagementView : View {
                                                 .foregroundColor(.orange)
                                         }
                                     }
-                                    Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
+                                    Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))\(Self.czfBackupUUIDSuffix(for: folderURL))")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                         .lineLimit(1)
@@ -2550,6 +2550,16 @@ struct LCDataManagementView : View {
         return ""
     }
 
+    // 3.8.567（L318-3）：行副标题追加 manifest dataUUID 前 8 位——
+    // 同款多开备份夹名只差实例后缀（旧备份甚至没后缀），只看名
+    // 分不出是哪个分身的备份；manifest 里有 dataUUID，拼上前 8 位
+    // 一眼认出归属。没 manifest/没 dataUUID/未下载时不拼
+    //（czfDownloadedManifestInfo 同款主线程守卫，不触发下载）。
+    static func czfBackupUUIDSuffix(for folderURL: URL) -> String {
+        guard let uuid = Self.czfDownloadedManifestInfo(of: folderURL)?.dataUUID, !uuid.isEmpty else { return "" }
+        return " · \(uuid.prefix(8))"
+    }
+
     func backupFolders(fromExternal: Bool) -> [URL] {
         let fm = FileManager.default
         var allFolders: [URL] = []
@@ -2671,7 +2681,7 @@ struct LCDataManagementView : View {
                         }
                     }
                 }
-                Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))")
+                Text("\(backupDateText(for: folderURL)) · \(backupSizeLabel(for: folderURL))\(Self.backupScopeBadge(folderURL))\(Self.czfBackupUUIDSuffix(for: folderURL))")
                     .font(.caption)
                     .foregroundColor(.gray)
                     .lineLimit(1)
@@ -5599,6 +5609,25 @@ struct LCDataManagementView : View {
                 containers.append(restored)
                 app.uiContainers = containers
                 app.appInfo.containers = containers
+            }
+            // 3.8.567（L315-2）：整容器拷回的 plist 带备份时的旧组号原样回来——
+            // 删 App 后旧组号已空闲，新装的 App 可能已随机抽中同一组（G5），
+            // 两容器同组、“各容器各组”的隔离语义被打破。三个兜底建容器处
+            // （:5741/:5785/:5851）都走 czfRestoreKeychainGroup（manifest 组
+            // 空闲才用、否则现挑空闲组），唯独整拷这路没验。拷回后按 plist
+            // 自身组号验一次：撞了就地重分，不撞原样保留。钥匙串导入在后
+            // （:5891 起）且按容器实时组号写（importKeychainItems），登录态
+            // 不受影响；makeLCContainerInfoPlist 按 live 属性重建并原子写盘，
+            // 隔离旗与伪装值都在 live 属性里，不丢。
+            let restoredGroup = (NSDictionary(contentsOf: destURL.appendingPathComponent("LCContainerInfo.plist")) as? [String: Any])?["keychainGroupId"] as? Int
+            if let restoredGroup {
+                let freshGroup = await Self.czfRestoreKeychainGroup(manifestId: restoredGroup)
+                if freshGroup != restoredGroup {
+                    let restoreBundleID = await MainActor.run { app.appInfo.bundleIdentifier() }
+                    if let restoreBundleID {
+                        restored.makeLCContainerInfoPlist(appIdentifier: restoreBundleID, keychainGroupId: freshGroup)
+                    }
+                }
             }
             restoredContainers += 1
             restoredFolderNames.insert(folderName)

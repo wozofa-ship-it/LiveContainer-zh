@@ -1023,6 +1023,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         let backupRoot = docsURL.appendingPathComponent("Backups")
+        // 3.8.567（L317-1）：App 页批量备份不走 doBackupScope——循环内自带
+        // 锁跳过（isBackupLocked → skipped + continue），backupOneAppSync
+        // 不传 allowLocked；L318-1（G1）的人脸 gate 覆盖不到这路，锁定的
+        // 照样备不上。门在批量头：选中里含锁定备份（czfHasLockedBackup，
+        // D 侧同款口径）→ 人脸一次；通过则该路跳过 continue 并透传
+        // allowLocked: true；失败/取消清 batchBusy、不开始，已选状态不动。
+        let czfAllowLocked: Bool
+        if LCDataManagementView.czfHasLockedBackup(in: apps) {
+            let czfAuthOK = (try? await LCUtils.authenticateUserForced()) ?? false
+            guard czfAuthOK else {
+                await MainActor.run { batchBusy = false }
+                return
+            }
+            czfAllowLocked = true
+        } else {
+            czfAllowLocked = false
+        }
         // 3.8.374：备份前先刷快照（见 refreshKeychainSnapshot），别读旧 dump
         // （backupApps 同款；批量备份原来直接调 backupOneAppSync）。
         for app in apps {
@@ -1046,13 +1063,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 3.8.281：锁了的跳过（报已锁定）；备之前先记有无
                     // 旧备份，成功了才算一次覆盖（跑完报“覆盖了 N 个”）。
                     let fname = LCDataManagementView.backupFolderName(for: app, backupRoot: backupRoot, fm: fm)
-                    if LCDataManagementView.isBackupLocked(fname) {
+                    if LCDataManagementView.isBackupLocked(fname) && !czfAllowLocked {
                         skipped.append("\(name)（已锁定）")
                         continue
                     }
                     let hadBackup = fm.fileExists(atPath: backupRoot.appendingPathComponent(fname).path)
                     do {
-                        let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly)
+                        let one = try LCDataManagementView.backupOneAppSync(app, backupRoot: backupRoot, fm: fm, loginOnly: loginOnly, allowLocked: czfAllowLocked)
                         ok.append(one.folderName)
                         copyFailed += one.loginFailed
                         if hadBackup { overwritten += 1 }
