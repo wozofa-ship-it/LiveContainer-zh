@@ -5022,6 +5022,17 @@ struct LCDataManagementView : View {
                 } else {
                     msg += "\n\n钥匙串：备份里没有钥匙串快照，登录态无从恢复（备份前先打开一次要备份的 App，让桥生成快照）"
                 }
+            } else {
+                // 3.8.566（L318-2）：完整恢复 0 条时报告也得点名——
+                // 原来只有 loginOnly 分支有 0 条说法，完整恢复 0 条
+                // 时报告只有“恢复完成 N 个”，用户以为登录也回来了。
+                // 两种说法复用 loginOnly 分支：有快照读出 0 条 /
+                // 根本没有快照（登录态无从恢复）。
+                if keychainPlistTotal > 0 {
+                    msg += "\n\n钥匙串：备份里有快照文件但读出 0 条（快照本身为空，或文件还没同步完；先在文件 App 里确认文件夹已下载，再打开 App 切一次后台重新备份）"
+                } else {
+                    msg += "\n\n钥匙串：备份里没有钥匙串快照，登录态无从恢复（备份前先打开一次要备份的 App，让桥生成快照）"
+                }
             }
             // v216：登录态提醒链——排队快照在 App 下次全新启动
             // 时才由桥写回，不打开就还没恢复登录态；恢复完逐个
@@ -5144,6 +5155,14 @@ struct LCDataManagementView : View {
                 line += "；钥匙串备份含 \(keychainFoundTotal) 条，已排队 \(keychainQueuedTotal) 条，宿主直写 \(keychainImportedTotal) 条"
                 if keychainUnwritableTotal > 0 {
                     line += "，\(keychainUnwritableTotal) 条不注入无法写回"
+                }
+            } else {
+                // 3.8.566（L318-2）：汇总行同款——0 条时也要写清
+                // 登录态没回来，不然一键恢复后只看汇总行以为全好了。
+                if keychainPlistTotal > 0 {
+                    line += "；钥匙串快照在但读出 0 条，登录态未恢复"
+                } else {
+                    line += "；钥匙串无快照，登录态未恢复"
                 }
             }
             // v216：一键汇总也带登录态提醒（逐个打开一次才算写回）

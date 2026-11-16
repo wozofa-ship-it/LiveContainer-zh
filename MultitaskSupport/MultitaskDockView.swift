@@ -586,6 +586,10 @@ extension Notification.Name {
             // 里就照常摘；原生窗口本来就没进表，守卫照旧拦住、
             // 不碰 VPN 待停等后续。守卫放块里与删条目同线程，
             // 不在调用线程读 @Published。
+            // 3.8.566（L295-1）：原生模式 ping 窗口内关掉的 App，它排进 deferredEnsureApps 的启动请求也要取消——原生条目从不进 apps 表，顶上 guard 拦住后下面旧取消点够不到（closedAppInfo 取自 apps 表，原生恒为 nil）；收尾补跑会把核心起在已关 App 的节点上，起后无人能停（V:1050-1061 注释自述）。guard 之前按 dataUUID 从 apps + hiddenApps 取 appInfo（先例 K:781）；没排进的取消是空操作；关与 async 块执行之间 App 被删则查不到、跳过。
+            if let closedAppInfo = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == appUUID })?.appInfo {
+                CZFVPNManager.shared.cancelDeferredEnsure(for: closedAppInfo)
+            }
             guard self.isDockEnabled() || self.apps.contains(where: { $0.appUUID == appUUID }) else { return }
             // 3.8.501（L22）：摘掉本分身的 uuid 名；bid 名只在没有
             // 别的分身共用它时才摘——原来不管有没有共用都摘，关掉
@@ -595,19 +599,7 @@ extension Notification.Name {
                !self.apps.contains(where: { $0.appUUID != appUUID && $0.appInfo?.bundleIdentifier() == bid }) {
                 self.czfUnregisterTouchRaiseObserver(identifier: bid)
             }
-            // 3.8.585（L117）：测速窗口内关掉的 App，它排进
-            // deferredEnsureApps 的启动请求要一起取消——收尾
-            // 补跑会把核心起在已关 App 的节点上，而关窗那刻
-            // 核心还没跑、下面 noteRunningAppsChanged 的
-            // `guard isRunning else { return }` 直接 return、
-            // 没排待停，核心起起来后就一直跑到下一次 App 开
-            // 关才停。appInfo 先在删条目前取（删完就找不到了）；
-            // 没排进的 App 取消是空操作，不影响正常关窗。
-            let closedAppInfo = self.apps.first(where: { $0.appUUID == appUUID })?.appInfo
             self.apps.removeAll { $0.appUUID == appUUID }
-            if let closedAppInfo {
-                CZFVPNManager.shared.cancelDeferredEnsure(for: closedAppInfo)
-            }
 
             if self.apps.isEmpty {
                 self.hideDock()

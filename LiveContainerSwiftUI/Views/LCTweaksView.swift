@@ -799,6 +799,8 @@ struct LCTweakFolderView : View {
         // tweakFolderNames/errorInfo/errorShow 回主线程再写；
         // 建目录本身仍在外面做。
         let fm = FileManager()
+        // 3.8.566（L298-1）：共享区目录只在分享流程里建——从没分享过的用户点“共享”分段进新建文件夹时 baseUrl 根本不存在，createDirectory（withIntermediateDirectories: false）直接抛 Cocoa 4、弹系统原样错（L294-1 同款，读路修了、写路漏了）；写路先把 baseUrl 建出来（只建 baseUrl 这一级链，dest 本身仍用 false、带“/”的名字照旧报错，建不出时下面照旧报）。
+        try? fm.createDirectory(at: baseUrl, withIntermediateDirectories: true)
         let dest = baseUrl.appendingPathComponent(cleanName)
         do {
             try fm.createDirectory(at: dest, withIntermediateDirectories: false)
@@ -838,6 +840,8 @@ struct LCTweakFolderView : View {
         // 完再汇总报，前面装好的不受影响。
         await MainActor.run { isTweakInstalling = true }
         let fm = FileManager()
+        // 3.8.566（L298-1）：同上——共享区没目录时 moveItem 到 baseUrl 下直接抛，整批导入全报失败；先把 baseUrl 建出来，建不出时逐项 moveItem 照旧报错，不静默吞掉。
+        try? fm.createDirectory(at: self.baseUrl, withIntermediateDirectories: true)
         // we will sign later before app launch
         var failedNames: [String] = []
         var firstError: String? = nil
