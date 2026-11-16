@@ -424,9 +424,12 @@ struct LCContainerView : View {
     }
     
     func removeContainer() async {
+        // 3.8.579（L399-1）：本函数从按钮的裸 Task 调来（:229/:249）、不在主 actor 上；errorInfo/errorShow 是 @State（:38-39），dismiss 与 delegate.unbindContainer 写 @Published（LCAppSettingsView:1417），离主线程写报 Publishing changes、容器列表可能不刷新、详情页可能关不掉（L40/L44 同款——L40 只修了新建/导入两路，删容器这路漏了）。isOwningAppLaunching() 读 sharedModel.apps 数组（L383-1 同款）也一并回主线程取；删文件本身留外面。deleteData/cleanUpKeychain 同款。
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
-            errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
+                errorShow = true
+            }
             return
         }
         // 锁是客在 bootstrap 时才写：启动/签名进行中（宿主侧，
@@ -434,9 +437,11 @@ struct LCContainerView : View {
         // 容器。宿主侧现成状态：模型正在启动或签名中，且选中的
         // 正是本容器时拦住；删的是同 App 别的容器不拦（启动
         // 只用选中那个）。不新造锁基础设施。
-        if isOwningAppLaunching() {
-            errorInfo = "App 正在启动或签名中，稍后再删。"
-            errorShow = true
+        if await MainActor.run(body: { isOwningAppLaunching() }) {
+            await MainActor.run {
+                errorInfo = "App 正在启动或签名中，稍后再删。"
+                errorShow = true
+            }
             return
         }
         guard let ans = await removeContainerAlert.open(), ans else {
@@ -446,13 +451,17 @@ struct LCContainerView : View {
             let fm = FileManager.default
             try fm.removeItem(at: container.containerURL)
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
             return
         }
         
-        dismiss()
-        delegate.unbindContainer(container: container)
+        await MainActor.run {
+            dismiss()
+            delegate.unbindContainer(container: container)
+        }
     }
     
     /// 本容器所属 App 是否正在用本容器启动/签名（S2 竞态口子）：
@@ -486,14 +495,19 @@ struct LCContainerView : View {
     }
     
     func cleanUpKeychain() async {
+        // 3.8.579（L399-1）：同 removeContainer，裸 Task 调来（:222）、@State 写与 isOwningAppLaunching() 的数组读回主线程；钥匙串操作本身留外面（SecItem 线程安全，G3 另案）。
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
-            errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
+                errorShow = true
+            }
             return
         }
-        if isOwningAppLaunching() {
-            errorInfo = "App 正在启动或签名中，稍后再操作。"
-            errorShow = true
+        if await MainActor.run(body: { isOwningAppLaunching() }) {
+            await MainActor.run {
+                errorInfo = "App 正在启动或签名中，稍后再操作。"
+                errorShow = true
+            }
             return
         }
         guard let ans = await removeKeychainAlert.open(), ans else {
@@ -504,14 +518,19 @@ struct LCContainerView : View {
     }
     
     func deleteData() async {
+        // 3.8.579（L399-1）：同 removeContainer，裸 Task 调来（:217）、@State 写与 isOwningAppLaunching() 的数组读回主线程；删文件本身留外面。
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
-            errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
-            errorShow = true
+            await MainActor.run {
+                errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
+                errorShow = true
+            }
             return
         }
-        if isOwningAppLaunching() {
-            errorInfo = "App 正在启动或签名中，稍后再操作。"
-            errorShow = true
+        if await MainActor.run(body: { isOwningAppLaunching() }) {
+            await MainActor.run {
+                errorInfo = "App 正在启动或签名中，稍后再操作。"
+                errorShow = true
+            }
             return
         }
         guard let ans = await deleteDataAlert.open(), ans else {
@@ -526,8 +545,10 @@ struct LCContainerView : View {
                 try fm.removeItem(at: file)
             }
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
 }

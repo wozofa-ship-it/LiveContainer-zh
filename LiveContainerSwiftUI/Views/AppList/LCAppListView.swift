@@ -2875,10 +2875,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 安装低 #24：秒级时间戳同秒装两次会撞名，改毫秒。
             appRelativePath = "\(newBundleId)_\(Int(CFAbsoluteTimeGetCurrent() * 1000)).app"
             
-            self.installOptions = [AppReplaceOption(isReplace: false, nameOfFolderToInstall: appRelativePath)]
-            
-            for app in sameBundleIdApp {
-                self.installOptions.append(AppReplaceOption(isReplace: true, nameOfFolderToInstall: app.appInfo.relativeBundlePath, appToReplace: app))
+            // 3.8.579（L395-1）：installOptions 是 @State（:188），替换选择框的 ForEach（:2174）读它；installIpaFile 是非隔离 async，decompress 等 await 之后在裸 Task 执行器上跑（L371-1 同款入口：文件选择器 :2164、分享收件箱 :3970、深链 :4769/:4854 全是裸 Task），这里直接写 @State 是离主线程发更新、与主线程渲染读同一份存储竞态，可能丢更新、框里选项出不来（L44/L81/L311-1 同款；本函数其余 @State 写点都已包过，只剩这两处）。赋值 + 追加一次回主线程做，relativeBundlePath 是 ivar 直读安全。
+            await MainActor.run {
+                self.installOptions = [AppReplaceOption(isReplace: false, nameOfFolderToInstall: appRelativePath)]
+                for app in sameBundleIdApp {
+                    self.installOptions.append(AppReplaceOption(isReplace: true, nameOfFolderToInstall: app.appInfo.relativeBundlePath, appToReplace: app))
+                }
             }
 
             let installOptionChosen: AppReplaceOption?

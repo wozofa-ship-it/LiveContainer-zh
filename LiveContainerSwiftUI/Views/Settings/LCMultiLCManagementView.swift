@@ -208,8 +208,11 @@ struct LCMultiLCManagementView : View, InstallAnotherLCButtonDelegate {
 
     func installAnotherLC(name: String) async {
         if !LCUtils.isAppGroupAltStoreLike() {
-            errorInfo = "lc.settings.unsupportedInstallMethod".loc
-            errorShow = true
+            // 3.8.579（L409-1）：本函数从按钮的裸 Task 调来（:42，Swift 5.0 靶下 Button 闭包的 Task 不继承 MainActor），不在主 actor 上；errorInfo/errorShow 是 @State（:71-72，.alert :156 读它），离主线程写报 Publishing changes、不支持安装法的报错弹框可能不出（L40/L44/L399-1 同款——本文件之前只有 openSideStore 的 onError 一路包过，其余四处全漏了）。@AppStorage 读（:225/:228）是 UserDefaults 读、线程安全，不动；打包/书签/UserDefaults 写留在外面。
+            await MainActor.run {
+                errorInfo = "lc.settings.unsupportedInstallMethod".loc
+                errorShow = true
+            }
             return;
         }
         
@@ -228,7 +231,10 @@ struct LCMultiLCManagementView : View, InstallAnotherLCButtonDelegate {
             }
             let packedIpaUrl = try LCUtils.archiveIPA(withBundleName: name, includingExtraInfoDict: extraInfo)
             
-            shareURL = packedIpaUrl
+            // 3.8.579（L409-1）：同上，shareURL 是 @State（:77，.sheet :161-163 读它），回主线程再写。
+            await MainActor.run {
+                shareURL = packedIpaUrl
+            }
             
             if(result == 2) {
                 let launchURLStr = packedIpaUrl.absoluteString
@@ -250,11 +256,17 @@ struct LCMultiLCManagementView : View, InstallAnotherLCButtonDelegate {
                 return
             }
             
-            showShareSheet = true
+            // 3.8.579（L409-1）：同上，showShareSheet 是 @State（:76，.sheet :161 读它），回主线程再写。
+            await MainActor.run {
+                showShareSheet = true
+            }
             
         } catch {
-            errorInfo = error.localizedDescription
-            errorShow = true
+            // 3.8.579（L409-1）：同上，catch 里的 @State 写回主线程。
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
         }
     }
 }
