@@ -1926,6 +1926,8 @@ extension Notification.Name {
                 if dy < 0 {
                     fireDockAction { self.maximizeFrontmostWindow() }
                 } else {
+                    // 3.8.586（GEST-4）：兜底下滑同款震一下（见中途分支）。
+                    self.edgeCallbackBuzz()
                     fireDockAction { self.restoreSmallWindow(uuid: front.appUUID) }
                 }
             } else if dx > 12, endX >= width - 12, abs(dx) > 0.4 * abs(dy), startInBand {
@@ -1971,6 +1973,8 @@ extension Notification.Name {
                     if translation.y < 0 {
                         fireDockAction { self.maximizeFrontmostWindow() }
                     } else {
+                        // 3.8.586（GEST-4）：下滑斜滑认到时震一下——真机上滑能出、下滑一次没出，震动是诊断信号：震了没出小窗 = 手势认到了、还原路没动作；没震 = 手势根本没认到。
+                        self.edgeCallbackBuzz()
                         fireDockAction { self.restoreSmallWindow(uuid: front.appUUID) }
                     }
                     return true

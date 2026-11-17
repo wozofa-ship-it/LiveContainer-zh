@@ -27,6 +27,8 @@
 // 最小化省电（CZF）：YES = 本窗口已最小化，场景应为后台；
 // 恢复时清掉。只做标记，真正的 foreground 写在下面三个方法里。
 @property(nonatomic) BOOL czfMinimized;
+// 3.8.586（GEST-4）：还原小窗尺寸净化（定义在 updateOriginalFrame 上方；返回 CGSize，须先声明，否则调用点按 id 推断编不过）。
+- (CGSize)czfSanitizedSmallSizeWithMaxFrame:(CGRect)maxFrame;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -558,7 +560,8 @@
             [self updateWindowedFrameWithSettings:settings];
         };
         CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
-        CGRect newFrame = CGRectMake(self.originalFrame.origin.x * maxFrame.size.width, self.originalFrame.origin.y * maxFrame.size.height, self.originalFrame.size.width, self.originalFrame.size.height);
+        CGSize czfSmallSize = [self czfSanitizedSmallSizeWithMaxFrame:maxFrame];
+        CGRect newFrame = CGRectMake(self.originalFrame.origin.x * maxFrame.size.width, self.originalFrame.origin.y * maxFrame.size.height, czfSmallSize.width, czfSmallSize.height);
         // C1：切换开始时同步落位，不再等 completion 才置 NO。
         self.isMaximized = NO;
         [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
@@ -946,7 +949,8 @@
     settings.peripheryInsets = UIEdgeInsetsZero;
     settings.safeAreaInsetsPortrait = UIEdgeInsetsZero;
     
-    CGRect newFrame = CGRectMake(self.originalFrame.origin.x * maxFrame.size.width, self.originalFrame.origin.y * maxFrame.size.height, self.originalFrame.size.width, self.originalFrame.size.height);
+    CGSize czfSmallSize = [self czfSanitizedSmallSizeWithMaxFrame:maxFrame];
+    CGRect newFrame = CGRectMake(self.originalFrame.origin.x * maxFrame.size.width, self.originalFrame.origin.y * maxFrame.size.height, czfSmallSize.width, czfSmallSize.height);
     CGPoint center = self.view.center;
     CGRect frame = CGRectZero;
     frame.size.width = MIN(newFrame.size.width, maxFrame.size.width);
@@ -957,6 +961,16 @@
     [UIView animateWithDuration:0.3 animations:^{
         self.view.frame = frame;
     }];
+}
+
+// 3.8.586（GEST-4）：还原用的小窗尺寸——originalFrame 被手动拖大（拉角/移窗时存的当前帧）后尺寸会等于最大帧，按它还原算出来还是大窗、看着像没反应；尺寸退化（<=0 或接近最大帧）时回落 setup 同款默认小窗（竖 320×524 / 横 480×364）。
+- (CGSize)czfSanitizedSmallSizeWithMaxFrame:(CGRect)maxFrame {
+    CGSize s = self.originalFrame.size;
+    if (s.width <= 0 || s.height <= 0 || s.width >= maxFrame.size.width - 10 || s.height >= maxFrame.size.height - 10) {
+        BOOL isLandscape = UIInterfaceOrientationIsLandscape(UIApp.statusBarOrientation);
+        s = CGSizeMake(isLandscape ? 480 : 320, (isLandscape ? 320 : 480) + 44);
+    }
+    return s;
 }
 
 - (void)updateOriginalFrame {
