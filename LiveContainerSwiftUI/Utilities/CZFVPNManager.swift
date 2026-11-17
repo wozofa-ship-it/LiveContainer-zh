@@ -2164,7 +2164,8 @@ public final class CZFVPNManager {
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
             var conversionCache: [String: String] = [:]
-            var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/", phase: "测速", onProgress: onProgress, conversionCache: &conversionCache)
+            var singBoxOutboundCache: [String: [String: Any]] = [:]  // 3.8.603（O-11）：sing-box 出站解析缓存，与 conversionCache 同款轮内复用
+            var outcome = self.runPingBatches(links: links, url: "https://cp.cloudflare.com/", phase: "测速", onProgress: onProgress, conversionCache: &conversionCache, singBoxOutboundCache: &singBoxOutboundCache)
             // 核心在跑且整批被拒 = 核心占用测速，不是节点不通：
             // 测速只读，不停车重测、不重试（重试同样会被拒，
             // 只会白白拖时间），直接把被拒结果交给界面提示。
@@ -2190,7 +2191,7 @@ public final class CZFVPNManager {
                 for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
                     if failedIndices.isEmpty { break }
                     let failedLinks = failedIndices.map { links[$0] }
-                    let retry = self.runPingBatches(links: failedLinks, url: retryURL, phase: "重试", onProgress: onProgress, conversionCache: &conversionCache)
+                    let retry = self.runPingBatches(links: failedLinks, url: retryURL, phase: "重试", onProgress: onProgress, conversionCache: &conversionCache, singBoxOutboundCache: &singBoxOutboundCache)
                     var stillFailed: [Int] = []
                     for (j, idx) in failedIndices.enumerated() {
                         if retry.items[j].success {
@@ -2315,13 +2316,14 @@ public final class CZFVPNManager {
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
             var conversionCache: [String: String] = [:]
-            var outcome = self.runPingBatches(links: [link], url: "https://cp.cloudflare.com/", phase: "测速", onProgress: nil, conversionCache: &conversionCache)
+            var singBoxOutboundCache: [String: [String: Any]] = [:]  // 3.8.603（O-11）：sing-box 出站解析缓存，与 conversionCache 同款轮内复用
+            var outcome = self.runPingBatches(links: [link], url: "https://cp.cloudflare.com/", phase: "测速", onProgress: nil, conversionCache: &conversionCache, singBoxOutboundCache: &singBoxOutboundCache)
             let pingRejected = coreRunningAtStart && outcome.batchRejected
             if !pingRejected {
                 var failed = outcome.items.first?.success == true ? [] : [0]
                 for retryURL in ["https://www.gstatic.com/generate_204", "https://captive.apple.com/hotspot-detect.html"] {
                     if failed.isEmpty { break }
-                    let retry = self.runPingBatches(links: [link], url: retryURL, phase: "重试", onProgress: nil, conversionCache: &conversionCache)
+                    let retry = self.runPingBatches(links: [link], url: retryURL, phase: "重试", onProgress: nil, conversionCache: &conversionCache, singBoxOutboundCache: &singBoxOutboundCache)
                     if retry.items.first?.success == true {
                         outcome.items[0] = retry.items[0]
                         failed = []
@@ -2404,7 +2406,13 @@ public final class CZFVPNManager {
     /// 链接重新调一次 convertShareLinksToXrayJson；转换结果
     /// 只取决于链接本身，与测速地址无关，所以一轮内缓存
     /// 一次即可，缓存只活在当次测速调用内，不跨轮复用。
-    private func runPingBatches(links: [String], url: String, phase: String = "", onProgress: ((Int, Int, String) -> Void)? = nil, conversionCache: inout [String: String]) -> (items: [CZFNodePingResult], batchRejected: Bool) {
+    /// singBoxOutboundCache 同款（3.8.603（O-11））：sing-box
+    /// 出站解析结果，key 为归一化链接，value 为出站字典——
+    /// 校验步解析一次，探针拼配置时复用，不再每轮重解析
+    /// （原来校验调 configJSON 生成整份配置再丢掉，探针又
+    /// 对同一批链接生成第二份，失败节点一轮内解析两次、
+    /// 三轮六次）。
+    private func runPingBatches(links: [String], url: String, phase: String = "", onProgress: ((Int, Int, String) -> Void)? = nil, conversionCache: inout [String: String], singBoxOutboundCache: inout [String: [String: Any]]) -> (items: [CZFNodePingResult], batchRejected: Bool) {
         var items = [CZFNodePingResult?](repeating: nil, count: links.count)
         var batchRejected = false
         // TUIC-only 测速分流（测速只读，不动主核心）：
@@ -2433,11 +2441,19 @@ public final class CZFVPNManager {
         for (i, link) in links.enumerated() {
             // sing-box 节点（tuic / hysteria2）：只做配置解析校验，不启动服务。
             if CZFSingBoxRouting.coreKind(for: link) == .singBox {
-                if (try? CZFSingBoxConfig.configJSON(for: link, socksPort: 10927, httpPort: nil)) != nil {
-                    singBoxPending.append((i, link))
-                } else {
-                    items[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                // 3.8.603（O-11）：校验即解析——原来调 configJSON(for: link) 生成整份
+                // 配置再丢掉（每轮每节点一次）；现在只解析出站字典进轮内缓存，校验与
+                // 探针共用一份，不再二次解析。校验结果与原来相同（configJSON 里唯一
+                // 可能抛错的步骤就是 outbound(for:)）。
+                let normalized = Self.normalizedShareLink(link)
+                if singBoxOutboundCache[normalized] == nil {
+                    guard let outbound = try? CZFSingBoxConfig.outbound(for: link) else {
+                        items[i] = CZFNodePingResult(success: false, delay: 10000, conversionFailed: true)
+                        continue
+                    }
+                    singBoxOutboundCache[normalized] = outbound
                 }
+                singBoxPending.append((i, link))
                 continue
             }
             let normalized = Self.normalizedShareLink(link)
@@ -2506,7 +2522,7 @@ public final class CZFVPNManager {
                 }
             } else {
                 let probeHost = URLComponents(string: url)?.host ?? ""
-                if let results = probeSingBoxNodes(links: singBoxPending.map { $0.link }, host: probeHost) {
+                if let results = probeSingBoxNodes(links: singBoxPending.map { $0.link }, host: probeHost, singBoxOutboundCache: singBoxOutboundCache) {
                     for (j, entry) in singBoxPending.enumerated() {
                         items[entry.index] = results[j]
                     }
@@ -2538,7 +2554,7 @@ public final class CZFVPNManager {
     /// 被拒记 10000（界面“不通”，清理可删），超时或失败记
     /// 11000（界面“超时”，实际含义是超时或失败，不是已证实
     /// 的超时——v1 已知局限，见汇报）。
-    private func probeSingBoxNodes(links: [String], host: String) -> [CZFNodePingResult]? {
+    private func probeSingBoxNodes(links: [String], host: String, singBoxOutboundCache: [String: [String: Any]]) -> [CZFNodePingResult]? {
         vpnCoreLock.lock()
         // 主核心在跑，或上个临时实例泄漏未停（崩溃才可能），
         // 都算占用：不与任何已跑实例同进程起第二个。
@@ -2547,7 +2563,21 @@ public final class CZFVPNManager {
         if occupied { return nil }
         let config: String
         do {
-            config = try CZFSingBoxConfig.configJSON(for: links, basePort: 10927)
+            // 3.8.603（O-11）：出站已在校验步解析进缓存，这里只换 tag
+            // （tag 只在出站字典顶层，见 tuicOutbound/hysteria2Outbound）
+            // 再拼配置，不再每轮重解析；缓存未命中时（不应发生）退回
+            // 直接解析，行为与原来相同。
+            var outbounds: [[String: Any]] = []
+            for (i, link) in links.enumerated() {
+                let normalized = Self.normalizedShareLink(link)
+                if var cached = singBoxOutboundCache[normalized] {
+                    cached["tag"] = "node-out-\(i)"
+                    outbounds.append(cached)
+                } else {
+                    outbounds.append(try CZFSingBoxConfig.outbound(for: link, tag: "node-out-\(i)"))
+                }
+            }
+            config = try CZFSingBoxConfig.configJSON(forOutbounds: outbounds, basePort: 10927)
         } catch {
             return links.map { _ in CZFNodePingResult(success: false, delay: 10000, conversionFailed: true) }
         }

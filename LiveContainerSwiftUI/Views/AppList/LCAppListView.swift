@@ -4430,6 +4430,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 await MainActor.run { czfLastInstallWasCancelled = true }
                 try? fileManager.removeItem(at: destinationURL)
             } else {
+                // 3.8.603（O-15）：真失败也清临时包——与取消路对称，
+                // 不留 tmp/<文件名>.ipa 残留；失败原因照常弹错。
+                try? fileManager.removeItem(at: destinationURL)
                 // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
                 await MainActor.run {
                     errorInfo = LCUtils.czfFriendlyError(error)

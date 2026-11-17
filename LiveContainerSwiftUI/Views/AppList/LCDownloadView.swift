@@ -56,6 +56,12 @@ public final class DownloadHelper : ObservableObject {
             Task { @MainActor in czfDownloadInFlight = false }
         }
         currentURL = url
+        // 3.8.603（O-15）：cancelled 只在用户主动发起新下载时复位——
+        // 原来 downloadOnce 入口无条件清掉，重试间隙点的取消在
+        // 下一轮开始时被擦除（重试循环的查取消跑在它前面，窗口虽小
+        // 仍是真口子）；移到 download() 入口、拿了在途锁之后清，
+        // 重试不再碰它。
+        await MainActor.run { cancelled = false }
         // 失败自动重试：最多 3 次（首次 + 2 次重试），网络抖
         // 一下不用用户再点一次。每次优先用上次留下的续传数
         // 据接着下（completeCallback 失败时已存好），不从 0
@@ -98,7 +104,8 @@ public final class DownloadHelper : ObservableObject {
         var createdSession: URLSession? = nil
 
         await MainActor.run {
-            cancelled = false
+            // 3.8.603（O-15）：复位移到 download() 入口，这里不再清——
+            // 重试调 downloadOnce 时清掉会把重试间隙点的取消擦除。
             if !batchMode {
                 minimized = false
             }
@@ -144,11 +151,18 @@ public final class DownloadHelper : ObservableObject {
                         self.savedResumeData = data
                         self.savedResumeURL = url
                     }
+                    // 3.8.603（O-15）：有错不搬文件——404/403 时 tempFileURL 是
+                    // 服务器错误页，搬过去就是错误页冒充的 .ipa；直接删掉临时文件。
+                    if let tempFileURL, tempFileURL.standardizedFileURL != to.standardizedFileURL {
+                        try? FileManager.default.removeItem(at: tempFileURL)
+                    }
                 } else {
                     self.savedResumeData = nil
                     self.savedResumeURL = nil
                 }
-                if let tempFileURL {
+                // 3.8.603（O-15）：只有没错时才搬临时文件到目标——
+                // 有错时上面已删临时文件，这里不再搬错误页冒充 .ipa。
+                if error == nil, let tempFileURL {
                     do {
                         let fm = FileManager.default
                         print(to)

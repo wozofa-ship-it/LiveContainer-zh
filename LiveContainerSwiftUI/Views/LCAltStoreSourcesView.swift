@@ -1051,20 +1051,20 @@ struct LCSourcesView: View {
                             )
                             .padding(.horizontal)
                         } else {
-                            ForEach(czfVisibleListSources, id: \.id) { item in
-                                let apps = filteredApps(for: item)
+                            ForEach(czfVisibleListEntries, id: \.item.id) { entry in
+                                let apps = entry.apps
                                 AltStoreSourceSectionView(
-                                    item: item,
+                                    item: entry.item,
                                     filteredApps: apps,
                                     isFiltering: isFiltering,
-                                    isExpanded: expandedSources.contains(item.id),
-                                    onRefresh: { Task { await viewModel.refreshSource(item) } },
+                                    isExpanded: expandedSources.contains(entry.item.id),
+                                    onRefresh: { Task { await viewModel.refreshSource(entry.item) } },
                                     onInstall: install(app:),
                                     onInstallAsNew: installAsNew(app:),
                                     onDownload: download(app:),
                                     onDownloadVersion: downloadVersion(url:),
-                                    onRemove: { sourcePendingRemoval = item },
-                                    toggleExpanded: { toggleExpansion(for: item.id) },
+                                    onRemove: { sourcePendingRemoval = entry.item },
+                                    toggleExpanded: { toggleExpansion(for: entry.item.id) },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
                                     onToggleSelect: { sourceURL, app in
@@ -1434,9 +1434,18 @@ struct LCSourcesView: View {
 
     // 源中 #6（列表路）：搜索中过滤掉 filteredApps 为空的源组，
     // 不渲染空组头；非搜索时不过滤。
-    private var czfVisibleListSources: [AltStoreSourcesViewModel.SourceItem] {
-        guard isFiltering else { return viewModel.sources }
-        return viewModel.sources.filter { !filteredApps(for: $0).isEmpty }
+    // 3.8.603（O-18）：列表路一次 map——原来 czfVisibleListSources 与
+    // 行内 filteredApps(for:) 各调一遍过滤，一次 body 求值过滤两遍
+    // （再加 totalFilteredAppCount 是三遍）；现在一次算出 [(item, apps)]，
+    // 可见组与行共用，少一遍全量过滤。非搜索时不过滤（同款语义）。
+    private var czfVisibleListEntries: [(item: AltStoreSourcesViewModel.SourceItem, apps: [AltStoreSourceApp])] {
+        guard isFiltering else {
+            return viewModel.sources.map { ($0, $0.source?.apps ?? []) }
+        }
+        return viewModel.sources.compactMap { item in
+            let apps = filteredApps(for: item)
+            return apps.isEmpty ? nil : (item, apps)
+        }
     }
     
     private var totalFilteredAppCount: Int {
@@ -1451,8 +1460,10 @@ struct LCSourcesView: View {
         guard !query.isEmpty else {
             return source.apps
         }
+        // 3.8.603（O-18）：query.lowercased() 提到 filter 外——
+        // 原来每 App 算一次，搜索时每遍过滤都重复算。
+        let lower = query.lowercased()
         return source.apps.filter { app in
-            let lower = query.lowercased()
             if app.name.lowercased().contains(lower) {
                 return true
             }

@@ -335,7 +335,9 @@ public enum CZFSingBoxConfig {
     /// 按 scheme 分发到对应的出站生成器（tuic / hysteria2 / hy2）。
     /// 其余 scheme 一律 throw notSingBoxNode（调用方先按 coreKind
     /// 分流，只把 sing-box 链接传进来）。
-    static func outbound(for link: String, tag: String = CZFSingBoxRouting.nodeTag) throws -> [String: Any] {
+    /// 3.8.603（O-11）：公开，测速轮内缓存出站字典用——校验步
+    /// 解析一次，探针拼配置时复用，不再每轮重解析。
+    public static func outbound(for link: String, tag: String = CZFSingBoxRouting.nodeTag) throws -> [String: Any] {
         switch CZFSingBoxRouting.scheme(of: link) {
         case "tuic": return try tuicOutbound(link: link, tag: tag)
         case "hysteria2", "hy2": return try hysteria2Outbound(link: link, tag: tag)
@@ -431,12 +433,30 @@ public enum CZFSingBoxConfig {
             throw CZFSingBoxConfigError.invalidValue("basePort")
         }
         var outbounds: [[String: Any]] = []
+        for (i, link) in links.enumerated() {
+            outbounds.append(try outbound(for: link, tag: "node-out-\(i)"))
+        }
+        return try configJSON(forOutbounds: outbounds, basePort: basePort)
+    }
+
+    /// 生成多出站配置 JSON（测速用）：出站字典由调用方事先备好
+    /// （tag 已按 node-out-<i> 写好），只负责入站/路由/骨架拼装。
+    /// 与 configJSON(for:links:) 同款骨架——links 版先逐链接调
+    /// outbound(for:tag:) 再调本函数，输出逐字节相同；路由规则
+    /// 的出站取各出站字典自身的 tag（无 tag 时回落 node-out-<i>）。
+    /// 3.8.603（O-11）：测速轮内复用已解析的出站，不再每轮重解析。
+    public static func configJSON(forOutbounds outbounds: [[String: Any]], basePort: Int) throws -> String {
+        guard !outbounds.isEmpty else {
+            throw CZFSingBoxConfigError.missingField("links")
+        }
+        guard (1...65535).contains(basePort), basePort + outbounds.count - 1 <= 65535 else {
+            throw CZFSingBoxConfigError.invalidValue("basePort")
+        }
         var inbounds: [[String: Any]] = []
         var rules: [[String: Any]] = []
-        for (i, link) in links.enumerated() {
-            let tag = "node-out-\(i)"
+        for i in outbounds.indices {
             let inboundTag = "mixed-in-\(i)"
-            outbounds.append(try outbound(for: link, tag: tag))
+            let outboundTag = outbounds[i]["tag"] as? String ?? "node-out-\(i)"
             inbounds.append([
                 "type": "mixed",
                 "tag": inboundTag,
@@ -445,7 +465,7 @@ public enum CZFSingBoxConfig {
             ])
             rules.append([
                 "inbound": [inboundTag],
-                "outbound": tag,
+                "outbound": outboundTag,
             ])
         }
         var root: [String: Any] = [
