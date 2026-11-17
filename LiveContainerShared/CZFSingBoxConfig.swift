@@ -51,7 +51,7 @@ extension CZFSingBoxConfigError: LocalizedError {
 public enum CZFSingBoxRouting {
 
     /// 节点出站的统一 tag。
-    static let nodeTag = "node-out"
+    public static let nodeTag = "node-out"
 
     // MARK: scheme 与 query 解析（与 CZFVPNManager.nodeScheme 同语义）
 
