@@ -29,6 +29,9 @@
 @property(nonatomic) BOOL czfMinimized;
 // 3.8.586（GEST-4）：还原小窗尺寸净化（定义在 updateOriginalFrame 上方；返回 CGSize，须先声明，否则调用点按 id 推断编不过）。
 - (CGSize)czfSanitizedSmallSizeWithMaxFrame:(CGRect)maxFrame;
+// 3.8.587（BLACKLAUNCH-1）：启动加载遮罩——客场景渲染出第一帧之前窗口是黑底（systemBackground），看着像死了；遮罩盖住黑底、居中转圈，内容一到就撤。
+@property(nonatomic) UIView *czfLoadingOverlay;
+@property(nonatomic) BOOL czfHideLoadingOnNextSettingsUpdate;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -343,6 +346,8 @@
 
     [defaults addObserver:self forKeyPath:@"LCMultitaskBottomWindowBar" options:NSKeyValueObservingOptionNew context:NULL];
     [self updateOriginalFrame];
+    // 3.8.587（BLACKLAUNCH-1）：启动加载遮罩（见 interface 注释）。
+    [self czfShowLoadingOverlay];
 }
 
 
@@ -657,6 +662,8 @@
         void (^handler)(NSNumber *, NSError *) = self.pidAvailableHandler;
         self.pidAvailableHandler = nil;
         if(error) {
+            // 3.8.587（BLACKLAUNCH-1）：初始化失败，遮罩直接撤（下面弹报错框）。
+            [self czfHideLoadingOverlay];
             [vc appTerminationCleanUp];
             // 初始化失败也要把 PID/错误回给等待方（scene 路径同款）：
             // 原来只弹 alert 不回调，runApp 的 continuation 永不恢复，
@@ -677,6 +684,8 @@
             // 刷新 originalFrame，后续场景更新都以此为准
             [self czfApplySavedWindowStateIfNeeded];
             [self updateOriginalFrame];
+            // 3.8.587（BLACKLAUNCH-1）：场景建好了，下一次设置更新到就撤遮罩（内容跟着就到）。
+            self.czfHideLoadingOnNextSettingsUpdate = YES;
             if (handler) {
                 handler(@(self.pid), nil);
             }
@@ -690,6 +699,11 @@
 }
 
 - (void)appSceneVC:(AppSceneViewController*)vc didUpdateFromSettings:(UIMutableApplicationSceneSettings *)baseSettings transitionContext:(id)newContext lifecycleActionType:(uint32_t)actionType {
+    // 3.8.587（BLACKLAUNCH-1）：初始化成功后的第一次设置更新，内容跟着就到，撤遮罩。
+    if (self.czfHideLoadingOnNextSettingsUpdate) {
+        self.czfHideLoadingOnNextSettingsUpdate = NO;
+        [self czfHideLoadingOverlay];
+    }
     [self.appSceneVC updateSettingsWithBlock:^(UIMutableApplicationSceneSettings *settings) {
         settings.userInterfaceStyle = baseSettings.userInterfaceStyle;
         settings.interfaceOrientation = baseSettings.interfaceOrientation;
@@ -971,6 +985,54 @@
         s = CGSizeMake(isLandscape ? 480 : 320, (isLandscape ? 320 : 480) + 44);
     }
     return s;
+}
+
+// 3.8.587（BLACKLAUNCH-1）：启动加载遮罩——盖住客场景出第一帧之前的黑底，居中转圈 + “正在启动…”；不拦触摸（userInteractionEnabled=NO），点按置顶/拖动照常。
+- (void)czfShowLoadingOverlay {
+    if (self.czfLoadingOverlay) return;
+    UIView *overlay = [[UIView alloc] init];
+    overlay.backgroundColor = UIColor.systemBackgroundColor;
+    overlay.translatesAutoresizingMaskIntoConstraints = NO;
+    overlay.userInteractionEnabled = NO;
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    spinner.color = UIColor.secondaryLabelColor;
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [spinner startAnimating];
+    [overlay addSubview:spinner];
+    UILabel *label = [[UILabel alloc] init];
+    label.text = @"正在启动…";
+    label.font = [UIFont systemFontOfSize:15];
+    label.textColor = UIColor.secondaryLabelColor;
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    [overlay addSubview:label];
+    [self.view addSubview:overlay];
+    [NSLayoutConstraint activateConstraints:@[
+        [overlay.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [overlay.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [overlay.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [overlay.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [spinner.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [spinner.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor constant:-12],
+        [label.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [label.topAnchor constraintEqualToAnchor:spinner.bottomAnchor constant:12]
+    ]];
+    self.czfLoadingOverlay = overlay;
+    // 兜底：8 秒后无论如何撤掉，遮罩永不盖住内容。
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [weakSelf czfHideLoadingOverlay];
+    });
+}
+
+- (void)czfHideLoadingOverlay {
+    UIView *overlay = self.czfLoadingOverlay;
+    if (!overlay) return;
+    self.czfLoadingOverlay = nil;
+    [UIView animateWithDuration:0.25 animations:^{
+        overlay.alpha = 0;
+    } completion:^(BOOL finished) {
+        [overlay removeFromSuperview];
+    }];
 }
 
 - (void)updateOriginalFrame {
