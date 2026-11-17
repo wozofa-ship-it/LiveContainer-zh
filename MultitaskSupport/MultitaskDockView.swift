@@ -1869,7 +1869,8 @@ extension Notification.Name {
         case .began:
             czfEdgeSwipeLatched = false
         case .changed:
-            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
+            // 3.8.584（GEST-2）：右边缘起手一律放行到判定——斜滑不认带（见下），横滑/往外弹分支自己仍守 startInBand，带外横滑到这里返回 false，不闩锁。
+            guard globalSwipeStartEdge == 0 || globalSwipeStartEdge == 2 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
             if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width, velocityX: gesture.velocity(in: gesture.view).x) {
                 czfEdgeSwipeLatched = true
                 // 3.8.284：认领了面板手势（开 App 面板/切 App/
@@ -1880,7 +1881,8 @@ extension Notification.Name {
             }
         case .ended, .cancelled:
             defer { czfEdgeSwipeLatched = false }
-            guard globalSwipeStartEdge == 0 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
+            // 3.8.584（GEST-2）：同上，右边缘起手放行到兜底，兜底里的斜滑分支才接得住中途没触发的快甩。
+            guard globalSwipeStartEdge == 0 || globalSwipeStartEdge == 2 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
             processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width, startX: globalSwipeStartX)
         default:
             break
@@ -1915,7 +1917,18 @@ extension Notification.Name {
             // 8*s（灵敏档才 4.8）会把点按抖动当终结滑放进来；12 是
             // 点按的物理上界，不乘灵敏度系数。往里（-44*s）本来就
             // 在点按 bound 之上，不动。
-            if dx > 12, endX >= width - 12, abs(dx) > 0.4 * abs(dy), startInBand {
+            // 3.8.584（GEST-2）：兜底先判斜滑——中途没触发的快甩/短滑按终态再判一次；斜滑不认带（与中途同款），
+            // 比值 [0.7, 1.5]、横竖各 >24*s；先判斜滑再判往里，斜滑带与往里分支重叠处归斜滑。
+            if dx < 0, Self.czfEdgeGesturesEnabled, !isAppPanelOpen, !isSourcesPanelOpen,
+               abs(dx) > 24 * s, abs(dy) > 24 * s,
+               abs(dy) / abs(dx) >= 0.7, abs(dy) / abs(dx) <= 1.5,
+               let front = czfFrontmostApp() {
+                if dy < 0 {
+                    fireDockAction { self.maximizeFrontmostWindow() }
+                } else {
+                    fireDockAction { self.restoreSmallWindow(uuid: front.appUUID) }
+                }
+            } else if dx > 12, endX >= width - 12, abs(dx) > 0.4 * abs(dy), startInBand {
                 fireDockAction { self.czfEdgeRightOutward() }
             } else if dx <= -44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
                 fireDockAction { self.czfEdgeRightInward() }
@@ -1932,7 +1945,10 @@ extension Notification.Name {
     private func processGlobalSwipe(startEdge: Int, startInBand: Bool, startInOutwardBand: Bool, translation: CGPoint, endX: CGFloat, width: CGFloat, velocityX: CGFloat) -> Bool {
         let draggingRight = translation.x > 0
         // 3.8.583（GEST-1）：右边缘斜滑——左滑往上拉满、左滑往下小窗口。
-        // 只认右边缘（startEdge == 2）普通带内起手；与现有横滑严格不重叠：
+        // 3.8.584（GEST-2）：斜滑不认带——真机反馈没反应，根因是带：启用带只在屏幕底部 83%–98%（用户红圈定），
+        // 自然斜滑起手在屏幕中部，startInBand=false，.changed 守卫直接拦住、分支到不了。斜滑方向本身够独特
+        // （横竖都 >24pt、比值 [0.7, 1.5]），不抢 App 自己的横滑/竖滑，故只认右边缘起手、不认带；横滑/往外弹
+        // 分支仍守 startInBand 不动。与现有横滑严格不重叠：
         // 横滑守卫要求 |dx| > 1.5|dy|（即 |dy|/|dx| < 0.67），斜滑带取
         // |dy|/|dx| ∈ [0.7, 1.5]，中间留 [0.67, 0.7) 死区；>1.5 的近竖滑
         // 不认。距离门槛照抄往里拖的 24*s（低档 33.6pt / 默认 24pt /
@@ -1941,10 +1957,9 @@ extension Notification.Name {
         // 总开关关着时不触发。拉满走 maximizeFrontmostWindow（强制拉满，
         // 已拉满无操作）；小窗口走 restoreSmallWindow（已最大化才还原，
         // 本来小窗无操作）——都只动台前已在跑的窗口，不新起窗口。
-        // 兜底（.ended/.cancelled）本版不加：兜底的往里分支已占
-        // |dy|/|dx| < 1.25，斜滑带与之重叠，加进去会抢切 App；中途触发
-        // 已覆盖一笔画的斜滑，先横后竖的变向路径待真机调。
-        if startEdge == 2, !draggingRight, startInBand,
+        // 兜底（.ended/.cancelled）GEST-2 补上：中途没触发的快甩/短滑在抬指时按终态再判一次，斜滑先判、再判往里，
+        // 斜滑带与往里分支重叠处归斜滑（斜滑本就是要抢这段方向）；先横后竖的变向路径仍待真机调。
+        if startEdge == 2, !draggingRight,
            Self.czfEdgeGesturesEnabled, !isAppPanelOpen, !isSourcesPanelOpen {
             let s = Self.czfThresholdScale
             let adx = abs(translation.x)
