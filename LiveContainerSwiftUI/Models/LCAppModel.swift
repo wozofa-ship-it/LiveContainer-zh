@@ -278,12 +278,19 @@ class LCAppModel: ObservableObject, Hashable {
         let expectedPath = app.appInfo.relativeBundlePath
         guard let uuid = app.czfInstanceUUID,
               let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else { return false }
+        // 3.8.588（POLL-OWNED）：条目在、归属未定（appInfo 还没挂上或相对路径为空）
+        // 时不要停表——停了窗就永远拉不满；归属已定但不是本 App 时才停。
+        // 6 秒预算照旧兜底。
         let owned: Bool
+        let ownershipKnown: Bool
         if let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty {
+            ownershipKnown = true
             owned = runningPath == expectedPath
         } else {
+            ownershipKnown = false
             owned = false
         }
+        if !ownershipKnown { return false }
         if !owned { return true }
         guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
         if !vc.isMaximized {
@@ -410,6 +417,10 @@ class LCAppModel: ObservableObject, Hashable {
     ) async {
         // 3.8.544（L74）：同上，裸 Task 执行器上读 @Published + _info；现取。
         guard let uuid = await MainActor.run(body: { app.czfInstanceUUID }) else { return }
+        // 3.8.588（OPENMAX-2）：最小化/小窗口路不要大窗口创建——
+        // 窗一出来就要藏/缩，大窗口创建会先闪一下全屏；
+        // 一次性标记，建窗时消费掉，大窗口启动路不受影响。
+        UserDefaults.standard.set(true, forKey: "CZFLaunchSmallOnce")
         do {
             try await app.runApp(multitask: multitask, containerFolderName: uuid)
         } catch {

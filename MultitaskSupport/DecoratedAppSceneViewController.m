@@ -44,7 +44,19 @@
     _dataUUID = dataUUID;
     _bundleId = bundleId;
     _scaleRatio = 1.0;
-    _isMaximized = [NSUserDefaults.lcUserDefaults boolForKey:@"LCLaunchMultitaskMaximized"];
+    // 3.8.588（OPENMAX-2）：开关没存过值时默认大窗口启动（打开直接全屏）；
+    // 存过值就按存的值来，不动用户亲手关掉的开关。
+    // 最小化/小窗口路在启动前置一次性 CZFLaunchSmallOnce——
+    // 窗一出来就要藏/缩，大窗口创建会先闪一下全屏；建窗即消费，
+    // 下一次启动不受影响（极少数启动没建窗时会漏一次，下一窗消费掉即恢复）。
+    NSUserDefaults *launchDefaults = NSUserDefaults.lcUserDefaults;
+    id launchMaxValue = [launchDefaults objectForKey:@"LCLaunchMultitaskMaximized"];
+    if ([launchDefaults boolForKey:@"CZFLaunchSmallOnce"]) {
+        [launchDefaults removeObjectForKey:@"CZFLaunchSmallOnce"];
+        _isMaximized = NO;
+    } else {
+        _isMaximized = launchMaxValue ? [launchMaxValue boolValue] : YES;
+    }
     _appSceneVC = [[AppSceneViewController alloc] initWithBundleId:bundleId dataUUID:dataUUID delegate:self];
     self.title = windowName;
     [self setupDecoratedView];
@@ -170,6 +182,12 @@
         return;
     }
     self.czfRestoreApplied = YES;
+    // 3.8.588（OPENMAX-1）：窗已是最大化（黑屏期间第二次点按提前拉满），
+    // 还原不再把帧打回上次存的小窗位置；否则帧小、标志 YES 脱节，
+    // 轮询见标志 YES 直接停表，窗永远卡小窗。
+    if (self.isMaximized) {
+        return;
+    }
     NSDictionary *savedState = [self czfSavedWindowState];
     if (!savedState || [savedState[@"max"] boolValue]) {
         return;
@@ -231,8 +249,17 @@
         CGFloat sh = [savedState[@"h"] doubleValue];
         if (sw >= 100 && sh >= 100) {
             restored = YES;
-            _isMaximized = [savedState[@"max"] boolValue];
             if (_isMaximized) {
+                // 3.8.588（OPENMAX-2）：按大窗口启动，不把上次关窗的小窗状态打回来；
+                // 小窗尺寸仍记进 originalFrame，以后还原小窗时位置才对；
+                // 窗从建出来就是全屏，场景激活时还会再按最大化刷一遍。
+                self.originalFrame = CGRectMake([savedState[@"nx"] doubleValue], [savedState[@"ny"] doubleValue], sw, sh);
+                CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, self.view.window.safeAreaInsets);
+                if (!CGRectIsEmpty(maxFrame)) {
+                    self.view.frame = maxFrame;
+                }
+            } else if ([savedState[@"max"] boolValue]) {
+                _isMaximized = YES;
                 self.originalFrame = CGRectMake([savedState[@"nx"] doubleValue], [savedState[@"ny"] doubleValue], sw, sh);
             } else {
                 // 这里先摆一次（马上会被启动方的居中覆盖，真

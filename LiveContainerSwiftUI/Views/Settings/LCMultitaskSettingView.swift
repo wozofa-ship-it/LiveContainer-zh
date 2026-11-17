@@ -10,7 +10,7 @@ import SwiftUI
 struct LCMultitaskSettingView: View {
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("LCLaunchInMultitaskMode") var launchInMultitaskMode = false
-    @AppStorage("LCLaunchMultitaskMaximized") var launchMultitaskMaximized = false
+    @AppStorage("LCLaunchMultitaskMaximized") var launchMultitaskMaximized = true  // 3.8.588（OPENMAX-2）：默认打开直接全屏
     @AppStorage("LCMultitaskBottomWindowBar", store: LCUtils.appGroupUserDefault) var bottomWindowBar = false
     @AppStorage("LCAutoEndPiP", store: LCUtils.appGroupUserDefault) var autoEndPiP = false
     @AppStorage("LCSkipTerminatedScreen", store: LCUtils.appGroupUserDefault) var skipTerminatedScreen = false
