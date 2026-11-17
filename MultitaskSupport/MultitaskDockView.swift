@@ -1918,10 +1918,10 @@ extension Notification.Name {
             // 点按的物理上界，不乘灵敏度系数。往里（-44*s）本来就
             // 在点按 bound 之上，不动。
             // 3.8.584（GEST-2）：兜底先判斜滑——中途没触发的快甩/短滑按终态再判一次；斜滑不认带（与中途同款），
-            // 比值 [0.7, 1.5]、横竖各 >24*s；先判斜滑再判往里，斜滑带与往里分支重叠处归斜滑。
+            // 3.8.585（GEST-3）：比值带与中途同款放宽到 [0.5, 2.0]；横竖各 >24*s；先判斜滑再判往里，斜滑带与往里分支重叠处归斜滑。
             if dx < 0, Self.czfEdgeGesturesEnabled, !isAppPanelOpen, !isSourcesPanelOpen,
                abs(dx) > 24 * s, abs(dy) > 24 * s,
-               abs(dy) / abs(dx) >= 0.7, abs(dy) / abs(dx) <= 1.5,
+               abs(dy) / abs(dx) >= 0.5, abs(dy) / abs(dx) <= 2.0,
                let front = czfFrontmostApp() {
                 if dy < 0 {
                     fireDockAction { self.maximizeFrontmostWindow() }
@@ -1947,11 +1947,12 @@ extension Notification.Name {
         // 3.8.583（GEST-1）：右边缘斜滑——左滑往上拉满、左滑往下小窗口。
         // 3.8.584（GEST-2）：斜滑不认带——真机反馈没反应，根因是带：启用带只在屏幕底部 83%–98%（用户红圈定），
         // 自然斜滑起手在屏幕中部，startInBand=false，.changed 守卫直接拦住、分支到不了。斜滑方向本身够独特
-        // （横竖都 >24pt、比值 [0.7, 1.5]），不抢 App 自己的横滑/竖滑，故只认右边缘起手、不认带；横滑/往外弹
-        // 分支仍守 startInBand 不动。与现有横滑严格不重叠：
-        // 横滑守卫要求 |dx| > 1.5|dy|（即 |dy|/|dx| < 0.67），斜滑带取
-        // |dy|/|dx| ∈ [0.7, 1.5]，中间留 [0.67, 0.7) 死区；>1.5 的近竖滑
-        // 不认。距离门槛照抄往里拖的 24*s（低档 33.6pt / 默认 24pt /
+        // （横竖都 >24pt、比值 [0.5, 2.0]），不抢 App 自己的横滑/竖滑，故只认右边缘起手、不认带；横滑/往外弹
+        // 分支仍守 startInBand 不动。3.8.585（GEST-3）：比值带从 [0.7, 1.5] 放宽到 [0.5, 2.0]（26.6°–63.4°）——
+        // 真机反馈上滑能出、下滑一次没出、偶尔触到切 App：拇指下滑动势先横后竖，起手一段比值在 [0.5, 0.67)，
+        // 斜滑判不上、横滑守卫（|dx| > 1.5|dy|）先命中闩锁切 App（单 App 时看着就是没反应）；斜滑分支跑在横滑
+        // 守卫之前，放宽后这段先归斜滑，横滑只剩比值 < 0.5 的真横滑；[0.67, 0.7) 死区取消，>2.0 的近竖滑仍不认（滚屏）。
+        // 距离门槛照抄往里拖的 24*s（低档 33.6pt / 默认 24pt /
         // 高档 14.4pt）。放横滑守卫之前——守卫会把斜滑直接 return 掉。
         // 面板开着时不触发（与 czfSwitchRunningApp 同款守卫）；边缘手势
         // 总开关关着时不触发。拉满走 maximizeFrontmostWindow（强制拉满，
@@ -1966,7 +1967,7 @@ extension Notification.Name {
             let ady = abs(translation.y)
             if adx > 24 * s, ady > 24 * s {
                 let ratio = ady / adx
-                if ratio >= 0.7, ratio <= 1.5, let front = czfFrontmostApp() {
+                if ratio >= 0.5, ratio <= 2.0, let front = czfFrontmostApp() {
                     if translation.y < 0 {
                         fireDockAction { self.maximizeFrontmostWindow() }
                     } else {
