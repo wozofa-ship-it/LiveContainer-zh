@@ -614,6 +614,16 @@ struct CZFInlineIpaFolderGrid: View {
     @AppStorage("CZFAppGridColumns") private var czfAppGridColumns = 5
     private var czfColCount: Int { max(3, min(6, czfAppGridColumns)) }
 
+    // 3.8.604（O-18）：已装查找表在父级一次算好，传给格子
+    // （见 CZFInstalledLookup）。sharedModel 来自 App 页同层
+    // 环境（格子原来自己读它）。文件夹格子只有已装标记要
+    // 查表，没有插件判据，pluginPaths 为空。
+    @EnvironmentObject private var sharedModel: SharedModel
+
+    private var czfInstalledLookup: CZFInstalledLookup {
+        CZFInstalledLookup(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps, pluginPaths: [])
+    }
+
     var body: some View {
         Group {
             // O-5：重扫时旧列表非空就不盖 ProgressView，列表一
@@ -644,7 +654,7 @@ struct CZFInlineIpaFolderGrid: View {
                 // 不用再手填 Color.clear 占位。
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: czfColCount), spacing: 12) {
                     ForEach(model.items) { item in
-                        CZFLocalIpaGridCell(item: item) {
+                        CZFLocalIpaGridCell(item: item, installedLookup: czfInstalledLookup) {
                             onInstall(item.url)
                         }
                         .onAppear { model.loadDetailIfNeeded(for: item) }
@@ -662,19 +672,20 @@ struct CZFInlineIpaFolderGrid: View {
 // 先显示占位，解出来那一行自己刷出来。
 struct CZFLocalIpaGridCell: View {
     let item: CZFLocalIpaItem
+    // 3.8.604（O-18）：父级一次算好的已装查找表，格子只查表。
+    let installedLookup: CZFInstalledLookup
     var onTap: () -> Void
 
     // 3.8.444：已安装标记（用户 13:51 令“不知道哪个安装了
     // 哪个没安装”）——按包名比对已装 App（含隐藏 App），与源
     // 页绿勾（CZFSourceGridView）同款判据、同款绿勾位置。
-    @EnvironmentObject private var sharedModel: SharedModel
     // 3.8.459 兼容审计：名字晕影按 colorScheme 换色（与 App 网格
     // CZFAppGridView:463、源格子 CZFSourceGridView:427 同款）——
     // 原来写死白晕影，深色模式下白字压在亮壁纸上没对比、读不清。
     @Environment(\.colorScheme) private var colorScheme
     private var czfIsInstalled: Bool {
         guard let bid = item.bundleIdentifier, !bid.isEmpty else { return false }
-        return (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == bid }
+        return installedLookup.isInstalled(bundleIdentifier: bid)
     }
 
     // App #16：detailLoaded 是“已尝试读详情”标记——读完

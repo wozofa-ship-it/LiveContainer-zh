@@ -2168,13 +2168,34 @@ struct CZFSourceAppListView: View {
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     @State private var showAllApps = false
 
+    // 3.8.604（O-18）：已装查找表在父级一次算好，传给行
+    // （见 CZFInstalledLookup）。sharedModel 来自源页同层
+    // 环境（行原来自己读它）。插件候选路径只对列表里带
+    // dylib 最新版的 App 算；filteredApps 已是父级算好的
+    // 列表，这里直接用，不重算。
+    @EnvironmentObject private var sharedModel: SharedModel
+
+    private var czfInstalledLookup: CZFInstalledLookup {
+        let pluginPaths: [String] = filteredApps.flatMap { app -> [String] in
+            guard let downloadURL = app.latestVersion?.downloadURL,
+                  downloadURL.pathExtension.lowercased() == "dylib",
+                  !downloadURL.lastPathComponent.isEmpty else { return [] }
+            let file = downloadURL.lastPathComponent
+            return [
+                LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(file).path,
+                LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(file).path
+            ]
+        }
+        return CZFInstalledLookup(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps, pluginPaths: pluginPaths)
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             // 2 列表行身份稳定：ForEach 不用默认 UUID id（每次
             // 解码重新生成，刷新一次全部行换身份、详情 sheet
             // 被关掉），改用包名+版本号的稳定身份。
             ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))], id: \.czfStableID) { app in
-                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)), onToggleSelect: { onToggleSelect(sourceURL, app) })
+                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, installedLookup: czfInstalledLookup, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)), onToggleSelect: { onToggleSelect(sourceURL, app) })
             }
             if filteredApps.isEmpty {
                 if source.apps.isEmpty || isFiltering {
@@ -2358,10 +2379,11 @@ struct LCSourceAppBanner: View {
     let isBatchMode: Bool
     let isSelected: Bool
     let onToggleSelect: () -> Void
+    // 3.8.604（O-18）：父级一次算好的已装查找表，行只查表。
+    let installedLookup: CZFInstalledLookup
     
     @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
-    @EnvironmentObject private var sharedModel: SharedModel
     @State private var showDetail = false
     @State private var copiedCardURL = false
     // 忽略/取消忽略后翻一下，强制本行按新状态重画
@@ -2371,18 +2393,21 @@ struct LCSourceAppBanner: View {
     // 3.8.535（L62-3）：启动失败本地报错——见下面「打开」两处注释。
     @State private var launchError: String?
     
+    // 3.8.604（O-18）：以下三处改查表——原来每行各扫一遍
+    // 已装列表（isInstalled、installedAppModel、installedAppModels
+    // 三遍），每遍调一次 ObjC bundleIdentifier()。
     private var isInstalled: Bool {
-        (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+        installedLookup.isInstalled(bundleIdentifier: app.bundleIdentifier)
     }
     
     // 注意：installedAppModel 只供 hasUpdate 版本比较；启动绝不走它
     //（多开时“打开”按下面 installedAppModels 走单开直启/多开选实例）。
     private var installedAppModel: LCAppModel? {
-        (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })
+        installedLookup.installedModel(bundleIdentifier: app.bundleIdentifier)
     }
 
     private var installedAppModels: [LCAppModel] {
-        (sharedModel.apps + sharedModel.hiddenApps).filter { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+        installedLookup.installedModels(bundleIdentifier: app.bundleIdentifier)
     }
     
     // 源里版本比已装版本新 → 有更新（被用户忽略的这个版本不算）
@@ -2405,10 +2430,14 @@ struct LCSourceAppBanner: View {
               !downloadURL.lastPathComponent.isEmpty else { return false }
         // 低 #10：文件夹名与 installTweak 同款“名-包名”；老版只
         // 有 app.name 的文件夹也认（已装的插件不用重装）。
-        let newURL = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(downloadURL.lastPathComponent)
-        if FileManager.default.fileExists(atPath: newURL.path) { return true }
-        let oldURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
-        return FileManager.default.fileExists(atPath: oldURL.path)
+        // 3.8.604（O-18）：fileExists 只在父级算一次、结果放
+        // 表里（见 CZFInstalledLookup），这里只查表，不再每
+        // 渲染调两次磁盘 stat。
+        let file = downloadURL.lastPathComponent
+        let newPath = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(file).path
+        if installedLookup.isPluginInstalled(path: newPath) { return true }
+        let oldPath = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(file).path
+        return installedLookup.isPluginInstalled(path: oldPath)
     }
     
     private var primaryColor: Color {

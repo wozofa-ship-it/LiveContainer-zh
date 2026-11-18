@@ -11,6 +11,51 @@
 import SwiftUI
 import UIKit
 
+// 3.8.604（O-18）：已装查找表——父级一次算好，cell 只查表。
+// 原来每个源 cell 各扫一遍已装列表：isInstalled 一遍、hasUpdate
+// 又一遍（每遍调一次 ObjC bundleIdentifier()），插件再加两次
+// fileExists；源里几十个格子 × 已装几百个 App，每刷表一次就
+// 是几万次比对。查表后每格子 O(1)，行为不变：modelsByBundleID
+// 保持 apps 在前、hiddenApps 在后的顺序，installedModel 取首个
+// 与原来 first(where:) 一致；插件两条候选路径（新“名-包名”
+// 文件夹、老只有名的文件夹）与原来 isPluginInstalled 同款。
+struct CZFInstalledLookup {
+    private let modelsByBundleID: [String: [LCAppModel]]
+    private let pluginInstalledByPath: [String: Bool]
+
+    init(apps: [LCAppModel], hiddenApps: [LCAppModel], pluginPaths: [String]) {
+        var byID: [String: [LCAppModel]] = [:]
+        byID.reserveCapacity(apps.count + hiddenApps.count)
+        for app in apps + hiddenApps {
+            guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { continue }
+            byID[bid, default: []].append(app)
+        }
+        modelsByBundleID = byID
+        var plugins: [String: Bool] = [:]
+        plugins.reserveCapacity(pluginPaths.count)
+        for path in pluginPaths {
+            plugins[path] = FileManager.default.fileExists(atPath: path)
+        }
+        pluginInstalledByPath = plugins
+    }
+
+    func isInstalled(bundleIdentifier: String) -> Bool {
+        modelsByBundleID[bundleIdentifier] != nil
+    }
+
+    func installedModel(bundleIdentifier: String) -> LCAppModel? {
+        modelsByBundleID[bundleIdentifier]?.first
+    }
+
+    func installedModels(bundleIdentifier: String) -> [LCAppModel] {
+        modelsByBundleID[bundleIdentifier] ?? []
+    }
+
+    func isPluginInstalled(path: String) -> Bool {
+        pluginInstalledByPath[path] ?? false
+    }
+}
+
 struct CZFSourceGridView: View {
     var items: [AltStoreSourcesViewModel.SourceItem]
     // S-4：详情页删源后自动 pop——详情页要活的 sources 判 item
@@ -33,6 +78,29 @@ struct CZFSourceGridView: View {
     // U10：勾选回调带源 feed URL——同一 App 在两个源里是两条
     // 记录，回调只给 app 时父视图分不清勾的是哪一个源的。
     var onToggleSelect: (URL, AltStoreSourceApp) -> Void
+
+    // 3.8.604（O-18）：已装查找表在父级一次算好，往下传给组
+    // 内容与格子（见 CZFInstalledLookup）。sharedModel 来自
+    // LCAltStoreSourcesView 同层环境（格子原来自己读它）。
+    @EnvironmentObject private var sharedModel: SharedModel
+
+    private var czfInstalledLookup: CZFInstalledLookup {
+        // 插件候选路径只对源里带 dylib 最新版的 App 算（其余
+        // App 不会走到 fileExists）；用源原始 apps，不复用
+        // czfVisibleItems——那会把搜索过滤再跑一遍。
+        let pluginPaths: [String] = items.flatMap { item in
+            (item.source?.apps ?? []).flatMap { app -> [String] in
+                guard let downloadURL = app.latestVersion?.downloadURL,
+                      downloadURL.pathExtension.lowercased() == "dylib" else { return [] }
+                let file = downloadURL.lastPathComponent
+                return [
+                    LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(file).path,
+                    LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(file).path
+                ]
+            }
+        }
+        return CZFInstalledLookup(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps, pluginPaths: pluginPaths)
+    }
 
     private var czfGridColumns: [GridItem] {
         let count = max(3, min(6, columns))
@@ -97,6 +165,8 @@ struct CZFSourceGridView: View {
                         item: item,
                         apps: apps,
                         isFiltering: isFiltering,
+                        // 3.8.604（O-18）：已装查找表往下传，格子只查表。
+                        installedLookup: czfInstalledLookup,
                         columns: czfGridColumns,
                         iconFactor: czfIconFactor,
                         onRefresh: { onRefresh(item) },
@@ -203,6 +273,8 @@ struct CZFSourceGridGroupContentView: View {
     let item: AltStoreSourcesViewModel.SourceItem
     let apps: [AltStoreSourceApp]
     let isFiltering: Bool
+    // 3.8.604（O-18）：父级一次算好的已装查找表，往下传给格子。
+    let installedLookup: CZFInstalledLookup
     let columns: [GridItem]
     let iconFactor: CGFloat
     let onRefresh: () -> Void
@@ -252,6 +324,8 @@ struct CZFSourceGridGroupContentView: View {
                                         CZFSourceAppGridCell(
                                             app: app,
                                             source: source,
+                                            // 3.8.604（O-18）：已装查找表往下传，格子只查表。
+                                            installedLookup: installedLookup,
                                             iconFactor: iconFactor,
                                             isBatchMode: isBatchMode,
                                             // U10：勾选键 = 源 feed URL + bundleIdentifier，
@@ -359,6 +433,8 @@ struct CZFSourceAppGridCell: View {
     var onInstallAsNew: (AltStoreSourceApp) -> Void
     var onDownload: (AltStoreSourceApp) -> Void
     var onDownloadVersion: (URL) -> Void
+    // 3.8.604（O-18）：父级一次算好的已装查找表，格子只查表。
+    let installedLookup: CZFInstalledLookup
 
     @State private var showDetail = false
 
@@ -366,12 +442,8 @@ struct CZFSourceAppGridCell: View {
     // 绿勾，免得重复装。App 部分判据与 LCSourceAppBanner.isInstalled
     // 同款：已装 + 隐藏 App 里按 bundleIdentifier 匹配；插件
     // 再加 isPluginInstalled 磁盘检查（见下面）。
-    // sharedModel 来自 LCAltStoreSourcesView 同层环境（该页
-    // 已用 @EnvironmentObject，格子是它的后代，环境里有）。
-    @EnvironmentObject private var sharedModel: SharedModel
-
     private var isInstalled: Bool {
-        if (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier } {
+        if installedLookup.isInstalled(bundleIdentifier: app.bundleIdentifier) {
             return true
         }
         // 已装插件也打绿勾：格子没有列表行那种“已安装”绿字
@@ -389,10 +461,14 @@ struct CZFSourceAppGridCell: View {
               downloadURL.pathExtension.lowercased() == "dylib" else { return false }
         // 文件夹名与 installTweak 同款“名-包名”；老版只有
         // app.name 的文件夹也认（已装的插件不用重装）。
-        let newURL = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(downloadURL.lastPathComponent)
-        if FileManager.default.fileExists(atPath: newURL.path) { return true }
-        let oldURL = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(downloadURL.lastPathComponent)
-        return FileManager.default.fileExists(atPath: oldURL.path)
+        // 3.8.604（O-18）：fileExists 只在父级算一次、结果放
+        // 表里（见 CZFInstalledLookup），这里只查表，不再每
+        // 渲染调两次磁盘 stat。
+        let file = downloadURL.lastPathComponent
+        let newPath = LCPath.tweakPath.appendingPathComponent("\(app.name)-\(app.bundleIdentifier)").appendingPathComponent(file).path
+        if installedLookup.isPluginInstalled(path: newPath) { return true }
+        let oldPath = LCPath.tweakPath.appendingPathComponent(app.name).appendingPathComponent(file).path
+        return installedLookup.isPluginInstalled(path: oldPath)
     }
 
     // 有更新角标（用户 17:49 令“源有更新也显示下角标”）：
@@ -405,8 +481,10 @@ struct CZFSourceAppGridCell: View {
         // latest 先解包：latestVersion?.buildVersion 是 String??（双层
         // 可选），直接传给 String? 参数编不过；解包后 buildVersion
         // 是 String?，单层。
+        // 3.8.604（O-18）：已装模型改查表——原来又扫一遍已装
+        // 列表（与 isInstalled 各一遍）；版本比较逻辑不动。
         guard let latest = app.latestVersion,
-              let installed = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }) else { return false }
+              let installed = installedLookup.installedModel(bundleIdentifier: app.bundleIdentifier) else { return false }
         let sourceVersion = latest.version
         if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
         return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
