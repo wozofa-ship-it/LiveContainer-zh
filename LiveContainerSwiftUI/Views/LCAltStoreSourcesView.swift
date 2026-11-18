@@ -2195,7 +2195,7 @@ struct CZFSourceAppListView: View {
             // 解码重新生成，刷新一次全部行换身份、详情 sheet
             // 被关掉），改用包名+版本号的稳定身份。
             ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))], id: \.czfStableID) { app in
-                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, installedLookup: czfInstalledLookup, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)), onToggleSelect: { onToggleSelect(sourceURL, app) })
+                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)), onToggleSelect: { onToggleSelect(sourceURL, app) }, installedLookup: czfInstalledLookup)
             }
             if filteredApps.isEmpty {
                 if source.apps.isEmpty || isFiltering {

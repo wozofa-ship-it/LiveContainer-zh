@@ -324,8 +324,6 @@ struct CZFSourceGridGroupContentView: View {
                                         CZFSourceAppGridCell(
                                             app: app,
                                             source: source,
-                                            // 3.8.604（O-18）：已装查找表往下传，格子只查表。
-                                            installedLookup: installedLookup,
                                             iconFactor: iconFactor,
                                             isBatchMode: isBatchMode,
                                             // U10：勾选键 = 源 feed URL + bundleIdentifier，
@@ -335,7 +333,10 @@ struct CZFSourceGridGroupContentView: View {
                                             onInstall: onInstall,
                                             onInstallAsNew: onInstallAsNew,
                                             onDownload: onDownload,
-                                            onDownloadVersion: onDownloadVersion
+                                            onDownloadVersion: onDownloadVersion,
+                                            // 3.8.604 修法：成员初始化实参须按声明顺序——
+                                            // installedLookup 在声明里是末位，放末尾。
+                                            installedLookup: installedLookup
                                         )
                                         .frame(maxWidth: .infinity)
                                     }
