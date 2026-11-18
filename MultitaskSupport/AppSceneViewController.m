@@ -78,7 +78,17 @@
     NSURL *docURL = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].lastObject;
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"LCSharePrivateDataWithLiveProcess"]) {
         NSData* bookmarkData = [docURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0];
-        [bookmarks addObject:bookmarkData];
+        // 3.8.900（L566-7）：bookmarkDataWithOptions 失败返 nil，直接
+        // addObject:nil 抛 NSInvalidArgumentException 闪退；下面
+        // containerBookmark 那路已有 if 判空，这里三处漏了。客侧按
+        // 条数遍历书签（LiveProcess/main.m:76、LCBootstrap.m:271，
+        // 不按位置取），缺一个只会让客少一份沙盒权限、走客侧报错，
+        // 不崩；拿不到就跳过，不拦 init（init 返 nil 会让 Decorated
+        // 的 setupDecoratedView 在 addChildViewController:nil 上
+        // 再崩一次，不能走那条路）。
+        if (bookmarkData) {
+            [bookmarks addObject:bookmarkData];
+        }
     } else {
         bool isSharedApp = false;
         NSBundle* bundle = [LCSharedUtils findBundleWithBundleId:bundleId isSharedAppOut:&isSharedApp];
@@ -86,12 +96,24 @@
         if (!isSharedApp) {
             NSURL *dataURL = [docURL URLByAppendingPathComponent:[NSString stringWithFormat:@"Data/Application/%@", dataUUID]];
             NSURL *tweaksURL = [docURL URLByAppendingPathComponent:@"Tweaks"];
-            [bookmarks addObject:[bundle.bundleURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0]];
+            // 3.8.900（L566-7）：同款——App 文件夹被删（列表未刷新）时
+            // findBundleWithBundleId 返 nil，bundle.bundleURL 是 nil，
+            // 书签返 nil；判空跳过。
+            NSData *bundleBookmark = [bundle.bundleURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0];
+            if (bundleBookmark) {
+                [bookmarks addObject:bundleBookmark];
+            }
             NSData* containerBookmark = [dataURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0];
             if(containerBookmark) {
                 [bookmarks addObject:containerBookmark];
             }
-            [bookmarks addObject:[tweaksURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0]];
+            // 3.8.900（L566-7）：同款——Documents/Tweaks 只在启动时建，
+            // 用户在文件 App 里删掉它后书签返 nil；插件夹是可选的，
+            // 没有就跳过，不拦启动。
+            NSData *tweaksBookmark = [tweaksURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0];
+            if (tweaksBookmark) {
+                [bookmarks addObject:tweaksBookmark];
+            }
         }
     }
     item.userInfo = userInfo;

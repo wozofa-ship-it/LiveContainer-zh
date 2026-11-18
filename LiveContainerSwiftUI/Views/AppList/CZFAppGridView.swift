@@ -316,11 +316,16 @@ struct CZFAppGridView: View {
     // 删 App 的文件部分走 banner 的共用静态方法（单个卸载与批量
     // 删除共用这一份）：删 .app 包、从列表移除、可选删数据容器
     // + 钥匙串；确认弹窗是本页的 SwiftUI confirmationDialog。
-    private func czfDeleteGridApp(removeDataFolders: Bool) {
-        guard let app = czfGridDeleteTarget else { return }
-        czfGridDeleteTarget = nil
+    private func czfDeleteGridApp(removeDataFolders: Bool) async {
+        // 3.8.900（L566-5）：本函数从确认框按钮的 Task 调来、不在主线程；czfGridDeleteTarget/czfGridError 是 @State，取目标与写结果都回主线程。deleteAppFiles 自管线程、删文件在后台，主线程不冻住。
+        let app: LCAppModel? = await MainActor.run {
+            let target = czfGridDeleteTarget
+            czfGridDeleteTarget = nil
+            return target
+        }
+        guard let app else { return }
         do {
-            let (failedContainers, keptBackupName) = try LCAppBannerViewController.deleteAppFiles(
+            let (failedContainers, keptBackupName) = try await LCAppBannerViewController.deleteAppFiles(
                 app,
                 removeDataFolders: removeDataFolders,
                 removeFromList: { model in onRemoveApp(model) }
@@ -333,10 +338,10 @@ struct CZFAppGridView: View {
                 messages.append("备份「\(kept)」已锁定，已保留")
             }
             if !messages.isEmpty {
-                czfGridError = messages.joined(separator: "\n")
+                await MainActor.run { czfGridError = messages.joined(separator: "\n") }
             }
         } catch {
-            czfGridError = error.localizedDescription
+            await MainActor.run { czfGridError = error.localizedDescription }
         }
     }
 
@@ -430,10 +435,10 @@ struct CZFAppGridView: View {
             EmptyView()
                 .confirmationDialog("删除 App", isPresented: $czfGridDeleteConfirm, titleVisibility: .visible) {
                     Button("删除 App（保留数据）", role: .destructive) {
-                        czfDeleteGridApp(removeDataFolders: false)
+                        Task { await czfDeleteGridApp(removeDataFolders: false) }
                     }
                     Button("删除 App 及其数据", role: .destructive) {
-                        czfDeleteGridApp(removeDataFolders: true)
+                        Task { await czfDeleteGridApp(removeDataFolders: true) }
                     }
                     Button("取消", role: .cancel) {
                         czfGridDeleteTarget = nil

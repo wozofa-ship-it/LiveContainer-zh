@@ -1431,24 +1431,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.544（L74）：batchDelete 跑确认框按钮的裸 Task（本函数注释），离主线程读 _info；L73 helper 同款 main.sync 取。
             let name = LCDataManagementView.czfAppDisplayName(for: app)
             do {
-                // 3.8.557（L305-1）：deleteAppFiles 在批量删除里离主线程跑——
-                // 本函数从确认框按钮的裸 Task 调来（:1837/:1840），同步前缀
-                // 跑在后台执行器上；deleteAppFiles 内读 appInfo.containers
-                // （_info[@"LCContainers"]，LCAppInfo.m:938，升级路还写 _info
-                // + 落盘）与 appInfo.dataUUID（_info[@"LCDataUUID"]），
-                // 成功删容器后还直接改 @Published appDataFolderNames
-                // （SharedModel 非 @MainActor，编得过，但 SwiftUI 要求
-                // 发布走主线程；单删两路都在主线程，批量这路漏了）。
-                // 主线程 toggleHidden/toggleLocked 写同一份 _info，
-                // 并发读可能崩（L233-1 同款）。整段调回主线程再删——
-                // 单删本来就在主线程删文件，语义不变；每项各 await 一次，
-                // 主线程在项与项之间能处理别的活，不会整批卡死界面。
+                // 3.8.900（L566-5）：deleteAppFiles 自管线程——快照与列表移除在主线程、删文件在后台；这里不再整段包 MainActor.run（L305-1 原来包着是怕离主线程读 _info，现在函数内部已分段）。每项各 await 一次，主线程在项与项之间能处理别的活，单项内也不冻界面。
                 // removeFromList 仍是同步调完的非逃逸闭包，抓 struct
                 // self 合法（原注释）。
-                let (failedC, keptBackupName) = try await MainActor.run {
-                    try LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { model in
-                        self.removeApp(app: model)
-                    }
+                let (failedC, keptBackupName) = try await LCAppBannerViewController.deleteAppFiles(app, removeDataFolders: removeDataFolders) { model in
+                    self.removeApp(app: model)
                 }
                 deleted.append(name)
                 failedContainers.append(contentsOf: failedC)

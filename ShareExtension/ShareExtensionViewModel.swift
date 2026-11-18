@@ -633,14 +633,27 @@ final class ShareExtensionViewModel: ObservableObject {
             sharedDefaults?.set(nil, forKey: "LCLaunchExtensionPrivateDocBookmark")
             return nil
         }
-        _ = url.startAccessingSecurityScopedResource()
+        // 3.8.900（L566-8）：startAccessing 的返回值不能丢——返回 false
+        // 就是没拿到 scope，继续用这个 URL 只会让 loadApps 静默空列表
+        // （私人 App 全没了）；失败就删键，主 App 下次打开会重建
+        // （LCTabView checkPrivateContainerBookmark），别拿无权 URL
+        // 往下走。
+        guard url.startAccessingSecurityScopedResource() else {
+            sharedDefaults?.set(nil, forKey: "LCLaunchExtensionPrivateDocBookmark")
+            return nil
+        }
         return url
     }
 
     private static func resolveBookmarkURL(_ bookmarkData: Data) -> URL? {
         do {
             var isStale = false
-            return try URL(resolvingBookmarkData: bookmarkData, bookmarkDataIsStale: &isStale)
+            // 3.8.900（L566-8）：书签是创建侧带 scope 建的（1<<11），解析
+            // 必须带解析侧 scope（1<<10），不然拿到的 URL 没有 scope、
+            // startAccessing 恒 false，私人区 contentsOfDirectory 抛错、
+            // 分享面板里私人 App 全没了；全仓其余解析点都带 1<<10，
+            // 本处是唯一用默认选项的。
+            return try URL(resolvingBookmarkData: bookmarkData, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), relativeTo: nil, bookmarkDataIsStale: &isStale)
         } catch {
             return nil
         }

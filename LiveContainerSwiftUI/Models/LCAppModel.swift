@@ -424,6 +424,13 @@ class LCAppModel: ObservableObject, Hashable {
         do {
             try await app.runApp(multitask: multitask, containerFolderName: uuid)
         } catch {
+            // 3.8.900（L566-2）：启动失败时窗没建出来，一次性小窗标记
+            // 没人消费就一直留在 defaults 里——下次任何 App 的装饰窗
+            // 创建都会把它当真、开成小窗（Decorated.m:54 注释只认了
+            // “漏一次、下一窗消费即恢复”，但消费本身就是一次用户没要
+            // 的小窗）。失败路在这里清掉；窗已建出来时标记早被消费，
+            // 再删一次是空操作。
+            UserDefaults.standard.removeObject(forKey: "CZFLaunchSmallOnce")
             // 3.8.535（L62-1）：catch 跑在调用方裸 Task 的执行器上
             // （非隔离 async），onError 是面板的 reportLaunchError
             // （写 @State launchError）/横幅卡的 showError——前者
@@ -1293,6 +1300,14 @@ class LCAppModel: ObservableObject, Hashable {
                     let czfPidBox = CZFOnceBox()
                     let czfPidTimeout = Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 30_000_000_000)
+                        // 3.8.900（L566-1）：取消后 sleep 抛错被 try? 吞掉，
+                        // 任务会继续往下走并抢盒子——JIT 成功路先 cancel、
+                        // 再 await MainActor.run 里 take，刚被唤醒的超时
+                        // 任务已在主 actor 队里排在前面，先拿盒子、以
+                        // 30 秒超时错恢复，成功启动反而弹错；取消了就是
+                        // 成功/失败路已接手，超时任务不再碰盒子（与门
+                        // acquire 超时任务的 catch 空处理同款）。
+                        guard !Task.isCancelled else { return }
                         if czfPidBox.take() {
                             continuation.resume(throwing: "Guest app did not initialize in 30 seconds")
                         }
@@ -1350,6 +1365,11 @@ class LCAppModel: ObservableObject, Hashable {
                 let czfPidBox = CZFOnceBox()
                 let czfPidTimeout = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 30_000_000_000)
+                    // 3.8.900（L566-1）：与 JIT 分支同款——取消后 sleep 抛错
+                    // 被 try? 吞掉，任务继续往下走并抢盒子；本分支成功
+                    // 路是 cancel 后在回调线程同步 take，窗口极窄、但
+                    // 取消了就是成功/失败路已接手，超时任务不再碰盒子。
+                    guard !Task.isCancelled else { return }
                     if czfPidBox.take() {
                         continuation.resume(throwing: "Guest app did not initialize in 30 seconds")
                     }

@@ -139,7 +139,8 @@ struct LaunchAppExtension: AppIntent {
         if !LaunchAppExtension.bookmarkResolved, let bookmarkData = lcSharedDefaults.data(forKey: "LCLaunchExtensionPrivateDocBookmark") {
             var isStale = false
             do {
-                let url = try URL(resolvingBookmarkData: bookmarkData, bookmarkDataIsStale: &isStale)
+                // 3.8.900（L566-8）：与分享扩展同款——书签创建侧带 scope（1<<11），解析必须带解析侧 scope（1<<10）；不带时 startAccessing 恒 false，本路会把本来好的书签键删掉、LC_HOME_PATH 也设不上。
+                let url = try URL(resolvingBookmarkData: bookmarkData, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), bookmarkDataIsStale: &isStale)
                 let access = url.startAccessingSecurityScopedResource()
                 if access {
                     setenv("LC_HOME_PATH", (url.deletingLastPathComponent().path as NSString).utf8String, 1)

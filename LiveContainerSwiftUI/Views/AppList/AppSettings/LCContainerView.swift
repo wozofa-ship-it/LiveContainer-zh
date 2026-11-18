@@ -448,8 +448,15 @@ struct LCContainerView : View {
             return
         }
         do {
-            let fm = FileManager.default
-            try fm.removeItem(at: container.containerURL)
+            // 3.8.900（L566-3）：外置容器（storageBookMark != nil）是用户
+            // 自管的外置文件夹，本来就不该由本 App 删盘——只解绑、不删文件。
+            // 书签已死时 containerURL 还会回落到本地 dataPath/<folderName>，
+            // removeItem 必抛（外置夹根本不在那里），unbind 一行都走不到、
+            // 条目永远删不掉；同名本地夹恰好存在时还会删错。本地容器才删盘。
+            if container.storageBookMark == nil {
+                let fm = FileManager.default
+                try fm.removeItem(at: container.containerURL)
+            }
         } catch {
             await MainActor.run {
                 errorInfo = error.localizedDescription
@@ -515,6 +522,13 @@ struct LCContainerView : View {
         }
         
         LCUtils.removeAppKeychain(dataUUID: container.folderName, keychainGroupId: container.keychainGroupId)
+        // 3.8.900（L566-4）：成功弹窗是死代码——successShow 全文件只有
+        // 声明与挂载两处，从没人置 true，清理完页面纹丝不动、用户分
+        // 不清成功还是没点上；成功了就报一声，复用已挂好的弹窗。
+        await MainActor.run {
+            successInfo = "钥匙串已清理"
+            successShow = true
+        }
     }
     
     func deleteData() async {
@@ -549,6 +563,13 @@ struct LCContainerView : View {
                 errorInfo = error.localizedDescription
                 errorShow = true
             }
+            return
+        }
+        // 3.8.900（L566-4）：同 cleanUpKeychain——成功弹窗死代码，删完
+        // 不报一声；删完无错就是成功，报一声。
+        await MainActor.run {
+            successInfo = "数据已删除"
+            successShow = true
         }
     }
 }

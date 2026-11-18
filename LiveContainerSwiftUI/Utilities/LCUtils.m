@@ -367,7 +367,18 @@
     if (*error) return nil;
     
     NSURL *infoPath = [tmpPayloadPath URLByAppendingPathComponent:@"App.app/Info.plist"];
-    NSMutableDictionary *infoDict = [NSMutableDictionary dictionaryWithContentsOfURL:infoPath];
+    // 3.8.900（L566-6）：dictionaryWithContentsOfURL 只保证顶层可变，
+    // 嵌套容器是不可变的——下面 :376 对 CFBundleURLTypes[0] 的 Schemes
+    // 数组下标赋值会抛 NSInvalidArgumentException 直接闪退（创建分身
+    // 一点就崩，Swift try 接不住 ObjC 异常）；同函数解 entitlements
+    // 的 dict（:404）就是用 MutableContainers 载入的，这里照抄同款，
+    // 嵌套的 URLTypes/IconFiles 写入都合法了。
+    NSData *infoData = [NSData dataWithContentsOfURL:infoPath];
+    if (!infoData) return nil;
+    NSMutableDictionary *infoDict = [NSPropertyListSerialization propertyListWithData:infoData
+                                                                              options:NSPropertyListMutableContainers
+                                                                               format:nil
+                                                                                error:error];
     if (!infoDict) return nil;
 
     infoDict[@"CFBundleDisplayName"] = newBundleName;
