@@ -3714,11 +3714,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 的那一份从 pendingInstalls 里取回、把本项放回队尾，稍后重装
                 // 时再计——不计失败、不计取消、不推进 processed；下面预取清理
                 // 照走。取回与放回在同一次主线程跳里做，drain 抢不到中间态。
-                let czfDeferred = !wasCancelled && !installOK && await MainActor.run { () -> Bool in
+                // 3.8.900（607 修）：await 不能放在 && 链右边——编译器报
+                // 'await' cannot appear to the right of a non-assignment
+                // operator。先判条件，再单独 await 取结果。
+                var czfDeferred = false
+                if !wasCancelled && !installOK {
+                    czfDeferred = await MainActor.run { () -> Bool in
                     guard pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew, customDisplayName: item.customDisplayName, as: $0) }) else { return false }
                     pendingInstalls.removeAll(where: { czfIsSameInstallRequest(urlStr: installStr, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew, customDisplayName: item.customDisplayName, as: $0) })
                     installQueue.append(item)
                     return true
+                    }
                 }
                 if czfDeferred {
                     // 延期重装：本轮不计入任何一类、不推进 processed。
