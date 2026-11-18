@@ -584,6 +584,18 @@
     // 也因此不会二次动画。
     if (self.czfMaximizeAnimating) return;
     self.czfMaximizeAnimating = YES;
+    // 3.8.900（L564-2）：最大化打断最小化动画会丢窗——minimizeWindow
+    // 的 completion 只认 czfWindowAnimSeq，maximizeWindow 原来不加
+    // 序号，0.3 秒淡出中点最大化时旧 completion 序号仍对得上，照
+    // 常 hidden=YES + czfMinimized=YES + 场景进后台，而 isMaximized
+    // 已同步置 YES，窗直接消失。按 C5 同款（czfRestoreFromMinimize）
+    // 加序号作废旧 completion；淡出动画已提交到渲染层，completion
+    // 作废后模型值仍是 alpha=0/scale=0.1——下面两处动画块里把
+    // alpha/transform 写回 1/identity，新动画替换旧轨道，窗淡回
+    // 满屏（正常最大化时这两行是空操作）。守卫之后再加序号：
+    // 最大化动画进行中又点最小化是用户显式最小化，旧 completion
+    // 必须照常落态，不能被这里的序号作废。
+    self.czfWindowAnimSeq++;
     void (^updateSettingsBlock)(UIMutableApplicationSceneSettings *settings);
 
     [self.view layoutIfNeeded];
@@ -597,6 +609,10 @@
         // C1：切换开始时同步落位，不再等 completion 才置 NO。
         self.isMaximized = NO;
         [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            // 3.8.900（L564-2）：见函数头注释——打断最小化淡出时把
+            // alpha/transform 淡回，旧淡出轨道被新动画替换。
+            self.view.alpha = 1;
+            self.view.transform = CGAffineTransformIdentity;
             self.view.frame = newFrame;
             self.view.layer.borderWidth = 1;
             self.resizeHandle.alpha = 1;
@@ -624,6 +640,10 @@
         // 在已最大化时直接返回），存完再同步落位为 YES。
         self.isMaximized = YES;
         [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            // 3.8.900（L564-2）：见函数头注释——打断最小化淡出时把
+            // alpha/transform 淡回，旧淡出轨道被新动画替换。
+            self.view.alpha = 1;
+            self.view.transform = CGAffineTransformIdentity;
             [self updateVerticalConstraints];
 
             self.view.layer.borderWidth = 0;
@@ -643,6 +663,15 @@
 }
 
 - (void)appSceneVCAppDidExit:(AppSceneViewController*)vc {
+    // 3.8.900（L564-1）：客进程死在首帧设置更新之前时遮罩撤不掉——
+    // 死亡只走 appTerminationCleanUp → 这里，不再有设置更新来触发
+    // didUpdateFromSettings 里那次撤遮罩（_performActionsForUIScene
+    // 在 !isAppRunning 时先清理、diff 为 nil 直接 return），只剩
+    // 8 秒兜底；不透明遮罩盖在 index 0 的“已终止”文案上面，用户
+    // 看到的是一直在转圈、不是已死。死亡到这里就撤遮罩、清待撤
+    // 标志，文案立即可见；手动关窗那路视图本来就要拿掉，撤了也无害。
+    self.czfHideLoadingOnNextSettingsUpdate = NO;
+    [self czfHideLoadingOverlay];
     BOOL skipTerminationScreen = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCSkipTerminatedScreen"];
     BOOL isManual = _isAppTerminationRequested;
     if(isManual || skipTerminationScreen) {

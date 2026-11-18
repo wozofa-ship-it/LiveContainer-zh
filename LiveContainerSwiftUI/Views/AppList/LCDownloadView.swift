@@ -40,7 +40,9 @@ public final class DownloadHelper : ObservableObject {
     // 自己的。
     private var czfDownloadInFlight = false
 
-    func download(url: URL, to: URL) async throws {
+    // 3.8.900（L564-3）czfCancelRequested：调用方传的取消检查闭包——下载在途期间
+    // 每 0.5 秒读一次，读到真就停掉本次下载；不传（nil）时不轮询，原样。
+    func download(url: URL, to: URL, czfCancelRequested: (() async -> Bool)? = nil) async throws {
         // 3.8.572（L339-1）：L50-1 的查与置是两次 MainActor.run、中间隔一次 await——都在主线程跑不等于原子：两路同时等时都能读到空闲、都置真并行下，单槽 continuation/downloadTask 被盖掉，后完成那路见 continuation 已空、永远不恢复（L50-1 原文说的挂起，安装队停摆、只能杀 App）。
         // 触发口子是现成的：重试 2 秒间隙里 isDownloading 已是 false（completeCallback 清的）、标志仍占着，源页守门 S:1834 只认 isDownloading、覆盖确认 S:1262 根本没门，两路都能进轮询等；安装队尾那路同款。查与置必须同一次 MainActor.run 内原子完成；defer 里不能 await，清标志仍放主线程 Task。
         while true {
@@ -62,6 +64,28 @@ public final class DownloadHelper : ObservableObject {
         // 仍是真口子）；移到 download() 入口、拿了在途锁之后清，
         // 重试不再碰它。
         await MainActor.run { cancelled = false }
+        // 3.8.900（L564-3）：下载阶段的取消检查点——进度条旁 ✕ 只置
+        // czfInstallCancelRequested（LCAppListView），原来 download() 全程
+        // 不读它，✕ 要等整个下载跑完才在下载后检查点生效，大包/慢网下
+        // 几分钟毫无反应。调用方传了检查闭包时，在途期间每 0.5 秒读一
+        // 次（与签名取消轮询同款），读到就调 cancel() 停掉本次下载；
+        // 闭包只读不取标志，标志由调用方下载后检查点/失败 catch 取走，
+        // 不抢不漏；轮询只在拿到在途锁、复位 cancelled 之后才起跑，停
+        // 的一定是本次下载，不会误停别的路正在下的包；没传闭包的调用
+        // 方（预取、源页）原样。下载返回/抛错时 defer 停掉轮询。
+        var czfDownloadCancelTask: Task<Void, Never>? = nil
+        if let czfIsCancelRequested = czfCancelRequested {
+            czfDownloadCancelTask = Task {
+                while !Task.isCancelled {
+                    if await czfIsCancelRequested() {
+                        await MainActor.run { self.cancel() }
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+        }
+        defer { czfDownloadCancelTask?.cancel() }
         // 失败自动重试：最多 3 次（首次 + 2 次重试），网络抖
         // 一下不用用户再点一次。每次优先用上次留下的续传数
         // 据接着下（completeCallback 失败时已存好），不从 0
