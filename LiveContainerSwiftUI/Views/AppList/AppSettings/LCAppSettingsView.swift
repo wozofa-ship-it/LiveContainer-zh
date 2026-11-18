@@ -36,6 +36,12 @@ struct LCAppSettingsView: View {
     
     @State private var errorShow = false
     @State private var errorInfo = ""
+    // 3.8.900（L567-6）：共享/私人转换进行中——两个转换函数都没
+    // 有重入守卫，按钮也不 disabled；确认第一路后、第一路搬完
+    // 前再点一次并再确认，第二路在 preflight（源已搬走/目标已
+    // 在）抛错、弹一条假报错（转换其实成功了）。两位共用（同一
+    // 时刻只显示其中一个按钮），进函数先判位、置位，结束清位。
+    @State private var czfConvertingShared = false
     // #13：隐藏确认框；#18：语言列表加载失败态
     @State private var hideConfirmShow = false
     @State private var languageLoadFailed = false
@@ -436,6 +442,9 @@ struct LCAppSettingsView: View {
                                 Text("lc.appSettings.toSharedApp".loc)
                             }
                         }
+                        // 3.8.900（L567-6）：转换进行中禁用（函数入口
+                        // 另有判位兜底，按钮灰掉是第一道防线）。
+                        .disabled(czfConvertingShared)
                     }
                 } else if sharedModel.multiLCStatus != 2 {
                     Button {
@@ -446,6 +455,8 @@ struct LCAppSettingsView: View {
                             Text("lc.appSettings.toPrivateApp".loc)
                         }
                     }
+                    // 3.8.900（L567-6）：同上。
+                    .disabled(czfConvertingShared)
                 }
             } header: {
                 Text("lc.common.data".loc)
@@ -1172,7 +1183,19 @@ struct LCAppSettingsView: View {
             }
         }
         
+        // 3.8.900（L567-6）：判位 + 置位一次回主线程做（@State；
+        // 查与置之间无挂起点，是同一 Task 的同步前缀，不会被另
+        // 一路插队——AlertHelper.open() 单槽守卫同款写法）。已在
+        // 途就静默返回（不弹错：第一路正在搬，报错是假的）。
+        let czfAlreadyConverting = await MainActor.run {
+            if czfConvertingShared { return true }
+            czfConvertingShared = true
+            return false
+        }
+        guard !czfAlreadyConverting else { return }
+
         guard let result = await moveToAppGroupAlert.open(), result else {
+            await MainActor.run { czfConvertingShared = false }
             return
         }
         
@@ -1248,6 +1271,9 @@ struct LCAppSettingsView: View {
                 errorShow = true
             }
         }
+        // 3.8.900（L567-6）：收尾清位（成功与失败都走这里；取消
+        // 路在上面 alert 处已清，运行中检查路在置位前就返回了）。
+        await MainActor.run { czfConvertingShared = false }
         
     }
     
@@ -1264,7 +1290,16 @@ struct LCAppSettingsView: View {
             }
         }
 
+        // 3.8.900（L567-6）：同 moveToAppGroup（两位共用）。
+        let czfAlreadyConverting = await MainActor.run {
+            if czfConvertingShared { return true }
+            czfConvertingShared = true
+            return false
+        }
+        guard !czfAlreadyConverting else { return }
+
         guard let result = await moveToPrivateDocAlert.open(), result else {
+            await MainActor.run { czfConvertingShared = false }
             return
         }
         
@@ -1335,6 +1370,8 @@ struct LCAppSettingsView: View {
                 errorShow = true
             }
         }
+        // 3.8.900（L567-6）：收尾清位（同 moveToAppGroup）。
+        await MainActor.run { czfConvertingShared = false }
         
     }
     

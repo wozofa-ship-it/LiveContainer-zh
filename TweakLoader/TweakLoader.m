@@ -56,7 +56,33 @@ static void loadTweaksRecursively(NSURL *folderURL, NSMutableArray *errors) {
     }
 }
 
+static void showDlerrAlertRetrying(NSString *error, NSInteger attempt);
+
 static void showDlerrAlert(NSString *error) {
+    // 3.8.900（L567-5）：入口只转重试版——constructor 跑在 dlopen
+    // 时（客 main/UIApplicationMain 之前），下面重试版在首个
+    // scene 接入前会自己等，不会直接丢框。
+    showDlerrAlertRetrying(error, 0);
+}
+
+static void showDlerrAlertRetrying(NSString *error, NSInteger attempt) {
+    // 3.8.900（L567-5）：scene 还没接入时不建窗——原来直接拿
+    // connectedScenes.anyObject（nil 也不判），无 scene 的窗口
+    // makeKeyAndVisible 等于空操作，报错框就这么丢了，用户只
+    // 看到插件没生效、没有任何提示（错只记了 NSLog）。手势安装
+    // 同款重试：1 秒一次、最多 10 次，scene 一到就弹；10 次都
+    // 没 scene 也不再试（错已记日志，不无限挂起）。
+    UIWindowScene *scene = nil;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if ([s isKindOfClass:UIWindowScene.class]) { scene = (UIWindowScene *)s; break; }
+    }
+    if (!scene) {
+        if (attempt >= 10) return;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            showDlerrAlertRetrying(error, attempt + 1);
+        });
+        return;
+    }
     UIWindow *window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Failed to load tweaks" message:error preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction* okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction * action) {
@@ -70,7 +96,7 @@ static void showDlerrAlert(NSString *error) {
     [alert addAction:cancelAction];
     window.rootViewController = [UIViewController new];
     window.windowLevel = 1000;
-    window.windowScene = (id)UIApplication.sharedApplication.connectedScenes.anyObject;
+    window.windowScene = scene;
     [window makeKeyAndVisible];
     [window.rootViewController presentViewController:alert animated:YES completion:nil];
     objc_setAssociatedObject(alert, @"window", window, OBJC_ASSOCIATION_RETAIN_NONATOMIC);

@@ -35,10 +35,15 @@ jobs:
         with:
           submodules: recursive
       # CI 自动升版（3.8.410 起）：读 LiveContainer/Info.plist 的
-      # 当前版本号，末位 +1，3 个 plist 各 2 处 + pbxproj 8 处一次
+      # 当前版本号，末位 +1，4 个 plist 各 2 处 + pbxproj 8 处一次
       # 改完再构建；构建完最后一步把改动推回 main（[skip ci]）。
       # 以后推代码不用再手动改版本，CI 自己升。注意：注释里的
-      # 3.8.409（如 CZFSourceGridView.swift）不碰，只改这 4 个文件。
+      # 3.8.409（如 CZFSourceGridView.swift）不碰，只改这 5 个文件。
+      # 3.8.900（L567-4）：第 4 个 plist 是 LaunchAppExtension/Info.plist——
+      # 390 同款，它缺版本键、每 Archive 都报扩展版本 '1' 与主 App 不符，
+      # 版本写死在 plist 里（不用 $(MARKETING_VERSION)，本 target 构建
+      # 设置里那俩值是陈旧的 1.0/1，390 就是这么红的），bump 必须带上它，
+      # 否则下次升版就留旧版、警告立刻回来。
       - name: Bump version (CI auto)
         id: bump-version
         run: |
@@ -47,12 +52,12 @@ jobs:
           echo "$CUR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "bad version: $CUR"; exit 1; }
           NEW=$(echo "$CUR" | awk -F. 'BEGIN{OFS="."} { $NF = $NF + 1; print }')
           CUR_ESC=$(echo "$CUR" | sed 's/\./\\./g')
-          for f in LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; do
+          for f in LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LaunchAppExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; do
             sed -i '' "s/$CUR_ESC/$NEW/g" "$f"
           done
-          # 验：3 个 plist 各 2 处、pbxproj 8 处，全是新版、旧版清零
-          [ "$(grep -c -F "$NEW" LiveContainer/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ShareExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ActionExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LiveContainer.xcodeproj/project.pbxproj)" = 8 ] || { echo "version bump verification failed"; exit 1; }
-          if grep -q -F "$CUR" LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; then echo "old version still present"; exit 1; fi
+          # 验：4 个 plist 各 2 处、pbxproj 8 处，全是新版、旧版清零
+          [ "$(grep -c -F "$NEW" LiveContainer/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ShareExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ActionExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LaunchAppExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LiveContainer.xcodeproj/project.pbxproj)" = 8 ] || { echo "version bump verification failed"; exit 1; }
+          if grep -q -F "$CUR" LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LaunchAppExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; then echo "old version still present"; exit 1; fi
           echo "version: $CUR -> $NEW"
           echo "new_version=$NEW" >> $GITHUB_OUTPUT
           echo "old_version=$CUR" >> $GITHUB_OUTPUT
@@ -212,7 +217,7 @@ jobs:
           if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then git fetch --unshallow; fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj
+          git add LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LaunchAppExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj
           git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
           git push
 

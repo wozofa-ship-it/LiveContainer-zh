@@ -377,9 +377,18 @@ class MultitaskRelaunchManager: NSObject {
         } catch {
             // L350-1：重起失败（没跑起来、无退出可记），清掉旧戳，
             // 免得下次手动启动的退出被旧戳算成长命而清掉计数。
+            // 3.8.900（L567-3）：失败本身也要记一笔熔断计数——
+            // 从没起来过的 App 每次重起都走这里，旧戳永远是空、
+            // czfRecordRelaunchExit 数不上，熔断永不触发、0.5 秒
+            // 一轮无限重起（窗口反复出现又卷走、报错框反复弹、
+            // 客进程反复拉起又死、耗电，关窗按钮都停不掉）；与
+            // 短命退出同口径记 1 次（同锁、同字段），满 3 次同样
+            // 停 10 分钟，10 分钟后下次退出再试一次（自愈同款）。
             pendingLock.lock()
             defer { pendingLock.unlock() }
             lastRelaunchStartedAt.removeValue(forKey: "\(bundleId)#\(dataUUID)")
+            failedRelaunchCounts["\(bundleId)#\(dataUUID)"] = (failedRelaunchCounts["\(bundleId)#\(dataUUID)"] ?? 0) + 1
+            lastRelaunchFailedAt["\(bundleId)#\(dataUUID)"] = Date()
             print("Failed to restart \(bundleId): \(error)")
         }
     }

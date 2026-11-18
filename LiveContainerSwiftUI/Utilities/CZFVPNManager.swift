@@ -75,6 +75,12 @@ public final class CZFVPNManager {
     private var rotateBaselineLink: String?
     private var rotateCooldownUntil = Date.distantPast
     private var rotateTriedLinks = Set<String>()
+    /// 轮换进行中（3.8.900（L567-1））：轮换改异步后，一轮（尤其
+    /// 节点多、全圈试下来）可能超过 30 秒巡检间隔，定时器到点会
+    /// 再起一轮——原来主线程同步跑不可能重叠。只在主线程上读写
+    /// （与 rotateTriedLinks 同款约束），轮换 Task 起时置真、
+    /// 跑完置假；在途时新一轮不叠加，只重排下一轮检查。
+    private var czfRotateRunning = false
     /// 无归属/无统计时探针连续失败次数（3.8.582（VPN-5））：只在主队
     /// 列上读写——handleRotateProbeResult 跑在 MainActor.run 里，
     /// rotateCheck 的 work item 也在主队列，与 rotateTriedLinks
@@ -1029,8 +1035,15 @@ public final class CZFVPNManager {
             vpnCoreLock.unlock()
         }
         // 有被标记 App 在启动：取消待执行的自动停，并记下时间
+        // 3.8.900（L567-2）：cancel 与置 nil 必须在同一把锁下——
+        // 本函数跑在 detached 后台任务里，noteRunningAppsChanged
+        // 在主线程排新任务；两条语句之间被插队会把新排任务的引
+        // 用抹掉，cancel 丢了、任务到点仍触发（下面 checkPendingStop
+        // 的停前复核是第二道防线）。
+        vpnCoreLock.lock()
         pendingStopWork?.cancel()
         pendingStopWork = nil
+        vpnCoreLock.unlock()
         lastFlaggedLaunchAt = Date()
         // 养号锁定（1）补钉：已经开了 VPN、还没钉过节点、也没
         // 亲手选过跟随全局的旧 App，第一次启动时就把当前全局
@@ -1276,25 +1289,41 @@ public final class CZFVPNManager {
     public func noteRunningAppsChanged(stillHasFlagged: Bool) {
         // 宿主自身走节点的开关开着时，核心同样算"还在被用"
         if stillHasFlagged || Self.isHostProxyEnabled {
+            // 3.8.900（L567-2）：cancel 与置 nil 在同一把锁下——
+            // ensureRunning 在 detached 任务里同时碰它（见该函数
+            // 注释），两条语句之间插队会抹掉对方刚排的任务。
+            vpnCoreLock.lock()
             pendingStopWork?.cancel()
             pendingStopWork = nil
+            vpnCoreLock.unlock()
             return
         }
         guard isRunning else { return }
+        // 3.8.900（L567-2）：取消旧任务、建新任务、赋值三步在
+        // 同一把锁下——建任务不碰共享状态，锁里建无妨；分开写
+        // 会在取消与赋值之间留窗口，ensureRunning 的 cancel+nil
+        // 落进来会把新任务引用抹掉（到点仍触发，靠下面的停前
+        // 复核兜底）。
+        vpnCoreLock.lock()
         pendingStopWork?.cancel()
         // 永不档：前面已取消待停任务，这里不再排新的——
         // asyncAfter 拿 .infinity 排期行为未定义，绝不能排。
-        guard !Self.autoStopDelay.isInfinite else { return }
+        guard !Self.autoStopDelay.isInfinite else {
+            vpnCoreLock.unlock()
+            return
+        }
         let work = DispatchWorkItem { [weak self] in
             self?.checkPendingStop()
         }
         pendingStopWork = work
+        vpnCoreLock.unlock()
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoStopDelay, execute: work)
     }
 
     /// 到点的自动停检查（noteRunningAppsChanged 排的任务与测速中
     /// 的重试共用）：逐项重查——核心还在跑、宿主开关关着、闲置
-    /// 够分钟数、测速窗口外，四项全过才停。测速窗口内不算数：
+    /// 够分钟数、测速窗口外、停前复核无标 VPN 的 App 在跑，五项
+    /// 全过才停（3.8.900（L567-2）：最后一项是漏网待停任务的兜底）。测速窗口内不算数：
     /// 30 秒后重查一次（测速有界、一定会结束），而不是丢掉这次
     /// 自动停、等下一次 App 变化（可能永远不来，核心就一直跑）。
     /// 重试同样逐项重查：期间有 App 启动/宿主开关打开，重查会
@@ -1314,7 +1343,11 @@ public final class CZFVPNManager {
             let retry = DispatchWorkItem { [weak self] in
                 self?.checkPendingStop()
             }
+            // 3.8.900（L567-2）：赋值进锁（ensureRunning 在 detached
+            // 里同时碰它；只锁赋值，建任务与排期不碰共享状态）。
+            vpnCoreLock.lock()
             pendingStopWork = retry
+            vpnCoreLock.unlock()
             DispatchQueue.main.asyncAfter(deadline: .now() + (delay - idle), execute: retry)
             return
         }
@@ -1325,8 +1358,30 @@ public final class CZFVPNManager {
             let retry = DispatchWorkItem { [weak self] in
                 self?.checkPendingStop()
             }
+            // 3.8.900（L567-2）：同上，赋值进锁。
+            vpnCoreLock.lock()
             pendingStopWork = retry
+            vpnCoreLock.unlock()
             DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: retry)
+            return
+        }
+        // 3.8.900（L567-2）：停之前再复核一次还有没有标 VPN 的
+        // App 在跑（与 noteRunningAppsChanged 同口径：坞里的在跑
+        // 列表）——待停任务可能因跨线程竞态成了漏网之鱼（cancel
+        // 丢了），只按闲置时间判会把正开着的 App 断网（钉死节点
+        // 的直接断网，跟随全局的悄悄直连），且没有任何提示；只
+        // 在虚拟窗模式下复核（原生窗 App 不进坞表，列表空不代表
+        // 没人在跑，那路保持现状）。在跑就不停、清掉本任务，
+        // 下次关 App 时 noteRunningAppsChanged 会重排。
+        if #available(iOS 16.0, *),
+           (MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow) == .virtualWindow,
+           MultitaskDockManager.shared.apps.contains(where: { app in
+               guard let info = app.appInfo else { return false }
+               return Self.isEnabled(for: info)
+           }) {
+            vpnCoreLock.lock()
+            pendingStopWork = nil
+            vpnCoreLock.unlock()
             return
         }
         stop()
@@ -1662,8 +1717,21 @@ public final class CZFVPNManager {
                 scheduleRotateCheck()
                 return
             }
-            if failedDelta >= 3 && proxiedDelta == 0 {
-                rotateToNextNode(for: appInfo)
+            if failedDelta >= 3 && proxiedDelta == 0, !czfRotateRunning {
+                // 3.8.900（L567-1）：轮换在后台起核心——rotateToNextNode
+                // 里的 start(withLink:) 是同步阻塞的 CGoInvoke（转换 +
+                // 起核，几秒），原来整段跑在主队列上，节点一死界面就
+                // 冻住几秒、候选多时冻更久；改 Task 里跑，跑完再排
+                // 下一轮检查（不先排：下一轮 30 秒从轮换结束起算，
+                // 与原来一致）；在途旗子防重叠（节点多、一轮超过
+                // 30 秒时定时器不再叠加第二轮）。
+                czfRotateRunning = true
+                Task { @MainActor in
+                    await self.rotateToNextNode(for: appInfo)
+                    self.czfRotateRunning = false
+                    self.scheduleRotateCheck()
+                }
+                return
             }
             scheduleRotateCheck()
             return
@@ -1726,12 +1794,26 @@ public final class CZFVPNManager {
             scheduleRotateCheck()
             return
         }
-        if let appInfo = owner {
-            rotateToNextNode(for: appInfo)
+        // 3.8.900（L567-1）：同统计路，轮换在后台起核心，跑完再排下一轮；
+        // 在途旗子防重叠（见 czfRotateRunning 声明注释）。
+        if !czfRotateRunning {
+            czfRotateRunning = true
+            if let appInfo = owner {
+                Task { @MainActor in
+                    await self.rotateToNextNode(for: appInfo)
+                    self.czfRotateRunning = false
+                    self.scheduleRotateCheck()
+                }
+            } else {
+                Task { @MainActor in
+                    await self.rotateGlobalNode(from: link)
+                    self.czfRotateRunning = false
+                    self.scheduleRotateCheck()
+                }
+            }
         } else {
-            rotateGlobalNode(from: link)
+            scheduleRotateCheck()
         }
-        scheduleRotateCheck()
     }
 
     /// 无归属时的全局轮换（3.8.582（VPN-5））：手动起核心没有归属
@@ -1739,7 +1821,11 @@ public final class CZFVPNManager {
     /// 列表顺序切下一个支持协议的节点并重启核心，只改全局活动
     /// 节点，不碰任何钉死。起不来的继续往下一个切，一圈都不通
     /// 就停轮换、写原因（rotateToNextNode 同款）。
-    private func rotateGlobalNode(from currentLink: String?) {
+    /// 3.8.900（L567-1）：@MainActor async——起核心是同步阻塞的
+    /// CGoInvoke，放 detached 跑，不冻主线程；主队列独占的状态
+    /// （rotateTriedLinks 等）仍在主 actor 上碰。
+    @MainActor
+    private func rotateGlobalNode(from currentLink: String?) async {
         vpnCoreLock.lock()
         let stillRunning = isRunning
         let current = runningLink
@@ -1757,13 +1843,24 @@ public final class CZFVPNManager {
             }
             rotateTriedLinks.insert(cursor)
             rotateTriedLinks.insert(target)
-            if start(withLink: target) {
-                if let idx = nodeLinks.firstIndex(of: target) {
-                    UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
-                }
-                return
+            // 3.8.900（L567-1）：起核心放 detached 跑（:613 注释与
+            // runApp 的 vpnCoreTask 同款）；await 不放条件里（607
+            // 修法同款），先取结果再判；落笔前复验核心仍跑在刚起
+            // 的节点上——await 回来这段时间里别的 App 可能已抢走
+            // 核心，这时再写活动下标就是错数。
+            let czfStarted = await Task.detached { [weak self] in self?.start(withLink: target) ?? false }.value
+            guard czfStarted else {
+                cursor = target
+                continue
             }
-            cursor = target
+            vpnCoreLock.lock()
+            let czfStillOurs = isRunning && runningLink == target
+            vpnCoreLock.unlock()
+            guard czfStillOurs else { return }
+            if let idx = nodeLinks.firstIndex(of: target) {
+                UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+            }
+            return
         }
         cancelRotateCheck()
         lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
@@ -1811,10 +1908,16 @@ public final class CZFVPNManager {
     // 可能刚起核心换了归属，重读会拿着旧 App 的死节点统计、
     // 去轮换新 App 的节点（无辜换 IP，养号最忌）；核心停了
     // 也一样会为已关 App 把核心重起起来。入口锁下复验归属
-    // 仍是该 App 且核心在跑，否则直接返回（rotateCheck 尾部
-    // 照常重排下一轮检查）。唯一调用方是 rotateCheck（主队
-    // 列），下面 bundleIdentifier() 直读安全。
-    private func rotateToNextNode(for appInfo: LCAppInfo) {
+    // 仍是该 App 且核心在跑，否则直接返回（调用方的 Task 续延
+    // 照常重排下一轮检查）。两个调用方（rotateCheck 与
+    // handleRotateProbeResult）都经 Task { @MainActor in } 调来，
+    // 下面 bundleIdentifier() 直读安全。
+    // 3.8.900（L567-1）：@MainActor async——起核心是同步阻塞的
+    // CGoInvoke，放 detached 跑，不冻主线程；主队列独占的状态
+    // 仍在主 actor 上碰；入口复验仍在函数开头做（函数跑在主
+    // actor 上，读到的是最新归属）。
+    @MainActor
+    private func rotateToNextNode(for appInfo: LCAppInfo) async {
         vpnCoreLock.lock()
         let stillOwner = isRunning && coreOwnerAppInfo === appInfo
         vpnCoreLock.unlock()
@@ -1847,7 +1950,17 @@ public final class CZFVPNManager {
             vpnCoreLock.lock()
             coreOwnerBundleId = nil
             vpnCoreLock.unlock()
-            if start(withLink: target, ownerBid: czfBid, ownerAppInfo: appInfo) {
+            // 3.8.900（L567-1）：起核心放 detached 跑（:613 注释与
+            // runApp 的 vpnCoreTask 同款）；await 不放条件里（607
+            // 修法同款），先取结果再判；落笔前复验核心仍跑在刚起
+            // 的节点上——await 回来这段时间里别的 App 可能已抢走
+            // 核心，这时再写钉死/活动下标/冷却基线就是错数。
+            let czfStarted = await Task.detached { [weak self] in self?.start(withLink: target, ownerBid: czfBid, ownerAppInfo: appInfo) ?? false }.value
+            if czfStarted {
+                vpnCoreLock.lock()
+                let czfStillOurs = isRunning && runningLink == target
+                vpnCoreLock.unlock()
+                guard czfStillOurs else { return }
                 // 3.8.523（L51）：起成功了才把目标节点写进钉死/
                 // 全局——原来先写再起，起失败继续试下一个，一圈
                 // 都起不来时钉死/全局已指着最后一个起失败的节
@@ -2942,8 +3055,12 @@ public final class CZFVPNManager {
         vpnCoreLock.lock()
         prewarmSuppressedAfterPing = false
         vpnCoreLock.unlock()
+        // 3.8.900（L567-2）：同 ensureRunning，cancel 与置 nil
+        // 在同一把锁下（本函数也可能被后台任务调）。
+        vpnCoreLock.lock()
         pendingStopWork?.cancel()
         pendingStopWork = nil
+        vpnCoreLock.unlock()
         if !isRunning {
             vpnCoreLock.lock()
             coreActionEpoch += 1
