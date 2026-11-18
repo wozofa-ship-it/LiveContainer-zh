@@ -358,7 +358,7 @@ struct LCContainerView : View {
                 saveIDFV()
             }
             if typingProxyHost != (container.spoofedProxyHost ?? "") || typingProxyPort != (container.spoofedProxyPort > 0 ? "\(container.spoofedProxyPort)" : "") {
-                saveProxy()
+                saveProxy(silent: true)
             }
         }
         
@@ -374,9 +374,16 @@ struct LCContainerView : View {
         delegate.saveContainer(container: container)
     }
 
-    func saveProxy() {
-        // host 留空 = 不走代理（同时清端口）；端口只认 1...65535，
-        // 非法输入静默丢弃（与 IDFV 离开时丢弃非法输入同款）。
+    func saveProxy(silent: Bool = false) {
+        // host 留空 = 不走代理（同时清端口）；端口只认 1...65535。
+        // 3.8.900（L568-22）：端口非法时原来直接 return，host 也
+        // 跟着静默丢了——用户填了 host、端口留空/填 99999，按回车
+        // 或离页后重进 host 栏是空的，全程无任何提示（端口栏是
+        // numberPad、无回车键，onSubmit 主要靠 host 栏回车或离页
+        // 触发，留空端口 `Int("")` 得 0，正好撞上这条 return）。
+        // 提交路（onSubmit）非法时报出来、保留输入框内容供修正；
+        // 离开路（onDisappear）仍静默丢弃，与 IDFV 离开时丢弃非法
+        // 输入同款。
         let host = typingProxyHost.trimmingCharacters(in: .whitespaces)
         let port = Int(typingProxyPort.trimmingCharacters(in: .whitespaces)) ?? 0
         if host.isEmpty {
@@ -386,6 +393,10 @@ struct LCContainerView : View {
             container.spoofedProxyHost = host
             container.spoofedProxyPort = port
         } else {
+            if !silent {
+                errorInfo = "代理端口须为 1–65535".loc
+                errorShow = true
+            }
             return
         }
         delegate.saveContainer(container: container)
@@ -550,6 +561,13 @@ struct LCContainerView : View {
         guard let ans = await deleteDataAlert.open(), ans else {
             return
         }
+        // 3.8.900（L568-16）：外置容器点“删除数据”永远弹错——
+        // 列目录/删文件全程没调 startAccessing，外置夹在沙盒
+        // 外，contentsOfDirectory 直接抛错进 catch、数据一行
+        // 都没删。L39 同款包一层；本地容器 bookmarkResolved
+        // 为 false，不碰。须与 L568-12（解析带 scope）合用。
+        let czfDidAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
+        defer { if czfDidAccess { container.containerURL.stopAccessingSecurityScopedResource() } }
         do {
             let fm = FileManager.default
             for file in try fm.contentsOfDirectory(at: container.containerURL, includingPropertiesForKeys: nil) {

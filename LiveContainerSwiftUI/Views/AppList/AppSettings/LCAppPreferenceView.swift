@@ -38,6 +38,15 @@ struct PSTextField: View {
                 }
                 .multilineTextAlignment(.trailing)
         }
+        // 3.8.900（L568-21）：只在 onSubmit 存——用户改完直接点
+        // 返回（不按键盘回车）就丢了本次输入，下次进页还是旧值，
+        // 静默丢设置（LCContainerView 的容器名/IDFV/代理三处同款
+        // 已在 onDisappear 补存，这里是漏的一处）。离开页面时再
+        // 存一次，与提交同值、幂等；进子页面时行也会消失，存的
+        // 是同一份值，无害。
+        .onDisappear {
+            delegate.set(key: key, val: val)
+        }
     }
     
 }

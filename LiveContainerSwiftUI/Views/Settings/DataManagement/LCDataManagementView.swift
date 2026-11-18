@@ -3203,6 +3203,19 @@ struct LCDataManagementView : View {
         }
         for container in snapshot.uiContainers {
             let srcURL = container.containerURL
+            // 3.8.900（L568-13）：外置容器备份静默漏备——本函数
+            // 全程没调过 startAccessing（全函数 grep 为 0），
+            // 外置夹在沙盒外，fileExists 直接 false：完整分支
+            // 两条 fileExists 判断全落空，容器既不计数也不进
+            // 失败清单，备份报成功、数据根本没进去；登录态分
+            // 支同款跳过。L39 只修了缓存清理那一路的同款缺口，
+            // 备份这三处漏了。L39 同款写法：只认
+            // bookmarkResolved 的，本机容器不碰；defer 在本轮
+            // 循环结束时跑（存储统计/缓存清理同款注释）。
+            // 须与 L568-12（解析带 scope）合用：没 scope 的
+            // URL 上 startAccessing 恒 false，单修这里没用。
+            let czfDidAccess = container.bookmarkResolved && srcURL.startAccessingSecurityScopedResource()
+            defer { if czfDidAccess { srcURL.stopAccessingSecurityScopedResource() } }
             let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
             // v216：成功拷回的数据容器数（健康分与预览共用；
             // AppGroup 组容器不计在内）
@@ -3254,6 +3267,11 @@ struct LCDataManagementView : View {
             // 快照在下面照旧备
             for container in snapshot.uiContainers {
                 let srcURL = container.containerURL
+                // 3.8.900（L568-13）：登录态分支同款——外置容器
+                // 的 fileExists 恒 false，整容器会话文件悄悄
+                // 跳过、备份仍报成功，恢复后登录回不来。
+                let czfDidAccess = container.bookmarkResolved && srcURL.startAccessingSecurityScopedResource()
+                defer { if czfDidAccess { srcURL.stopAccessingSecurityScopedResource() } }
                 if fm.fileExists(atPath: srcURL.path) {
                     let destURL = appBackupURL.appendingPathComponent(srcURL.lastPathComponent)
                     let r = Self.copyLoginStateFiles(from: srcURL, to: destURL, fm: fm)
@@ -3300,6 +3318,12 @@ struct LCDataManagementView : View {
         // 装上钥匙串桥之后还没被打开过
         var bridgeStatus: String? = nil
         for container in snapshot.uiContainers {
+            // 3.8.900（L568-13）：钥匙串快照读同款——外置容器
+            // 的 dump 文件没访问权读不到，guard 直接 continue，
+            // keychainHasSnapshot 恒 false，备份报“无快照”、恢复
+            // 时令牌悄悄丢了；桥状态文本同款读不到。
+            let czfDidAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
+            defer { if czfDidAccess { container.containerURL.stopAccessingSecurityScopedResource() } }
             // 桥的状态回执：备份弹窗要带出来定案（桥跑没跑、
             // 组对不对、条目在不在），取第一个有的容器那份
             if bridgeStatus == nil,
@@ -3552,6 +3576,13 @@ struct LCDataManagementView : View {
         let fm = FileManager.default
         var before: [URL: Date] = [:]
         for container in containers {
+            // 3.8.900（L568-17）：外置容器快照恒判“过期”——dump
+            // 明明新鲜，没访问权时 attributesOfItem 取不到 mtime，
+            // before 记不上；App 在跑时又不走 notNeeded 早退，关窗
+            // + 轮询 5 秒照样读不到，返 .stale，备份回执错报快照
+            // 过期。L39 同款包一层；须与 L568-12 合用。
+            let czfDidAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
+            defer { if czfDidAccess { container.containerURL.stopAccessingSecurityScopedResource() } }
             let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
             if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
                let mdate = attrs[.modificationDate] as? Date {
@@ -3574,6 +3605,12 @@ struct LCDataManagementView : View {
         while Date() < deadline {
             var refreshed = false
             for container in containers {
+                // 3.8.900（L568-17）：轮询段同款——关窗触发桥重写
+                // 后，外置容器 dump 的新 mtime 没访问权照样读不
+                // 到，refreshed 永远成不了 true，白等满 5 秒返
+                // stale；每轮现取现放（sleep 间隙不占访问权）。
+                let czfDidAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
+                defer { if czfDidAccess { container.containerURL.stopAccessingSecurityScopedResource() } }
                 let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
                 if let attrs = try? fm.attributesOfItem(atPath: dumpURL.path),
                    let mdate = attrs[.modificationDate] as? Date {
@@ -4090,6 +4127,11 @@ struct LCDataManagementView : View {
             var hasItems = false
             var newestDate: Date? = nil
             for container in app.uiContainers {
+                // 3.8.900（L568-17）：警告文案同款——外置容器 dump
+                // 没访问权读不到，hasDump 恒 false，备份预览里
+                // 明明有快照的 App 也被写成“钥匙串 ❌ 无快照”。
+                let czfDidAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
+                defer { if czfDidAccess { container.containerURL.stopAccessingSecurityScopedResource() } }
                 let dumpURL = container.containerURL.appendingPathComponent("CZFKeychainDump.plist")
                 guard let data = try? Data(contentsOf: dumpURL),
                       let items = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [[String: Any]] else { continue }
@@ -5817,6 +5859,13 @@ struct LCDataManagementView : View {
                     // 合并拷盘挪后台（见三件套注释）：逐文件
                     // copyItem 累计也是主线程长堵。
                     let mergeDest = live.containerURL
+                    // 3.8.900（L568-15）：登录态恢复合进外置容器写不进去——
+                    // mergeLoginStateOffMain 全程没调 startAccessing，
+                    // 外置夹在沙盒外，逐文件 copyItem 全失败、失败数
+                    // 累进报告，登录态备份明明有内容、恢复后登录还是
+                    // 回不来。L39 同款包一层；须与 L568-12 合用。
+                    let czfDidAccess = live.bookmarkResolved && mergeDest.startAccessingSecurityScopedResource()
+                    defer { if czfDidAccess { mergeDest.stopAccessingSecurityScopedResource() } }
                     let mergeMirror: URL? = live.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
                     let mergeResult = await Self.mergeLoginStateOffMain(from: containerFolder, to: mergeDest, mirrorGroupToHost: mergeMirror)
                     mergedLoginFiles += mergeResult.merged
@@ -5833,6 +5882,12 @@ struct LCDataManagementView : View {
                 // 拷盘挪后台（见三件套注释）；替换是原子的
                 // （见 replaceContainerOffMain），失败原数据保留、
                 // 照常 throw。
+                // 3.8.900（L568-15）：完整恢复原地覆盖同款——外置
+                // 容器没访问权时 tmp 目录都建不起来，replace
+                // 直接抛错，整个 App 的恢复就此中断、报告失败；
+                // 本地容器 bookmarkResolved 为 false，不碰。
+                let czfDidAccess = live.bookmarkResolved && live.containerURL.startAccessingSecurityScopedResource()
+                defer { if czfDidAccess { live.containerURL.stopAccessingSecurityScopedResource() } }
                 try await Self.replaceContainerOffMain(from: containerFolder, to: live.containerURL)
                 // 3.8.568（L319-1）：原地覆盖把磁盘 plist 整份换成备份里的，
                 // 但 live.keychainGroupId 读的是缓存的 infoDict（只在
@@ -6232,6 +6287,12 @@ struct LCDataManagementView : View {
                 for container in queueContainers {
                     // 3.8.582（BKP-3）：原子写 + fsync（见
                     // czfWriteAtomicallyAndSync；3.8.584 只做了原子写）。
+                    // 3.8.900（L568-15）：排队文件写进外置容器同款——
+                    // 没访问权时原子写直接失败、queuedAny 不置位，
+                    // 钥匙串排队导入悄悄丢了，下次启动桥读不到、
+                    // 登录回不来，回执里还不记这一笔。
+                    let czfDidAccess = container.bookmarkResolved && container.containerURL.startAccessingSecurityScopedResource()
+                    defer { if czfDidAccess { container.containerURL.stopAccessingSecurityScopedResource() } }
                     if Self.czfWriteAtomicallyAndSync(data: data, to: container.containerURL.appendingPathComponent("CZFKeychainImport.plist")) {
                         queuedAny = true
                     }
@@ -6269,7 +6330,17 @@ struct LCDataManagementView : View {
         // 进空容器。放关窗口之前，让关窗口也按纠正后的 dataUUID 走。
         // 3.8.544（L74）：逐点取当前值——uiContainers 是 @Published；磁盘存在性检查仍在调用方线程做，只把数组读搬回主线程。
         let currentContainers = await MainActor.run { app.uiContainers }
-        let existingContainers = currentContainers.filter { fm.fileExists(atPath: $0.containerURL.path) }
+        // 3.8.900（L568-14）：恢复任意一个备份后，外置容器条目
+        // 被当成“文件夹不存在”注销——外置夹在沙盒外，没调
+        // startAccessing 时 fileExists 恒 false，filter 把它
+        // 当幽灵条目剪掉；若它正好是选中/默认容器，选中还被
+        // 改指别的容器，下次启动进一个空容器、登录和数据看着
+        // 全没了（文件夹本身还在，只是注册丢了）。外置夹是
+        // 用户自管的，本来就不能用本地存在性判断（G6 与
+        // L566-3 同款：外置容器一律跳过、不删不注销）；真删
+        // 了文件夹的外置容器由容器页“外置存储不可用 + 删除
+        // 容器”按钮手动处理，不在这里误伤。
+        let existingContainers = currentContainers.filter { $0.storageBookMark != nil || fm.fileExists(atPath: $0.containerURL.path) }
         if existingContainers.count != currentContainers.count {
             // 3.8.513（L37）：同上，@Published 写包进 MainActor.run。
             await MainActor.run {

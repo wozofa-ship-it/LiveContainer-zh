@@ -1696,7 +1696,14 @@ public final class CZFVPNManager {
             return
         }
         // 有归属且统计可读 → 原来的增量统计路（下面 if 内，一字不动）
+        // 3.8.900（L568-1）：统计还得是新鲜的——归属 App 关掉/挂起后
+        // 文件冻结，增量恒为 0、轮换条件永不成立，探针兜底又只在
+        // “无归属或统计读不到”时才走，冻结但能读到的文件把它也堵
+        // 住了（宿主代理开着时核心留下来给源/下载用，节点死后宿主
+        // 流量一直走死节点，直到下次开标 VPN 的 App 或亲手切节点）。
+        // 文件不新鲜就走下面的探针兜底（实测，不认冻结的数）。
         if let appInfo = owner,
+           Self.czfProxyStatsFresh(for: appInfo),
            let dict = Self.proxyStatsDict(for: appInfo),
            let failed = Int64(dict["failed"] ?? ""),
            let proxied = Int64(dict["proxied"] ?? "") {
@@ -3072,7 +3079,9 @@ public final class CZFVPNManager {
     /// 读按包名统计文件并解析成 k=v 表；文件没有/读不出返回 nil。
     /// 统计文件在插件自己的目录（CZFVPN）里：多选时先找它，
     /// 没有再退第一个文件夹（旧单选行为），都没有才看开关默认
-    private static func proxyStatsDict(for appInfo: LCAppInfo) -> [String: String]? {
+    /// 3.8.900（L568-1）：统计文件地址——proxyStatsDict 与新鲜度检查
+    /// 共用同一算法（文件夹取法/包名分文件一字不动，只是抽出来）。
+    private static func czfProxyStatsURL(for appInfo: LCAppInfo) -> URL? {
         let czfFolders = LCAppModel.czfSplitTweakFolders(appInfo.tweakFolder)
         guard let folderName = czfFolders.first(where: { $0 == "CZFVPN" }) ?? czfFolders.first ?? (isEnabled(for: appInfo) ? "CZFVPN" : nil) else { return nil }
         let base = appInfo.isShared ? LCPath.lcGroupTweakPath : LCPath.tweakPath
@@ -3081,7 +3090,23 @@ public final class CZFVPNManager {
         // 不再退读老版共用文件——那是各 App 混在一起的老数，显示成当前
         // App 的就是错数
         let bid = appInfo.bundleIdentifier() ?? ""
-        let url = folder.appendingPathComponent("CZFProxyStats-\(bid).txt")
+        return folder.appendingPathComponent("CZFProxyStats-\(bid).txt")
+    }
+
+    /// 3.8.900（L568-1）：统计文件 90 秒内写过才算新鲜——插件只在
+    /// 有网络动作时写统计（节流 1.5 秒，见 CZFProxy.m 的
+    /// CZFWriteStats 调用点）；90 秒（三个巡检周期）一个字节没写，
+    /// 客进程要么已死、要么已挂起、要么一直没流量，文件里的数不
+    /// 是活证据，不能拿它拦轮换。只给 rotateCheck 用，设置页的
+    /// 统计显示一字不动（陈旧数照常显示，只是不再当轮换判据）。
+    private static func czfProxyStatsFresh(for appInfo: LCAppInfo) -> Bool {
+        guard let url = czfProxyStatsURL(for: appInfo),
+              let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return false }
+        return Date().timeIntervalSince(mtime) < 90
+    }
+
+    private static func proxyStatsDict(for appInfo: LCAppInfo) -> [String: String]? {
+        guard let url = czfProxyStatsURL(for: appInfo) else { return nil }
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         var dict: [String: String] = [:]
         for part in raw.split(separator: " ") {

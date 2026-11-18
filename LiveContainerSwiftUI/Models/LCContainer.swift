@@ -248,7 +248,16 @@ class LCContainer : ObservableObject, Hashable {
 
                 do {
                     var isStale = false
-                    let url = try URL(resolvingBookmarkData: bookmarkData, bookmarkDataIsStale: &isStale)
+                    // 3.8.900（L568-12）：书签是创建侧带 scope 建的
+                    // （LCUtils.bookmark(for:)，1<<11），这里解析
+                    // 原来用默认选项 []——解析侧 scope 是 1<<10，
+                    // 不带它解出的 URL 没有安全域，startAccessing
+                    // 恒 false（L566-8 分享扩展/快捷指令同款）。
+                    // 全仓其余解析点都带 1<<10，只剩这一处漏网。
+                    // 后果：外置容器在存储页恒显示 0 字节、缓存
+                    // 清理静默跳过（那两路已按 L39 包了
+                    // startAccessing，只等这里解出带 scope 的 URL）。
+                    let url = try URL(resolvingBookmarkData: bookmarkData, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), bookmarkDataIsStale: &isStale)
 
                     self.resolvedContainerURL = url
 

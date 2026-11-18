@@ -563,14 +563,30 @@
     // 起来后键盘同样会盖在宿主界面上；PiP 视频本身不受
     // resign 影响（只收第一响应者，不改场景前后台）。
     [self czfDismissKeyboard];
+    // 3.8.900（L568-11）：PiP 最小化 0.3 秒淡出中途停 PiP，
+    // 窗口直接消失——minimizeWindowPiP 的 completion 原来
+    // 无条件置 hidden=YES，不认序号（普通最小化那路 L564-2
+    // 已加 C5 序号，这里漏了）。WillStart 调它淡出，0.3 秒
+    // 内用户再点 PiP 按钮（WillStop → unminimizeWindowPiP，
+    // hidden=NO/alpha=1）或启动失败（L565-4 → 同款恢复），
+    // 旧 completion 到点仍把 hidden 置 YES：浮窗没了、窗口
+    // 也没了，坞里点回是空窗（内容还在，只是 hidden）。
+    // 与 minimizeWindow 同款：淡出记序号、completion 只认
+    // 最新序号；unminimize 先加序号作废在途淡出。
+    NSInteger czfPiPMinAnimSeq = ++self.czfWindowAnimSeq;
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.alpha = 0;
     } completion:^(BOOL finished) {
+        if (czfPiPMinAnimSeq != self.czfWindowAnimSeq) return;
         self.view.hidden = YES;
     }];
 }
 
 - (void)unminimizeWindowPiP {
+    // 3.8.900（L568-11）：恢复先作废在途的 PiP 淡出（见
+    // 上面注释）——不加这一行，completion 仍认旧序号，
+    // 到点把刚恢复的窗口重新藏起来。
+    self.czfWindowAnimSeq++;
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.hidden = NO;
         self.view.alpha = 1;
