@@ -166,7 +166,20 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         // 不然 onAppear 推进来的详情全被 guard 拦住、永远不读。
         if folderURL == lastScannedFolderURL, !items.isEmpty {
             detailsCancelled = false
-            return
+            // 3.8.900（L565-2）：O-5 短路只认文件夹 URL，不认内容——外面
+            // 增删 IPA 后切回来，onAppear 调 scan() 直接短路返回，列表陈旧：
+            // 新 IPA 不出现、已删的还留着，点它安装失败。短路前先比一次
+            // 递归枚举出的 IPA 地址集（collectIpaURLs 本来就是扫的第一步，
+            // 枚举本身便宜；贵的是逐文件 stat 与详情解包，短路照样省掉）：
+            // 地址集与当前列表一致才短路，不一致就走全扫；枚举失败时
+            // 也走全扫（全扫的 do/catch 会报真错）。
+            var found: [URL] = []
+            if (try? collectIpaURLs(in: folderURL, into: &found)) != nil {
+                let sortedFound = found.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                if sortedFound == items.map(\.url) {
+                    return
+                }
+            }
         }
         lastScannedFolderURL = folderURL
         cancelDetailTasks()

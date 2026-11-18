@@ -198,6 +198,21 @@ static PiPManager* sharedInstance = nil;
     // 没跑过 WillStart 时找不到登记，是空操作。
     [self czfRemoveBoundsObserverForController:pictureInPictureController];
     NSLog(@"%@", error.description);
+    // 3.8.900（L565-4）：WillStart 已跑、启动失败时没有 WillStop/
+    // DidStop——WillStart 已把窗口最小化（hidden=YES）、iOS 18+ 托管
+    // 路径把 contentView 从客 VC 视图里挪进 PiP 内容视图、还置了
+    // shouldIgnoreSceneUpdates=YES、关了后台通知；失败回调只拆 KVO，
+    // 窗口直接消失，坞里点回是空窗（contentView 还挂在已死的 PiP VC
+    // 里）。按 WillStop+DidStop 的逆操作恢复：只认当前会话（L57-1
+    // 同款守卫，错会话的迟到失败不碰新会话）；displayingVC 已释放时
+    // 全是 nil 消息，空操作。pipController 不置 nil，用户可再点 PiP
+    // 重试（DidStop 那路的 LCAutoEndPiP 清理是正常结束才走的，不照搬）。
+    if (pictureInPictureController != self.pipController) return;
+    self.displayingVC.shouldIgnoreSceneUpdates = NO;
+    [self.displayingDecoratedVC unminimizeWindowPiP];
+    [self.displayingVC.view insertSubview:self.displayingVC.contentView atIndex:0];
+    [self.displayingVC setBackgroundNotificationEnabled:true];
+    [self.displayingDecoratedVC updateVerticalConstraints];
 }
 
 - (void)observeValueForKeyPath:(NSString*)keyPath ofObject:(NSObject*)object change:(NSDictionary<NSString *,id> *) change context:(void *) context {

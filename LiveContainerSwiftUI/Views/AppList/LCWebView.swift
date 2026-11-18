@@ -842,8 +842,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
     // 用 UIAlertController 实现，completion 恰好调一次（无呈现
     // 方时走默认值、不挂起 JS）。
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url {
-            webView.load(URLRequest(url: url))
+        // 3.8.900（L565-5）：原来只取 request.url 再新建默认 GET 请求——
+        // <form method="post" target="_blank"> 的提交变 GET 发出去，
+        // 支付/登录/结账类表单直接 405 / 错页，请求头也一并丢了。直接载
+        // 原始 request，method/body/headers 全保留（仍在本 WKWebView
+        // 内加载，不另开窗口，见函数头注释）。
+        if navigationAction.request.url != nil {
+            webView.load(navigationAction.request)
         }
         return nil
     }
@@ -861,6 +866,17 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
             completionHandler()
             return
         }
+        // 3.8.900（L565-3）：present 可能被 UIKit 丢掉——顶层正在
+        // dismiss 上一个框（连续两次 alert() 时第二个 delegate 几毫秒
+        // 就到，dismiss 动画要 0.25 秒）或正在 present 别的弹窗时，
+        // present 失败、action 永不回调，completionHandler 没人调，
+        // JS 永久冻住（WebKit 释放未调的 handler 时还可能直接抛异常
+        // 闪退）。present 前先判顶层是否正处过渡/已离窗，有就直接调
+        // 默认 completion，不挂起 JS。
+        guard !topVC.isBeingDismissed, !topVC.isBeingPresented, topVC.view.window != nil else {
+            completionHandler()
+            return
+        }
         let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "lc.common.ok".loc, style: .default) { _ in completionHandler() })
         topVC.present(alert, animated: true)
@@ -868,6 +884,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
 
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         guard let topVC = czfTopmostViewController(for: webView) else {
+            completionHandler(false)
+            return
+        }
+        // 3.8.900（L565-3）：见 alert 同款——顶层正处过渡时 present
+        // 会被 UIKit 丢掉，completionHandler 没人调、JS 冻住；先判，
+        // 有过渡就按取消调默认 completion。
+        guard !topVC.isBeingDismissed, !topVC.isBeingPresented, topVC.view.window != nil else {
             completionHandler(false)
             return
         }
@@ -879,6 +902,13 @@ class WebViewDelegate : NSObject,WKNavigationDelegate, WKDownloadDelegate, WKUID
 
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
         guard let topVC = czfTopmostViewController(for: webView) else {
+            completionHandler(nil)
+            return
+        }
+        // 3.8.900（L565-3）：见 alert 同款——顶层正处过渡时 present
+        // 会被 UIKit 丢掉，completionHandler 没人调、JS 冻住；先判，
+        // 有过渡就按取消调默认 completion。
+        guard !topVC.isBeingDismissed, !topVC.isBeingPresented, topVC.view.window != nil else {
             completionHandler(nil)
             return
         }

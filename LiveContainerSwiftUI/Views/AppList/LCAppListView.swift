@@ -3672,12 +3672,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 要弹预览确认的不预取——预取会把远程 URL 换成本地
                 // 文件，文件分支不跑预览，第 2 个起直接装、没确认。
                 var prefetchTask: Task<(URL, URL)?, Never>? = nil
+                // 3.8.900（L565-1）：预取用的下载器实例留一份在外面——
+                // 队已清空/预取那一项已被删时，await 前要先调 helper.cancel()
+                // 停掉本次下载（只 cancel Task 不够，download() 不查
+                // Task.isCancelled）；prefetchURL 记下预取的是哪一项，
+                // await 前判它是否还在队里。
+                var prefetchHelper: DownloadHelper? = nil
+                var prefetchURL: URL? = nil
                 // 3.8.559（L309-1）：installQueue.first 离主线程读，与主线程 append 撞同一份 Array；回主线程取。
                 let next = await MainActor.run { installQueue.first }
                 if let next, !next.url.isFileURL, !next.preview {
                     let nextURL = next.url
+                    let helper = DownloadHelper()
+                    prefetchHelper = helper
+                    prefetchURL = nextURL
                     prefetchTask = Task {
-                        let helper = DownloadHelper()
                         let dest = FileManager.default.temporaryDirectory.appendingPathComponent("CZFPrefetch-\(UUID().uuidString).ipa")
                         do {
                             try await helper.download(url: nextURL, to: dest)
@@ -3751,7 +3760,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 if let oldPrefetched = prefetched {
                     try? FileManager.default.removeItem(at: oldPrefetched.file)
                 }
+                // 3.8.900（L565-1）：队已清空/预取那一项已被删时，别等整包
+                // 下完——清队按钮只改 installQueue，不通知循环；这里无条件
+                // await prefetchTask?.value，慢网/大包下 pill 挂几分钟、
+                // 白白下已删的包。await 前先判预取 URL 是否还在队里，不在
+                // 就调预取 helper 的 cancel()（LCDownloadView 既有）：
+                // cancel() resume continuation，download() 查到 cancelled
+                // 抛 CancellationError，预取 Task 立即返 nil，循环退出、
+                // pill 熄灭；还在队里就照等，预取照用。helper 与 URL 只在
+                // 本次预取在途期间留着，await 后清掉。
+                if let pfURL = prefetchURL {
+                    let stillQueued = await MainActor.run { installQueue.contains { $0.url == pfURL } }
+                    if !stillQueued {
+                        await MainActor.run { prefetchHelper?.cancel() }
+                    }
+                }
                 prefetched = await prefetchTask?.value ?? nil
+                prefetchHelper = nil
+                prefetchURL = nil
             }
             // 队列中途被清空：循环退出时 prefetched 还攥着刚下好的包，
             // 没人消费，顺手删掉，别留整包 IPA 在 tmp 里。
