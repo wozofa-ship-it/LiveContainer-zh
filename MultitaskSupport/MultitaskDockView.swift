@@ -2006,7 +2006,18 @@ extension Notification.Name {
                 guard czfRightOutwardFlick || translation.x > 12 else { return false }
                 fireDockAction { self.czfEdgeRightOutward() }
             } else {
-                guard abs(translation.x) > 24 * s else { return false }
+                // 3.8.900（L559-1）：往里切 App 别在斜滑的平头段抢闩——
+                // 拇指下滑先横后竖（GEST-3 注释同款），平头段某次
+                // .changed 到 adx>24*s、ady 还小（比值 <0.5）时，
+                // 斜滑分支判不上、横滑守卫（|dx|>1.5|dy|）先命中
+                // 闩锁切 App，之后比值进 [0.5, 2.0] 也没机会了，
+                // 抬指兜底也被闩锁拦住；快甩一次过、慢拖次次被抢，
+                // 就是“时灵时不灵”。纵向已 ≥8*s 时把横滑门槛从
+                // 24*s 推到 44*s（兜底往里那档的距离，斜滑有
+                // 充分路程先认出来）；干净横滑（ady<8*s）仍 24*s
+                // 就切，短横甩不受影响。
+                let czfDiagonalPossible = abs(translation.y) >= 8 * s // 3.8.900（L559-1）
+                guard abs(translation.x) > (czfDiagonalPossible ? 44 * s : 24 * s) else { return false } // 3.8.900（L559-1）
                 fireDockAction { self.czfEdgeRightInward() }
             }
             return true
@@ -2106,6 +2117,16 @@ extension Notification.Name {
         }
         guard globalSwipeRecognizers.contains(where: { $0 === gestureRecognizer }),
               let window = gestureRecognizer.view as? UIWindow else { return true }
+        // 3.8.900（L560-1）：第二根手指中途落下会重写进行中滑动
+        // 的起手状态——多指时 gestureRecognizer 已在跟踪触摸，
+        // shouldReceive 对新触摸仍无条件改写全局起手变量（边缘/
+        // 带内/起手 x），进行中的滑动就被偷换成新手指的起手
+        // （边缘→中间杀死斜滑，中间→边缘误武装边缘滑动）。
+        // 漏斗侧同款已在 L47（3.8.521，TweakLoader.m:440–505）
+        // 修过（只在观察 pan 跟踪 0 个触摸时写全局量），宿主
+        // 侧漏了，按同款镜像：已跟踪触摸时不改写任何起手状
+        // 态。单指流程 numberOfTouches 恒为 0，行为不变。
+        let czfStartStateLocked = gestureRecognizer.numberOfTouches > 0 // 3.8.900（L560-1）
         // 用户 2026-11-04 令：左往左滑根本不好用——折叠滑块
         // 也不拦：收起后栏收成滑块贴在左缘，拦滑块就等于左
         // 缘手势全死（左滑出源面板失灵的根因之一）；栏上滑
@@ -2118,10 +2139,11 @@ extension Notification.Name {
             let edgeLoc = touch.location(in: window)
             let atEdge = edgeLoc.x <= 44 || edgeLoc.x >= window.bounds.width - 44
             if !(atEdge && !czfTouchOnSliderOrProgress(touch)) {
-                globalSwipeStartEdge = 0
+                if !czfStartStateLocked { globalSwipeStartEdge = 0 } // 3.8.900（L560-1）
                 return false
             }
         }
+        if czfStartStateLocked { return true } // 3.8.900（L560-1）
         let loc = touch.location(in: window)
         let height = window.bounds.height
         globalSwipeStartInBand = loc.y >= height * Self.czfEdgeBandTop && loc.y <= height * Self.czfEdgeBandBottom
@@ -2338,12 +2360,19 @@ extension Notification.Name {
         switch source {
         case .host:
             guard now.timeIntervalSince(czfLastHostAppPanelActionAt) > 0.4 else { return }
-            czfLastHostAppPanelActionAt = now
         case .funnel:
             guard now.timeIntervalSince(czfLastFunnelAppPanelActionAt) > 0.4 else { return }
-            czfLastFunnelAppPanelActionAt = now
         }
         if now.timeIntervalSince(czfLastAppPanelOpenedAt) < 0.4, czfLastAppPanelOpenedSource != source { return }
+        // 3.8.900（L560-2）：节流戳只给真正跑到动作的调用记——
+        // 原来先记戳再过回声检查，被回声吞掉的那路也刷新了本源
+        // 节流戳，等于把该源下一次真滑动往后推一段（回声到达
+        // 与开面板之间的时差）；回声检查只拦跨源第二报，本源
+        // 节流不该替它记账。switchPanels 同款先过守卫再记戳。
+        switch source { // 3.8.900（L560-2）
+        case .host: czfLastHostAppPanelActionAt = now // 3.8.900（L560-2）
+        case .funnel: czfLastFunnelAppPanelActionAt = now // 3.8.900（L560-2）
+        }
         edgeCallbackBuzz()
         // 切换式（用户要求）：面板已打开再滑一次就关掉，
         // 不再是只能滑开、关还得点按钮/点遮罩。
@@ -2375,12 +2404,19 @@ extension Notification.Name {
         switch source {
         case .host:
             guard now.timeIntervalSince(czfLastHostSourcesPanelActionAt) > 0.4 else { return }
-            czfLastHostSourcesPanelActionAt = now
         case .funnel:
             guard now.timeIntervalSince(czfLastFunnelSourcesPanelActionAt) > 0.4 else { return }
-            czfLastFunnelSourcesPanelActionAt = now
         }
         if now.timeIntervalSince(czfLastSourcesPanelOpenedAt) < 0.4, czfLastSourcesPanelOpenedSource != source { return }
+        // 3.8.900（L560-2）：节流戳只给真正跑到动作的调用记——
+        // 原来先记戳再过回声检查，被回声吞掉的那路也刷新了本源
+        // 节流戳，等于把该源下一次真滑动往后推一段（回声到达
+        // 与开面板之间的时差）；回声检查只拦跨源第二报，本源
+        // 节流不该替它记账。switchPanels 同款先过守卫再记戳。
+        switch source { // 3.8.900（L560-2）
+        case .host: czfLastHostSourcesPanelActionAt = now // 3.8.900（L560-2）
+        case .funnel: czfLastFunnelSourcesPanelActionAt = now // 3.8.900（L560-2）
+        }
         edgeCallbackBuzz()
         if isSourcesPanelOpen {
             dismissSourcesOverlay()
