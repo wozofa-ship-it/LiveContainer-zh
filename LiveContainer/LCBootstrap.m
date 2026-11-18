@@ -756,7 +756,13 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     
     bool is32bit = [guestAppInfo[@"is32bit"] boolValue];
     if(is32bit) {
-        [lcUserDefaults removeObjectForKey:@"LC32BitTranslationLayerLogFile"];
+        // 3.8.900（L563-3）：32 位崩溃日志键清除与读取不在同一套 defaults——
+        // 原来清的是 lcUserDefaults（standard），而崩溃分享页（LCTabView）
+        // 从 lcShared()（app-group 套）读；写端 LiveExec32 是独立 App，只
+        // 能走 group 套写，standard 里永远没这个键，清除是空操作，旧日志路
+        // 径残留，下次 32 位崩溃分享会拿到过期日志。改清 group 套，与读取端
+        // 同一套；同一函数往下读模拟器选择时用的就是 lcSharedDefaults。
+        [lcSharedDefaults removeObjectForKey:@"LC32BitTranslationLayerLogFile"];
         if (!isJitEnabled) {
             return @"JIT is required to run 32-bit apps.";
         }

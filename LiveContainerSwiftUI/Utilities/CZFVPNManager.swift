@@ -80,6 +80,10 @@ public final class CZFVPNManager {
     /// rotateCheck 的 work item 也在主队列，与 rotateTriedLinks
     /// 同款约束。探通清零；连续两次失败才轮换。
     private var rotateProbeFailures = 0
+    /// 探针连续失败所属的节点链接（3.8.900（L563-1））：计数是“同一节点连续
+    /// 失败”的次数，节点一切换就重开一轮——原来只记次数不记归属，旧节点攒了
+    /// 1 次失败后手动切节点/统计路轮换，新节点再抖一次就满两次被轮换。
+    private var rotateProbeLink: String?
     private static let autoRotateKey = "CZFVPNAutoRotate"
     // 轮换开关：键不存在 = 开（用户亲令要轮换，默认开着，随时可关）
     public static var isAutoRotateEnabled: Bool {
@@ -1676,7 +1680,9 @@ public final class CZFVPNManager {
         Task { [weak self] in
             guard let self else { return }
             let ok = await self.probeNodeThroughCore(timeout: 5)
-            await MainActor.run { self.handleRotateProbeResult(ok: ok) }
+            // 3.8.900（L563-1）：把探针发起时的链接带给结果处理——探针跑完
+            // 时节点可能已换，旧节点的结果不能记到新节点头上。
+            await MainActor.run { self.handleRotateProbeResult(ok: ok, link: link) }
         }
     }
 
@@ -1684,7 +1690,22 @@ public final class CZFVPNManager {
     /// 与 rotateCheck/rotateToNextNode 同在主队列）：探通清零；
     /// 连续两次探不通才轮换——有归属走 rotateToNextNode（它自带
     /// 归属复验），无归属走下面的全局轮换。处理完重排下一轮。
-    private func handleRotateProbeResult(ok: Bool) {
+    /// 3.8.900（L563-1）：计数按链接分账——探针跑完时节点已换（手动切/
+    /// 统计路轮换/启停）就丢弃这份旧结果；链接变了就重开一轮计数，
+    /// 旧节点的 1 次失败不算到新节点头上。
+    private func handleRotateProbeResult(ok: Bool, link probeLink: String?) {
+        vpnCoreLock.lock()
+        let currentLink = runningLink
+        let coreRunning = isRunning
+        vpnCoreLock.unlock()
+        guard coreRunning, let probeLink, currentLink == probeLink else {
+            scheduleRotateCheck()
+            return
+        }
+        if rotateProbeLink != probeLink {
+            rotateProbeLink = probeLink
+            rotateProbeFailures = 0
+        }
         if ok {
             rotateProbeFailures = 0
             scheduleRotateCheck()

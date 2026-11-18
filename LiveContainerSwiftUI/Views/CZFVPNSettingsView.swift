@@ -1012,6 +1012,12 @@ struct CZFVPNSettingsView: View {
                     UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFVPNSubAutoUpdateLast")
                     mergeSubscriptionLinks(links)
                 case .failure(let error):
+                    // 3.8.900（L563-2）：失败也记时间——原来只在成功时写
+                    // CZFVPNSubAutoUpdateLast，订阅地址一失效，每次进 VPN 页
+                    //（.onAppear）都重新拉一次、弹一次错；成功路 24 小时一次，
+                    // 失败路完全无退避。失败记时间后 24 小时内不再自动拉、也不
+                    // 再弹；想立即重试走“导入订阅”手动拉。
+                    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFVPNSubAutoUpdateLast")
                     errorInfo = "订阅自动更新失败：\(error.localizedDescription)"
                     errorShow = true
                 }

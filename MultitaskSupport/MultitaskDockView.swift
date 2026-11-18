@@ -1671,6 +1671,24 @@ extension Notification.Name {
     // 边缘手势一次性闩锁：一次拖动只触发一次动作（源面板入口带震动，
     // 不闩住会在 .changed 里连震好几下）
     private var czfEdgeSwipeLatched = false
+    // 3.8.900（L561-1）：闩锁的持有者——闩锁是全局手势共用的
+    // （每个窗口一个 pan 识别器，全指 handleGlobalSwipe；栏
+    // 藏着时还有 handleEdgeSwipe 的边条识别器也共用它），
+    // 但复位/清闩原来不认识别器：另一窗口的 pan 一 .began
+    // 就把进行中滑动的闩锁清掉（或一 .ended 就替它清掉），
+    // 进行中的滑动下一跳 .changed 会二次触发——切 App 会连
+    // 切两个。闩锁只认触发它的那支识别器：别人 .began/.ended
+    // 一律不动它；持有者已释放（weak 变 nil）时当无人持有。
+    private weak var czfEdgeSwipeLatchedBy: UIPanGestureRecognizer?
+    // 3.8.900（L561-2）：各识别器自己的起手状态——起手全局量
+    // （globalSwipeStart*）原来也是共用的，另一窗口的 pan 一
+    // 接新触摸就改写它：手指 1 在屏幕中间拖、手指 2 落在另一
+    // 窗口的右边缘，起手就被偷换成 edge=2，手指 1 下一跳
+    // .changed 直接走右边缘分支、位移一过门槛就误切 App。
+    // L560-1 的锁只拦同一识别器的第二指，跨识别器拦不住。
+    // 起手按识别器分账记，handler 只读自己那支的；全局量
+    // 照旧维护，只当字典缺项时的回落。
+    private var czfSwipeStartByRecognizer: [ObjectIdentifier: (edge: Int, inBand: Bool, inOutwardBand: Bool, x: CGFloat)] = [:]
     // 左边缘系统手势（2026-11-04 22:xx）：直接左滑被系统在落指时
     // 就认领、App 侧触摸没动就死了，sendEvent 再松的阈值也接不住
     // （272 改阈值零变化实证）。UIScreenEdgePanGestureRecognizer 是
@@ -1722,6 +1740,9 @@ extension Notification.Name {
                 self?.setupGlobalSwipeRecognizer()
             })
         }
+        // 3.8.900（L561-2）：摘掉的识别器分账一并清掉，不留死键。
+        let czfDeadRecognizers = globalSwipeRecognizers.filter { $0.view == nil }
+        for dead in czfDeadRecognizers { czfSwipeStartByRecognizer.removeValue(forKey: ObjectIdentifier(dead)) }
         globalSwipeRecognizers.removeAll { $0.view == nil }
         czfLeftEdgePanRecognizers.removeAll { $0.view == nil }
         var windows = UIApplication.shared.connectedScenes
@@ -1867,12 +1888,23 @@ extension Notification.Name {
         let width = gesture.view?.bounds.width ?? 0
         switch gesture.state {
         case .began:
-            czfEdgeSwipeLatched = false
+            // 3.8.900（L561-1）：只复位自己的闩锁——另一窗口的
+            // pan 已闩锁（动作已触发、手指还在动）时，本识别器
+            // 的 .began 不能替它清闩，否则它下一跳 .changed 二
+            // 次触发。闩锁属于本识别器或无人持有时照旧复位。
+            if czfEdgeSwipeLatchedBy == nil || czfEdgeSwipeLatchedBy === gesture {
+                czfEdgeSwipeLatched = false
+                czfEdgeSwipeLatchedBy = nil
+            }
         case .changed:
             // 3.8.584（GEST-2）：右边缘起手一律放行到判定——斜滑不认带（见下），横滑/往外弹分支自己仍守 startInBand，带外横滑到这里返回 false，不闩锁。
-            guard globalSwipeStartEdge == 0 || globalSwipeStartEdge == 2 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
-            if processGlobalSwipe(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width, velocityX: gesture.velocity(in: gesture.view).x) {
+            // 3.8.900（L561-2）：读本识别器自己的起手状态，不读
+            // 共用全局量（另一窗口的 pan 接新触摸会改写它）。
+            let czfStart = czfSwipeStartByRecognizer[ObjectIdentifier(gesture)] ?? (edge: globalSwipeStartEdge, inBand: globalSwipeStartInBand, inOutwardBand: globalSwipeStartInOutwardBand, x: globalSwipeStartX)
+            guard czfStart.edge == 0 || czfStart.edge == 2 || czfStart.inBand || czfStart.inOutwardBand, !czfEdgeSwipeLatched else { return }
+            if processGlobalSwipe(startEdge: czfStart.edge, startInBand: czfStart.inBand, startInOutwardBand: czfStart.inOutwardBand, translation: translation, endX: endX, width: width, velocityX: gesture.velocity(in: gesture.view).x) {
                 czfEdgeSwipeLatched = true
+                czfEdgeSwipeLatchedBy = gesture // 3.8.900（L561-1）：记下是谁闩的
                 // 3.8.284：认领了面板手势（开 App 面板/切 App/
                 // 藏栏），客 App 的触摸到此为止
                 if let window = gesture.view as? UIWindow {
@@ -1880,10 +1912,23 @@ extension Notification.Name {
                 }
             }
         case .ended, .cancelled:
-            defer { czfEdgeSwipeLatched = false }
+            // 3.8.900（L561-1）：只清自己的闩锁——另一识别器的
+            // 滑动还在进行时，本识别器的终结不能替它清闩；闩锁
+            // 属于本识别器（或持有者已释放）时照旧清掉。
+            // 3.8.900（L561-2）：起手分账用完即清，不留死键。
+            defer {
+                if czfEdgeSwipeLatchedBy == nil || czfEdgeSwipeLatchedBy === gesture {
+                    czfEdgeSwipeLatched = false
+                    czfEdgeSwipeLatchedBy = nil
+                }
+                czfSwipeStartByRecognizer.removeValue(forKey: ObjectIdentifier(gesture))
+            }
             // 3.8.584（GEST-2）：同上，右边缘起手放行到兜底，兜底里的斜滑分支才接得住中途没触发的快甩。
-            guard globalSwipeStartEdge == 0 || globalSwipeStartEdge == 2 || globalSwipeStartInBand || globalSwipeStartInOutwardBand, !czfEdgeSwipeLatched else { return }
-            processGlobalSwipeFallback(startEdge: globalSwipeStartEdge, startInBand: globalSwipeStartInBand, startInOutwardBand: globalSwipeStartInOutwardBand, translation: translation, endX: endX, width: width, startX: globalSwipeStartX)
+            let czfStart = czfSwipeStartByRecognizer[ObjectIdentifier(gesture)] ?? (edge: globalSwipeStartEdge, inBand: globalSwipeStartInBand, inOutwardBand: globalSwipeStartInOutwardBand, x: globalSwipeStartX)
+            guard czfStart.edge == 0 || czfStart.edge == 2 || czfStart.inBand || czfStart.inOutwardBand, !czfEdgeSwipeLatched else { return }
+            processGlobalSwipeFallback(startEdge: czfStart.edge, startInBand: czfStart.inBand, startInOutwardBand: czfStart.inOutwardBand, translation: translation, endX: endX, width: width, startX: czfStart.x)
+        case .failed:
+            czfSwipeStartByRecognizer.removeValue(forKey: ObjectIdentifier(gesture)) // 3.8.900（L561-2）：没认出滑动，分账即清
         default:
             break
         }
@@ -2156,6 +2201,10 @@ extension Notification.Name {
             globalSwipeStartEdge = 0
         }
         globalSwipeStartX = loc.x
+        // 3.8.900（L561-2）：起手按识别器分账记一份（全局量照
+        // 旧写，当字典缺项时的回落）；锁住时不写——本识别器
+        // 已有第一指的分账，第二指不许覆写（L560-1 同款）。
+        czfSwipeStartByRecognizer[ObjectIdentifier(gestureRecognizer)] = (edge: globalSwipeStartEdge, inBand: globalSwipeStartInBand, inOutwardBand: globalSwipeStartInOutwardBand, x: loc.x)
         return true
     }
 
@@ -3001,6 +3050,19 @@ extension Notification.Name {
     }
     
     @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        // 3.8.900（L561-1）：边条手势终结时清自己的闩锁——原来
+        // 这路根本没有终结清闩（下面守卫只放行 .began/.changed，
+        // .ended 直接 return），闩锁要等下一支手势的 .began 才
+        // 清；跨识别器时那次 .began 还会替别人清闩。放最前，
+        // 总开关关着也清（闩锁只能是开关开着时闩上的，开关
+        // 中途关掉不能让它赖着不走）。
+        if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
+            if czfEdgeSwipeLatchedBy == nil || czfEdgeSwipeLatchedBy === gesture {
+                czfEdgeSwipeLatched = false
+                czfEdgeSwipeLatchedBy = nil
+            }
+            return
+        }
         // 3.8.560（L252-1）：右缘分支漏了总开关守卫——台前有客 App
         // 时走 showDockFromHidden，它只守 LCHideDock、不认总开关；
         // 总开关关着 + 栏藏着 + 右缘一滑超 30pt，栏照样弹出来。
@@ -3011,7 +3073,11 @@ extension Notification.Name {
             return
         }
         if gesture.state == .began {
-            czfEdgeSwipeLatched = false
+            // 3.8.900（L561-1）：只复位自己的闩锁（见 handleGlobalSwipe）。
+            if czfEdgeSwipeLatchedBy == nil || czfEdgeSwipeLatchedBy === gesture {
+                czfEdgeSwipeLatched = false
+                czfEdgeSwipeLatchedBy = nil
+            }
         }
 
         let translation = gesture.translation(in: gesture.view)
@@ -3019,6 +3085,7 @@ extension Notification.Name {
 
         if swipeDistance > Constants.edgeSwipeThreshold, !czfEdgeSwipeLatched {
             czfEdgeSwipeLatched = true
+            czfEdgeSwipeLatchedBy = gesture // 3.8.900（L561-1）：记下是谁闩的
             // 左边缘（屏幕边缘手势只能往里拖）= App 面板
             // （2026-10-23 对调后，与全局甩手判定一致）；
             // 右边缘：App 页（没有台前 App）且有运行中 App
