@@ -1897,6 +1897,16 @@ public final class CZFVPNManager {
             // 上一轮起核失败后核心若还在跑，一定是别人刚起的，收手）。
             if !czfFirstAttempt, czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: nil) { return }
             czfFirstAttempt = false
+            // 3.8.900（L571-1）：每轮起核前重查测速窗口——轮换是多候选、
+            // 每候选一次阻塞式起核的长 Task，上一候选起失败后核心已停，
+            // 用户此时点“测延迟”（先停核心再测）会与本轮下一候选起核
+            // 撞上：起核成功会让整轮 pingBatch/探针记“核心占用”，
+            // 结果全作废。收手：巡检由调用方的 Task 续延重排，不取消、
+            // 不写“一圈都不通”（L570-2 同款收手语义）。
+            vpnCoreLock.lock()
+            let czfPingingNow = isPinging
+            vpnCoreLock.unlock()
+            if czfPingingNow { return }
             // 3.8.900（L570-2）：每轮起核前重查轮换开关——开关只在排巡检
             // （scheduleRotateCheck）与巡检入口（rotateCheck）查过一次，
             // 一轮轮换要起好几个候选、每候选一次阻塞式起核就是几秒，
@@ -1974,6 +1984,14 @@ public final class CZFVPNManager {
             // 第一轮也验——ensureRunning 那次起核若是被归属守卫拒的
             // （核心正被别的 App 占着），一个候选都不该试）。
             if czfRetryYielded(stopEpochAtEntry: stopEpochAtEntry, for: appInfo) { return }
+            // 3.8.900（L571-1）：每轮起核前重查测速窗口（同轮换两路：
+            // 上一候选起失败后核心已停，用户此时点“测延迟”会与本轮
+            // 下一候选起核撞上，整轮 pingBatch/探针记“核心占用”、
+            // 结果全作废；收手：App 按既有 fail-open 放行）。
+            vpnCoreLock.lock()
+            let czfPingingNow = isPinging
+            vpnCoreLock.unlock()
+            if czfPingingNow { return }
             if start(withLink: cand.link, ownerBid: czfBid, ownerAppInfo: appInfo) {
                 if let appInfo = appInfo, Self.nodeOverride(for: appInfo) != nil {
                     Self.setNodeOverride(cand.link, for: appInfo)
@@ -2045,6 +2063,15 @@ public final class CZFVPNManager {
             // 不写“一圈都不通”（节点没死，是让路）；第一轮入口刚验过，
             // 代次与归属都是现取的，复验恒过。
             if czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: appInfo) { return }
+            // 3.8.900（L571-1）：每轮起核前重查测速窗口（同 rotateGlobalNode：
+            // 轮换是多候选、每候选一次阻塞式起核的长 Task，上一候选起失败
+            // 后核心已停，用户此时点“测延迟”会与本轮下一候选起核撞上，
+            // 整轮 pingBatch/探针记“核心占用”、结果全作废；收手时不取消
+            // 巡检、不写“一圈都不通”，调用方的 Task 续延重排）。
+            vpnCoreLock.lock()
+            let czfPingingNow = isPinging
+            vpnCoreLock.unlock()
+            if czfPingingNow { return }
             // 3.8.900（L570-2）：每轮起核前重查轮换开关（同 rotateGlobalNode：
             // 开关只在排巡检与巡检入口查过，轮换本身是多候选、每候选一次
             // 阻塞式起核的长 Task，中途关开关不复验就照常换节点；收手时

@@ -4028,8 +4028,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 Self.czfClaimedInboxFiles.insert(fileKey)
                 Task {
+                    // 3.8.900（L571-2）：用户在替换弹窗/预览/进度条旁
+                    // 点取消，installFromUrl 返 false、JSON 留着下次
+                    // 重试，下次进前台又自动弹出安装框，每次前台都弹
+                    // 一次。取消单独记：装前清一次取消标记、装完一次
+                    // 取齐（enqueueInstall :3692/:3699 同款），取消也
+                    // 删 JSON；真失败才留着重试。标记是 @State，两跳
+                    // 都回主线程（L311-1 同款）。
+                    await MainActor.run { self.czfLastInstallWasCancelled = false }
                     let ok = await self.installFromUrl(urlStr: fileURLString)
-                    if ok { try? fm.removeItem(at: url) }
+                    let czfWasCancelled = await MainActor.run {
+                        let v = self.czfLastInstallWasCancelled
+                        self.czfLastInstallWasCancelled = false
+                        return v
+                    }
+                    if ok || czfWasCancelled { try? fm.removeItem(at: url) }
                     // L58-1：本 Task 是裸 Task、跑在全局执行器上，
                     // czfClaimedInboxFiles 是静态 Set、其余读写
                     // （contains/insert）都在主线程——离主线程删
