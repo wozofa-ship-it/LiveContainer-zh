@@ -776,6 +776,29 @@ public final class CZFVPNManager {
         // 不走这里，手动强制切换的原语义不动。
         if wasActive && trimmed != oldLink {
             czfFollowListChange()
+        } else if trimmed != oldLink {
+            // 3.8.900（L576-1）：改的不是全局在用节点、但核心正跑
+            // 在这条旧链接上（钉死它的 App 的节点）时也要跟过去——
+            // 上面 remap 只把钉死挪到新链接上，核心却还跑着旧链接：
+            // 用户改链接多半是旧服务器/密码已死，改完 App 还走旧
+            // 链接继续失败、界面却显示新链接，等于改了个寂寞；
+            // 下次开 App 时才按新钉死起，之前一直跑旧的。
+            // 只认“核心正跑的正是被改这条”：跑在别的钉死节点上
+            // 时不动（L574-1 同款，绝不抢走养号 App 的核心）；
+            // 跟随目标是改后的新链接，不是全局节点（czfFollowListChange
+            // 只会跟全局，钉死 App 跟过去就悄悄换了 IP）。
+            // 归属原样带进 start（锁下读到的现任归属），起成功后
+            // 归属不变；测速窗口内核心已停（runningLink 为 nil），
+            // 不触发，收尾 restart 按已 remap 的新钉死起（见
+            // restartCoreAfterPing 的 effectiveLink）。
+            vpnCoreLock.lock()
+            let czfRunningOldLink = isRunning && runningLink == oldLink
+            let czfOwnerBid = coreOwnerBundleId
+            let czfOwnerAppInfo = coreOwnerAppInfo
+            vpnCoreLock.unlock()
+            if czfRunningOldLink {
+                _ = start(withLink: trimmed, ownerBid: czfOwnerBid, ownerAppInfo: czfOwnerAppInfo)
+            }
         }
         return true
     }
@@ -798,6 +821,9 @@ public final class CZFVPNManager {
         if nodeScheme(for: link) == "vmess", let vmess = vmessDisplay(for: std) {
             name = vmess.name
             detail = vmess.detail
+        } else if nodeScheme(for: link) == "ss", let ss = ssDisplay(for: std) {
+            name = ss.name
+            detail = ss.detail
         } else if let comps = URLComponents(string: std) {
             if let frag = comps.fragment, !frag.isEmpty {
                 name = frag
@@ -858,6 +884,74 @@ public final class CZFVPNManager {
         let remark = (dict["ps"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !remark.isEmpty || !hostPort.isEmpty else { return nil }
         return (name: remark.isEmpty ? hostPort : remark, detail: hostPort)
+    }
+
+    /// ss 链接解地址：`ss://<base64(method:password@host:port)>#名`
+    /// （整段 authority 是 base64 的老格式）。通用路拿 base64 当
+    /// 主机名——有 #备注时详情行显示一整串 base64 而不是地址:端口，
+    /// 没备注时名字本身就是那串 base64，列表里认不出是哪个节点
+    /// （vmessDisplay 的 L51 同款）。只有 authority 里没有 "@"
+    /// 时才试解（`ss://base64@host:port` 那种只编了 userinfo 的，
+    /// 通用路本来就能读出 host:port，不动它）；解不出/格式不对
+    /// 返回 nil，调用方走通用路。base64 可能是 URL 安全变体
+    /// （- _）且缺 padding，与 vmessDisplay 同款处理。
+    /// 3.8.900（L575-2）
+    private static func ssDisplay(for link: String) -> (name: String, detail: String)? {
+        guard link.hasPrefix("ss://") else { return nil }
+        var rest = String(link.dropFirst("ss://".count))
+        // 外面的 #备注先取出来（名字优先用它）；authority 是 # 之前那段。
+        var remark = ""
+        if let hashIdx = rest.firstIndex(of: "#") {
+            let rawRemark = String(rest[rest.index(after: hashIdx)...])
+            remark = rawRemark.removingPercentEncoding ?? rawRemark
+            rest = String(rest[..<hashIdx])
+        }
+        // authority 里有 @ 就是标准/半 base64 格式，通用路能读，不动。
+        guard !rest.contains("@") else { return nil }
+        // base64 本身可能含 "/"，整段先试；外面带 "/?plugin=…" 时
+        // 再试 "/" / "?" 之前的前缀。两次都按下面的严格形状验，
+        // 解出来不是 method:password@host:port 就返回 nil，不误伤。
+        var candidates: [String] = [rest]
+        if let slashIdx = rest.firstIndex(of: "/") { candidates.append(String(rest[..<slashIdx])) }
+        if let qIdx = rest.firstIndex(of: "?") { candidates.append(String(rest[..<qIdx])) }
+        for candidate in candidates {
+            let b64 = candidate
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let padded = b64 + String(repeating: "=", count: (4 - b64.count % 4) % 4)
+            guard let data = Data(base64Encoded: padded),
+                  var decoded = String(data: data, encoding: .utf8) else { continue }
+            decoded = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+            // 解开后可能带 "/?plugin=…" 或 "#名"，先切掉。
+            if let cutIdx = decoded.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) {
+                decoded = String(decoded[..<cutIdx])
+            }
+            // method:password@host:port——密码里可能含 ":"，按第一个
+            // ":" 分 method；host:port 按最后一个 "@" 与最后一个
+            // ":" 分（IPv6 主机带方括号）。
+            guard let atIdx = decoded.lastIndex(of: "@") else { continue }
+            let hostPort = String(decoded[decoded.index(after: atIdx)...])
+            let methodAndPassword = String(decoded[..<atIdx])
+            guard methodAndPassword.contains(":") else { continue }
+            let host: String
+            let port: String
+            if hostPort.hasPrefix("[") {
+                guard let closeIdx = hostPort.firstIndex(of: "]") else { continue }
+                let afterBracket = hostPort.index(after: closeIdx)
+                guard afterBracket < hostPort.endIndex, hostPort[afterBracket] == ":" else { continue }
+                host = String(hostPort[hostPort.index(after: hostPort.startIndex)..<closeIdx])
+                port = String(hostPort[hostPort.index(after: afterBracket)...])
+            } else {
+                guard let colonIdx = hostPort.lastIndex(of: ":") else { continue }
+                host = String(hostPort[..<colonIdx])
+                port = String(hostPort[hostPort.index(after: colonIdx)...])
+            }
+            guard !host.isEmpty, let portInt = Int(port), (1...65535).contains(portInt) else { continue }
+            let hostPortText = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+            let cleanRemark = remark.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (name: cleanRemark.isEmpty ? hostPortText : cleanRemark, detail: hostPortText)
+        }
+        return nil
     }
 
     /// 节点链接的协议 scheme（小写；原始 Xray JSON 出站记
@@ -1583,6 +1677,22 @@ public final class CZFVPNManager {
             return false
         }
         if isRunning && runningLink == link { return true }
+        // 3.8.900（L575-1）：测速窗口内不起主核心——六路调用方
+        // （ensureRunning / start() / waitUntilNodeReady / 轮换两路 /
+        // startFallback）起核前都查过 isPinging，但查与起之间隔着
+        // effectiveLink/nodeOverride 的 main.sync 与归属守卫：查完
+        // 到起核之间用户在另一页点下“测延迟”，窗口已立、起核照常
+        // 跑，pingBatch/探针撞上在跑的核心、整批记“核心占用”，
+        // 测速白跑一轮、还弹“核心在跑”。这里已持 vpnCoreLock
+        // （pingAllNodes/pingSingleNode 立标志走同一把锁），锁下
+        // 再验一次才是终审；已在跑同一条时上面已直接返回 true，
+        // 不扰测速。测速收尾的 restartCoreAfterPing 在 isPinging
+        // 已清后才跑，不受影响；轮换/就地切的每轮重查（L571-1）
+        // 仍在，起核被拒后各自收手，不死循环。
+        guard !isPinging else {
+            lastError = "测速进行中，稍后再试"
+            return false
+        }
         // 锁下再认归属：已被别的 App 钉死占住时拒绝，不停它的核心。
         if isRunning, let owner = coreOwnerBundleId, let bid = ownerBid, bid != owner {
             lastError = "核心正被另一个已钉死节点的 App 占用，暂不切换（手动在设置里切节点可强制切换）"
@@ -2439,6 +2549,7 @@ public final class CZFVPNManager {
             return
         }
         let hadSnapshot = pingStoppedLink != nil
+        let czfSnapshotLink = pingStoppedLink
         var owner = pingStoppedOwner
         pingStoppedLink = nil
         pingStoppedOwner = nil
@@ -2473,6 +2584,17 @@ public final class CZFVPNManager {
         // 这里只补全局（owner 为 nil）那一路。isRunning 与
         // 清抑制同一把锁下读改，与测速收尾的读法一致。
         vpnCoreLock.lock()
+        // 3.8.900（L575-1）：重启撞上新一轮测速时别丢快照——上面守卫
+        // 通过后、ensureRunning 起核前，另一页点了“测延迟”，新窗口
+        // 已立、start(withLink:) 里的测速守卫会拒掉这次起核；快照已
+        // 被上面清掉的话，新一轮收尾的 restart 读不到快照、测速前在
+        // 跑的核心一直停着。起核被测速挡下时把快照还回去，留给新一
+        // 轮收尾重试（L227 同款“留给最新一轮”）；起核是别的原因失败
+        // （节点本身起不来）时不还，快照已消费、行为与原来一致。
+        if !isRunning && isPinging {
+            pingStoppedLink = czfSnapshotLink
+            pingStoppedOwner = owner
+        }
         if isRunning {
             prewarmSuppressedAfterPing = false
         }

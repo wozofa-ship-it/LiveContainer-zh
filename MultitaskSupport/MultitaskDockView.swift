@@ -4270,7 +4270,15 @@ struct SourcesPanelView: View {
         if czfCoreRunningNow {
             CZFVPNManager.shared.stop()
         } else {
-            _ = CZFVPNManager.shared.start()
+            // 3.8.900（L576-2）：起失败要报出来，别静默吞掉——
+            // 没节点/节点起不来/别处正在测速时 start() 都返回 false，
+            // 原来返回值直接丢掉，用户点了“启动核心”毫无反应、
+            // 也无从知道为什么（App 页 toggleVPNCore 的 VPN-6 同款
+            // 已弹错，设置页状态行也显示 lastError，只坞面板漏了）。
+            // 用面板已有的 errorMessage + alert 弹（安装/下载报错同款宿主）。
+            if !CZFVPNManager.shared.start() {
+                errorMessage = CZFVPNManager.shared.lastError ?? "核心启动失败"
+            }
         }
         vpnCoreRunning = CZFVPNManager.shared.isRunning
     }

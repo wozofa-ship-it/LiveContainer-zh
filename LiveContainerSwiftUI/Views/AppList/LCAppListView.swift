@@ -87,12 +87,16 @@ final class CZFOnceFlag: @unchecked Sendable {
 // CZFSourcePendingInstall（四字段齐全），urls 已删。
 private enum CZFPendingInstall {
     // url：地址、autoReplace、preview、forceAsNew、预设自定义名
-    //（恢复缺失的多开实例时带，nil = 不预设）。
-    case url(String, Bool, Bool, Bool, String?)
+    //（恢复缺失的多开实例时带，nil = 不预设）、随请求走的
+    // 文件书签（nil = 走 LCLaunchExtensionFileBookmark 键）。
+    // 3.8.900（L576-3）：书签必须随请求走，不能只靠共享键——
+    // 认领路原来把书签写进共享键、Task 事后才读，同一轮扫描
+    // 里两条 .file 条目会先后覆写同一个键（见 czfClaimShareInbox）。
+    case url(String, Bool, Bool, Bool, String?, Data?)
     case plist(String)
     var urlStr: String {
         switch self {
-        case .url(let s, _, _, _, _): return s
+        case .url(let s, _, _, _, _, _): return s
         case .plist(let s): return s
         }
     }
@@ -2654,7 +2658,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             let alreadyInFlight = czfInFlightInstall.map { $0.url == fileUrl && $0.autoReplace == false && $0.preview == false && $0.forceAsNew == false && $0.customDisplayName == nil } ?? false
             let alreadyPending = pendingInstalls.contains(where: { czfIsSameInstallRequest(urlStr: urlStr, autoReplace: false, preview: false, forceAsNew: false, customDisplayName: nil, as: $0) })
             if !alreadyQueued && !alreadyInFlight && !alreadyPending {
-                pendingInstalls.append(.url(urlStr, false, false, false, nil))
+                pendingInstalls.append(.url(urlStr, false, false, false, nil, nil))
                 // asCopy 临时副本：排空走 installFromUrl 不删它
                 // （只删 Inbox / LCWebDownload-），记一笔，drain
                 // 里装完（或起跑即取消）后删，免得 tmp 漏一个 IPA。
@@ -3926,8 +3930,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return
             }
             switch next {
-            case .url(let s, let r, let p, let f, let n):
-                await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f, customDisplayName: n)
+            case .url(let s, let r, let p, let f, let n, let b):
+                await installFromUrl(urlStr: s, autoReplace: r, preview: p, forceAsNew: f, customDisplayName: n, czfBookmarkData: b)
                 // 3.8.527（L54）：排空装完，按表删 asCopy 临时
                 // 副本（installFromUrl 的 file 分支不删它）；不
                 // 在表里的地址（源页/收件箱/直链）原样不动。
@@ -4029,8 +4033,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 先验书签：解析抛错即文件已死，静默删 JSON、不装、
                 // 不弹；解析成功（含 stale，文件可能只是挪了位置）
                 // 才继续走安装。只验书签，不动无书签条目。
-                if let b64 = entry.bookmarkBase64,
-                   let bookmarkData = Data(base64Encoded: b64) {
+                // 3.8.900（L576-3）：两条 .file 条目同一轮扫描进前台时，
+                // 原来先在同步循环里把各自书签先后写进同一个共享键、
+                // 再各起 Task 事后读键装——循环是同步的、Task 的
+                // MainActor 跳要等循环让出主线程才跑，两次写键都
+                // 先于两次读键，第一条装的永远是第二条的文件，
+                // 自己的 JSON 还按成功删掉（A 丢了、B 装两遍，
+                // 第二遍走 pendingInstalls 排队）；预检与写键
+                // 原样保留（客端开文件还认这个键），书签另随
+                // installFromUrl 的参数走（忙时进队也带着，见
+                // CZFPendingInstall.url 第六字段），各装各的。
+                let czfClaimBookmarkData: Data? = entry.bookmarkBase64.flatMap { Data(base64Encoded: $0) }
+                if let bookmarkData = czfClaimBookmarkData {
                     var czfPreflightStale = false
                     do {
                         _ = try URL(resolvingBookmarkData: bookmarkData,
@@ -4041,8 +4055,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         continue
                     }
                 }
-                if let b64 = entry.bookmarkBase64,
-                   let bookmarkData = Data(base64Encoded: b64) {
+                if let bookmarkData = czfClaimBookmarkData {
                     LCUtils.appGroupUserDefault.set(bookmarkData, forKey: "LCLaunchExtensionFileBookmark")
                 }
                 Self.czfClaimedInboxFiles.insert(fileKey)
@@ -4055,7 +4068,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 删 JSON；真失败才留着重试。标记是 @State，两跳
                     // 都回主线程（L311-1 同款）。
                     await MainActor.run { self.czfLastInstallWasCancelled = false }
-                    let ok = await self.installFromUrl(urlStr: fileURLString)
+                    let ok = await self.installFromUrl(urlStr: fileURLString, czfBookmarkData: czfClaimBookmarkData)
                     let czfWasCancelled = await MainActor.run {
                         let v = self.czfLastInstallWasCancelled
                         self.czfLastInstallWasCancelled = false
@@ -4108,7 +4121,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // preview, forceAsNew）：只比 urlStr 会把同地址不同 autoReplace /
     // forceAsNew 的请求误丢；.plist 项没有这三个字段，不参与本比对。
     private func czfIsSameInstallRequest(urlStr: String, autoReplace: Bool, preview: Bool, forceAsNew: Bool, customDisplayName: String?, as pending: CZFPendingInstall) -> Bool {
-        guard case .url(let s, let r, let p, let f, let n) = pending else { return false }
+        guard case .url(let s, let r, let p, let f, let n, _) = pending else { return false }
         return s == urlStr && r == autoReplace && p == preview && f == forceAsNew && n == customDisplayName
     }
 
@@ -4161,7 +4174,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 用前已记为在途项，忙时门若按“已在途”豁免排队，本项会被静默丢掉
     // （见门里注释）；直达安装路（网页/粘贴/深链/文件选择器）不传，
     // 正在装的同一请求仍按原来豁免、不重复排队。
-    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil, czfFromQueue: Bool = false) async -> Bool {
+    func installFromUrl(urlStr: String, autoReplace: Bool = false, preview: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil, czfFromQueue: Bool = false, czfBookmarkData: Data? = nil) async -> Bool {
         // 3.8.428 App#4：粘贴的安装链接带首尾空格/换行就报“链接
         // 无效”，先 trim（与 installFromPlist 同款处理）。
         let urlStr = urlStr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4185,7 +4198,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.560（L311-1）：门 + 取取消 + 校验 + 置 flag 一次回主线程做——四步原子在主线程上，中间不挂起。分开跳会在门与置 flag 之间留窗口：第二个并发调用会在第一个还没置 flag 时也通过门、两路同时装（原写法门到置 flag 间无挂起点、窗口只有几条同步语句；拆成四跳会把窗口放大到两次主线程往返）。czfTakeInstallCancel/czfValidatedInstallURL 保持同步、只在调用点包（签名不动）；忙时返回 (nil, true) 入队、取消/校验失败返回 (nil, false) 续排、放行返回 (url, false) 且 flag 已置。
         let (czfEntryURL, czfBusyQueued): (URL?, Bool) = await MainActor.run {
             if installprogressVisible {
-                let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew, customDisplayName)
+                let item = CZFPendingInstall.url(urlStr, autoReplace, preview, forceAsNew, customDisplayName, czfBookmarkData)
                 let alreadyQueued = URL(string: urlStr).map { queuedURL in
                     installQueue.contains(where: { $0.url == queuedURL && $0.autoReplace == autoReplace && $0.preview == preview && $0.forceAsNew == forceAsNew && $0.customDisplayName == customDisplayName })
                 } ?? false
@@ -4239,7 +4252,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             let fm = FileManager.default
             var didStartAccessing = false
             if !fm.isReadableFile(atPath: installUrl.path),
-               let bookmarkData = LCUtils.appGroupUserDefault.data(forKey: "LCLaunchExtensionFileBookmark") {
+               // 3.8.900（L576-3）：调用方随请求带的书签优先——
+               // 认领路两条 .file 条目会先后覆写共享键，事后读键
+               // 只能读到最后一条的；没带时（其余调用方）仍读键。
+               let bookmarkData = czfBookmarkData ?? LCUtils.appGroupUserDefault.data(forKey: "LCLaunchExtensionFileBookmark") {
                 do {
                     // 安装低 #20：解析侧 withSecurityScope = 1 << 10——
                     // iOS 上该具名常量标了 unavailable（429 实证
