@@ -610,7 +610,7 @@ public final class CZFVPNManager {
 
     // 活动节点变了而核心在跑：立刻按新节点重启（改完即生效）；
     // 没有可用节点了就停掉
-    // czfRespectPinned：跟随路（czfFollowListChange）传 true——执行时再验一次钉死守卫；显式切节点（setActiveNode / 测速收尾的显式切换）与恢复传 false，手动强制切换的原语义不动。
+    // czfRespectPinned：跟随路（czfFollowListChange）传 true——执行时再验一次钉死守卫；显式切节点（setActiveNode / 测速收尾的显式切换）传 false，手动强制切换的原语义不动；恢复/导入不再直接调这里（见 applyRestoredNodeSettings）。
     private func applyActiveNodeChange(czfRespectPinned: Bool = false) {
         // 测速窗口内不切：切节点会重启核心、打断测速；
         // 节点选择已写进 UserDefaults，测速收尾
@@ -721,8 +721,17 @@ public final class CZFVPNManager {
     // 不需重启 App；核心停着时下次启动现读新节点。测速窗口
     // 内推迟到测速收尾跟随（applyActiveNodeChange 同款守卫）。
     // 起核心是同步阻塞的 CGoInvoke，调用方放 detached 跑。
+    // 3.8.900（L581-A1）：恢复/导入是列表被动变动，不是显式切节点——
+    // 原来走 applyActiveNodeChange（默认不验钉死），核心正跑在钉死
+    // 节点的 App 的节点上、恢复的全局活动节点是另一条时，start() 会
+    // 把核心重启到全局节点、清掉归属，养号 App 当场悄悄换 IP（L572-2
+    // 订阅刷新/删节点同款，那两路已修，这里漏了）；恢复写回的 override
+    // 本身也在备份里，钉死关系没变，核心就该留在钉死节点上。走
+    // czfFollowListChange（钉死时收手、跑全局时照常跟过去）；显式切
+    // 节点（setActiveNode）不走这里，手动强制切换的原语义不动。
+    // 测速窗口内这路本来就是钉死安全的：窗内跟随由收尾列表变动分支经 czfFollowListChange 补做（见 czfFollowPostPingNodeSwitch）；本修法只补窗外直达路。
     public func applyRestoredNodeSettings() {
-        applyActiveNodeChange()
+        czfFollowListChange()
     }
 
     // 节点自定义别名：按链接原文存字典（UserDefaults），

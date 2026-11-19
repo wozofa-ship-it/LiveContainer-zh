@@ -6235,6 +6235,16 @@ struct LCDataManagementView : View {
                 // 调用方线程取出，只把纯 URL 传进 detached。
                 let mergeDest = target.containerURL
                 let mergeMirror: URL? = target.isolateAppGroup ? nil : LCPath.lcGroupAppGroupPath
+                // 3.8.900（L580-C1）：只恢复登录态合进外置容器写不进去——
+                // L568-15 只包了上面 containerFolders 循环里的那处合并，
+                // 这处是 loginOnly 合并循环（完整备份 + 只恢复登录态）：
+                // target 是按名对上的现有容器，外置的也在其中，
+                // mergeLoginStateOffMain 全程没调 startAccessing，
+                // 会话文件逐个 copyItem 全失败、merged 恒 0，登录回不来
+                //（失败数进报告，B-6）。L39 同款包一层；本地容器
+                // bookmarkResolved 为 false，不碰。
+                let czfDidAccess = target.bookmarkResolved && mergeDest.startAccessingSecurityScopedResource()
+                defer { if czfDidAccess { mergeDest.stopAccessingSecurityScopedResource() } }
                 let mergeResult = await Self.mergeLoginStateOffMain(from: folder, to: mergeDest, mirrorGroupToHost: mergeMirror)
                 mergedLoginFiles += mergeResult.merged
                 // B-6：合并失败累上来，进 outcome 与报告。
