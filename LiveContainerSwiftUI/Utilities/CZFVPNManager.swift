@@ -1957,7 +1957,7 @@ public final class CZFVPNManager {
             // 别人刚起的核心。收手：App 按既有 fail-open 放行，不写错；
             // 第一轮也验——ensureRunning 那次起核若是被归属守卫拒的
             // （核心正被别的 App 占着），一个候选都不该试）。
-            if czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: appInfo) { return }
+            if czfRetryYielded(stopEpochAtEntry: stopEpochAtEntry, for: appInfo) { return }
             if start(withLink: cand.link, ownerBid: czfBid, ownerAppInfo: appInfo) {
                 if let appInfo = appInfo, Self.nodeOverride(for: appInfo) != nil {
                     Self.setNodeOverride(cand.link, for: appInfo)
