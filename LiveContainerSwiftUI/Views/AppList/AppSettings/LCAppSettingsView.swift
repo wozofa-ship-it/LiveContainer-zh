@@ -42,6 +42,11 @@ struct LCAppSettingsView: View {
     // 在）抛错、弹一条假报错（转换其实成功了）。两位共用（同一
     // 时刻只显示其中一个按钮），进函数先判位、置位，结束清位。
     @State private var czfConvertingShared = false
+    // 3.8.900（L573-7）：已为偏好设置持有外置容器访问权的夹名
+    // （只起一次、进程内保持，外部备份根同款：偏好读写经
+    // UserDefaults 贯穿整个偏好页访问，无法像单次文件操作
+    // 那样起用即停）。
+    private static var czfHeldPreferenceAccess: Set<String> = []
     // #13：隐藏确认框；#18：语言列表加载失败态
     @State private var hideConfirmShow = false
     @State private var languageLoadFailed = false
@@ -1498,6 +1503,17 @@ extension LCAppSettingsView : LCContainerViewDelegate {
     }
     
     func getContainerURL(container: LCContainer) -> URL {
+        // 3.8.900（L573-7）：外置容器的偏好目录在 containerURL
+        // 下，建目录也要先 startAccessing（deleteData 的
+        // L568-16 同款：同一 URL 不拿 scope 就操作失败）。原来
+        // 裸调 createDirectory，外置容器点“偏好设置”就弹
+        // “Cannot create Library/Preferences folder!”、偏好
+        // 目录也建不出来；本地容器与死书签不动。
+        if container.storageBookMark != nil, container.bookmarkResolved,
+           !Self.czfHeldPreferenceAccess.contains(container.folderName),
+           container.containerURL.startAccessingSecurityScopedResource() {
+            Self.czfHeldPreferenceAccess.insert(container.folderName)
+        }
         let preferencesFolderUrl = container.containerURL.appendingPathComponent("Library/Preferences")
         let fm = FileManager.default
         do {

@@ -459,6 +459,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         vpnPinging = true
         CZFVPNManager.shared.pingAllNodes { results, rejected in
             self.vpnPinging = false
+            // 3.8.900（L573-2）：列表中途被换过时结果下标已不对号——设置页
+            // startVPNPing 的 L43 同款，App 页漏了：测速要十几秒，期间去 VPN
+            // 页删/排节点再回来，completion 照旧下标覆写 vpnPingResults，
+            // 盾牌菜单（vpnNodeMenuLabel/vpnCurrentNodeLabel 不验快照，
+            // 与坞面板 L134-2 的守卫不同）会把别节点的延迟挂到错行上，
+            // “最快”还会报一个已删节点的名字；直到下次进页 restore 才清。
+            // 换过就不覆写内存、不落盘、不报最快（落盘本就按链接内容存，
+            // 但与设置页 L43 一致整批跳过）；停过的核心照常重启、
+            // afterPing 回调按内容换算，本就安全，一字不动。
+            let listUnchanged = CZFVPNManager.shared.nodeLinks == links
             var bestIndex: Int? = nil
             if rejected {
                 // 3.8.303：被拒那批全是失败，不是节点真不通——不覆写
@@ -470,7 +480,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 上次真测的毫秒数；没测过就不挂后缀。先停核心后
                 // 正常不应再被拒，这支留作兜底。
                 self.vpnPingMessage = "核心在跑，测速被占用——先停核心再测"
-            } else {
+            } else if listUnchanged {
                 var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (idx, r) in results.enumerated() { stored[idx] = r }
                 self.vpnPingResults = stored

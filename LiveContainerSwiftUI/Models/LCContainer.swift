@@ -275,6 +275,16 @@ class LCContainer : ObservableObject, Hashable {
         }
         
         do {
+            // 3.8.900（L573-4）：外置容器读 plist 也要先
+            // startAccessing——书签解出带 scope 的 URL 只是“能
+            // 访问”，不 start 就读不到（deleteData 的 L568-16
+            // 同款：同一 containerURL 列目录直接抛错）。原来
+            // 这里裸读，外置容器的隔离/IDFV/指纹开关每次进设置
+            // 页都显示关、伪装值全空，用户以为没开隔离、其实
+            // plist 里开着；书签已死时 bookmarkResolved 为
+            // false，不碰，行为与原来一致（本地回落路照旧）。
+            let czfDidAccess = bookmarkResolved && containerURL.startAccessingSecurityScopedResource()
+            defer { if czfDidAccess { containerURL.stopAccessingSecurityScopedResource() } }
             let fm = FileManager.default
             if(!fm.fileExists(atPath: infoDictUrl.deletingLastPathComponent().path)) {
                 try fm.createDirectory(at: infoDictUrl.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -383,6 +393,13 @@ class LCContainer : ObservableObject, Hashable {
             infoDict!["spoofedProxyPort"] = spoofedProxyPort
         }
         
+        // 3.8.900（L573-5）：与 L573-4 同根的写侧——外置容器写
+        // plist 也要先 startAccessing，否则写盘静默失败
+        // （catch 空着）：容器页开关看着改了、退出重进又变
+        // 回去，隔离/指纹/代理全都存不住。只包写盘这段，
+        // 本地容器（storageBookMark 为 nil）与死书签不动。
+        let czfDidAccess = storageBookMark != nil && bookmarkResolved && containerURL.startAccessingSecurityScopedResource()
+        defer { if czfDidAccess { containerURL.stopAccessingSecurityScopedResource() } }
         do {
             let fm = FileManager.default
             if(!fm.fileExists(atPath: infoDictUrl.deletingLastPathComponent().path)) {
@@ -404,6 +421,15 @@ class LCContainer : ObservableObject, Hashable {
     }
     
     func reloadInfoPlist() {
+        // 3.8.900（L573-6）：与 L573-4 同根——容器页 onAppear 每次
+        // 都调这里，外置容器裸读读不到就把 infoDict 置 nil，
+        // keychainGroupId 立刻变 -1：之后点“清理钥匙串”会按
+        // -1 归一到 0 组清理（LCUtilsExtensions:525），真组
+        // （如 5 组）的令牌全残留；再存一次还会把 -1 写进
+        // plist（L573-5 修好写盘后）。读之前先拿 scope，死书签
+        // 时不碰，行为与原来一致。
+        let czfDidAccess = storageBookMark != nil && bookmarkResolved && containerURL.startAccessingSecurityScopedResource()
+        defer { if czfDidAccess { containerURL.stopAccessingSecurityScopedResource() } }
         infoDict = NSDictionary(contentsOf: infoDictUrl) as? [String : Any]
     }
 

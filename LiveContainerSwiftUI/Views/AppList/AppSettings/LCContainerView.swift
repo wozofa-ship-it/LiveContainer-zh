@@ -388,7 +388,8 @@ struct LCContainerView : View {
                 }
             }
             if !typingIDFV.isEmpty, typingIDFV != (container.spoofedIdentifier ?? ""), UUID(uuidString: typingIDFV) != nil {
-                saveIDFV()
+                // 3.8.900（L573-3）：离页静默存——在用时拒存不弹错。
+                saveIDFV(silent: true)
             }
             if typingProxyHost != (container.spoofedProxyHost ?? "") || typingProxyPort != (container.spoofedProxyPort > 0 ? "\(container.spoofedProxyPort)" : "") {
                 saveProxy(silent: true)
@@ -397,14 +398,27 @@ struct LCContainerView : View {
         
     }
     
-    func saveIDFV() {
+    func saveIDFV(silent: Bool = false) {
         guard let newIDFV = UUID(uuidString: typingIDFV) else {
-            errorInfo = "lc.container.invalidIDFV".loc
-            errorShow = true
+            if !silent {
+                errorInfo = "lc.container.invalidIDFV".loc
+                errorShow = true
+            }
             return
         }
+        // 3.8.900（L573-3）：IDFV 原来直调 delegate.saveContainer——
+        // 那里没有在用拦截（LCAppSettingsView:1490 只写盘），容器
+        // 正在运行时名字栏/三个开关都会被 saveContainer() 拒存，
+        // 唯独 IDFV 改了就存进去了：下次启动客端按新 IDFV 跑，
+        // 用户却以为“在用时改不了”。走带拦截的 saveContainer()，
+        // 拒存时内存值与输入框都还原（L97/L569-6 同款）；离页
+        // 静默路（onDisappear）不弹错，改动直接丢弃。
+        let oldIDFV = container.spoofedIdentifier
         container.spoofedIdentifier = newIDFV.uuidString
-        delegate.saveContainer(container: container)
+        if !saveContainer(showError: !silent) {
+            container.spoofedIdentifier = oldIDFV
+            typingIDFV = oldIDFV ?? ""
+        }
     }
 
     func saveProxy(silent: Bool = false) {
@@ -419,6 +433,11 @@ struct LCContainerView : View {
         // 输入同款。
         let host = typingProxyHost.trimmingCharacters(in: .whitespaces)
         let port = Int(typingProxyPort.trimmingCharacters(in: .whitespaces)) ?? 0
+        // 3.8.900（L573-3）：同 saveIDFV——代理原来也直调
+        // delegate.saveContainer，绕过在用拦截；在用时拒存，
+        // 内存值与输入框都还原。
+        let oldHost = container.spoofedProxyHost
+        let oldPort = container.spoofedProxyPort
         if host.isEmpty {
             container.spoofedProxyHost = nil
             container.spoofedProxyPort = 0
@@ -432,17 +451,28 @@ struct LCContainerView : View {
             }
             return
         }
-        delegate.saveContainer(container: container)
+        if !saveContainer(showError: !silent) {
+            container.spoofedProxyHost = oldHost
+            container.spoofedProxyPort = oldPort
+            typingProxyHost = oldHost ?? ""
+            typingProxyPort = oldPort > 0 ? "\(oldPort)" : ""
+        }
     }
 
     // 3.8.566（L97）：拒存时返回 false——名字先改内存再调保存，
     // 在用时保存被拒、内存里的名字却已改了，列表当场显示新名、
     // 重启又变回旧名，拒存等于没拒；调用方存失败时把名字还原。
     @discardableResult
-    func saveContainer() -> Bool {
+    func saveContainer(showError: Bool = true) -> Bool {
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
-            errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
-            errorShow = true
+            // 3.8.900（L573-3）：离页静默路（saveIDFV/saveProxy 的
+            // silent:true）拒存时不弹错——正在消失的视图上弹 alert
+            // 可能弹不出来，改动直接丢弃，与 IDFV 离开时丢弃非法
+            // 输入同款；其余调用点默认弹错，行为不变。
+            if showError {
+                errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
+                errorShow = true
+            }
             return false
         }
         

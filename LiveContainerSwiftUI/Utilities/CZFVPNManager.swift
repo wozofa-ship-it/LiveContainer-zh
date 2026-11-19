@@ -329,6 +329,24 @@ public final class CZFVPNManager {
         refreshSettingsBackup()
     }
 
+    /// 订阅返回的一行是不是节点链接（3.8.900（L573-1））：行首到 "://" 之前
+    /// 必须是纯 scheme token（字母开头，只含字母/数字/+/-/.），且不是 http/https；
+    /// 以 "{" 开头的原始 JSON 出站原样保留（订阅本来就按含 :// 的行收）。
+    /// 过期订阅回 200 + HTML 错误页时，页里的 <script src="https://…">、
+    /// <a href="https://…">、<link href="https://…"> 行都含 ://，旧过滤
+    /// （只判含 ://）直接当节点返回、整体替换会把好节点全换成垃圾行、行行
+    /// “不支持”；sub:// 分支早已拦 http 行，主路漏了同款（下面注释自认
+    /// HTML 错误页能过三关、只验了状态码）。
+    private static func czfIsNodeLinkLine(_ line: String) -> Bool {
+        guard line.contains("://") else { return false }
+        if line.hasPrefix("{") { return true }
+        guard let range = line.range(of: "://") else { return false }
+        let scheme = String(line[..<range.lowerBound]).lowercased()
+        guard scheme != "http", scheme != "https",
+              let first = scheme.first, first.isLetter else { return false }
+        return scheme.allSatisfy { $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." }
+    }
+
     /// 拉订阅内容并解析出节点链接：机场订阅通常是整段 base64
     /// （解开后一行一条链接），也有直接一行一条的明文格式，
     /// 两种都认；只保留带 :// 的行（vless/vmess/trojan/ss 等）
@@ -352,7 +370,7 @@ public final class CZFVPNManager {
                 let decodedTrimmed = decodedText.trimmingCharacters(in: .whitespacesAndNewlines)
                 let nodeLines = decodedTrimmed.components(separatedBy: .newlines)
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { $0.contains("://") && !$0.lowercased().hasPrefix("http") }
+                    .filter { Self.czfIsNodeLinkLine($0) }
                 if !nodeLines.isEmpty {
                     completion(.success(nodeLines))
                     return
@@ -418,7 +436,7 @@ public final class CZFVPNManager {
             }
             let links = text.components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { $0.contains("://") }
+                .filter { Self.czfIsNodeLinkLine($0) }
             if links.isEmpty {
                 completion(.failure(NSError(domain: "CZFVPN", code: -3, userInfo: [NSLocalizedDescriptionKey: "订阅里没找到节点链接"])))
             } else {
