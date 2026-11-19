@@ -399,52 +399,58 @@ public final class CZFVPNManager {
         // 取（URLSession.shared 绕开代理；机场订阅域名在直连下常被墙，
         // 核心明明在跑、订阅却拉不下来，图标同款已在 load 里修过）；
         // 代理关时 hostSession() 本来就回 .shared，行为不变。
-        Self.hostSession().dataTask(with: request) { data, response, error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            // 过期订阅返回的 HTML 错误页也能过下面三关（无传输错、
-            // 是 UTF-8、含 "://"），先验 HTTP 状态，非 200 直接失败。
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                completion(.failure(NSError(domain: "CZFVPN", code: -4, userInfo: [NSLocalizedDescriptionKey: "订阅拉取失败，服务器返回 \(code)"])))
-                return
-            }
-            guard let data, let raw = String(data: data, encoding: .utf8) else {
-                completion(.failure(NSError(domain: "CZFVPN", code: -2, userInfo: [NSLocalizedDescriptionKey: "订阅内容读不出来"])))
-                return
-            }
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            var text = trimmed
-            // 整体 base64 就先解开（去掉空白后能整段解码、且
-            // 解出来含 :// 才算数，明文格式不会误伤）；有的
-            // 机场用 URL 安全变体（- 和 _），一并兼容
-            let compact = trimmed.components(separatedBy: .whitespacesAndNewlines).joined()
-                .replacingOccurrences(of: "-", with: "+")
-                .replacingOccurrences(of: "_", with: "/")
-            // 3.8.576（L107）：整段 base64 常常不带尾部 `=`（URL 安全变体
-            // 尤其如此，上面刚换过 `-`/`_`）；`Data(base64Encoded:)` 要
-            // 求长度是 4 的倍数，没补 `=` 就解不出来、订阅报“里没找到
-            // 节点链接”。与 sub:// 分支（:291）与 vmessDisplay 同款，
-            // 先补齐再解；`count % 4 == 1` 的串补了也解不出，自然落
-            // 到下面的明文行过滤，不误伤。
-            let padded = compact + String(repeating: "=", count: (4 - compact.count % 4) % 4)
-            if !compact.isEmpty,
-               let decoded = Data(base64Encoded: padded),
-               let decodedText = String(data: decoded, encoding: .utf8),
-               decodedText.contains("://") {
-                text = decodedText
-            }
-            let links = text.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { Self.czfIsNodeLinkLine($0) }
-            if links.isEmpty {
-                completion(.failure(NSError(domain: "CZFVPN", code: -3, userInfo: [NSLocalizedDescriptionKey: "订阅里没找到节点链接"])))
-            } else {
-                completion(.success(links))
-            }
-        }.resume()
+        // 3.8.900（L585-A1）：订阅是换节点的唯一活路，不能只走可能已死的节点——代理开且核心在跑时先经节点拉（L183 原意：机场域名直连常被墙）；传输层失败时直连重试一次，直连通就照常换回新节点，墙了才报失败。只重试传输错：HTTP 非 200 / 内容错是服务端的意思，直连也一样，不重试。直连必须显式用 URLSession.shared——hostSession() 在核心在跑时又会回代理会话，重试等于没退。
+        func fetch(viaProxy: Bool) {
+            let session = viaProxy ? Self.hostSession() : URLSession.shared
+            session.dataTask(with: request) { data, response, error in
+                if let error {
+                    if viaProxy { fetch(viaProxy: false); return }
+                    completion(.failure(error))
+                    return
+                }
+                // 过期订阅返回的 HTML 错误页也能过下面三关（无传输错、
+                // 是 UTF-8、含 "://"），先验 HTTP 状态，非 200 直接失败。
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    completion(.failure(NSError(domain: "CZFVPN", code: -4, userInfo: [NSLocalizedDescriptionKey: "订阅拉取失败，服务器返回 \(code)"])))
+                    return
+                }
+                guard let data, let raw = String(data: data, encoding: .utf8) else {
+                    completion(.failure(NSError(domain: "CZFVPN", code: -2, userInfo: [NSLocalizedDescriptionKey: "订阅内容读不出来"])))
+                    return
+                }
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                var text = trimmed
+                // 整体 base64 就先解开（去掉空白后能整段解码、且
+                // 解出来含 :// 才算数，明文格式不会误伤）；有的
+                // 机场用 URL 安全变体（- 和 _），一并兼容
+                let compact = trimmed.components(separatedBy: .whitespacesAndNewlines).joined()
+                    .replacingOccurrences(of: "-", with: "+")
+                    .replacingOccurrences(of: "_", with: "/")
+                // 3.8.576（L107）：整段 base64 常常不带尾部 `=`（URL 安全变体
+                // 尤其如此，上面刚换过 `-`/`_`）；`Data(base64Encoded:)` 要
+                // 求长度是 4 的倍数，没补 `=` 就解不出来、订阅报“里没找到
+                // 节点链接”。与 sub:// 分支（:291）与 vmessDisplay 同款，
+                // 先补齐再解；`count % 4 == 1` 的串补了也解不出，自然落
+                // 到下面的明文行过滤，不误伤。
+                let padded = compact + String(repeating: "=", count: (4 - compact.count % 4) % 4)
+                if !compact.isEmpty,
+                   let decoded = Data(base64Encoded: padded),
+                   let decodedText = String(data: decoded, encoding: .utf8),
+                   decodedText.contains("://") {
+                    text = decodedText
+                }
+                let links = text.components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { Self.czfIsNodeLinkLine($0) }
+                if links.isEmpty {
+                    completion(.failure(NSError(domain: "CZFVPN", code: -3, userInfo: [NSLocalizedDescriptionKey: "订阅里没找到节点链接"])))
+                } else {
+                    completion(.success(links))
+                }
+            }.resume()
+        }
+        fetch(viaProxy: true)
     }
 
     // 只换节点顺序（测速排序用）：活动节点按内容找回，不
@@ -1087,6 +1093,16 @@ public final class CZFVPNManager {
             UserDefaults.standard.set(true, forKey: followGlobalKeyPrefix + bundleId)
         }
         // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
+        shared.refreshSettingsBackup()
+    }
+
+    // 3.8.900（L585-A2）：删 App 时清掉它的三枚 VPN 键——开关/钉死/跟随全按 bundleId 存，删 App 只删包、容器、钥匙串、备份，从不清这三枚；钉死键残留时 czfIsPinnedLiveLink 永远认已删 App 的节点还钉着，被动跟随（订阅刷新/删节点/恢复）再也不敢挪走核心，界面显示的全局在用节点与核心实际跑的节点对不上，节点死后 App 断网/直连却无处可查。清掉后备份也一并刷新，不让恢复把幽灵钉死带回来。
+    public static func clearVPNSettings(for appInfo: LCAppInfo) {
+        guard let bundleId = czfBundleId(for: appInfo) else { return }
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: enabledKeyPrefix + bundleId)
+        defaults.removeObject(forKey: nodeOverrideKeyPrefix + bundleId)
+        defaults.removeObject(forKey: followGlobalKeyPrefix + bundleId)
         shared.refreshSettingsBackup()
     }
 

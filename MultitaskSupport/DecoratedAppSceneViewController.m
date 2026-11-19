@@ -56,8 +56,12 @@
     // 下一次启动不受影响（极少数启动没建窗时会漏一次，下一窗消费掉即恢复）。
     NSUserDefaults *launchDefaults = NSUserDefaults.lcUserDefaults;
     id launchMaxValue = [launchDefaults objectForKey:@"LCLaunchMultitaskMaximized"];
-    if ([launchDefaults boolForKey:@"CZFLaunchSmallOnce"]) {
-        [launchDefaults removeObjectForKey:@"CZFLaunchSmallOnce"];
+    NSArray *czfSmallOnceUUIDs = [launchDefaults stringArrayForKey:@"CZFLaunchSmallOnceUUIDs"];
+    [launchDefaults removeObjectForKey:@"CZFLaunchSmallOnce"]; // 3.8.900（L585-B3）：旧 bool 键残留一并清掉，免得 L566-2 之前写下的旧值继续误缩下个窗口。
+    if (self.dataUUID && [czfSmallOnceUUIDs containsObject:self.dataUUID]) { // 3.8.900（L585-B3）：只认自己的 uuid 才开小窗，别人的 uuid 留给别人。
+        NSMutableArray *czfSmallOnceRest = [czfSmallOnceUUIDs mutableCopy];
+        [czfSmallOnceRest removeObject:self.dataUUID];
+        [launchDefaults setObject:czfSmallOnceRest forKey:@"CZFLaunchSmallOnceUUIDs"];
         _isMaximized = NO;
     } else {
         _isMaximized = launchMaxValue ? [launchMaxValue boolValue] : YES;

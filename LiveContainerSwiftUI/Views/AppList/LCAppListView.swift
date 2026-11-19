@@ -4598,6 +4598,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             // 3.8.568（L322-1）：删 App 也要取消它排进 deferredEnsureApps 的启动请求——L295-1 只修了关窗那路（K:591）；测速窗口内起 App 后删掉它，收尾补跑会把核心起在已删 App 的节点上，起后无人能停（V:1050-1061 注释自述）。删只走 removeApp 这一个漏斗（单删/批量/网格三路全经它），用传入 model 自身的 appInfo 取消，不查表；没排进的取消是空操作。
             CZFVPNManager.shared.cancelDeferredEnsure(for: app.appInfo)
+            // 3.8.900（L585-A2）：删 App 也清它的三枚 VPN 键（开关/钉死/跟随）——不清除掉的钉死 override 会让已删 App 的节点永远判钉死，被动跟随再也不敢挪走核心。
+            CZFVPNManager.clearVPNSettings(for: app.appInfo)
             // 删 App 后 AppInfo 缓存与 dock 残留条目一起清，否
             // 则删掉的 App 还会按旧 LCAppInfo 被解析、旧 dock
             // 条目还会被顶回前台（MultitaskDockManager 是

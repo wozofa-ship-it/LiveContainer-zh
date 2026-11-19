@@ -342,7 +342,7 @@ class LCAppModel: ObservableObject, Hashable {
         let dockManager = MultitaskDockManager.shared
         await czfLaunchThenActOnWindow(
             app: app,
-            multitask: nil,
+            multitask: true, // 3.8.900（L585-B1）：最小化必须有窗口可藏——小窗口路同款已传 true（M:389），这里传 nil 时默认设置决议成经典、宿主被交接杀掉，最小化永不执行。
             timeout: 6,
             timeoutMessage: "最小化超时：6 秒内没等到「\(displayName)」的窗口，请确认 App 已打开后重试",
             action: { waitUUID in
@@ -420,7 +420,12 @@ class LCAppModel: ObservableObject, Hashable {
         // 3.8.588（OPENMAX-2）：最小化/小窗口路不要大窗口创建——
         // 窗一出来就要藏/缩，大窗口创建会先闪一下全屏；
         // 一次性标记，建窗时消费掉，大窗口启动路不受影响。
-        UserDefaults.standard.set(true, forKey: "CZFLaunchSmallOnce")
+        // 3.8.900（L585-B3）：按 uuid 记名——全局 bool 时 runApp 静默 early-return 会泄漏给下一个无关窗口；记名后别人的窗口不受影响，并发两路最小化打开也不互相顶掉。
+        var czfSmallOnceUUIDs = UserDefaults.standard.stringArray(forKey: "CZFLaunchSmallOnceUUIDs") ?? []
+        if !czfSmallOnceUUIDs.contains(uuid) {
+            czfSmallOnceUUIDs.append(uuid)
+            UserDefaults.standard.set(czfSmallOnceUUIDs, forKey: "CZFLaunchSmallOnceUUIDs")
+        }
         do {
             try await app.runApp(multitask: multitask, containerFolderName: uuid)
         } catch {
@@ -430,7 +435,10 @@ class LCAppModel: ObservableObject, Hashable {
             // “漏一次、下一窗消费即恢复”，但消费本身就是一次用户没要
             // 的小窗）。失败路在这里清掉；窗已建出来时标记早被消费，
             // 再删一次是空操作。
-            UserDefaults.standard.removeObject(forKey: "CZFLaunchSmallOnce")
+            // 3.8.900（L585-B3）：只清自己的 uuid，别人的不动。
+            var czfSmallOnceUUIDs = UserDefaults.standard.stringArray(forKey: "CZFLaunchSmallOnceUUIDs") ?? []
+            czfSmallOnceUUIDs.removeAll { $0 == uuid }
+            UserDefaults.standard.set(czfSmallOnceUUIDs, forKey: "CZFLaunchSmallOnceUUIDs")
             // 3.8.535（L62-1）：catch 跑在调用方裸 Task 的执行器上
             // （非隔离 async），onError 是面板的 reportLaunchError
             // （写 @State launchError）/横幅卡的 showError——前者
@@ -467,6 +475,10 @@ class LCAppModel: ObservableObject, Hashable {
                 try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             }
             if !done {
+                // 3.8.900（L585-B3）：超时也没建窗，自己的标记不能留——uuid 是启动前取的号，waitUUID 是启动后重读的号，两边都清，拆容器换号时旧号不能留。
+                var czfSmallOnceUUIDs = UserDefaults.standard.stringArray(forKey: "CZFLaunchSmallOnceUUIDs") ?? []
+                czfSmallOnceUUIDs.removeAll { $0 == uuid || $0 == waitUUID }
+                UserDefaults.standard.set(czfSmallOnceUUIDs, forKey: "CZFLaunchSmallOnceUUIDs")
                 onError(timeoutMessage)
             }
         }

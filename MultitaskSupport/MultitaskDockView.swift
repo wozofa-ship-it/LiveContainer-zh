@@ -1217,22 +1217,24 @@ extension Notification.Name {
         // 不开，用户得手动再拉起。先判空再关窗，判空时窗不动。
         guard !bundlePath.isEmpty else { return }
         closeAppWindow(uuid: uuid)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            // 跳错修复：重启不再走只带包名的 URL（那边按包名
-            // 取首个模型，重启第 2 个实例会拉起第 1 个）；但
-            // restartApp 手里只有 DockAppModel（无 runApp），
-            // 直启走不通，改走 URL 但补 container-folder-name
-            //（launchAppWithBundleId 已支持，直达被关实例的容器）。
-            // bundlePath 是 .app 文件夹名，可能含空格；直接拼 URL(string:)
-            // 会返回 nil，重启就变成只关不开。先 percent-encoding 再拼。
-            // L60-1：值里带 & 时 urlQueryAllowed 会放行它、接收侧从
-            // & 处切断，改走 czfQueryValueAllowed（排除 &）。
+        // 3.8.900（L585-B2）：不等固定 0.8 秒——卡死客 3 秒才被 SIGKILL，0.8 秒重起撞上活客注册表会被 bringExisting 当带回吞掉；等注册表注销（客真死）再发链接，健康 App 反而比重起更快。
+        czfRelaunchAfterGuestExit(uuid: uuid, bundlePath: bundlePath, deadline: Date().addingTimeInterval(5))
+    }
+
+    // 3.8.900（L585-B2）：每 0.2 秒查一次客注册表——注销（AppSceneViewController.m:398，客死后清理）即开重起链接；5 秒兜底到时也开（等于今天的行为，不比今天差）。只读 MultitaskManager.isUsing（NSLock 保护，L332-1），不碰启动锁。
+    private func czfRelaunchAfterGuestExit(uuid: String, bundlePath: String, deadline: Date) {
+        if !MultitaskManager.isUsing(container: uuid) || Date() >= deadline {
+            // bundlePath 是 .app 文件夹名，可能含空格/&，先 percent-encoding 再拼（L60-1：走 czfQueryValueAllowed，排除 &）。
             let encodedBundlePath = bundlePath.addingPercentEncoding(withAllowedCharacters: .czfQueryValueAllowed) ?? bundlePath
             if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=\(encodedBundlePath)&container-folder-name=\(uuid)") {
                 #if !os(visionOS)
                 UIApplication.shared.open(url, options: [:], completionHandler: nil)
                 #endif
             }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.czfRelaunchAfterGuestExit(uuid: uuid, bundlePath: bundlePath, deadline: deadline)
         }
     }
 
@@ -1357,7 +1359,7 @@ extension Notification.Name {
         }
         Task {
             do {
-                try await app.runApp(containerFolderName: dataUUID)
+                try await app.runApp(multitask: true, containerFolderName: dataUUID) // 3.8.900（L585-B1）：定时最小化打开也必须走多任务窗，否则默认设置下经典交接杀宿主、12 秒回调随宿主一起死。
                 // 启动成功：失败计数清零（下次失败重新累计）。
                 await MainActor.run { self.czfSchedMinFailCounts[bundleId] = 0 }
             } catch {

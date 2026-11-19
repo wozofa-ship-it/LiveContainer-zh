@@ -271,7 +271,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // launch 侧 showError，不在这里重复报错）。
         guard configuration.model.czfInstanceUUID != nil else {
             Task { [weak self] in
-                await self?.launchForAux(multitask: nil, containerFolderName: nil)
+                await self?.launchForAux(multitask: true, containerFolderName: nil) // 3.8.900（L585-B1）：最小化打开必须走多任务窗——容器重建这一步经典交接同样杀宿主，重进 minimizeButtonTapped 的定时器随宿主一起死，最小化永不发生。小窗口路同款已传 true（Banner:331）。
             }
             var attempts = 0
             Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in

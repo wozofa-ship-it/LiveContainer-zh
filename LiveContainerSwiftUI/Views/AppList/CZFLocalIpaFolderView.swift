@@ -119,6 +119,8 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // O-30 文件夹懒加载：详情解包任务——单任务按想要详情的
     // 项 3 个一组并行解包；弹窗关闭时 cancelDetailTasks() 取消它。
     private var detailTask: Task<Void, Never>?
+    // 3.8.900（L585-C1）：扫文件夹的代次——onAppear 重进时旧 Task 还在跑，新 Task 不取消它（Task 体里无挂起点、取消也停不住），只凭代次拦旧写回；存 Task 会与 self 成环，不存。
+    private var czfScanEpoch = 0
     // O-30：想要详情的项 id 集合（格子滚到眼前时 onAppear
     // 推进来），不在队里的不解，不浪费 CPU。
     // D11：由 [UUID] 改 Set，contains/insert/remove 全是
@@ -186,6 +188,10 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         detailsCancelled = false
         scanning = true
         errorText = nil
+        // 3.8.900（L585-C1）：代次 +1、取本次代次；didStartAccessing 快照进本地量——Task 是裸 Task，里面直读这个 @MainActor 旗是跨线程读。
+        czfScanEpoch += 1
+        let czfEpoch = czfScanEpoch
+        let czfNeedsAccess = !didStartAccessing
         // O-5：不清 items，旧列表一直可见到新列表就绪（枚举
         // 完再整体替换）；初次扫 items 为空，照常显示
         // ProgressView（见 Grid 的 scanning && items.isEmpty）。
@@ -198,8 +204,13 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             // 首次起过（didStartAccessing 已真）就不再起；首次
             // 起失败（沙盒内目录返 false）时仍为 false，下次重扫
             // 会重试，行为不变。
-            if !didStartAccessing {
-                didStartAccessing = folderURL.startAccessingSecurityScopedResource()
+            // 3.8.900（L585-C1）：取权仍在这里做（文件 I/O 不上主线程），旗只回主线程置；czfStarted 供下面报错分支用，不用再读 didStartAccessing。
+            let czfStarted: Bool
+            if czfNeedsAccess {
+                czfStarted = folderURL.startAccessingSecurityScopedResource()
+                await MainActor.run { self.didStartAccessing = czfStarted }
+            } else {
+                czfStarted = true
             }
             let fm = FileManager.default
             // 安装审计 #17：打不开要分原因，不许再用一句笼统的
@@ -214,25 +225,32 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             } catch let error as NSError {
                 // O-5：扫失败时把短路标记清掉，下次出现重扫；
                 // 否则旧列表非空会直接短路返回，错误一直挂着。
-                lastScannedFolderURL = nil
-                if !didStartAccessing {
-                    errorText = "没有权限访问这个文件夹，请重新选择文件夹"
+                let czfErrorText: String
+                if !czfStarted {
+                    czfErrorText = "没有权限访问这个文件夹，请重新选择文件夹"
                 } else if error.domain == NSCocoaErrorDomain && error.code == 260 {
                     // Cocoa 260 = NSFileReadNoSuchFileError（LCUtilsExtensions 同款判法）
-                    errorText = "这个文件夹已被移动或删除，请重新选择文件夹"
+                    czfErrorText = "这个文件夹已被移动或删除，请重新选择文件夹"
                 } else if error.domain == NSCocoaErrorDomain && error.code == 257 {
                     // Cocoa 257 = NSFileReadNoPermissionError
-                    errorText = "没有权限访问这个文件夹：\(error.localizedDescription)"
+                    czfErrorText = "没有权限访问这个文件夹：\(error.localizedDescription)"
                 } else {
-                    errorText = "读取文件夹失败：\(error.localizedDescription)"
+                    czfErrorText = "读取文件夹失败：\(error.localizedDescription)"
                 }
-                scanning = false
+                // 3.8.900（L585-C1）：写回全回主线程、代次不对就一行不写——旧 Task 的失败不盖新 Task 的列表。
+                await MainActor.run {
+                    guard czfEpoch == self.czfScanEpoch else { return }
+                    lastScannedFolderURL = nil
+                    errorText = czfErrorText
+                    scanning = false
+                }
                 return
             }
             let sortedURLs = ipaURLs.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             let fmt = ByteCountFormatter()
             fmt.countStyle = .file
-            items = sortedURLs.map { url in
+            // 3.8.900（L585-C1）：条目先在后台拼好，赋值回主线程；代次不对（已有新一轮在扫）就不写，旧列表不盖新列表。
+            let czfNewItems = sortedURLs.map { url in
                 let size = ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
                 return CZFLocalIpaItem(
                     url: url,
@@ -243,7 +261,11 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                     icon: nil
                 )
             }
-            scanning = false
+            await MainActor.run {
+                guard czfEpoch == self.czfScanEpoch else { return }
+                items = czfNewItems
+                scanning = false
+            }
             // O-30：扫完不再全量解包所有 IPA（100 个包就要解
             // 100 次，打开文件夹卡半天）。文件名先顶着，详情
             // 由格子滚到眼前时 onAppear 按需推进。
