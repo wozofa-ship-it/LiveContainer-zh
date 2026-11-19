@@ -535,6 +535,21 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     private func openDataFolder() {
+        // 3.8.900（L572-5）：外置容器（选中容器带 storageBookMark）的数据不住在
+        // dataPath 下，原来无条件拼 shareddocuments://dataPath/<夹名>，文件 App
+        // 打开的是不存在的本地路径（容器设置页 LCContainerView 同款已修）。外置
+        // 容器直接开解析出的 URL（D:7322 外部备份文件夹同款）；书签已死时弹现有
+        // 提示，不开错路。本地容器走下面原路。
+        if let selected = configuration.model.uiSelectedContainer, selected.storageBookMark != nil {
+            if selected.bookmarkResolved, let resolvedURL = selected.resolvedContainerURL {
+                UIApplication.shared.open(resolvedURL)
+            } else {
+                let alert = UIAlertController(title: nil, message: "无法打开数据文件夹", preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "确定", style: .default))
+                present(alert, animated: true)
+            }
+            return
+        }
         // 容器名含空格时 URL(string:) 直接返回 nil；先 percent-encoding 再拼
         //（与容器设置页同款），拼不出弹提示而不是静默 return。
         guard let folderName = configuration.model.uiSelectedContainer?.folderName,

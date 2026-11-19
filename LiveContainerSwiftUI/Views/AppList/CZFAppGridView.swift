@@ -760,7 +760,19 @@ struct CZFAppGridCell: View {
 
     // banner openDataFolder 同款：容器名先 percent-encoding 再拼
     // shareddocuments://，拼不出弹提示而不是静默 return。
+    // 3.8.900（L572-5）：外置容器（选中容器带 storageBookMark）的数据不住在
+    // dataPath 下，原来无条件拼 shareddocuments://dataPath/<夹名>，文件 App
+    // 打开的是不存在的本地路径（横幅卡/容器设置页同款已修）。外置容器直接开
+    // 解析出的 URL（D:7322 外部备份文件夹同款）；书签已死时弹现有提示，不开错路。
     private func czfOpenDataFolder(for app: LCAppModel) {
+        if let selected = app.uiSelectedContainer, selected.storageBookMark != nil {
+            if selected.bookmarkResolved, let resolvedURL = selected.resolvedContainerURL {
+                UIApplication.shared.open(resolvedURL)
+            } else {
+                czfCellError = "无法打开数据文件夹"
+            }
+            return
+        }
         guard let folderName = app.uiSelectedContainer?.folderName,
               let encodedName = folderName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
               let url = URL(string: "shareddocuments://\(LCPath.dataPath.path)/\(encodedName)") else {

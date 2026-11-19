@@ -324,7 +324,8 @@ public final class CZFVPNManager {
         // 3.8.582（VPN-1）：订阅刷新整体换表，旧链接不在新表里
         // 的 override 一并清掉（见下面 helpers 注释）。
         Self.clearStaleNodeOverrides(keeping: cleaned)
-        applyActiveNodeChange()
+        // 3.8.900（L572-2）：被动换表不抢钉死核心（见 czfFollowListChange）。
+        czfFollowListChange()
         refreshSettingsBackup()
     }
 
@@ -499,6 +500,13 @@ public final class CZFVPNManager {
         } else {
             UserDefaults.standard.set(max(links.count - 1, 0), forKey: Self.activeNodeKey)
         }
+        // 3.8.582（VPN-1）：删掉的节点若还有 App 钉死在上面，清掉
+        // override 回落全局——不然钉死的 App 永远拿已删的死链接连，
+        // 菜单里还看不见它（链接因重复行仍在列表里时 helper 不动）。
+        // 3.8.900（L572-2）：清掉必须在跟随之前——跟随的放行条件是
+        // “核心跑的链接还钉不钉死”，刚删的钉死链接要先清掉才读到不
+        // 钉死、照常跟回全局；不清就误判还在钉死、核心一直跑死链接。
+        Self.clearStaleNodeOverrides(keeping: links)
         if wasActive {
             // 3.8.594（L127）：删在用节点就是亲手停核心——
             // stop() 只停核心，不清测速的待重启快照；测速窗口
@@ -515,18 +523,24 @@ public final class CZFVPNManager {
             vpnCoreLock.unlock()
             stop()
         } else {
-            applyActiveNodeChange()
+            // 3.8.900（L572-2）：被动删节点不抢钉死核心（见 czfFollowListChange）。
+            czfFollowListChange()
         }
-        // 3.8.582（VPN-1）：删掉的节点若还有 App 钉死在上面，清掉
-        // override 回落全局——不然钉死的 App 永远拿已删的死链接连，
-        // 菜单里还看不见它（链接因重复行仍在列表里时 helper 不动）。
-        Self.clearStaleNodeOverrides(keeping: links)
         refreshSettingsBackup()
     }
 
     public func setActiveNode(at index: Int) {
         guard nodeLinks.indices.contains(index) else { return }
         let oldIndex = activeNodeIndex
+        // 3.8.900（L572-1）：点已在用的节点行不是切换——原来不判就直
+        // 接 applyActiveNodeChange，核心正跑在钉死节点的 App 的节点
+        // 上时 runningLink（钉死）!= nodeLink（全局在用），start() 会
+        // 把核心重启到全局节点、清掉归属，养号 App 当场悄悄换 IP；
+        // 点一下已在用的行本该什么都不做。其它调用方（切最快/测速收
+        // 尾）本来就先判 != 才调，这里一次拦住行点/菜单点/盾牌切最快
+        // 三路；下标没变时下面那笔 ping 窗口标志本来也不记、备份也
+        // 不用刷，提前返回行为一字不动。
+        guard index != oldIndex else { return }
         UserDefaults.standard.set(index, forKey: Self.activeNodeKey)
         // 3.8.592（L125）：测速窗口内点的切换记一笔，收尾跟随用
         //（见 czfFollowPostPingNodeSwitch / restartCoreAfterPing）；
@@ -539,6 +553,38 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
         applyActiveNodeChange()
         refreshSettingsBackup()
+    }
+
+    // 3.8.900（L572-2）：某条链接是否仍被任一 App 钉死（override 值
+    // 等于它）——列表被动变动后跟随全局的放行条件（见 czfFollowListChange）。
+    // 直接扫 UserDefaults 的 override 键，与 nodeOverride(for:) 读同一
+    // 份值；只在订阅刷新/删节点/测速收尾这类用户动作里调，不在热路上。
+    private static func czfIsPinnedLiveLink(_ link: String?) -> Bool {
+        guard let link, !link.isEmpty else { return false }
+        let defaults = UserDefaults.standard
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(nodeOverrideKeyPrefix) {
+            if defaults.string(forKey: key) == link { return true }
+        }
+        return false
+    }
+
+    /// 列表被动变动后的跟随（订阅刷新 / 删节点 / 测速收尾的列表变动路，
+    /// 3.8.900（L572-2）：核心正跑在仍被任一 App 钉死的节点上时别跟
+    /// 全局走——订阅刷新/删不相干节点只动了列表，全局在用节点根本没变，
+    /// 原来无条件 applyActiveNodeChange，runningLink（钉死）!= nodeLink
+    /// （全局）就把核心重启到全局节点、清掉归属，养号 App 当场悄悄换
+    /// IP；钉死链接已不在列表里时 override 已被清掉（VPN-1），这里读
+    /// 到不钉死、照常跟全局，不留死节点。核心跑在全局节点上时
+    /// applyActiveNodeChange 本来就是空操作，行为一字不动。显式切换
+    /// （setActiveNode 点了别的节点、测速收尾的显式切换分支）不走这里，
+    // 手动切节点强制切换的原语义不动。
+    private func czfFollowListChange() {
+        // 判定与跟随在同一把锁下（L567-2 同款纪律）：锁外判、锁内
+        // 动之间核心可能刚被别的 App 抢走，判完就错了。
+        vpnCoreLock.lock()
+        defer { vpnCoreLock.unlock() }
+        if Self.czfIsPinnedLiveLink(runningLink) { return }
+        applyActiveNodeChange()
     }
 
     // 活动节点变了而核心在跑：立刻按新节点重启（改完即生效）；
@@ -595,10 +641,17 @@ public final class CZFVPNManager {
             vpnCoreLock.lock()
             let czfCoreRunningNow = isRunning
             let czfHadSnapshot = pingStoppedLink != nil
+            let czfSnapshotLink = pingStoppedLink
             vpnCoreLock.unlock()
             if czfCoreRunningNow {
-                self.applyActiveNodeChange()
+                // 3.8.900（L572-2）：列表变动路不抢钉死核心（见 czfFollowListChange）。
+                self.czfFollowListChange()
             } else if czfHadSnapshot {
+                // 3.8.900（L572-2）：快照链着仍钉死的节点时不动——测速前
+                // 核心跑的是钉死 App 的节点，全局换了与它无关，改写快照
+                // 会让 restart 按全局节点起、钉死 App 悄悄换 IP；快照链
+                // 已不在列表（override 已清）或本来就是全局核心时照旧改写。
+                guard !Self.czfIsPinnedLiveLink(czfSnapshotLink) else { return }
                 vpnCoreLock.lock()
                 self.pingStoppedLink = postPingActiveLink
                 self.pingStoppedOwner = nil
@@ -694,7 +747,10 @@ public final class CZFVPNManager {
         // 在用——与 setActiveNode（改完即重启生效）/ replaceAllNodes
         // 同款，立刻跟过去；测速窗口内 applyActiveNodeChange 会推
         // 迟到测速收尾跟随，核心停着时是空操作。
-        if wasActive {
+        // 3.8.900（L572-3）：原样保存不算改——链接一个字没变时跟过
+        // 去等于无故重启核心，核心正跑在钉死节点的 App 的节点上时
+        // 还会把它抢回全局节点、悄悄换 IP；真改了才跟。
+        if wasActive && trimmed != oldLink {
             applyActiveNodeChange()
         }
         return true

@@ -451,6 +451,21 @@ struct LCContainerView : View {
     }
     
     func openDataFolder() {
+        // 3.8.900（L572-5）：外置容器（storageBookMark != nil）的数据根本不在
+        // dataPath 下，住在用户自选的外置位置（containerURL = 解析出的书签 URL）；
+        // 原来无条件拼 shareddocuments://dataPath/<夹名>，文件 App 打开的是不
+        // 存在的本地路径，用户到不了自己的外置数据夹。外置容器直接开解析出的
+        // URL（D:7322 外部备份文件夹同款：文件 App 对 File Provider 位置一般能接
+        // 住）；书签已死（解析不出）时走错误通道，不开错路。本地容器走下面原路。
+        if container.storageBookMark != nil {
+            if container.bookmarkResolved, let resolvedURL = container.resolvedContainerURL {
+                UIApplication.shared.open(resolvedURL)
+            } else {
+                errorInfo = "无法打开数据文件夹"
+                errorShow = true
+            }
+            return
+        }
         // 文件夹名含空格时 URL(string:) 直接返回 nil，原来
         // url! 强解包点一下就闪退；先 percent-encoding 再拼，
         // 拼不出走现有错误提示通道，不强解包。

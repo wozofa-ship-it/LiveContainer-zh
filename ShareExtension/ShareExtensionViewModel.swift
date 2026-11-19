@@ -34,6 +34,10 @@ final class ShareExtensionViewModel: ObservableObject {
     // 2 秒后自动 completeRequest 关面板。
     @Published var inboxNotice: String?
     private var inboxCompletionSent = false
+    // 3.8.900（L572-4）：本次会话已写进收件箱的文件（取消时删，见 cancelRequest）+
+    // 取消标记（2 秒后那跳 complete 之前再拦一道，取消后不再 completeRequest）。
+    private var czfWrittenInboxFiles: [URL] = []
+    private var czfInboxCancelled = false
     // L8：beginRequest 与 viewDidLoad 各调一次 loadPayload——宿主先调
     // beginRequest 再加载 view，两次调用会并行跑两份 Task（loadItem
     // 两次 + AASA 推荐拉两次）。ViewModel 一次扩展调用只建一次，
@@ -98,6 +102,19 @@ final class ShareExtensionViewModel: ObservableObject {
     }
 
     func cancelRequest() {
+        // 3.8.900（L572-4）：点了 App/安装、横幅已出、2 秒未到时点“取消”，
+        // 收件箱 JSON 早已写进 App Group——原来这里只调 context.cancelRequest，
+        // JSON 一行没动，主 App 下次进前台照认领：取消的启动照开、取消的安装
+        // 照弹安装框（L571-2 只修了主 App 内安装中的取消，扩展内取消这路漏了；
+        // .launch/.sidestore 在主 App 侧根本没有取消概念）。先删本次会话已写
+        // 的条目（只删自己写的，try?，主 App 未认领时一定还在），再取消请求；
+        // 置取消标记，2 秒那跳不再 completeRequest（取消后 complete 已无效）。
+        for fileURL in czfWrittenInboxFiles {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        czfWrittenInboxFiles.removeAll()
+        czfInboxCancelled = true
+        inboxNotice = nil
         currentContext?.cancelRequest(withError: ShareExtensionError("Cancelled"))
     }
 
@@ -577,6 +594,8 @@ final class ShareExtensionViewModel: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(entry)
         try data.write(to: fileURL, options: .atomic)
+        // 3.8.900（L572-4）：记下来，取消时删（见 cancelRequest）；只记写成功的。
+        czfWrittenInboxFiles.append(fileURL)
         czfShareLog("inbox: wrote \(entry.kind.rawValue) -> \(fileURL.lastPathComponent)")
     }
 
@@ -591,6 +610,9 @@ final class ShareExtensionViewModel: ObservableObject {
     /// 面板提示后关面板（3.8.404）：先置 inboxNotice 让面板顶部横幅
     /// 显示文案，2 秒后 completeRequest。inboxCompletionSent 防重复关。
     private func finishWithInboxNotice(_ notice: String, context: NSExtensionContext?) {
+        // 3.8.900（L572-4）：新一次收件算新一轮，取消标记清掉——取消后
+        // 面板若还活着、用户又点一个 App，2 秒那跳要能正常 complete。
+        czfInboxCancelled = false
         inboxNotice = notice
         czfShareLog("inbox notice: \(notice)")
         let ctx = context ?? currentContext
@@ -601,7 +623,8 @@ final class ShareExtensionViewModel: ObservableObject {
     }
 
     private func completeInboxRequest(context: NSExtensionContext?) {
-        guard !inboxCompletionSent else { return }
+        // 3.8.900（L572-4）：已取消就不再 complete（见 cancelRequest）。
+        guard !inboxCompletionSent, !czfInboxCancelled else { return }
         inboxCompletionSent = true
         (context ?? currentContext)?.completeRequest(returningItems: nil, completionHandler: nil)
     }
