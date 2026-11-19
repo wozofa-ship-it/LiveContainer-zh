@@ -581,6 +581,24 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             let backupRoot: URL?
         }
         let plan: CZFDeletePlan = try await MainActor.run {
+            // 3.8.900（L569-7）：正在运行的 App 不许删——三路删除（网格单删/
+            // 横幅卸载/批量删除）全走本函数，删前谁都不查在用：包与数据容器
+            // 当场删掉，窗口里跑着的客 App 下次读资源/写数据就崩或丢数据，
+            // “删除 App 及其数据”还会把运行中 App 的容器也一并删掉。
+            // 覆盖安装（L428#9）与删容器（LCContainerView）都有在用拦截，
+            // 删 App 这路漏了。isAppRunning 盖宿主侧启动/签名窗口（含多任
+            // 务 runApp 路）；容器锁盖别个 LC 宿主的窗口（锁文件记 audit
+            // token、csops 验进程活着，死进程不误拦）。删之前拦住、一个
+            // 文件都不动；三路调用方原有 catch 已会把抛出的错弹出来
+            // （网格 czfGridError、横幅 showError、批量失败清单）。
+            if model.isAppRunning {
+                throw "这个 App 正在运行，先退出它再删除"
+            }
+            for c in appInfo.containers {
+                if LCSharedUtils.getContainerUsingLCScheme(withFolderName: c.folderName) != nil {
+                    throw "这个 App 正在运行，先退出它再删除"
+                }
+            }
             guard let bundlePath = appInfo.bundlePath() else {
                 throw CocoaError(.fileNoSuchFile)
             }

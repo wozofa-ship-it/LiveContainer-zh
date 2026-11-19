@@ -75,6 +75,15 @@ public final class CZFVPNManager {
     private var rotateBaselineLink: String?
     private var rotateCooldownUntil = Date.distantPast
     private var rotateTriedLinks = Set<String>()
+    /// 用户亲手停核心的代次（3.8.900（L569-1））：只有“停核心”这个
+    /// 决定才 +1——三处核心开关的 noteManualCoreToggle(started: false)、
+    /// 删在用节点（removeNode 的 wasActive 支）、到点自动停
+    /// （checkPendingStop）。轮换/就地切的重试循环在每次重试前比对它，
+    /// 中途有人亲手停了核心就收手，不把刚停的核心又起回来。轮换自己
+    /// 的起核中间态 stop()（start(withLink:) 里先停后起）与测速的
+    /// stopCoreForPing 不碰它（那两路不是“停核心”的决定；轮换本来
+    /// 也不在测速窗口内跑）。只在 vpnCoreLock 下读写。
+    private var czfManualCoreStopEpoch = 0
     /// 轮换进行中（3.8.900（L567-1））：轮换改异步后，一轮（尤其
     /// 节点多、全圈试下来）可能超过 30 秒巡检间隔，定时器到点会
     /// 再起一轮——原来主线程同步跑不可能重叠。只在主线程上读写
@@ -500,6 +509,9 @@ public final class CZFVPNManager {
             vpnCoreLock.lock()
             pingStoppedLink = nil
             pingStoppedOwner = nil
+            // 3.8.900（L569-1）：删在用节点也是亲手停核心，记一代次——
+            // 轮换/就地切正在重试时见代次变了就收手（同 noteManualCoreToggle）。
+            czfManualCoreStopEpoch += 1
             vpnCoreLock.unlock()
             stop()
         } else {
@@ -1009,6 +1021,11 @@ public final class CZFVPNManager {
         if !started {
             pingStoppedLink = nil
             pingStoppedOwner = nil
+            // 3.8.900（L569-1）：亲手停核心记一代次——轮换/就地切正在
+            // 重试时见代次变了就收手，不把刚停的核心又起回来（见
+            // czfManualCoreStopEpoch 注释）；亲手起核心不记（起核后
+            // 核心在跑且无归属，重试前的归属复验自会让路）。
+            czfManualCoreStopEpoch += 1
         }
         // 亲手起核心才清掉测速后的预热抑制：亲手停核心不
         // 清——停完切回前台又被预热起回来，和测速后翻盘是
@@ -1106,6 +1123,13 @@ public final class CZFVPNManager {
             lastError = "核心正被另一个已钉死节点的 App 占用，暂不切换（手动在设置里切节点可强制切换）"
             return
         }
+        // 3.8.900（L569-2）：记下起核前的代次，传给 startFallback——
+        // 代次快照必须在起核前取：用户可能正在起核这几秒里亲手停
+        // 核心（停核心那下先卡在锁上、等起核失败才跑），起核失败后
+        // 再取就已是停过之后的代次，重试复验恒过、等于没验。
+        vpnCoreLock.lock()
+        let czfStopEpochBeforeStart = czfManualCoreStopEpoch
+        vpnCoreLock.unlock()
         if start(withLink: link, ownerBid: czfBid, ownerAppInfo: appInfo) {
             claimCoreOwnershipIfRunning(link: link, for: appInfo)
         } else {
@@ -1114,7 +1138,7 @@ public final class CZFVPNManager {
             // 失败才触发，根本等不到。排序与轮换同款（新鲜
             // 测速从快到慢，没测速排最后），钉死的改 override，
             // 跟随全局的改全局活动节点；一圈都不通就停。
-            startFallback(from: link, for: appInfo)
+            startFallback(from: link, for: appInfo, stopEpochAtEntry: czfStopEpochBeforeStart)
         }
     }
 
@@ -1186,6 +1210,10 @@ public final class CZFVPNManager {
         guard let appInfo else { return false }
         let link = effectiveLink(for: appInfo).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !link.isEmpty else { return false }
+        // 3.8.900（L569-2）：记下进来的代次——候选重试前复验用（见循环内）。
+        vpnCoreLock.lock()
+        let czfStopEpochAtEntry = czfManualCoreStopEpoch
+        vpnCoreLock.unlock()
         vpnCoreLock.lock()
         let running = isRunning
         let currentLink = runningLink
@@ -1221,6 +1249,11 @@ public final class CZFVPNManager {
             let pinging = isPinging
             vpnCoreLock.unlock()
             guard !pinging else { return false }
+            // 3.8.900（L569-2）：重试前复验（同 L569-1：探针几秒里用户
+            // 可能已亲手停了核心、或别的 App 刚起核心；不复验就起候选
+            // 节点，等于把刚停的核心又起回来、或停掉别人刚起的核心。
+            // 收手：返回 false，调用方按既有 fail-open 放行）。
+            if czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: appInfo) { return false }
             // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，
             // 不冻调用方的协作线程（runApp 侧同款做法）。
             let started = await Task.detached(priority: .userInitiated) { CZFVPNManager.shared.start(withLink: cand.link, ownerBid: czfBid, ownerAppInfo: appInfo) }.value
@@ -1384,6 +1417,11 @@ public final class CZFVPNManager {
             vpnCoreLock.unlock()
             return
         }
+        // 3.8.900（L569-1）：到点停核心也是“停核心”的决定，记一代次——
+        // 轮换/就地切正在重试时见代次变了就收手，不把刚停的核心又起回来。
+        vpnCoreLock.lock()
+        czfManualCoreStopEpoch += 1
+        vpnCoreLock.unlock()
         stop()
     }
 
@@ -1836,13 +1874,21 @@ public final class CZFVPNManager {
         vpnCoreLock.lock()
         let stillRunning = isRunning
         let current = runningLink
+        // 3.8.900（L569-1）：记下进来的代次——重试前复验用（见循环顶）。
+        let czfStopEpochAtEntry = czfManualCoreStopEpoch
         vpnCoreLock.unlock()
         guard stillRunning, current == currentLink, let current else { return }
         let links = nodeLinks
         guard links.count >= 2 else { return }
         rotateTriedLinks = []
         var cursor = current
+        var czfFirstAttempt = true
         for _ in 0..<links.count {
+            // 3.8.900（L569-1）：重试前复验（同 rotateToNextNode；无归属，
+            // 第一轮不验——入口刚验过在跑且是当前链接；之后每轮先验：
+            // 上一轮起核失败后核心若还在跑，一定是别人刚起的，收手）。
+            if !czfFirstAttempt, czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: nil) { return }
+            czfFirstAttempt = false
             guard let target = nextSupportedNode(after: cursor, links: links) else {
                 cancelRotateCheck()
                 lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
@@ -1873,6 +1919,23 @@ public final class CZFVPNManager {
         lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
     }
 
+    /// 3.8.900（L569-1）：重试前复验——轮换/就地切/探通后切的重试循环
+    /// 在每次重试前调：中途有人亲手停了核心（代次变了）、核心被别的
+    /// App 抢走（归属变了）、或核心正跑在无归属的手动核心上时收手，
+    /// 不把刚停的核心又起回来、不抢别人刚起的核心。返回 true = 收手。
+    /// 只读状态、不改状态；锁只跨三次读，不包起核、不调 main.sync。
+    private func czfRetryYielded(stopEpochAtEntry: Int, for appInfo: LCAppInfo?) -> Bool {
+        vpnCoreLock.lock()
+        let czfEpochNow = czfManualCoreStopEpoch
+        let czfOwnerNow = coreOwnerAppInfo
+        let czfRunningNow = isRunning
+        vpnCoreLock.unlock()
+        if czfEpochNow != stopEpochAtEntry { return true }
+        if let czfOwnerNow, czfOwnerNow !== appInfo { return true }
+        if czfRunningNow && czfOwnerNow == nil { return true }
+        return false
+    }
+
     // 按列表顺序切下一个支持协议的节点并重启核心：归属 App
     // 钉死过就改它的 override（轮换后仍钉死在新节点，不回落
     // 全局），跟随全局就改全局活动节点。起不来的节点继续往
@@ -1881,13 +1944,20 @@ public final class CZFVPNManager {
     // 新鲜测速从快到慢（与轮换同款排序），跳过刚失败的那条；
     // 成功后按轮换同款改钉死/全局，并接管归属、排轮换检查；
     // 一圈都不通就停，lastError 留最后一次失败原因。
-    private func startFallback(from failedLink: String, for appInfo: LCAppInfo?) {
+    private func startFallback(from failedLink: String, for appInfo: LCAppInfo?, stopEpochAtEntry: Int) {
         let links = nodeLinks
         guard links.count >= 2 else { return }
         // 3.8.562（L93）：bid 锁外取好传进 start（同 ensureRunning）。
         let czfBid = appInfo.flatMap { Self.czfBundleId(for: $0) }
         let cands = Self.sortedSupportedCandidates(links: links, excluding: [failedLink])
         for cand in cands {
+            // 3.8.900（L569-2）：重试前复验（同 L569-1 轮换：上一候选起核
+            // 失败后，用户可能已亲手停了核心、或别的 App 刚起核心占住；
+            // 不复验就接着起下一个，等于把刚停的核心又起回来、或停掉
+            // 别人刚起的核心。收手：App 按既有 fail-open 放行，不写错；
+            // 第一轮也验——ensureRunning 那次起核若是被归属守卫拒的
+            // （核心正被别的 App 占着），一个候选都不该试）。
+            if czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: appInfo) { return }
             if start(withLink: cand.link, ownerBid: czfBid, ownerAppInfo: appInfo) {
                 if let appInfo = appInfo, Self.nodeOverride(for: appInfo) != nil {
                     Self.setNodeOverride(cand.link, for: appInfo)
@@ -1927,6 +1997,8 @@ public final class CZFVPNManager {
     private func rotateToNextNode(for appInfo: LCAppInfo) async {
         vpnCoreLock.lock()
         let stillOwner = isRunning && coreOwnerAppInfo === appInfo
+        // 3.8.900（L569-1）：记下进来的代次——重试前复验用（见循环顶）。
+        let czfStopEpochAtEntry = czfManualCoreStopEpoch
         vpnCoreLock.unlock()
         guard stillOwner else { return }
         let links = nodeLinks
@@ -1947,6 +2019,16 @@ public final class CZFVPNManager {
         // 直读安全；start 里锁下认领，轮换起完不再留窗口）。
         let czfBid = appInfo.bundleIdentifier()
         for _ in 0..<links.count {
+            // 3.8.900（L569-1）：重试前复验——上一轮起核失败后、这一轮
+            // 再起之前，用户可能已亲手停了核心（轮换进行中点的“停止
+            // 核心”：起核同步阻塞持锁，停核心那下先卡住、等起核失败
+            // 才跑，跑完核心已停；不复验就接着起下一个，等于把刚停的
+            // 核心又起回来），或别的 App 刚起核心占住了它（本函数每轮
+            // 起核前先把归属清 nil，下一轮起核守卫直接放行、会停掉别人
+            // 刚起的核心）。收手：巡检由调用方的 Task 续延重排，不取消、
+            // 不写“一圈都不通”（节点没死，是让路）；第一轮入口刚验过，
+            // 代次与归属都是现取的，复验恒过。
+            if czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: appInfo) { return }
             guard let target = nextSupportedNode(after: current, links: links) else {
                 cancelRotateCheck()
                 lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"

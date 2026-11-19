@@ -54,8 +54,16 @@
     NSError* error = nil;
     _extension = [NSExtension extensionWithIdentifier:LCUtils.liveProcessBundleIdentifier error:&error];
     if(error) {
+        // 3.8.900（L569-3）：init 返 nil 会让 Decorated 的
+        // setupDecoratedView 在 addChildViewController:nil 上
+        // 再崩一次（L566-7 注释已点明）——入口的
+        // liveProcessBundleIdentifier 守卫只验 .appex 文件在，
+        // 不验扩展建不建得出来，损坏/签名/插件库问题仍会走到
+        // 这里；错已由上面 delegate 回调报给等待方与弹框路，
+        // 这里返 self、让同一条已验证的报错路（beginExtension
+        // 请求失败同款）走完，不再返 nil。
         [delegate appSceneVC:self didInitializeWithError:error];
-        return nil;
+        return self;
     }
     _extension.preferredLanguages = @[];
     

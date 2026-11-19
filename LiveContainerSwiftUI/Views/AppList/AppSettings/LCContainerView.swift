@@ -76,11 +76,26 @@ struct LCContainerView : View {
                         Text(container.folderName)
                             .foregroundStyle(.gray)
                     }
-                    Toggle(isOn: $container.isolateAppGroup) {
+                    Toggle(isOn: Binding(
+                        get: { container.isolateAppGroup },
+                        set: { newValue in
+                            // 3.8.900（L569-6）：在用时拒存，内存里的开关也必须还原——
+                            // Toggle 先写内存、onChange 再调 saveContainer()，在用时
+                            // saveContainer() 拒存报错，但开关已留在开的位置（L97
+                            // 只修了名字栏，三个开关漏了同款）；reloadInfoPlist()
+                            // 只重读 infoDict、不回写 @Published 属性，重进页面开关
+                            // 仍显示开、重启才变回关，用户以为已隔离、其实下次启动
+                            // 仍按旧配置跑。存失败就地把开关拨回旧值（同步做，
+                            // 不走 onChange，无往复触发；didSet 已生成的伪装值
+                            // 留着无害——下次成功打开时复用同一套固定值）。
+                            let oldValue = container.isolateAppGroup
+                            container.isolateAppGroup = newValue
+                            if !saveContainer() {
+                                container.isolateAppGroup = oldValue
+                            }
+                        }
+                    )) {
                         Text("lc.container.isolateAppGroup".loc)
-                    }
-                    .onChange(of: container.isolateAppGroup) { newValue in
-                        saveContainer()
                     }
                     
                     if let settingsBundle {
@@ -105,11 +120,18 @@ struct LCContainerView : View {
                 }
                 
                 Section {
-                    Toggle(isOn: $container.spoofIdentifierForVendor) {
+                    Toggle(isOn: Binding(
+                        get: { container.spoofIdentifierForVendor },
+                        set: { newValue in
+                            // 3.8.900（L569-6）：同 isolateAppGroup——在用时拒存，开关拨回旧值。
+                            let oldValue = container.spoofIdentifierForVendor
+                            container.spoofIdentifierForVendor = newValue
+                            if !saveContainer() {
+                                container.spoofIdentifierForVendor = oldValue
+                            }
+                        }
+                    )) {
                         Text("lc.container.spoofIdentifierForVendor".loc)
-                    }
-                    .onChange(of: container.spoofIdentifierForVendor) { newValue in
-                        saveContainer()
                     }
                     
                     if container.spoofIdentifierForVendor {
@@ -125,11 +147,18 @@ struct LCContainerView : View {
                 }
 
                 Section {
-                    Toggle(isOn: $container.spoofDeviceFingerprint) {
+                    Toggle(isOn: Binding(
+                        get: { container.spoofDeviceFingerprint },
+                        set: { newValue in
+                            // 3.8.900（L569-6）：同 isolateAppGroup——在用时拒存，开关拨回旧值。
+                            let oldValue = container.spoofDeviceFingerprint
+                            container.spoofDeviceFingerprint = newValue
+                            if !saveContainer() {
+                                container.spoofDeviceFingerprint = oldValue
+                            }
+                        }
+                    )) {
                         Text("lc.container.spoofDeviceFingerprint".loc)
-                    }
-                    .onChange(of: container.spoofDeviceFingerprint) { newValue in
-                        saveContainer()
                     }
 
                     // 指纹值只读展示：打开时自动生成、固定不变，

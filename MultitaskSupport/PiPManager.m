@@ -125,6 +125,13 @@ static PiPManager* sharedInstance = nil;
     // 再调 startPictureInPicture，见该函数）。KVO 登记按控制器 key
     // 记，错会话的重复 WillStart 不重复注册（L15），守卫与它不冲突。
     if (pictureInPictureController != self.pipController) return;
+    // 3.8.900（L569-4）：displayingVC 是 weak，点 PiP 后
+    // 0.6 秒里关窗（或客进程自己死了）会把它置空——下面托管
+    // 路径往非空内容视图里 addSubview:nil 内容视图，直接抛
+    // NSInvalidArgumentException、宿主跟着闪退；WillStart
+    // 晚到一步就直接放弃，PiP 本来也已没了。observeValue
+    // 同款守空（L15）。
+    if (!self.displayingVC) return;
     [self.displayingDecoratedVC minimizeWindowPiP];
     if(self.displayingVC.usesHostingControllerAPI) {
         self.pipVideoCallContentView.frame = CGRectMake(0, 0, self.displayingVC.view.bounds.size.width, self.displayingVC.view.bounds.size.height);

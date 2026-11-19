@@ -79,8 +79,15 @@ int LiveProcessMain(int argc, char *argv[]) {
     for(int i = 0; i < bookmarks.count; i++) {
         bool isStale = false;
         NSError* error = nil;
-        bookmarkedUrls[i] = [NSURL URLByResolvingBookmarkData:bookmarks[i] options:0 relativeToURL:nil bookmarkDataIsStale:&isStale error:&error];
-        access = [bookmarkedUrls[i] startAccessingSecurityScopedResource];
+        // 3.8.900（L569-5）：解书签返 nil 时直接往可变数组
+        // 下标里塞 nil 会抛 NSInvalidArgumentException——宿主
+        // 建书签与客端解书签之间目标被删/外置盘被拔，书签就
+        // 解不出来；解不出的只跳过（客端按条数取书签，缺一
+        // 条只少一份沙盒权限、走客侧报错），不拦启动。
+        NSURL *resolvedURL = [NSURL URLByResolvingBookmarkData:bookmarks[i] options:0 relativeToURL:nil bookmarkDataIsStale:&isStale error:&error];
+        if (!resolvedURL) continue;
+        [bookmarkedUrls addObject:resolvedURL];
+        access = [resolvedURL startAccessingSecurityScopedResource];
     }
     
     if ([appInfo[@"selected"] isEqualToString:@"builtinSideStore"]) {
