@@ -1474,17 +1474,23 @@ public final class CZFVPNManager {
             guard started else { continue }
             claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
             if await probeNodeThroughCore(timeout: timeout) {
-                // 3.8.523（L51）：探通了才把候选节点写进钉死/
-                // 全局——原来先写再探，探不通继续试下一个，最
-                // 后全试完都失败时钉死/全局已指着最后一个探
-                // 证已死的节点，用户的原节点选择被悄悄换掉，
-                // 下次启动还先上这个死节点。全局下标按当前列
-                // 表现查（探针几秒里用户可能增删过节点，旧快
-                // 照的 idx 会指错行；钉死那路本来就是按内容写）。
-                if Self.nodeOverride(for: appInfo) != nil {
-                    Self.setNodeOverride(cand.link, for: appInfo)
-                } else if let idx = nodeLinks.firstIndex(of: cand.link) {
-                    UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+                // 3.8.900（L579-A1）：落笔前复验核心仍跑在刚探通的候选
+                // 链接上——探针几秒里别的 App 可能已抢走核心、用户可
+                // 能已亲手切节点/停核心（rotateToNextNode 同款
+                // czfStillOurs 复验，:2327）；不复验就写钉死/全局，
+                // 等于把别人的节点写成这 App 的选择、或把已停的核心
+                // 记成在用候选节点。复验不过就不写，探通本身仍算数
+                // （runApp 按既有 fail-open 放行）；探通缓存照常记，
+                // 入口短路先验核心正跑着该链接，旧缓存带不偏人。
+                vpnCoreLock.lock()
+                let czfStillOnCand = isRunning && runningLink == cand.link
+                vpnCoreLock.unlock()
+                if czfStillOnCand {
+                    if Self.nodeOverride(for: appInfo) != nil {
+                        Self.setNodeOverride(cand.link, for: appInfo)
+                    } else if let idx = nodeLinks.firstIndex(of: cand.link) {
+                        UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
+                    }
                 }
                 noteProbeOK(link: cand.link)
                 return true
@@ -2668,6 +2674,12 @@ public final class CZFVPNManager {
             self.isPinging = true
             self.pingRetryLink = nil
             let epochAtPingStart = self.coreActionEpoch
+            // 3.8.900（L579-A2/A3）：记下测速开始时的亲手停核代次——
+            // 收尾补跑 deferred 队列前复验用（见两轮收尾）；只认
+            // czfManualCoreStopEpoch 三处来源（亲手停/删在用节点/
+            // 自动停到点），stopCoreForPing 自己的停核不记代次，
+            // 不会误判。
+            let czfStopEpochAtPingStart = self.czfManualCoreStopEpoch
             let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
@@ -2735,6 +2747,9 @@ public final class CZFVPNManager {
             // 跑的新轮探针撞上“核心占用”，还会提前放开 isPinging。
             let isLatestPing = (generation == self.pingGeneration)
             let epochChanged = self.coreActionEpoch != epochAtPingStart
+            // 3.8.900（L579-A2/A3）：窗口内是否有人亲手停过核心——
+            // 与 epochChanged 同锁下读（见快照注释）。
+            let czfManualStopDuringPing = czfStopEpochAtPingStart != self.czfManualCoreStopEpoch
             if isLatestPing {
                 if !epochChanged {
                     self.prewarmSuppressedAfterPing = !self.isRunning
@@ -2746,6 +2761,24 @@ public final class CZFVPNManager {
                 self.deferredEnsureApps = []
                 deferredHost = self.deferredHostEnsure
                 self.deferredHostEnsure = false
+                // 3.8.900（L579-A2）：窗口内有人亲手停了核心就丢弃
+                // 被挡的开 App 请求——noteManualCoreToggle 只清了待重
+                // 启快照，没清这支队列；L569-1 的代次复验只盖了轮换/
+                // 就地切/探针重试三路，补跑这路漏了。代次变了还补跑，
+                // 等于把刚停的核心又起回来（L221 那句“测完又被收尾起
+                // 回来”换了条路重演）。App 已按 fail-open 放行直连，
+                // 丢弃不丢数据；删在用节点与自动停到点同款（同代次
+                // 的另两处来源）。
+                if czfManualStopDuringPing {
+                    deferredApps = []
+                }
+                // 3.8.900（L579-A3）：同 A2，宿主源下载那路——
+                // deferredHostEnsure 同样只由收尾补跑消费，窗口内
+                // 亲手停核心后补跑 ensureRunningForHost 也会把核
+                // 心起回来；代次变了就丢弃，不补跑。
+                if czfManualStopDuringPing {
+                    deferredHost = false
+                }
                 nodeSwitched = self.czfNodeSwitchDuringPing
                 // 链接没变时不清除：窗口内点的切换可能在收尾与
                 // restart 之间才发生，留给 restartCoreAfterPing
@@ -2820,6 +2853,8 @@ public final class CZFVPNManager {
             self.isPinging = true
             self.pingRetryLink = nil
             let epochAtPingStart = self.coreActionEpoch
+            // 3.8.900（L579-A2/A3）：记下测速开始时的亲手停核代次（同 pingAllNodes，收尾复验用）。
+            let czfStopEpochAtPingStart = self.czfManualCoreStopEpoch
             let coreRunningAtStart = self.isRunning
             let prePingActiveLink = self.nodeLink
             self.vpnCoreLock.unlock()
@@ -2847,6 +2882,8 @@ public final class CZFVPNManager {
             // 清标志、记预热抑制、取走被挡请求。
             let isLatestPing = (generation == self.pingGeneration)
             let epochChanged = self.coreActionEpoch != epochAtPingStart
+            // 3.8.900（L579-A2/A3）：窗口内是否有人亲手停过核心（同 pingAllNodes）。
+            let czfManualStopDuringPing = czfStopEpochAtPingStart != self.czfManualCoreStopEpoch
             if isLatestPing {
                 if !epochChanged {
                     self.prewarmSuppressedAfterPing = !self.isRunning
@@ -2858,6 +2895,14 @@ public final class CZFVPNManager {
                 self.deferredEnsureApps = []
                 deferredHost = self.deferredHostEnsure
                 self.deferredHostEnsure = false
+                // 3.8.900（L579-A2）：窗口内有人亲手停了核心就丢弃被挡的开 App 请求（同 pingAllNodes）。
+                if czfManualStopDuringPing {
+                    deferredApps = []
+                }
+                // 3.8.900（L579-A3）：同 A2，宿主源下载那路（同 pingAllNodes）。
+                if czfManualStopDuringPing {
+                    deferredHost = false
+                }
                 nodeSwitched = self.czfNodeSwitchDuringPing
                 // 链接没变时不清除：窗口内点的切换可能在收尾与
                 // restart 之间才发生，留给 restartCoreAfterPing

@@ -583,6 +583,17 @@
 }
 
 - (void)unminimizeWindowPiP {
+    // 3.8.900（L579-B1）：PiP 淡出 0.3 秒内点了最小化时别再把
+    // 窗口露出来——minimizeWindow 在淡出中途（hidden 还没置位）
+    // 照常跑完、czfMinimized 已置 YES、场景已进后台；WillStop/
+    // 启动失败再调这里取消隐藏，窗口会以“最小化标记还在、场景
+    // 仍后台”的状态露出来：画面定在最后一帧、客 App 不响应，
+    // 只能再最小化一次+叫回才恢复。最小化优先，留在藏着的状态；
+    // 叫回路（animateViewAppearance 先调 czfRestoreFromMinimize
+    // 清标志）不受影响。注意：这里直接 return、不加序号——加序
+    // 号会作废在途最小化动画的 completion（它才负责落
+    // hidden=YES），窗会卡在 alpha=0 不藏不显。
+    if (self.czfMinimized) return;
     // 3.8.900（L568-11）：恢复先作废在途的 PiP 淡出（见
     // 上面注释）——不加这一行，completion 仍认旧序号，
     // 到点把刚恢复的窗口重新藏起来。
