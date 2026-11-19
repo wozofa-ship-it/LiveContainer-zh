@@ -762,14 +762,20 @@ public final class CZFVPNManager {
         }
         refreshSettingsBackup()
         // 改的正是在用节点：核心还在跑旧链接，界面却已把新链接标成
-        // 在用——与 setActiveNode（改完即重启生效）/ replaceAllNodes
-        // 同款，立刻跟过去；测速窗口内 applyActiveNodeChange 会推
-        // 迟到测速收尾跟随，核心停着时是空操作。
+        // 在用——与 replaceAllNodes 同款，立刻跟过去；测速窗口内
+        // 跟随会推迟到测速收尾，核心停着时是空操作。
         // 3.8.900（L572-3）：原样保存不算改——链接一个字没变时跟过
         // 去等于无故重启核心，核心正跑在钉死节点的 App 的节点上时
         // 还会把它抢回全局节点、悄悄换 IP；真改了才跟。
+        // 3.8.900（L574-1）：改链接是列表变动、不是显式切节点——上面
+        // remap 已把旧链接的钉死挪到新链接上：核心正跑在别的钉
+        // 死节点上时跟过去等于抢走养号 App 的核心、悄悄换 IP
+        // （L572-2 同款，replaceAllNodes/删节点已修，这里漏了）；
+        // 核心跑的正是被改这条时，旧链接已被 remap 挪走、不再被
+        // 钉死，跟随照常重启到新链接。显式切节点（setActiveNode）
+        // 不走这里，手动强制切换的原语义不动。
         if wasActive && trimmed != oldLink {
-            applyActiveNodeChange()
+            czfFollowListChange()
         }
         return true
     }

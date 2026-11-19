@@ -4260,8 +4260,14 @@ struct SourcesPanelView: View {
     // 核心已为测速停下，start() 走探针守卫本来就被拒。
     private func togglePanelVPNCore() {
         guard !vpnPinging else { return }
-        CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
-        if vpnCoreRunning {
+        // 3.8.900（L574-2）：同 App 页/设置页——三处开关里的第三处，侦察
+        // 只改了前两处、这里漏了：起/停的决定读 manager 现值，别读面板
+        // 镜像（调出时才刷、开着不补刷，子窗口里开标 VPN 的 App 会把
+        // 核心起停、镜像收不到通知）。钉死核心正跑着时镜像仍是“未启
+        // 动”，点“启动核心”走 start() 抢回全局节点、悄悄换 IP。
+        let czfCoreRunningNow = CZFVPNManager.shared.isRunning
+        CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
+        if czfCoreRunningNow {
             CZFVPNManager.shared.stop()
         } else {
             _ = CZFVPNManager.shared.start()

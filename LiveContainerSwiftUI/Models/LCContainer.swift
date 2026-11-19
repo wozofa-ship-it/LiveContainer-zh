@@ -200,6 +200,20 @@ class LCContainer : ObservableObject, Hashable {
     public var keychainGroupId : Int {
         get {
             if infoDict == nil {
+                // 3.8.900（L574-3）：外置容器懒读也要先拿 scope——与
+                // L573-4 同根（convenience init 读 plist 那处）：
+                // init 从不填 infoDict（只 applyPlistInfo 到各
+                // 属性），loadName/reloadInfoPlist 只在容器设置
+                // 页走；启动时 czfFreeKeychainGroup（M:734）与
+                // czfIsolateMultiOpenContainersIfNeeded（M:881）
+                // 直接读这里，裸读读不到外置 plist 就回 -1：
+                // 已占的组号被当成空闲，新容器撞组、两分身共用
+                // 一组钥匙串（L438-1/G5 同款伤害）；未隔离过
+                // 的外置容器还会因 -1 被重分新组，旧组令牌留
+                // 在旧组里、新组是空的，下次启动登录态就没了。
+                // 本地容器（无书签）与死书签不动。
+                let czfDidAccess = storageBookMark != nil && bookmarkResolved && containerURL.startAccessingSecurityScopedResource()
+                defer { if czfDidAccess { containerURL.stopAccessingSecurityScopedResource() } }
                 infoDict = NSDictionary(contentsOf: infoDictUrl) as? [String : Any]
             }
             guard let infoDict else {
@@ -212,6 +226,11 @@ class LCContainer : ObservableObject, Hashable {
     public var appIdentifier : String? {
         get {
             if infoDict == nil {
+                // 3.8.900（L574-3）：与 keychainGroupId 同根——外置
+                // 容器裸读读不到 plist，LCSelectContainerView
+                // 里一直显示 unknown；同款先拿 scope 再读。
+                let czfDidAccess = storageBookMark != nil && bookmarkResolved && containerURL.startAccessingSecurityScopedResource()
+                defer { if czfDidAccess { containerURL.stopAccessingSecurityScopedResource() } }
                 infoDict = NSDictionary(contentsOf: infoDictUrl) as? [String : Any]
             }
             guard let infoDict else {

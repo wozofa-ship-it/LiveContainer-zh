@@ -385,8 +385,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.282：顶部盾牌的开关（点按与长按菜单共用同一套调用；
     // 状态从 shared.isRunning 读，点按后刷新，不靠猜）
     private func toggleVPNCore() {
-        CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
-        if vpnCoreRunning {
+        // 3.8.900（L574-2）：起/停的决定读 manager 现值，别读本页镜像
+        // vpnCoreRunning——镜像只在进页/回前台时刷新，子窗口里开
+        // 关标 VPN 的 App 会在页内把核心起停、镜像收不到通知：
+        // 钉死 App 的核心正跑着时镜像仍是“未启动”，点“启动核心”
+        // 会走 start() 把核心抢回全局节点、养号 App 悄悄换 IP；
+        // 反向过期时点“停止核心”只是空操作。现值读法与 L58-3
+        // （删/清理/排序按 manager 现值）同款；镜像对上时行为
+        // 一字不动，决定完照常写回镜像。
+        let czfCoreRunningNow = CZFVPNManager.shared.isRunning
+        CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
+        if czfCoreRunningNow {
             CZFVPNManager.shared.stop()
         } else {
             // 3.8.582（VPN-6）：起失败以前只把开关留在关态、不显示

@@ -507,8 +507,15 @@ struct CZFVPNSettingsView: View {
     @ViewBuilder private var czfVPNCoreRow: some View {
         HStack {
             Button(vpnCoreRunning ? "停止核心" : "启动核心") {
-                CZFVPNManager.shared.noteManualCoreToggle(started: !vpnCoreRunning)
-                if vpnCoreRunning {
+                // 3.8.900（L574-2）：同 App 页盾牌开关——起/停的决定读
+                // manager 现值，别读本页镜像：子窗口里开标 VPN 的
+                // App 会把核心起停、镜像收不到通知，过期镜像会让
+                // “启动核心”走 start() 抢走钉死 App 的核心。按钮
+                // 文案仍按镜像显示，决定只认现值；镜像对上时行为
+                // 一字不动。
+                let czfCoreRunningNow = CZFVPNManager.shared.isRunning
+                CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
+                if czfCoreRunningNow {
                     CZFVPNManager.shared.stop()
                 } else {
                     _ = CZFVPNManager.shared.start()
