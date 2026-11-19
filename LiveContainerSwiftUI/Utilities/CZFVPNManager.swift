@@ -56,6 +56,8 @@ public final class CZFVPNManager {
     // 启动时间"+ 30 分钟延迟双保险，避免 App 重启时反复启停
     private var pendingStopWork: DispatchWorkItem?
     private var lastFlaggedLaunchAt = Date.distantPast
+    // 3.8.900（L587-A1）：点按“停止核心”那一刻的 lastFlaggedLaunchAt 快照——排队停核执行时再验一次：排队这会儿刚开起来的标 VPN App 已把 lastFlaggedLaunchAt 刷成现在（ensureRunning 入口，V:1307，起核/等锁之前就写），快照之后有新值 = 点按后有 App 开过，跳过这次停。
+    private var czfManualStopTapLaunchAt = Date.distantPast
     // O-29：每链接上次探通时间——连开几个 VPN App 时每个都实网探
     // 一次，白白建会话、打 generate_204。60 秒内同一链接直接放行，
     // 省重复探针、省电；坏节点轮换仍靠 scheduleRotateCheck 兜底，
@@ -1262,6 +1264,8 @@ public final class CZFVPNManager {
             // czfManualCoreStopEpoch 注释）；亲手起核心不记（起核后
             // 核心在跑且无归属，重试前的归属复验自会让路）。
             czfManualCoreStopEpoch += 1
+            // 3.8.900（L587-A1）：同款快照——排队停核执行时凭它认“点按后有无 App 开过”（见 czfManualStopTapLaunchAt 声明）；起核心那路不记。
+            czfManualStopTapLaunchAt = lastFlaggedLaunchAt
         }
         // 亲手起核心才清掉测速后的预热抑制：亲手停核心不
         // 清——停完切回前台又被预热起回来，和测速后翻盘是
@@ -1457,6 +1461,12 @@ public final class CZFVPNManager {
         guard let appInfo else { return false }
         let link = effectiveLink(for: appInfo).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !link.isEmpty else { return false }
+        // 3.8.900（L586-A2）：入口快照用户选择——落笔前复验用（见探通路）。
+        // 探针是数秒的 await（Task.detached 起核 + probeNodeThroughCore），
+        // 这段时间里用户可能在设置页改钉死/切节点；落笔的 czfStillOnCand
+        // 只验核心仍跑在候选上、拦不住它（L579-A1 注释自认了这窗口）。
+        let czfOverrideAtEntry = Self.nodeOverride(for: appInfo)
+        let czfActiveLinkAtEntry = nodeLink
         // 3.8.900（L569-2）：记下进来的代次——候选重试前复验用（见循环内）。
         vpnCoreLock.lock()
         let czfStopEpochAtEntry = czfManualCoreStopEpoch
@@ -1519,9 +1529,16 @@ public final class CZFVPNManager {
                 let czfStillOnCand = isRunning && runningLink == cand.link
                 vpnCoreLock.unlock()
                 if czfStillOnCand {
-                    if Self.nodeOverride(for: appInfo) != nil {
+                    // 3.8.900（L586-A2）：落笔前复验用户选择（同轮换两路）：入口有钉死
+                    // 且现值仍等于入口值时才写候选进钉死；入口无钉死且现值仍为 nil、
+                    // 且全局在用链接仍等于入口值时才写全局下标；用户中途改了就跳过
+                    // 写回（探通本身仍算数，noteProbeOK 与 return true 在 if 外不动）。
+                    let czfOverrideNow = Self.nodeOverride(for: appInfo)
+                    if let czfOverrideAtEntry, czfOverrideNow == czfOverrideAtEntry {
                         Self.setNodeOverride(cand.link, for: appInfo)
-                    } else if let idx = nodeLinks.firstIndex(of: cand.link) {
+                    } else if czfOverrideAtEntry == nil, czfOverrideNow == nil,
+                              nodeLink == czfActiveLinkAtEntry,
+                              let idx = nodeLinks.firstIndex(of: cand.link) {
                         UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
                     }
                 }
@@ -1959,6 +1976,15 @@ public final class CZFVPNManager {
         lastError = nil
     }
 
+    /// 3.8.900（L587-A1）：排队的手动停核心——执行时再验一次：排队这会儿可能有标 VPN 的 App 刚开起来、ensureRunning 已把核心认领/起好；这时再停等于把刚开的 App 的 VPN 悄悄断掉（L578-A1 起核方向同款，见 czfApplyActiveNodeChangeNow）。点按时记下的 lastFlaggedLaunchAt 之后有新值 = 点按后有 App 开过，跳过这次停（完成回调照常刷新镜像，显示仍在运行中，再点一次即停——第二次点按的快照在开 App 之后，不再跳过）。只认点按后开过的 App：点按前已在跑的 App 不拦停（手动停的本意）。只给三处开关的排队停核用；自动停（checkPendingStop 有自己的停前复核）、删节点停核、测速停核一字不动。
+    public func czfStopFromQueuedToggle() {
+        vpnCoreLock.lock()
+        let czfOpenedAfterTap = lastFlaggedLaunchAt > czfManualStopTapLaunchAt
+        vpnCoreLock.unlock()
+        guard !czfOpenedAfterTap else { return }
+        stop()
+    }
+
     // MARK: - 节点自动轮换
 
     // 排一次 30 秒后的轮换检查：已排的先取消再重排，保证
@@ -2151,6 +2177,11 @@ public final class CZFVPNManager {
         guard links.count >= 2 else { return }
         rotateTriedLinks = []
         var cursor = current
+        // 3.8.900（L586-A2）：入口快照全局在用链接——落笔前复验用（见成功路）。
+        // 起核是数秒的 await Task.detached，这段时间里用户可能在 VPN 页点别的
+        // 节点（setActiveNode 当场写活动下标、起核排进队列）；落笔的 czfStillOurs
+        // 只验核心仍跑在目标上、拦不住它。不快照就把用户刚点的节点悄悄盖回目标。
+        let czfActiveLinkAtEntry = nodeLink
         var czfFirstAttempt = true
         for _ in 0..<links.count {
             // 3.8.900（L569-1）：重试前复验（同 rotateToNextNode；无归属，
@@ -2197,7 +2228,10 @@ public final class CZFVPNManager {
             let czfStillOurs = isRunning && runningLink == target
             vpnCoreLock.unlock()
             guard czfStillOurs else { return }
-            if let idx = nodeLinks.firstIndex(of: target) {
+            // 3.8.900（L586-A2）：落笔前复验全局在用链接仍等于入口值才写下标；
+            // 用户中途切了节点就跳过写回（核心照跑 target；用户点的节点已由
+            // setActiveNode 写进下标、起核排进队列，跑完即生效）。只补选择复验。
+            if nodeLink == czfActiveLinkAtEntry, let idx = nodeLinks.firstIndex(of: target) {
                 UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
             }
             return
@@ -2234,6 +2268,11 @@ public final class CZFVPNManager {
     private func startFallback(from failedLink: String, for appInfo: LCAppInfo?, stopEpochAtEntry: Int) {
         let links = nodeLinks
         guard links.count >= 2 else { return }
+        // 3.8.900（L586-A2）：入口快照用户选择——落笔前复验用（见成功路）。
+        // 候选起核是同步阻塞的 CGoInvoke、一圈几秒里用户可能在设置页改钉死/
+        // 切节点；重试前复验（czfRetryYielded）只验停核代次与归属、拦不住它。
+        let czfOverrideAtEntry = appInfo.flatMap { Self.nodeOverride(for: $0) }
+        let czfActiveLinkAtEntry = nodeLink
         // 3.8.562（L93）：bid 锁外取好传进 start（同 ensureRunning）。
         let czfBid = appInfo.flatMap { Self.czfBundleId(for: $0) }
         let cands = Self.sortedSupportedCandidates(links: links, excluding: [failedLink])
@@ -2254,9 +2293,16 @@ public final class CZFVPNManager {
             vpnCoreLock.unlock()
             if czfPingingNow { return }
             if start(withLink: cand.link, ownerBid: czfBid, ownerAppInfo: appInfo) {
-                if let appInfo = appInfo, Self.nodeOverride(for: appInfo) != nil {
+                // 3.8.900（L586-A2）：落笔前复验用户选择（同轮换两路）：入口有钉死
+                // 且现值仍等于入口值时才写候选进钉死；入口无钉死且现值仍为 nil、
+                // 且全局在用链接仍等于入口值时才写全局下标；用户中途改了就跳过
+                // 写回（核心照跑候选）。只补选择复验，claimCoreOwnership 一字不动。
+                let czfOverrideNow = appInfo.flatMap { Self.nodeOverride(for: $0) }
+                if let appInfo, let czfOverrideAtEntry, czfOverrideNow == czfOverrideAtEntry {
                     Self.setNodeOverride(cand.link, for: appInfo)
-                } else {
+                } else if czfOverrideAtEntry == nil, czfOverrideNow == nil,
+                          nodeLink == czfActiveLinkAtEntry,
+                          let idx = nodeLinks.firstIndex(of: cand.link) {
                     // 3.8.529（L56）：下标按当前列表现查——cand.idx
                     // 是函数入口快照里的下标，start(withLink:) 同步
                     // 阻塞几秒里用户可能在设置页增删/重排节点（测速
@@ -2265,9 +2311,7 @@ public final class CZFVPNManager {
                     // 面“在用”行对不上（L51-12 在 waitUntilNodeReady
                     // 里修过同款，这里漏了）；链接已不在列表里时不
                     // 写下标，核心照常跑这条链接。
-                    if let idx = nodeLinks.firstIndex(of: cand.link) {
-                        UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
-                    }
+                    UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
                 }
                 claimCoreOwnershipIfRunning(link: cand.link, for: appInfo)
                 return
@@ -2310,6 +2354,12 @@ public final class CZFVPNManager {
         // 不动它。
         rotateTriedLinks = []
         var current = effectiveLink(for: appInfo)
+        // 3.8.900（L586-A2）：入口快照用户选择——落笔前复验用（见成功路）。
+        // 起核是数秒的 await Task.detached，这段时间里用户可能在 App 设置
+        // 页改钉死（只写键、不动在跑的核心）；落笔的 czfStillOurs 只验核心
+        // 仍跑在目标上、拦不住它。不快照就把用户刚改的钉死悄悄盖回目标。
+        let czfOverrideAtEntry = Self.nodeOverride(for: appInfo)
+        let czfActiveLinkAtEntry = nodeLink
         // 3.8.562（L93）：bid 传进 start（主队列上，bundleIdentifier()
         // 直读安全；start 里锁下认领，轮换起完不再留窗口）。
         let czfBid = appInfo.bundleIdentifier()
@@ -2368,9 +2418,18 @@ public final class CZFVPNManager {
                 // 掉。全失败时钉死仍指着原来那个死节点，与报错
                 // 文案“手动换节点”一致。startFallback 本来就是
                 // 起成功才写的形状，这里照它。
-                if Self.nodeOverride(for: appInfo) != nil {
+                // 3.8.900（L586-A2）：落笔前复验用户选择——入口有钉死且现值
+                // 仍等于入口值时才写目标进钉死；入口无钉死且现值仍为 nil、
+                // 且全局在用链接仍等于入口值时才写全局下标；用户中途改了
+                // 钉死/切了节点就跳过写回（核心照跑 target，本次轮换成果
+                // 保留；用户的新选择下次开 App 生效）。只补选择复验，
+                // czfStillOurs 与冷却基线/归属写回一字不动。
+                let czfOverrideNow = Self.nodeOverride(for: appInfo)
+                if let czfOverrideAtEntry, czfOverrideNow == czfOverrideAtEntry {
                     Self.setNodeOverride(target, for: appInfo)
-                } else if let idx = nodeLinks.firstIndex(of: target) {
+                } else if czfOverrideAtEntry == nil, czfOverrideNow == nil,
+                          nodeLink == czfActiveLinkAtEntry,
+                          let idx = nodeLinks.firstIndex(of: target) {
                     // 3.8.535（L62-2）：下标按当前列表现查——上面
                     // links 是函数入口快照，start(withLink:) 同步
                     // 阻塞几秒里列表可能已变：L56 注“整函数在主队

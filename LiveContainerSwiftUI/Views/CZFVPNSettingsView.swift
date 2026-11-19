@@ -82,8 +82,11 @@ struct CZFVPNSettingsView: View {
     /// 清理只认网络失败——转换失败（不支持）的不算，避免只剩
     /// 不支持节点时出现一行空按钮。
     private var hasVPNBatchActions: Bool {
-        vpnPingResults.contains(where: { $0.value.success && $0.key != vpnActiveIndex })
-            || vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex })
+        // 3.8.900（L586-A1）：读 manager 现值，不读 @State 镜像
+        // vpnActiveIndex——自动轮换/坞面板切节点在后台改活动下标、
+        // manager 从不发通知，镜像只在进页/回前台/本地操作后才刷新。
+        vpnPingResults.contains(where: { $0.value.success && $0.key != CZFVPNManager.shared.activeNodeIndex })
+            || vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != CZFVPNManager.shared.activeNodeIndex })
             || vpnPingResults.count > 1
     }
 
@@ -370,7 +373,8 @@ struct CZFVPNSettingsView: View {
                     CZFVPNNodeLabel(
                         link: link,
                         ping: vpnPingResults[index],
-                        isActive: index == vpnActiveIndex,
+                        // 3.8.900（L586-A1）：✓ 按 manager 现值打，不读过期镜像（同上）。
+                        isActive: index == CZFVPNManager.shared.activeNodeIndex,
                         coreRunning: vpnCoreRunning,
                         pinging: vpnPinging,
                         isSinglePingTarget: vpnSinglePingIndex == index,
@@ -518,7 +522,7 @@ struct CZFVPNSettingsView: View {
                 // 3.8.900（L577-1）：起/停核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放 manager 的串行队列跑（点按顺序不变），做完回主线程刷新状态。noteManualCoreToggle 仍同步记（它只动锁下标志、清测速快照，必须在起停之前落定）；起失败的原因走状态行 lastError（refreshVPNState 里读），与原来一致。
                 CZFVPNManager.czfCoreStartQueue.async {
                     if czfCoreRunningNow {
-                        CZFVPNManager.shared.stop()
+                        CZFVPNManager.shared.czfStopFromQueuedToggle() // 3.8.900（L587-A1）：排队停核执行时再验一次，点按后刚开起来的 VPN App 不被悄悄断网（见 V）。
                     } else {
                         _ = CZFVPNManager.shared.start()
                     }
@@ -581,7 +585,8 @@ struct CZFVPNSettingsView: View {
         HStack {
             // 测完后一键切到最快的（只认测通的节点；
             // 已经是最快时不显示，省得误会）
-            if let fastest = vpnPingResults.filter({ $0.value.success }).min(by: { $0.value.delay < $1.value.delay }), fastest.key != vpnActiveIndex {
+            // 3.8.900（L586-A1）：按钮显隐按 manager 现值判，不读过期镜像（同上）。
+            if let fastest = vpnPingResults.filter({ $0.value.success }).min(by: { $0.value.delay < $1.value.delay }), fastest.key != CZFVPNManager.shared.activeNodeIndex {
                 Button("切到最快") {
                     CZFVPNManager.shared.setActiveNode(at: fastest.key)
                     refreshVPNState()
@@ -598,7 +603,8 @@ struct CZFVPNSettingsView: View {
             // 换协议或走原始 JSON 出站绕法。用
             // replaceAllNodes 一次替换，活动节点按内容
             // 跟随、不重启核心。
-            if vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != vpnActiveIndex }) {
+            // 3.8.900（L586-A1）：按钮显隐按 manager 现值判，不读过期镜像（同上）。
+            if vpnPingResults.contains(where: { !$0.value.success && !$0.value.conversionFailed && $0.key != CZFVPNManager.shared.activeNodeIndex }) {
                 Button("清理不通") {
                     // L58-3：个数按 manager 现值算，别读 @State
                     // 镜像——自动轮换后镜像过期，会把真在用节点

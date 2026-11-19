@@ -403,7 +403,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         CZFVPNManager.czfCoreStartQueue.async {
             var czfStartError: String?
             if czfCoreRunningNow {
-                CZFVPNManager.shared.stop()
+                CZFVPNManager.shared.czfStopFromQueuedToggle() // 3.8.900（L587-A1）：排队停核执行时再验一次，点按后刚开起来的 VPN App 不被悄悄断网（见 V）。
             } else {
                 // 3.8.582（VPN-6）：起失败以前只把开关留在关态、不显示
                 // 原因，用户无从查（lastError 只有 VPN 设置页读）。失败

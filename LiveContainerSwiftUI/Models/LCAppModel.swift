@@ -330,6 +330,11 @@ class LCAppModel: ObservableObject, Hashable {
         // 直接动 UIView/dismiss），必须回主线程再调；横幅卡传默认
         // 空闭包，无行为变化。L38 只包了小窗口路的带回，没包这里。
         await MainActor.run { onProceed() }
+        // 3.8.900（L587-B1）：原生窗口模式下没有最小化——原生场景不进坞表（addRunningAppWithInfo 的 isDockEnabled 守卫）、窗口出现信号永不发出，等 6 秒只会报假超时；直接报实话，不启动、不等窗。虚拟模式一字不动。
+        if LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode") == 1 {
+            await MainActor.run { onError("原生窗口模式下无法最小化：窗口是系统场景，没有最小化功能；请在设置里切回虚拟窗口模式") }
+            return
+        }
         // 3.8.539（L69）：同款漏网——czfMinimizeRunningWindow 里
         // czfOwnedDockEntry 读 @Published dockManager.apps（L67
         // 修的是 pruneStaleDockEntries 改它的写侧，这是读侧），
@@ -373,6 +378,11 @@ class LCAppModel: ObservableObject, Hashable {
         // closePanel（dismissPanelOverlay 直接动 UIView/dismiss），
         // 裸 Task 执行器上调会离主线程动 UI；回主线程再调。
         await MainActor.run { onProceed() }
+        // 3.8.900（L587-B1）：原生窗口模式下没有小窗口——原生场景不进坞表、窗口出现信号永不发出，等 30 秒只会报假超时；直接报实话，不启动、不等窗。虚拟模式一字不动。
+        if LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode") == 1 {
+            await MainActor.run { onError("原生窗口模式下无法开小窗口：窗口是系统场景，没有小窗口功能；请在设置里切回虚拟窗口模式") }
+            return
+        }
         // 3.8.514（L38）：本函数从横幅卡裸 Task 调来、不在主 actor
         // 上，czfBringRunningAppToFront 是纯 UIKit 活（带回/拉满），
         // 必须回主线程再调（横幅卡 :202 与面板 :1510 两处调用方
@@ -1964,6 +1974,11 @@ actor CZFMultitaskLaunchGate {
     /// 15 秒 asyncAfter 兜底，超时也放门。出现/超时谁先到谁
     /// 恢复，CZFOnceBox 保证只恢复一次。
     func czfWaitForWindowAndRelease(uuid: String) async {
+        // 3.8.900（L587-B3）：原生窗口模式下窗口出现信号永不发出（addRunningAppWithInfo 的 isDockEnabled 守卫拦住了条目追加，.czfMultitaskWindowAppeared 唯一发送点 K:1053 走不到），等满 15 秒超时才放门；连开两个 App 时第二个最多卡 15 秒。pid 已回 ⇒ 客进程 main（LiveContainerMain）已读走并删掉了 selected/selectedContainer 单键（LCBootstrap.m:827-828 读、:966-967 删），门已无保护对象，直接放。虚拟模式一字不动。
+        if LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode") == 1 {
+            release(for: uuid)
+            return
+        }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let box = CZFOnceBox()
             // MultitaskDockManager 带 @available(iOS 16.0, *)，跨文件
