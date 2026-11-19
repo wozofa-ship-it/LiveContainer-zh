@@ -515,12 +515,15 @@ struct CZFVPNSettingsView: View {
                 // 一字不动。
                 let czfCoreRunningNow = CZFVPNManager.shared.isRunning
                 CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
-                if czfCoreRunningNow {
-                    CZFVPNManager.shared.stop()
-                } else {
-                    _ = CZFVPNManager.shared.start()
+                // 3.8.900（L577-1）：起/停核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放 manager 的串行队列跑（点按顺序不变），做完回主线程刷新状态。noteManualCoreToggle 仍同步记（它只动锁下标志、清测速快照，必须在起停之前落定）；起失败的原因走状态行 lastError（refreshVPNState 里读），与原来一致。
+                CZFVPNManager.czfCoreStartQueue.async {
+                    if czfCoreRunningNow {
+                        CZFVPNManager.shared.stop()
+                    } else {
+                        _ = CZFVPNManager.shared.start()
+                    }
+                    DispatchQueue.main.async { refreshVPNState() }
                 }
-                refreshVPNState()
             }
             // 测速中置灰：测速中亲手起停核心会和测速
             // 的 deferred 逻辑插队，状态容易翻；测速
@@ -730,7 +733,11 @@ struct CZFVPNSettingsView: View {
             .onChange(of: vpnHostProxy) { newValue in
                 CZFVPNManager.isHostProxyEnabled = newValue
                 if newValue {
-                    CZFVPNManager.shared.ensureRunningForHost()
+                    // 3.8.900（L577-1）：ensureRunningForHost 里起核心是同步阻塞的 CGoInvoke，主线程直调冻界面；放串行队列跑，做完回主线程刷新（开关值本身已同步写回）。关开关那路不碰核心，不动。
+                    CZFVPNManager.czfCoreStartQueue.async {
+                        CZFVPNManager.shared.ensureRunningForHost()
+                        DispatchQueue.main.async { refreshVPNState() }
+                    }
                 } else {
                     // 3.8.572（L103）：宿主代理关掉也是“没人用核心了”——原来只在
                     // 关窗（removeRunningApp）时才排自动停：最后已标 VPN 的 App 关

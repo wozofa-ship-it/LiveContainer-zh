@@ -4267,20 +4267,24 @@ struct SourcesPanelView: View {
         // 动”，点“启动核心”走 start() 抢回全局节点、悄悄换 IP。
         let czfCoreRunningNow = CZFVPNManager.shared.isRunning
         CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
-        if czfCoreRunningNow {
-            CZFVPNManager.shared.stop()
-        } else {
-            // 3.8.900（L576-2）：起失败要报出来，别静默吞掉——
-            // 没节点/节点起不来/别处正在测速时 start() 都返回 false，
-            // 原来返回值直接丢掉，用户点了“启动核心”毫无反应、
-            // 也无从知道为什么（App 页 toggleVPNCore 的 VPN-6 同款
-            // 已弹错，设置页状态行也显示 lastError，只坞面板漏了）。
-            // 用面板已有的 errorMessage + alert 弹（安装/下载报错同款宿主）。
-            if !CZFVPNManager.shared.start() {
-                errorMessage = CZFVPNManager.shared.lastError ?? "核心启动失败"
+        // 3.8.900（L577-1）：同 App 页盾牌开关——起/停核心是同步阻塞的 CGoInvoke，主线程直调冻界面；放 manager 的串行队列跑（点按顺序不变），做完回主线程刷新状态、起失败再弹原因（L576-2 同款，只改到后台跑）。noteManualCoreToggle 仍同步记（见设置页同款）。
+        CZFVPNManager.czfCoreStartQueue.async {
+            var czfStartError: String?
+            if czfCoreRunningNow {
+                CZFVPNManager.shared.stop()
+            } else {
+                // L576-2：起失败要报出来，别静默吞掉——没节点/节点起不来/别处正在测速时 start() 都返回 false，原来返回值直接丢掉，用户点了“启动核心”毫无反应、也无从知道为什么（App 页 toggleVPNCore 的 VPN-6 同款已弹错，设置页状态行也显示 lastError，只坞面板漏了）。用面板已有的 errorMessage + alert 弹（安装/下载报错同款宿主）。
+                if !CZFVPNManager.shared.start() {
+                    czfStartError = CZFVPNManager.shared.lastError ?? "核心启动失败"
+                }
+            }
+            DispatchQueue.main.async {
+                if let czfStartError = czfStartError {
+                    errorMessage = czfStartError
+                }
+                vpnCoreRunning = CZFVPNManager.shared.isRunning
             }
         }
-        vpnCoreRunning = CZFVPNManager.shared.isRunning
     }
 
     // 3.8.309：节点行字（与 App 页 vpnNodeMenuLabel 同款：当前

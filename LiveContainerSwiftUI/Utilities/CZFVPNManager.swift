@@ -126,6 +126,8 @@ public final class CZFVPNManager {
     // （pingBatch 有 5 秒超时、重试可达十几秒，包住会冻住主
     // 线程的预热）；测速窗口内别的触发靠下面的 isPinging 挡。
     private let vpnCoreLock = NSRecursiveLock()
+    /// UI 发起的起/停核心串行队列（3.8.900（L577-1））：点节点行/核心开关/宿主代理开关都在主线程，起核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放这条串行队列跑，点按顺序不变（先点的先起停），做完由调用方回主线程刷新。只接 UI 发起的起停：轮换/就地切/预热/恢复早已在 detached/后台跑，不动它们。
+    static let czfCoreStartQueue = DispatchQueue(label: "CZFVPNManager.coreStart", qos: .userInitiated)
     // 测速进行中标志：测速窗口内开 App、预热、切节点一律不
     // 直接动核心，改由测速收尾统一处理（见 pingAllNodes 末尾
     // 的 deferredEnsure / 切节点跟随），否则测速结果会被
@@ -616,6 +618,16 @@ public final class CZFVPNManager {
         let pinging = isPinging
         vpnCoreLock.unlock()
         if pinging { return }
+        // 3.8.900（L577-1）：主线程调进来时（点节点行/切最快/订阅导入跟随/删节点跟随），起/停核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放串行队列跑（点按顺序不变），执行时再现读状态（见下）。后台调进来时（测速收尾跟随/恢复）同步跑，一字不动。
+        if Thread.isMainThread {
+            Self.czfCoreStartQueue.async { self.czfApplyActiveNodeChangeNow() }
+            return
+        }
+        czfApplyActiveNodeChangeNow()
+    }
+
+    /// applyActiveNodeChange 的真正起停步（见上）：执行时现读在跑态与活动链接——排队这会儿核心可能已被停（验不过就不起，不把刚停的核心又起回来）、活动链接可能已被改（按最新链接起，不起旧选择）。
+    private func czfApplyActiveNodeChangeNow() {
         guard isRunning else { return }
         if nodeLink.isEmpty {
             stop()
@@ -797,7 +809,15 @@ public final class CZFVPNManager {
             let czfOwnerAppInfo = coreOwnerAppInfo
             vpnCoreLock.unlock()
             if czfRunningOldLink {
-                _ = start(withLink: trimmed, ownerBid: czfOwnerBid, ownerAppInfo: czfOwnerAppInfo)
+                // 3.8.900（L577-1）：同款——起核心是同步阻塞的 CGoInvoke，编辑链接在主线程调这里，直调冻界面；放串行队列跑。执行时再验一次核心仍跑在旧链接上（排队这会儿用户可能已亲手停了核心、或测速已停核心，验不过就不起；测速停核心那路收尾 restart 按已 remap 的新钉死起，同款覆盖）。
+                Self.czfCoreStartQueue.async {
+                    self.vpnCoreLock.lock()
+                    let czfStillOnOldLink = self.isRunning && self.runningLink == oldLink
+                    self.vpnCoreLock.unlock()
+                    if czfStillOnOldLink {
+                        _ = self.start(withLink: trimmed, ownerBid: czfOwnerBid, ownerAppInfo: czfOwnerAppInfo)
+                    }
+                }
             }
         }
         return true
@@ -1358,16 +1378,19 @@ public final class CZFVPNManager {
         vpnCoreLock.lock()
         let claimed = isRunning && runningLink == link
         if claimed {
-            if let bid = claimBid {
-                coreOwnerBundleId = bid
-            }
-            // appInfo 为 nil 时不动归属：上面只在有值时改
-            // bundleId，这里却把 appInfo 置 nil，会让两字段
-            // 不同步（bundleId 指着旧 App、appInfo 是空），
-            // 轮换巡检读到空归属就停摆。nil 调用方只认领
-            // “在跑”的事实，不改归属。
-            if let appInfo = appInfo {
-                coreOwnerAppInfo = appInfo
+            // 3.8.900（L577-2）：只在无归属或同一 App 时认领——原来不管现任归属是谁都直接改写：A 钉死节点 X、核心归属 A 时，B（跟随全局，全局正好也是 X）一打开就把归属偷成 B；X 死后轮换按 B 走，新节点只写全局下标、A 的钉死仍指着已死的 X，之后每次开 A 都先试死节点再就地切。现任归属是别的 App 时不动（B 的启动照常放行，核心本来就在 B 要的节点上）；无归属（手动起核心）或同一 App（分身共用 bundleId 也算同一）时照旧认领。只比 bundleId：coreOwnerBundleId 与 coreOwnerAppInfo 同步记、同步清，拿它当唯一身份，不在锁下调 bundleIdentifier()（L75 死锁禁令）。
+            if coreOwnerBundleId == nil || (claimBid != nil && coreOwnerBundleId == claimBid) {
+                if let bid = claimBid {
+                    coreOwnerBundleId = bid
+                }
+                // appInfo 为 nil 时不动归属：上面只在有值时改
+                // bundleId，这里却把 appInfo 置 nil，会让两字段
+                // 不同步（bundleId 指着旧 App、appInfo 是空），
+                // 轮换巡检读到空归属就停摆。nil 调用方只认领
+                // “在跑”的事实，不改归属。
+                if let appInfo = appInfo {
+                    coreOwnerAppInfo = appInfo
+                }
             }
         }
         vpnCoreLock.unlock()

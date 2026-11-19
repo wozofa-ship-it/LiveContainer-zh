@@ -399,20 +399,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 一字不动，决定完照常写回镜像。
         let czfCoreRunningNow = CZFVPNManager.shared.isRunning
         CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
-        if czfCoreRunningNow {
-            CZFVPNManager.shared.stop()
-        } else {
-            // 3.8.582（VPN-6）：起失败以前只把开关留在关态、不显示
-            // 原因，用户无从查（lastError 只有 VPN 设置页读）。失败
-            // 时把原因弹出来，走已有的 errorShow/errorInfo 通用报错
-            // 框（L121 移到 background 叶子，sheet 盖不住）。
-            let ok = CZFVPNManager.shared.start()
-            if !ok {
-                errorInfo = CZFVPNManager.shared.lastError ?? "核心启动失败"
-                errorShow = true
+        // 3.8.900（L577-1）：起/停核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放 manager 的串行队列跑（点按顺序不变），做完回主线程刷新状态、起失败再弹原因（VPN-6 同款，只改到后台跑）。noteManualCoreToggle 仍同步记（见设置页同款）。
+        CZFVPNManager.czfCoreStartQueue.async {
+            var czfStartError: String?
+            if czfCoreRunningNow {
+                CZFVPNManager.shared.stop()
+            } else {
+                // 3.8.582（VPN-6）：起失败以前只把开关留在关态、不显示
+                // 原因，用户无从查（lastError 只有 VPN 设置页读）。失败
+                // 时把原因弹出来，走已有的 errorShow/errorInfo 通用报错
+                // 框（L121 移到 background 叶子，sheet 盖不住）。
+                if !CZFVPNManager.shared.start() {
+                    czfStartError = CZFVPNManager.shared.lastError ?? "核心启动失败"
+                }
+            }
+            DispatchQueue.main.async {
+                if let czfStartError = czfStartError {
+                    errorInfo = czfStartError
+                    errorShow = true
+                }
+                vpnCoreRunning = CZFVPNManager.shared.isRunning
             }
         }
-        vpnCoreRunning = CZFVPNManager.shared.isRunning
     }
 
     // 3.8.282：长按菜单里节点行的字：当前节点打 ✓，测过延迟的

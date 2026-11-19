@@ -679,6 +679,19 @@
 }
 
 - (void)appSceneVCAppDidExit:(AppSceneViewController*)vc {
+    // 3.8.900（L577-3）：本窗口的画中画还开着时关窗/客进程死掉，
+    // 浮窗不会自己走——关窗只调 terminate/清场景（closeWindow 与
+    // appTerminationCleanUp 全程没碰 PiPManager），stopPiP 的调用
+    // 方只有菜单开关与带回前台那条 PiP 分支；PiP 的 contentView
+    // 还挂在画中画 VC 里、displayingVC 是 weak（窗一拆就置空，
+    // 新开 PiP 不受影响），浮窗就一直飘着一张死画面、视频定在
+    // 最后一帧，直到用户手动点浮窗自己的关闭按钮。退出到这里
+    // 就停掉本窗的 PiP（只认 isPiPWithDecoratedVC:self，别家
+    // 窗口的画中画不动）；WillStop/DidStop 照常把 contentView
+    // 插回窗口、取消最小化，窗口随后照旧被拿掉。
+    if ([[PiPManager shared] isPiPWithDecoratedVC:self]) {
+        [[PiPManager shared] stopPiP];
+    }
     // 3.8.900（L564-1）：客进程死在首帧设置更新之前时遮罩撤不掉——
     // 死亡只走 appTerminationCleanUp → 这里，不再有设置更新来触发
     // didUpdateFromSettings 里那次撤遮罩（_performActionsForUIScene
