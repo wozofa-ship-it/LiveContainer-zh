@@ -604,12 +604,14 @@ public final class CZFVPNManager {
         vpnCoreLock.lock()
         defer { vpnCoreLock.unlock() }
         if Self.czfIsPinnedLiveLink(runningLink) { return }
-        applyActiveNodeChange()
+        // 3.8.900（L578-A1）：跟随路执行时也要再验钉死（见 czfApplyActiveNodeChangeNow 的 czfRespectPinned）——这里的判定只在排队那一刻做过。
+        applyActiveNodeChange(czfRespectPinned: true)
     }
 
     // 活动节点变了而核心在跑：立刻按新节点重启（改完即生效）；
     // 没有可用节点了就停掉
-    private func applyActiveNodeChange() {
+    // czfRespectPinned：跟随路（czfFollowListChange）传 true——执行时再验一次钉死守卫；显式切节点（setActiveNode / 测速收尾的显式切换）与恢复传 false，手动强制切换的原语义不动。
+    private func applyActiveNodeChange(czfRespectPinned: Bool = false) {
         // 测速窗口内不切：切节点会重启核心、打断测速；
         // 节点选择已写进 UserDefaults，测速收尾
         // 会比对测速前后的活动链接、再跟随这次切换（见
@@ -620,18 +622,25 @@ public final class CZFVPNManager {
         if pinging { return }
         // 3.8.900（L577-1）：主线程调进来时（点节点行/切最快/订阅导入跟随/删节点跟随），起/停核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放串行队列跑（点按顺序不变），执行时再现读状态（见下）。后台调进来时（测速收尾跟随/恢复）同步跑，一字不动。
         if Thread.isMainThread {
-            Self.czfCoreStartQueue.async { self.czfApplyActiveNodeChangeNow() }
+            Self.czfCoreStartQueue.async { self.czfApplyActiveNodeChangeNow(czfRespectPinned: czfRespectPinned) }
             return
         }
-        czfApplyActiveNodeChangeNow()
+        czfApplyActiveNodeChangeNow(czfRespectPinned: czfRespectPinned)
     }
 
-    /// applyActiveNodeChange 的真正起停步（见上）：执行时现读在跑态与活动链接——排队这会儿核心可能已被停（验不过就不起，不把刚停的核心又起回来）、活动链接可能已被改（按最新链接起，不起旧选择）。
-    private func czfApplyActiveNodeChangeNow() {
+    /// applyActiveNodeChange 的真正起停步（见上）：执行时现读在跑态与活动链接——排队这会儿核心可能已被停（验不过就不起，不把刚停的核心又起回来）、活动链接可能已被改（按最新链接起，不起旧选择）。跟随路（czfRespectPinned）执行时再现读钉死守卫（见内）。
+    private func czfApplyActiveNodeChangeNow(czfRespectPinned: Bool = false) {
         guard isRunning else { return }
         if nodeLink.isEmpty {
             stop()
         } else if runningLink != nodeLink {
+            // 3.8.900（L578-A1）：跟随路执行时再验一次钉死守卫——排队时判的是“核心跑在全局节点上”，排队这会儿钉死 App 可能刚开起来、把核心起到了它钉死的节点上：点节点行/订阅刷新把跟随排进队列、队列正被上一次阻塞式起核占着（几秒），钉死 App 的 ensureRunning 起核（等锁，起完认领归属）先落、跟随的起核后到，执行时不重验就把刚起的钉死核心抢回全局节点、清掉归属，养号 App 悄悄换 IP。验到钉死就收手（钉死 App 自己的轮换巡检仍在跑，核心不动）；空节点停核那路（nodeLink 为空）不拦，停核心与钉死无关。
+            if czfRespectPinned {
+                vpnCoreLock.lock()
+                let czfPinnedNow = Self.czfIsPinnedLiveLink(runningLink)
+                vpnCoreLock.unlock()
+                if czfPinnedNow { return }
+            }
             _ = start()
         }
     }

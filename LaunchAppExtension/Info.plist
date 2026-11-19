@@ -22,5 +22,20 @@
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.share-services</string>
 	</dict>
+	<!-- 3.8.900（L578-C1）：GENERATE_INFOPLIST_FILE 已改 NO（project.pbxproj 本 target 两档）：GEN=YES 时构建设置生成的版本（MARKETING_VERSION 1.0 / CURRENT_PROJECT_VERSION 1）会覆盖上面 L567-4 写死的版本键——v511 包内实测仍是 1.0/1；GEN=NO 后 plist 的版本键才生效。下面 7 键是生成步骤原先带入、源 plist 里没有的：DisplayName 与空 Copyright 来自 INFOPLIST_KEY；Executable/Identifier/InfoDictionaryVersion/Name/PackageType 是五项标准键（值逐字抄 ShareExtension/ActionExtension 的源 plist）——GEN=NO 后构建步骤不再补这五键，不写进来建成包会缺 CFBundleExecutable/CFBundleIdentifier，扩展加载失败。 -->
+	<key>CFBundleDisplayName</key>
+	<string>LaunchAppExtension</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>NSHumanReadableCopyright</key>
+	<string></string>
 </dict>
 </plist>

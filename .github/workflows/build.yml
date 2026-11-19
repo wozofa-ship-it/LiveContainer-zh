@@ -55,8 +55,9 @@ jobs:
           for f in LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LaunchAppExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; do
             sed -i '' "s/$CUR_ESC/$NEW/g" "$f"
           done
-          # 验：4 个 plist 各 2 处、pbxproj 8 处，全是新版、旧版清零
-          [ "$(grep -c -F "$NEW" LiveContainer/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ShareExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ActionExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LaunchAppExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LiveContainer.xcodeproj/project.pbxproj)" = 8 ] || { echo "version bump verification failed"; exit 1; }
+          # 验：4 个 plist 各 2 处、pbxproj 12 处，全是新版、旧版清零
+          # 3.8.900（L578-C2）：pbxproj 校验 8 -> 12——LiveProcess 两档的 MV/CPV 也写了当前版（4 处），与 Share/Action 的 8 处一起计。
+          [ "$(grep -c -F "$NEW" LiveContainer/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ShareExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" ActionExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LaunchAppExtension/Info.plist)" = 2 ] && [ "$(grep -c -F "$NEW" LiveContainer.xcodeproj/project.pbxproj)" = 12 ] || { echo "version bump verification failed"; exit 1; }
           if grep -q -F "$CUR" LiveContainer/Info.plist ShareExtension/Info.plist ActionExtension/Info.plist LaunchAppExtension/Info.plist LiveContainer.xcodeproj/project.pbxproj; then echo "old version still present"; exit 1; fi
           echo "version: $CUR -> $NEW"
           echo "new_version=$NEW" >> $GITHUB_OUTPUT
