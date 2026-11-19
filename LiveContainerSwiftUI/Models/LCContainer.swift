@@ -260,12 +260,18 @@ class LCContainer : ObservableObject, Hashable {
                     let url = try URL(resolvingBookmarkData: bookmarkData, options: URL.BookmarkResolutionOptions(rawValue: 1 << 10), bookmarkDataIsStale: &isStale)
 
                     self.resolvedContainerURL = url
+                    // 3.8.900（L570-4）：只在解析成功时置真——原来这行
+                    // 写在 do/catch 外面，书签已死（外置夹被移动/删掉）
+                    // 抛错也照置真，resolvedContainerURL 仍是 nil、
+                    // 标志却说已解析。调用方全凭它认“外置可用”：
+                    // 备份那路（D:3232）拿 containerURL（已回落到
+                    // 本地 dataPath/<夹名>、init 还顺手建了个空壳目录
+                    // （M:280）当真夹拷、计成功，备份报成功、真数据根本没进去。
+                    self.bookmarkResolved = true
 
                 } catch {
                     print(error.localizedDescription)
                 }
-
-                self.bookmarkResolved = true
         }
         
         do {

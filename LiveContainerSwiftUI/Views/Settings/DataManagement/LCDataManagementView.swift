@@ -3203,6 +3203,21 @@ struct LCDataManagementView : View {
         }
         for container in snapshot.uiContainers {
             let srcURL = container.containerURL
+            // 3.8.900（L570-5）：外置书签已死时不许拷回落路径——
+            // containerURL 已回落到本地 dataPath/<夹名>，而
+            // LCContainer init 在读 plist 那步顺手把这个空壳目录
+            // 建出来了（M:280），fileExists 恒真、空壳拷过去还
+            // 计 containerCount +1：备份报成功，收进来的只是空壳，
+            // 真数据（外置夹被移走/删掉）根本没进备份；用户之后
+            // 删了外置夹、凭这份“成功”备份恢复，数据就没了。
+            // 须与 L570-4 合用：C1 之前 bookmarkResolved 恒真、
+            // 这条守卫永远不触发。死书签的容器记失败清单进回执，
+            // 不计数、不拷空壳；本机容器（无书签）不受影响。
+            if container.storageBookMark != nil && !container.bookmarkResolved {
+                loginFailed += 1
+                if loginFailedPaths.count < 50 { loginFailedPaths.append(srcURL.lastPathComponent) }
+                continue
+            }
             // 3.8.900（L568-13）：外置容器备份静默漏备——本函数
             // 全程没调过 startAccessing（全函数 grep 为 0），
             // 外置夹在沙盒外，fileExists 直接 false：完整分支
@@ -3267,6 +3282,16 @@ struct LCDataManagementView : View {
             // 快照在下面照旧备
             for container in snapshot.uiContainers {
                 let srcURL = container.containerURL
+                // 3.8.900（L570-5）：登录态分支同款——死书签时
+                // srcURL 是本地空壳目录，copyLoginStateFiles 会
+                // 从空壳里“拷回”0 个会话文件、不记失败，备份报
+                // 成功、恢复后登录回不来；记失败清单进回执。
+                // 须与 L570-4 合用（同上）。
+                if container.storageBookMark != nil && !container.bookmarkResolved {
+                    loginFailed += 1
+                    if loginFailedPaths.count < 50 { loginFailedPaths.append(srcURL.lastPathComponent) }
+                    continue
+                }
                 // 3.8.900（L568-13）：登录态分支同款——外置容器
                 // 的 fileExists 恒 false，整容器会话文件悄悄
                 // 跳过、备份仍报成功，恢复后登录回不来。

@@ -938,6 +938,20 @@ extension Notification.Name {
             let pipManager = PiPManager.shared!
             if let decoratedVC = view._viewDelegate(), pipManager.isPiP(withDecoratedVC: decoratedVC) {
                 pipManager.stopPiP()
+                // 3.8.900（L570-3）：画中画分支也要同步取消隐藏——
+                // 上面刚把 hidden 置 YES，恢复只靠 WillStop 回调里
+                // 的 unminimizeWindowPiP（PiPManager.m:191）；WillStop
+                // 是异步回调，stopPiP 自己的 C2 注释已承认它会漏掉
+                // （“回调漏掉时标志永久残留”，所以 stopPiP 才同步清
+                // shouldIgnoreSceneUpdates）。WillStop 一漏，DidStop
+                // 照常把 contentView 插回窗口、PiP 浮窗也关了，但
+                // hidden 还卡在 YES：用户点坞图标，PiP 关了、窗口
+                // 没回来，再点一次才走 else 分支恢复。WillStop 正常
+                // 到时 unminimize 再跑一次是空操作（hidden 已 NO、
+                // alpha 已 1）；内容视图仍在 PiP 里时窗口先露空底，
+                // 与 unminimizeWindowPiP 本来就先露空底再等 DidStop
+                // 插回内容同一行为。非画中画分支一字不动。
+                view.isHidden = false
             } else {
                 view.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
                 view.isHidden = false

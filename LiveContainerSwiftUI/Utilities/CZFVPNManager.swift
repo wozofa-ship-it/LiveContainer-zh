@@ -1043,7 +1043,13 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
     }
 
-    public func ensureRunning(for appInfo: LCAppInfo? = nil) {
+    // 3.8.900（L570-1）：czfKeepAutoStop 只给测速后重启（restartCoreAfterPing）
+    // 传 true——那不是一次 App 启动，只是把测速前在跑的核心起回来：
+    // 下面两步（取消待执行的自动停、把闲置计时起点刷成现在）是“有 App
+    // 刚启动”的语义，重启路走它等于把已排好的自动停取消、闲置时钟
+    // 重置，之后再没人重排，核心一直跑到下次 App 开关才停（耗电）。
+    // 其余调用方（runApp、测速收尾补跑）都是真启动，一字不动。
+    public func ensureRunning(for appInfo: LCAppInfo? = nil, czfKeepAutoStop: Bool = false) {
         // 开 App 是用户/ App 动作：记进 epoch，测速收尾的
         // 校验不会把它当成自动触发 undo 掉。
         if appInfo != nil {
@@ -1057,11 +1063,13 @@ public final class CZFVPNManager {
         // 在主线程排新任务；两条语句之间被插队会把新排任务的引
         // 用抹掉，cancel 丢了、任务到点仍触发（下面 checkPendingStop
         // 的停前复核是第二道防线）。
-        vpnCoreLock.lock()
-        pendingStopWork?.cancel()
-        pendingStopWork = nil
-        vpnCoreLock.unlock()
-        lastFlaggedLaunchAt = Date()
+        if !czfKeepAutoStop {
+            vpnCoreLock.lock()
+            pendingStopWork?.cancel()
+            pendingStopWork = nil
+            vpnCoreLock.unlock()
+            lastFlaggedLaunchAt = Date()
+        }
         // 养号锁定（1）补钉：已经开了 VPN、还没钉过节点、也没
         // 亲手选过跟随全局的旧 App，第一次启动时就把当前全局
         // 节点钉死，之后不再跟全局走
@@ -1889,6 +1897,14 @@ public final class CZFVPNManager {
             // 上一轮起核失败后核心若还在跑，一定是别人刚起的，收手）。
             if !czfFirstAttempt, czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: nil) { return }
             czfFirstAttempt = false
+            // 3.8.900（L570-2）：每轮起核前重查轮换开关——开关只在排巡检
+            // （scheduleRotateCheck）与巡检入口（rotateCheck）查过一次，
+            // 一轮轮换要起好几个候选、每候选一次阻塞式起核就是几秒，
+            // 探针兜底那路还要先探 5 秒：这几秒到十几秒里用户关掉开关，
+            // 轮换照常把节点换掉（关开关只取消已排的 work item，在途的
+            // Task 不停）。收手：巡检由调用方的 Task 续延重排，开关关着
+            // 时 scheduleRotateCheck 直接不排，不取消、不写“一圈都不通”。
+            guard Self.isAutoRotateEnabled else { return }
             guard let target = nextSupportedNode(after: cursor, links: links) else {
                 cancelRotateCheck()
                 lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
@@ -2029,6 +2045,12 @@ public final class CZFVPNManager {
             // 不写“一圈都不通”（节点没死，是让路）；第一轮入口刚验过，
             // 代次与归属都是现取的，复验恒过。
             if czfRetryYielded(stopEpochAtEntry: czfStopEpochAtEntry, for: appInfo) { return }
+            // 3.8.900（L570-2）：每轮起核前重查轮换开关（同 rotateGlobalNode：
+            // 开关只在排巡检与巡检入口查过，轮换本身是多候选、每候选一次
+            // 阻塞式起核的长 Task，中途关开关不复验就照常换节点；收手时
+            // 不取消巡检、不写“一圈都不通”，调用方的 Task 续延重排，
+            // 开关关着时 scheduleRotateCheck 直接不排）。
+            guard Self.isAutoRotateEnabled else { return }
             guard let target = nextSupportedNode(after: current, links: links) else {
                 cancelRotateCheck()
                 lastError = "节点自动轮换一圈都不通，已停止轮换，手动换节点或检查订阅"
@@ -2334,7 +2356,9 @@ public final class CZFVPNManager {
         // 自己按当前 effectiveLink 取，旧链接本来就起不回来；
         // 亲手停核心（noteManualCoreToggle）与删在用节点（removeNode）
         // 已在快照为 nil 时早退，拦重启的口子不在这里。
-        ensureRunning(for: owner)
+        // 3.8.900（L570-1）：重启不是 App 启动，不取消待执行的自动停、
+        // 不重置闲置计时（见 ensureRunning 的 czfKeepAutoStop 注释）。
+        ensureRunning(for: owner, czfKeepAutoStop: true)
         // 重启成功后清掉测速收尾置的预热抑制：收尾时核心
         // 是停的（抑制置真），现在核心又在跑了，抑制前提
         // 已不存在；重启失败则留着，不让预热去起刚起不来

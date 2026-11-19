@@ -265,11 +265,15 @@ struct LCContainerView : View {
                 }
             } else {
                 Section {
-                    if container.bookmarkResolved {
-                        Text("lc.container.externalStorageUnavailable".loc)
-                    } else {
-                        Text("lc.container.bookmarkResolveInProgress".loc)
-                    }
+                    // 3.8.900（L570-4）：解析是同步的（LCContainer
+                    // convenience init 里当场解，无异步解析路、
+                    // bookmarkResolveContinuation 全仓无写点），
+                    // 走到这里就是书签在、URL 解不出 = 已死，
+                    // 不是“正在解析”——原来按 bookmarkResolved
+                    // 分两句，C1 把死书签的标志改回 false 后，
+                    // 死书签会错显示“正在解析”、用户会一直等。
+                    // 死书签只有“不可用”这一句。
+                    Text("lc.container.externalStorageUnavailable".loc)
 
                 }
                 
