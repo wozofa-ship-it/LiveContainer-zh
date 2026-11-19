@@ -166,6 +166,8 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
                               "mov x16, #26\n"
                               "svc #0x80"
                               );
+        // 3.8.900（L583-A3）：经典交接成功、宿主自杀前立标志——客退出、宿主重回前台时预热（prewarmIfNeeded）见标志即知这是有意的经典交接、不是宿主崩溃，不把核心恢复回来（否则核心无限空转、永不自动停）；失败路不走 killHost，不立标志，崩溃恢复不受影响。
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"CZFClassicGuestLaunched"];
         raise(SIGKILL);
     };
     void (^reportFailure)(NSError *) = ^(NSError *error) {

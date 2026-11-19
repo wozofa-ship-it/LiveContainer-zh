@@ -5761,41 +5761,52 @@ private struct RunningAppsStripView: View {
                 .frame(width: 60)
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            // F-2：带回前过锁守卫（此处只有 LCAppInfo，走静态守卫）。
-            Task {
-                if let appInfo = runningApp.appInfo {
-                    guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
-                }
-                // 3.8.514（L38）：裸 Task 不在主 actor 上（Swift 5
-                // 语言模式下手势的 @escaping 闭包不继承 body 的
-                // @MainActor）；bring 是纯 UIKit 活、onSwitch 关面板
-                // 写 @State，必须回主线程再调（maximizeWindow 自己
-                // 内部已 dispatch，包进来无害）。
-                await MainActor.run {
-                    let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                    dockManager.maximizeWindow(uuid: runningApp.appUUID)
-                    onSwitch()
-                }
-            }
-        }
-        .onLongPressGesture(minimumDuration: 0.45) {
-            // F-2：带回前过锁守卫（此处只有 LCAppInfo，走静态守卫）。
-            Task {
-                if let appInfo = runningApp.appInfo {
-                    guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
-                }
-                // 3.8.514（L38）：同上，裸 Task 不在主 actor 上，
-                // bring 是纯 UIKit 活、onSwitch 关面板写 @State，
-                // 必须回主线程再调（restoreSmallWindow 自己内部
-                // 已 dispatch，包进来无害）。
-                await MainActor.run {
-                    let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                    dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
-                    onSwitch()
+        // 3.8.900（L583-B1）：点按与长按同行共挂会双触发——
+        // SwiftUI 不自动互斥同视图的两个手势修饰符（CZFSourceGridView
+        // :543 同款实证：双击时单点先触发一次；CZFAppGridView :486
+        // 已用 exclusively 修过同类问题）。小窗态下长按 0.45 秒到点
+        // 先跑还原（空操作、不置标志），抬指后 tap 再跑最大化，终态
+        // 恒为全屏，与行注释“长按切前台并小窗口打开”正相反。改走
+        // LongPressGesture().exclusively(before: TapGesture())：
+        // 长按优先，0.45 秒到点 tap 不再认；快按抬指时长按失败、tap
+        // 照常认，不加延迟。两路 Task 体逐字搬（F-2 锁守卫 + L38
+        // MainActor.run 不动）。
+        .gesture(LongPressGesture(minimumDuration: 0.45)
+            .onEnded { _ in
+                // F-2：带回前过锁守卫（此处只有 LCAppInfo，走静态守卫）。
+                Task {
+                    if let appInfo = runningApp.appInfo {
+                        guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
+                    }
+                    // 3.8.514（L38）：同上，裸 Task 不在主 actor 上，
+                    // bring 是纯 UIKit 活、onSwitch 关面板写 @State，
+                    // 必须回主线程再调（restoreSmallWindow 自己内部
+                    // 已 dispatch，包进来无害）。
+                    await MainActor.run {
+                        let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                        dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
+                        onSwitch()
+                    }
                 }
             }
-        }
+            .exclusively(before: TapGesture().onEnded {
+                // F-2：带回前过锁守卫（此处只有 LCAppInfo，走静态守卫）。
+                Task {
+                    if let appInfo = runningApp.appInfo {
+                        guard await LCAppModel.czfAuthenticateIfLocked(appInfo: appInfo) else { return }
+                    }
+                    // 3.8.514（L38）：裸 Task 不在主 actor 上（Swift 5
+                    // 语言模式下手势的 @escaping 闭包不继承 body 的
+                    // @MainActor）；bring 是纯 UIKit 活、onSwitch 关面板
+                    // 写 @State，必须回主线程再调（maximizeWindow 自己
+                    // 内部已 dispatch，包进来无害）。
+                    await MainActor.run {
+                        let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                        dockManager.maximizeWindow(uuid: runningApp.appUUID)
+                        onSwitch()
+                    }
+                }
+            }))
     }
 }
 

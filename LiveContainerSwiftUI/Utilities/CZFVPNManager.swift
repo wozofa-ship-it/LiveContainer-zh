@@ -487,6 +487,12 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
         if pinging { return }
         if suppressed && !ignoringSuppression { return }
+        // 3.8.900（L583-A3）：经典交接后不恢复核心——宿主在客会话期间已死，coreWasRunning（UserDefaults 持久化）仍是 true，stop() 从不跑；预热会把“客退出”误当“宿主崩溃”重启核心，而经典路没有任何关窗事件能排自动停，核心从此无限空转。标志只区分这一次交接：见标志即清标志、清 coreWasRunning、直接返回；多任务路从不写它。
+        if UserDefaults.standard.bool(forKey: "CZFClassicGuestLaunched") {
+            UserDefaults.standard.removeObject(forKey: "CZFClassicGuestLaunched")
+            coreWasRunning = false
+            return
+        }
         // 3.8.282：重启恢复——上次亲手开着，宿主重启后起
         // 回来（不要求有 App 标 VPN，核心开关本身就是全局
         // 的；起成功后 start() 已把标志写回 true，起失败
@@ -731,6 +737,8 @@ public final class CZFVPNManager {
     // 节点（setActiveNode）不走这里，手动强制切换的原语义不动。
     // 测速窗口内这路本来就是钉死安全的：窗内跟随由收尾列表变动分支经 czfFollowListChange 补做（见 czfFollowPostPingNodeSwitch）；本修法只补窗外直达路。
     public func applyRestoredNodeSettings() {
+        // 3.8.900（L583-A1）：恢复先清幽灵钉死——备份里没有的 override 键恢复时不会被删（applySettingsDictionary 只写备份里有的键），列表被整体替换后，指向已删节点的 override 还在；effectiveLink 不看列表、照常用它，App 会永远走 VPN 页上看不见的节点，节点死掉时无任何线索。先按恢复后的列表清掉 stale override（VPN-1 同款，订阅刷新/删节点/改顺序三路都调它），再跟随。
+        Self.clearStaleNodeOverrides(keeping: nodeLinks)
         czfFollowListChange()
     }
 

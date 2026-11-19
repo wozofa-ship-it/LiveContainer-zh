@@ -1162,7 +1162,8 @@ class LCAppModel: ObservableObject, Hashable {
         // fail-open 兜底，直连）。appInfo 先提成本地常量：
         // detached 闭包是 escaping，不能隐式抓 self 的属性。
         let vpnAppInfo = appInfo
-        let vpnCoreTask: Task<Void, Never>? = CZFVPNManager.isEnabled(for: vpnAppInfo)
+        // 3.8.900（L583-A2）：经典模式不启动核心——核心是进程内库，经典交接（launchToGuestAppWithClassicMode 成功即 raise(SIGKILL) 杀宿主）后核心即死，客进程（LCBootstrap invokeAppMain）从不建核，注入的插件只探活；在这里起核 + 探通 5 秒全是白演，跟随全局的 App 走直连漏真实 IP、钉死/严格的 App 全程断网。经典路跳过起核与探通（下面的 waitUntilNodeReady 跟 vpnCoreTask 走，自动跳过）；多任务路不动。
+        let vpnCoreTask: Task<Void, Never>? = (multitask && CZFVPNManager.isEnabled(for: vpnAppInfo))
             ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: vpnAppInfo) }
             : nil
         try await signApp(force: false)

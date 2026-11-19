@@ -24,6 +24,11 @@
 // 最小化 completion 只认最新序号，旧动画被新动作打断时
 // 不再由旧 completion 落态，改由新动作自己的路径落态。
 @property(nonatomic) NSInteger czfWindowAnimSeq;
+// 3.8.900（L582-B1）：PiP 淡出进行中标志——minimizeWindowPiP
+// 的 0.3 秒淡出跑着时 maximizeWindow 再进来会把窗以空内容
+// 重新露出来（见 maximizeWindow 守卫注释）；淡出只由
+// WillStart 调起，completion 与 unminimizeWindowPiP 负责清掉。
+@property(nonatomic) BOOL czfPiPMinimizeAnimating;
 // 最小化省电（CZF）：YES = 本窗口已最小化，场景应为后台；
 // 恢复时清掉。只做标记，真正的 foreground 写在下面三个方法里。
 @property(nonatomic) BOOL czfMinimized;
@@ -574,9 +579,16 @@
     // 与 minimizeWindow 同款：淡出记序号、completion 只认
     // 最新序号；unminimize 先加序号作废在途淡出。
     NSInteger czfPiPMinAnimSeq = ++self.czfWindowAnimSeq;
+    // 3.8.900（L582-B1）：淡出开始即置位，maximizeWindow
+    // 在淡出跑完前凭它拦住（见 maximizeWindow 守卫注释）。
+    self.czfPiPMinimizeAnimating = YES;
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.alpha = 0;
     } completion:^(BOOL finished) {
+        // 3.8.900（L582-B1）：淡出结束（不论序号新旧）都清
+        // 进行中标志——被作废的旧淡出不再拥有窗口状态，标志
+        // 不能赖着不走，否则此后最大化永远被拦。
+        self.czfPiPMinimizeAnimating = NO;
         if (czfPiPMinAnimSeq != self.czfWindowAnimSeq) return;
         self.view.hidden = YES;
     }];
@@ -593,6 +605,11 @@
     // 清标志）不受影响。注意：这里直接 return、不加序号——加序
     // 号会作废在途最小化动画的 completion（它才负责落
     // hidden=YES），窗会卡在 alpha=0 不藏不显。
+    // 3.8.900（L582-B1）：恢复即清淡出进行中标志——窗口
+    // 已决定露出来，淡出不再拥有它；放 czfMinimized 守卫
+    // 之前，最小化优先那路也清（在途淡出 completion 届时
+    // 已是旧序号，同样清，双重保险不冲突）。
+    self.czfPiPMinimizeAnimating = NO;
     if (self.czfMinimized) return;
     // 3.8.900（L568-11）：恢复先作废在途的 PiP 淡出（见
     // 上面注释）——不加这一行，completion 仍认旧序号，
@@ -610,6 +627,25 @@
     // 现在进行中直接返回，程序化切换（unmaximizeWindow）
     // 也因此不会二次动画。
     if (self.czfMaximizeAnimating) return;
+    // 3.8.900（L582-B1）：PiP 淡出 0.3 秒内不最大化——WillStart
+    // 已把 hosting 路的 contentView 挪进 PiP、置
+    // shouldIgnoreSceneUpdates=YES（PiPManager.m:135-156），
+    // 此时最大化：先 bump 序号作废淡出 completion（hidden=YES
+    // 永不落位），动画块又把 alpha 写回 1，窗口重新露出来、
+    // 内容区却是空的（contentView 还在 PiP 里），直到 PiP 停掉、
+    // DidStop 把 contentView 插回才恢复；更糟的是最大化分支
+    // 的满屏帧走 updateSettingsWithBlock、而它正被
+    // shouldIgnoreSceneUpdates 拦住，帧仍是小窗尺寸、
+    // isMaximized 却已同步置 YES——帧与标志脱节（还原分支
+    // 是帧与标志同步回小窗、内容同样空）。isPiP 守卫拦不住
+    // 这 0.3 秒：WillStart 是“about to start”，
+    // isPictureInPictureActive 此时仍是 NO（“currently
+    // displayed”要到 DidStart 才 YES），淡出全程它都不可靠；
+    // 改认自家标志——minimizeWindowPiP 唯一调用方就是 WillStart，
+    // 淡出开始即置位、completion 与 unminimize 负责清。0.3 秒
+    // 后淡出跑完再点，正常最大化；与 L579-4 的最小化优先同款：
+    // 进行中的动作赢，后到的一下丢掉、不静默改状态。
+    if (self.czfPiPMinimizeAnimating) return;
     self.czfMaximizeAnimating = YES;
     // 3.8.900（L564-2）：最大化打断最小化动画会丢窗——minimizeWindow
     // 的 completion 只认 czfWindowAnimSeq，maximizeWindow 原来不加
