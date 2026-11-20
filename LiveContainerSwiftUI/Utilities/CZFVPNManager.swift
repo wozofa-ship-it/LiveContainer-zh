@@ -1601,7 +1601,17 @@ public final class CZFVPNManager {
             vpnCoreLock.unlock()
             return
         }
-        guard isRunning else { return }
+        // 3.8.900（L588-A2）：测速窗口内关掉最后一个标 VPN 的 App 时核心
+        // 正停着（stopCoreForPing 停掉的），原来这里直接 return、待停根本
+        // 没排；测速结束 restartCoreAfterPing 又把核心起回来，之后无人能停。
+        // 核心停着但测速快照还在 = 一次 ping 重启待定，照样排队；到点
+        // checkPendingStop 的 isRunning 守卫兜底（重启没来就是空操作）。
+        // 快照只由 stopCoreForPing 置、restartCoreAfterPing 消费、亲手停核
+        // 与删在用节点清，收尾跟随只改写已有快照——非 nil 当且仅当重启待定。
+        vpnCoreLock.lock()
+        let czfCoreRunningOrPingPending = isRunning || pingStoppedLink != nil
+        vpnCoreLock.unlock()
+        guard czfCoreRunningOrPingPending else { return }
         // 3.8.900（L567-2）：取消旧任务、建新任务、赋值三步在
         // 同一把锁下——建任务不碰共享状态，锁里建无妨；分开写
         // 会在取消与赋值之间留窗口，ensureRunning 的 cancel+nil
@@ -1685,6 +1695,30 @@ public final class CZFVPNManager {
             vpnCoreLock.lock()
             pendingStopWork = nil
             vpnCoreLock.unlock()
+            return
+        }
+        // 3.8.900（L588-A1）：再复核原生窗里在跑的标 VPN App——虚拟复核
+        // 只认坞表，原生窗 App 永不进坞表；混合模式下（原生开的 App 还活着、
+        // 模式已切回虚拟）虚拟关窗排的待停到点时会把原生窗里还在跑的 App
+        // 断网（钉死直接断网、跟随悄悄直连）。注册表覆盖双模式
+        // （AppSceneViewController.m:139 注册、:398 注销），按 dataUUID 查。
+        // 命中时不丢任务、按档位重排：原生关窗不走坞表、不会重排待停，
+        // 丢了就一直跑到下次虚拟关窗；重排后 App 关掉、注册表清掉，
+        // 下次复核即停。陈旧注册项（jetsam 后清理链丢了）也只拖一轮档位，
+        // 不永久拦停。
+        let czfNativeStillRunning = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps).contains { app in
+            guard let info = app.appInfo, let uuid = info.dataUUID else { return false }
+            return Self.isEnabled(for: info) && MultitaskManager.isUsing(container: uuid)
+        }
+        if czfNativeStillRunning {
+            guard !delay.isInfinite else { return }
+            let retry = DispatchWorkItem { [weak self] in
+                self?.checkPendingStop()
+            }
+            vpnCoreLock.lock()
+            pendingStopWork = retry
+            vpnCoreLock.unlock()
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retry)
             return
         }
         // 3.8.900（L569-1）：到点停核心也是“停核心”的决定，记一代次——

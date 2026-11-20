@@ -867,6 +867,17 @@ extension Notification.Name {
                    Date().timeIntervalSince(entry.czfAppearedAt) > 30 {
                     czfLastBringCleanedDeadWindowUUID = uuid
                     removeRunningApp(uuid)
+                    // 3.8.900（L588-B1）：先做 appDidExit 里只认 delegate 的收尾，
+                    // 再摘视图——直接摘视图会同步触发 viewDidMoveToWindow:nil
+                    // 把 delegate 置空（AppSceneViewController.m:447），cleanup
+                    // 异步块里的 appSceneVCAppDidExit 就永远调不到了（L577-3
+                    // 的停 PiP 与 L15 的 VC 离队全丢）。只取 PiP 停 + VC 离队
+                    // 两件，不直接调 appSceneVCAppDidExit 全套：非手动分支会插
+                    // “已终止”文案、不摘视图，与 C4“拆掉死窗”的意图冲突。
+                    if PiPManager.shared?.isPiP(withDecoratedVC: decoratedVC) == true {
+                        PiPManager.shared?.stopPiP()
+                    }
+                    decoratedVC.removeFromParentViewController()
                     targetView.removeFromSuperview()
                     appSceneVC.appTerminationCleanUp()
                     return false
