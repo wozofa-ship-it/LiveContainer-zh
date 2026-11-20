@@ -740,7 +740,8 @@ class LCAppModel: ObservableObject, Hashable {
             $0 !== self && $0.bundleIdentifier == bundleIdentifier && $0.appInfo.relativeBundlePath != myPath
         }
     }
-    private func czfFreeKeychainGroup(excluding container: LCContainer) -> Int {
+    // 3.8.900（L594-C #1）：放开给设置页用——createFolder/importDataStorage/addContainers 原来各手写一份“本 App 内空闲”集合，只排本 App 容器，别的 App 占着的组号也能抽中；改调这里（三表全扫）。
+    func czfFreeKeychainGroup(excluding container: LCContainer) -> Int {
         var used = Set<Int>()
         // 3.8.552（L213-1）：已用组号三表全扫——原来只扫 apps +
         // hiddenApps，漏了 arm32EmuApps（同是 LCAppModel、容器
@@ -758,6 +759,19 @@ class LCAppModel: ObservableObject, Hashable {
         }
         let free = (0..<SharedModel.keychainAccessGroupCount).filter { !used.contains($0) }
         return free.randomElement() ?? Int.random(in: 0..<SharedModel.keychainAccessGroupCount)
+    }
+    // 3.8.900（L594-C #2）：某组号是否已被全机任一容器占用（与 czfFreeKeychainGroup 同一次扫描口径；-1 不算占用，由调用方另行处理）。导入 plist 分支验组用；调用方在 MainActor.run 里调（读 @Published 数组）。
+    func czfIsKeychainGroupUsed(_ group: Int, excluding container: LCContainer) -> Bool {
+        guard group >= 0 else { return false }
+        for app in DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps {
+            for c in app.uiContainers where c !== container {
+                if c.keychainGroupId == group { return true }
+            }
+        }
+        for c in uiContainers where c !== container {
+            if c.keychainGroupId == group { return true }
+        }
+        return false
     }
     // 多开容器拆分（视频实证）：同包名两个 App 条目若指到
     // 同一个容器文件夹，启动时按容器找窗口、按容器查占用都会

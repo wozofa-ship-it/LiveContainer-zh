@@ -1025,23 +1025,8 @@ struct LCAppSettingsView: View {
             sharedModel.appDataFolderNames.append(newName)
         }
         let newContainer = LCContainer(folderName: newName, name: displayName, isShared: czfIsShared)
-        // assign keychain group
-        var keychainGroupSet : Set<Int> = Set(minimumCapacity: 3)
-        for i in 0..<SharedModel.keychainAccessGroupCount {
-            keychainGroupSet.insert(i)
-        }
-        // 3.8.569（L325-2）：与 L325-1 同根——本函数从按钮的裸 Task 调来（L40 同款），uiContainers 是 @Published（M:480），这里在 MainActor.run 外面读，主线程别处改容器列表（新建/导入/解绑/恢复）时读-写并发可能崩；快照与使用之间无挂起点，语义不变。
-        let uiContainers = await MainActor.run { model.uiContainers }
-        for container in uiContainers {
-            keychainGroupSet.remove(container.keychainGroupId)
-        }
-        guard let freeKeyChainGroup = keychainGroupSet.randomElement() else {
-            await MainActor.run {
-                errorInfo = "lc.container.notEnoughKeychainGroup".loc
-                errorShow = true
-            }
-            return
-        }
+        // 3.8.900（L594-C #1）：组号走全局分配器——手写集合只排本 App 容器，别的 App 占着的组号也能抽中，两容器共用一组串登录态；czfFreeKeychainGroup 三表全扫（L213-1）。本函数从按钮的裸 Task 调来，分配器在 MainActor.run 里跑（读 @Published 数组）。分配器永不返回 nil（128 组全占满时回落盲随机，与 M:859/:971 同款），notEnoughKeychainGroup 报错分支随之去掉。
+        let freeKeyChainGroup = await MainActor.run { model.czfFreeKeychainGroup(excluding: newContainer) }
         
         // 3.8.516（L40）：同上，uiContainers/uiSelectedContainer/
         // uiDefaultDataFolder 是 LCAppModel 的 @Published，离主线
@@ -1115,28 +1100,24 @@ struct LCAppSettingsView: View {
                 if let plistInfo = plistInfo as? [String : Any] {
                     let name = plistInfo["folderName"] as? String ?? url.lastPathComponent
                     container = LCContainer(infoDict: ["folderName": url.lastPathComponent, "name": name, "bookmarkData":bookmark], isShared: false)
+                    // 3.8.900（L594-C #2）：plist 里的组号要验——撞组或缺组（-1）时重分，否则原样保留（旧文件夹与钥匙串的对应关系不断）；重分走恢复侧同款 makeLCContainerInfoPlist（D:6003）。await 不进 if 条件，先算好再判（607 教训）。
+                    let czfImportedContainer = container!
+                    let czfImportedGroup = czfImportedContainer.keychainGroupId
+                    let czfGroupTaken = await MainActor.run { model.czfIsKeychainGroupUsed(czfImportedGroup, excluding: czfImportedContainer) }
+                    if czfImportedGroup < 0 || czfGroupTaken {
+                        let czfFreshGroup = await MainActor.run { model.czfFreeKeychainGroup(excluding: czfImportedContainer) }
+                        if czfImportedContainer.bookmarkResolved {
+                            let czfBid = await MainActor.run { appInfo.bundleIdentifier()! }
+                            czfImportedContainer.makeLCContainerInfoPlist(appIdentifier: czfBid, keychainGroupId: czfFreshGroup)
+                        }
+                    }
                 }
             }
             if container == nil {
                 // it's an empty folder, we assign a new keychain group to it.
                 container = LCContainer(infoDict: ["folderName": url.lastPathComponent, "name": url.lastPathComponent, "bookmarkData": bookmark], isShared: false)
-                // assign keychain group
-                var keychainGroupSet : Set<Int> = Set(minimumCapacity: 3)
-                for i in 0..<SharedModel.keychainAccessGroupCount {
-                    keychainGroupSet.insert(i)
-                }
-                // 3.8.569（L325-2）：与 L325-1 同根——本函数从 fileImporter 的裸 Task 调来（L40 同款），uiContainers 是 @Published（M:480），这里在 MainActor.run 外面读；快照与使用之间无挂起点，语义不变。
-                let uiContainers = await MainActor.run { model.uiContainers }
-                for container in uiContainers {
-                    keychainGroupSet.remove(container.keychainGroupId)
-                }
-                guard let freeKeyChainGroup = keychainGroupSet.randomElement() else {
-                    await MainActor.run {
-                        errorInfo = "lc.container.notEnoughKeychainGroup".loc
-                        errorShow = true
-                    }
-                    return
-                }
+                // 3.8.900（L594-C #1）：组号走全局分配器（同 createFolder；本函数从 fileImporter 的裸 Task 调来，分配器在 MainActor.run 里跑）。
+                let freeKeyChainGroup = await MainActor.run { model.czfFreeKeychainGroup(excluding: container!) }
                 
 //                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     if container!.bookmarkResolved {
@@ -1543,19 +1524,8 @@ extension LCAppSettingsView : LCSelectContainerViewDelegate {
             let newContainer = LCContainer(folderName: folderName, name: folderName, isShared: false)
             newContainer.loadName()
             if newContainer.keychainGroupId == -1 {
-                // assign keychain group for old containers
-                var keychainGroupSet : Set<Int> = Set(minimumCapacity: SharedModel.keychainAccessGroupCount)
-                for i in 0..<SharedModel.keychainAccessGroupCount {
-                    keychainGroupSet.insert(i)
-                }
-                for container in model.uiContainers {
-                    keychainGroupSet.remove(container.keychainGroupId)
-                }
-                guard let freeKeyChainGroup = keychainGroupSet.randomElement() else {
-                    errorInfo = "lc.container.notEnoughKeychainGroup".loc
-                    errorShow = true
-                    return
-                }
+                // 3.8.900（L594-C #1）：组号走全局分配器（同 createFolder；本函数在主线程按钮回调里，直接调）。
+                let freeKeyChainGroup = model.czfFreeKeychainGroup(excluding: newContainer)
                 newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: freeKeyChainGroup)
             }
 

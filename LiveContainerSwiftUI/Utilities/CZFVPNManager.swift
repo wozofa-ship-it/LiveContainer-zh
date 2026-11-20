@@ -2391,10 +2391,21 @@ public final class CZFVPNManager {
     private func rotateToNextNode(for appInfo: LCAppInfo) async {
         vpnCoreLock.lock()
         let stillOwner = isRunning && coreOwnerAppInfo === appInfo
+        // 3.8.900（L594-A #1）：与归属同批抓正在跑的链接——轮换的
+        // current 必须是实际在跑的那条，不是 effectiveLink：改钉死 /
+        // 改跟随全局只写键、不动在跑的核心（setNodeOverride 本体无
+        // 核心操作），effectiveLink 与 runningLink 分叉是合法常态；
+        // 用 effectiveLink 当 current 会把正在跑的死节点又选回来，
+        // start(withLink:) 对同一条早返 true、轮换判“成功”，还把
+        // 用户刚改的选择悄悄写回死节点。rotateGlobalNode 同款
+        // （V:2227 以 runningLink 当 cursor）。两处赋值同在锁下，
+        // start(withLink:) 里 isRunning 与 runningLink 也是同锁下
+        // 先后置的，读不到“在跑却无链接”的中间态。
+        let czfRunningLinkAtEntry = runningLink
         // 3.8.900（L569-1）：记下进来的代次——重试前复验用（见循环顶）。
         let czfStopEpochAtEntry = czfManualCoreStopEpoch
         vpnCoreLock.unlock()
-        guard stillOwner else { return }
+        guard stillOwner, let czfRunningLinkAtEntry else { return }
         let links = nodeLinks
         guard links.count >= 2 else { return }
         // 3.8.520（L46）：每轮轮换从空 tried 集开始——上一轮
@@ -2408,7 +2419,7 @@ public final class CZFVPNManager {
         // baseline 重置（rotateCheck 里 link 变了即清）仍在，
         // 不动它。
         rotateTriedLinks = []
-        var current = effectiveLink(for: appInfo)
+        var current = czfRunningLinkAtEntry
         // 3.8.900（L586-A2）：入口快照用户选择——落笔前复验用（见成功路）。
         // 起核是数秒的 await Task.detached，这段时间里用户可能在 App 设置
         // 页改钉死（只写键、不动在跑的核心）；落笔的 czfStillOurs 只验核心

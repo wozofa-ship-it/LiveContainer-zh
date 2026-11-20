@@ -591,7 +591,33 @@ extension Notification.Name {
             if let closedAppInfo = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == appUUID || $0.uiContainers.contains(where: { c in c.folderName == appUUID }) })?.appInfo {
                 CZFVPNManager.shared.cancelDeferredEnsure(for: closedAppInfo)
             }
-            guard self.isDockEnabled() || self.apps.contains(where: { $0.appUUID == appUUID }) else { return }
+            guard self.isDockEnabled() || self.apps.contains(where: { $0.appUUID == appUUID }) else {
+                // 3.8.900（L594-A #2）：原生窗关窗不走坞表，守卫拦住后
+                // 自动停永远排不上——noteRunningAppsChanged 的三个调用方
+                // 全够不到原生关窗（本函数 K:628 在守卫之后、设置页
+                // :763 只算虚拟窗、M:1207 只在启动失败时调），核心按档位
+                // 本该停却一直跑着、状态行一直显示运行中。按
+                // checkPendingStop 原生复核同口径（V:1714：apps +
+                // hiddenApps + arm32EmuApps 里 isEnabled 且任一容器在
+                // MultitaskManager.isUsing 中）现算是否还有在跑的标 VPN
+                // App，算时排除刚关的这个容器（注册表注销与 disconnect
+                // 通知的时序未定，排除才稳）；没有就排一次待停。虚拟路
+                // 一字不动；到点仍有虚拟 + 原生两道复核兜底；宿主代理开
+                // 着时 noteRunningAppsChanged 内部第一分支会取消待停，
+                // 行为不变。CZFHostKeepAlive.refresh 不跟进——它只读坞表，
+                // 原生关窗本来就不调它，行为不变。
+                let czfNativeStillRunning = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps).contains { app in
+                    guard CZFVPNManager.isEnabled(for: app.appInfo) else { return false }
+                    var czfUUIDs = Set(app.uiContainers.map { $0.folderName })
+                    if let uuid = app.appInfo.dataUUID { czfUUIDs.insert(uuid) }
+                    czfUUIDs.remove(appUUID)
+                    return czfUUIDs.contains { MultitaskManager.isUsing(container: $0) }
+                }
+                if !czfNativeStillRunning {
+                    CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false)
+                }
+                return
+            }
             // 3.8.501（L22）：摘掉本分身的 uuid 名；bid 名只在没有
             // 别的分身共用它时才摘——原来不管有没有共用都摘，关掉
             // 第 1 个分身就把第 2 个的点按置顶也断了。
