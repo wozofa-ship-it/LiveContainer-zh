@@ -1341,6 +1341,11 @@ extension Notification.Name {
             }
             // 3.8.900（L587-B2）：原生窗口模式下没有最小化——定时打开只会把 App 全屏弹出来、永不最小化，当天标记还照样耗掉；直接跳过（不写标记、不打开），切回虚拟模式后下一轮 30 秒检查照常触发。
             if LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode") == 1 { continue }
+            // 3.8.900（L597-B #2）：首轮触发时 App 已在运行——人已接手，别再把它从台前最小化；当天目标已达成，记账跳过（L142-1 同款原则，那路只盖了失败重试）。
+            if let du = app.appInfo.dataUUID, apps.contains(where: { $0.appUUID == du }) {
+                defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
+                continue
+            }
             // 先记账再打开，防同一天重复触发
             defaults.set(today, forKey: "CZFSchedMinLastDate-\(bundleId)")
             czfMinimizeOpenApp(app: app, bundleId: bundleId)
@@ -1387,21 +1392,22 @@ extension Notification.Name {
         }
         // 跳错修复：不再走只带包名的 URL（按包名取首个模型，
         // 定时打开多开实例会拉起首个实例），改走模型直启。
-        // 第 4 条：先注册窗口出现回调、再启动，窗口出现即最小化，
-        // 不再 0.1 秒轮询等窗口（上限 12 秒，原轮询同款预算）；
-        // 超时未出现直接放弃（原轮询到期同款，无提示）。
-        czfOnWindowAppeared(uuid: dataUUID, timeout: 12) { [weak self] in
-            // L142-1：启动失败后标记已清（见下面 catch），残留回调
-            // 不再动手——用户在 12 秒内手动打开时不该被它悄悄最小化；
-            // 重试会重新记标记、重注册回调，成功路不受影响。
-            guard let self, self.czfIsSchedMinOpened(uuid: dataUUID) else { return }
-            self.minimizeWindow(uuid: dataUUID)
-        }
+        // 3.8.900（L597-B #1）：等窗预算从启动完成才起算（L155 同款）——原来先注册再启动，12 秒预算含整段启动（签名 5 分钟超时 + pid 30 秒等待），签名慢的大 App 窗出来时观察者已被摘掉，最小化悄悄丢掉；改成启动完再注册，窗已出现时当场回调，不丢快启动。
         Task {
             do {
                 try await app.runApp(multitask: true, containerFolderName: dataUUID) // 3.8.900（L585-B1）：定时最小化打开也必须走多任务窗，否则默认设置下经典交接杀宿主、12 秒回调随宿主一起死。
                 // 启动成功：失败计数清零（下次失败重新累计）。
                 await MainActor.run { self.czfSchedMinFailCounts[bundleId] = 0 }
+                // 启动完再注册窗口出现回调（见上）：窗已在 apps 里时当场回调。
+                await MainActor.run {
+                    self.czfOnWindowAppeared(uuid: dataUUID, timeout: 12) { [weak self] in
+                        // L142-1：启动失败后标记已清（见下面 catch），残留回调
+                        // 不再动手——用户在 12 秒内手动打开时不该被它悄悄最小化；
+                        // 重试会重新记标记、重注册回调，成功路不受影响。
+                        guard let self, self.czfIsSchedMinOpened(uuid: dataUUID) else { return }
+                        self.minimizeWindow(uuid: dataUUID)
+                    }
+                }
             } catch {
                 // 3.8.595（L128）：启动失败不能把当天的标记耗掉——
                 // 上面 check 里先记账再打开，runApp 抛错（签名失败/

@@ -2287,7 +2287,8 @@ public final class CZFVPNManager {
             // 3.8.900（L586-A2）：落笔前复验全局在用链接仍等于入口值才写下标；
             // 用户中途切了节点就跳过写回（核心照跑 target；用户点的节点已由
             // setActiveNode 写进下标、起核排进队列，跑完即生效）。只补选择复验。
-            if nodeLink == czfActiveLinkAtEntry, let idx = nodeLinks.firstIndex(of: target) {
+            // 3.8.900（L597-A #2）：入口选择还必须是死掉的那条（current）或本轮已试过它且起失败——轮换开始前用户刚改的全局只写键不动核心，入口快照抓到的就是新选择，旧条件恒成立、会把新选择悄悄盖成目标。
+            if nodeLink == czfActiveLinkAtEntry, (czfActiveLinkAtEntry == current || rotateTriedLinks.contains(czfActiveLinkAtEntry)), let idx = nodeLinks.firstIndex(of: target) {
                 UserDefaults.standard.set(idx, forKey: Self.activeNodeKey)
             }
             return
@@ -2492,10 +2493,13 @@ public final class CZFVPNManager {
                 // 保留；用户的新选择下次开 App 生效）。只补选择复验，
                 // czfStillOurs 与冷却基线/归属写回一字不动。
                 let czfOverrideNow = Self.nodeOverride(for: appInfo)
-                if let czfOverrideAtEntry, czfOverrideNow == czfOverrideAtEntry {
+                // 3.8.900（L597-A #2）：入口选择必须是死掉的那条（czfRunningLinkAtEntry）或本轮已试过它且起失败，才写回——轮换开始前用户刚改的钉死/全局只写键不动核心，入口快照抓到的就是新选择，旧条件恒成立、会把新选择悄悄盖成目标。
+                if let czfOverrideAtEntry, czfOverrideNow == czfOverrideAtEntry,
+                   czfOverrideAtEntry == czfRunningLinkAtEntry || rotateTriedLinks.contains(czfOverrideAtEntry) {
                     Self.setNodeOverride(target, for: appInfo)
                 } else if czfOverrideAtEntry == nil, czfOverrideNow == nil,
                           nodeLink == czfActiveLinkAtEntry,
+                          czfActiveLinkAtEntry == czfRunningLinkAtEntry || rotateTriedLinks.contains(czfActiveLinkAtEntry),
                           let idx = nodeLinks.firstIndex(of: target) {
                     // 3.8.535（L62-2）：下标按当前列表现查——上面
                     // links 是函数入口快照，start(withLink:) 同步

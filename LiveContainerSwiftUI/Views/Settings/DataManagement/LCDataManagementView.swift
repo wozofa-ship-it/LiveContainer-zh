@@ -2118,6 +2118,8 @@ struct LCDataManagementView : View {
         // actor 上（L40-1 同款），errorInfo/errorShow 是 @State，
         // 回主线程再写。原来 forEach 的闭包是同步的、里面不能
         // await，改成 for 循环。
+        // 3.8.900（L597-C #2）：失败记数——下面两路（无组删除 + 逐组补删）任一路失败都记，成功只在零失败时报一声。
+        var czfKeychainFailed = 0
         for cls in [kSecClassGenericPassword, kSecClassInternetPassword, kSecClassCertificate, kSecClassKey, kSecClassIdentity] {
           let status = SecItemDelete([
             kSecClass: cls,
@@ -2125,11 +2127,36 @@ struct LCDataManagementView : View {
           ] as CFDictionary)
           if status != errSecSuccess && status != errSecItemNotFound {
               //Error while removing class
+              czfKeychainFailed += 1
               await MainActor.run {
                   errorInfo = status.description
                   errorShow = true
               }
           }
+        }
+        // 3.8.900（L597-C #2）：原来只按五类删、不带 access group——只在宿主默认组里找，组号 >0 的分身令牌全残留（L438-1 同款）；逐组带 access group 补删 128 组（removeAppKeychain 同款 pattern，字典键一律 as String）。
+        for groupId in 0..<SharedModel.keychainAccessGroupCount {
+            let group = LCUtils.keychainGroupString(groupId: groupId)
+            for cls in [kSecClassGenericPassword, kSecClassInternetPassword, kSecClassCertificate, kSecClassKey, kSecClassIdentity] {
+                let status = SecItemDelete([
+                    kSecClass as String: cls,
+                    kSecAttrAccessGroup as String: group,
+                    kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+                ] as CFDictionary)
+                if status != errSecSuccess && status != errSecItemNotFound {
+                    czfKeychainFailed += 1
+                    await MainActor.run {
+                        errorInfo = status.description
+                        errorShow = true
+                    }
+                }
+            }
+        }
+        if czfKeychainFailed == 0 {
+            await MainActor.run {
+                successInfo = "钥匙串已清理"
+                successShow = true
+            }
         }
     }
 

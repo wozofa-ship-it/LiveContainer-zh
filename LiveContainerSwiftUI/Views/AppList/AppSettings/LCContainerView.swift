@@ -611,7 +611,9 @@ struct LCContainerView : View {
             return
         }
         
-        LCUtils.removeAppKeychain(dataUUID: container.folderName, keychainGroupId: container.keychainGroupId)
+        // 3.8.900（L597-C #1）：组号 -1 = 读不到（死书签/缺 plist），不是 0 组；直传 -1 会被 removeAppKeychain 归一到 0 组清错、还报成功。-1 时传 nil 走其已有 128 组全扫分支。
+        let czfGid = container.keychainGroupId
+        LCUtils.removeAppKeychain(dataUUID: container.folderName, keychainGroupId: czfGid >= 0 ? czfGid : nil)
         // 3.8.900（L566-4）：成功弹窗是死代码——successShow 全文件只有
         // 声明与挂载两处，从没人置 true，清理完页面纹丝不动、用户分
         // 不清成功还是没点上；成功了就报一声，复用已挂好的弹窗。

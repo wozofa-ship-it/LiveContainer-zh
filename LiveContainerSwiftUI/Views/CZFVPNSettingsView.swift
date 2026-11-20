@@ -757,8 +757,9 @@ struct CZFVPNSettingsView: View {
                     // 下次关 App。关开关时与 removeRunningApp 同款口径现算还有没有
                     // 已标的在跑，有就取消待停、没有就按档位重排（checkPendingStop
                     // 到点再逐项重查）。只在虚拟窗模式下算坞列表：原生窗口模式
-                    // App 不进坞表，列表空不代表没 App 在跑，那路保持现状（关窗
-                    // 本就不排自动停）；iOS 16 以下多任务不存在，同样不排。
+                    // App 不进坞表，列表空不代表没 App 在跑，那路不在这里算；
+                    // iOS 16 以下多任务不存在，同样不排。
+                    // 3.8.900（L597-A #1）：原生模式那路不再“保持现状”——L594-A #2 已修原生关窗排停，关宿主代理这路没跟进；原生时传 stillHasFlagged: false 排一次待停，到点 checkPendingStop 的原生复核（V:1715，无模式门）兜底误停。
                     if #available(iOS 16.0, *),
                        (MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow) == .virtualWindow {
                         let stillHasFlagged = MultitaskDockManager.shared.apps.contains { app in
@@ -766,6 +767,8 @@ struct CZFVPNSettingsView: View {
                             return CZFVPNManager.isEnabled(for: info)
                         }
                         CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: stillHasFlagged)
+                    } else if #available(iOS 16.0, *) {
+                        CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false)
                     }
                 }
                 refreshVPNState()
