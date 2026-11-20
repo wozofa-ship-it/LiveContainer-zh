@@ -4290,7 +4290,7 @@ struct SourcesPanelView: View {
                 CZFVPNManager.shared.czfStopFromQueuedToggle() // 3.8.900（L587-A1）：排队停核执行时再验一次，点按后刚开起来的 VPN App 不被悄悄断网（见 V）。
             } else {
                 // L576-2：起失败要报出来，别静默吞掉——没节点/节点起不来/别处正在测速时 start() 都返回 false，原来返回值直接丢掉，用户点了“启动核心”毫无反应、也无从知道为什么（App 页 toggleVPNCore 的 VPN-6 同款已弹错，设置页状态行也显示 lastError，只坞面板漏了）。用面板已有的 errorMessage + alert 弹（安装/下载报错同款宿主）。
-                if !CZFVPNManager.shared.start() {
+                if !CZFVPNManager.shared.czfStartFromQueuedToggle() { // 3.8.900（L593-A #1）：排队起核执行时再验一次，点按后刚开起来的钉死 App 不被抢回全局节点（见 V）。
                     czfStartError = CZFVPNManager.shared.lastError ?? "核心启动失败"
                 }
             }

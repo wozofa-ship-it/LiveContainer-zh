@@ -409,7 +409,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 原因，用户无从查（lastError 只有 VPN 设置页读）。失败
                 // 时把原因弹出来，走已有的 errorShow/errorInfo 通用报错
                 // 框（L121 移到 background 叶子，sheet 盖不住）。
-                if !CZFVPNManager.shared.start() {
+                if !CZFVPNManager.shared.czfStartFromQueuedToggle() { // 3.8.900（L593-A #1）：排队起核执行时再验一次，点按后刚开起来的钉死 App 不被抢回全局节点（见 V）。
                     czfStartError = CZFVPNManager.shared.lastError ?? "核心启动失败"
                 }
             }

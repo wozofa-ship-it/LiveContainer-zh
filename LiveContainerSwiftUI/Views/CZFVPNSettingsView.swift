@@ -524,7 +524,7 @@ struct CZFVPNSettingsView: View {
                     if czfCoreRunningNow {
                         CZFVPNManager.shared.czfStopFromQueuedToggle() // 3.8.900（L587-A1）：排队停核执行时再验一次，点按后刚开起来的 VPN App 不被悄悄断网（见 V）。
                     } else {
-                        _ = CZFVPNManager.shared.start()
+                        _ = CZFVPNManager.shared.czfStartFromQueuedToggle() // 3.8.900（L593-A #1）：排队起核执行时再验一次，点按后刚开起来的钉死 App 不被抢回全局节点（见 V）。
                     }
                     DispatchQueue.main.async { refreshVPNState() }
                 }

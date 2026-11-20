@@ -44,6 +44,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         python .github/update_json.py
+        # 3.8.900（L592-C1）：job summary 读 steps.update_source.outputs.changes，但 update_json.py 从不写这个 output，总结永远走“无变化”分支；跑完按 git diff 判定是否改写并写 output（diff 为 0 走 && 写 false、为 1 走 || 写 true，bash -e 下整体 exit 0，不把成功步打红）。
+        git diff --quiet -- .github/apps.json .github/apps_ss_lc.json && echo "changes=false" >> $GITHUB_OUTPUT || echo "changes=true" >> $GITHUB_OUTPUT
 
     - name: Update apps.json in Release 1.0
       uses: softprops/action-gh-release@v3

@@ -508,9 +508,12 @@ public final class CZFVPNManager {
         // 手动关的又起回来；没记过（nil，从没动过开关）
         // 也不起——只开 LiveContainer 看一眼不该起核心。
         if let wasRunning = coreWasRunning {
+            // 3.8.900（L593-A #1）：验 + 起原子完成——同 ensureRunningForHost：锁外读 !isRunning 与 start() 之间钉死 App 可能已把核心起好。同一把锁下验完直接起（NSRecursiveLock，start() 本体重入无死锁）。
+            vpnCoreLock.lock()
             if wasRunning, !isRunning, !nodeLinks.isEmpty {
                 _ = start()
             }
+            vpnCoreLock.unlock()
         }
     }
 
@@ -1762,11 +1765,17 @@ public final class CZFVPNManager {
         // 再排新的；起失败时核心本就停着，待停到点也是空操作。
         pendingStopWork?.cancel()
         pendingStopWork = nil
-        // 手动 / 宿主 / 预热起核心：不归某个 App 所有，清掉
-        // 养号归属，之后 App 自动启动才可以重新抢核心
-        coreOwnerBundleId = nil
-        coreOwnerAppInfo = nil
-        let ok = start(withLink: nodeLink)
+        // 3.8.900（L593-A #1）：同链早返前不清归属——核心已在跑且正是当前全局链接时，排队启动是空操作（start(withLink:) 的同链早返），直接成功，不动归属、不重启；待停取消、coreWasRunning 与轮换巡检仍按下面走。显式切节点（czfApplyActiveNodeChangeNow）执行前已验 runningLink != nodeLink，不受影响。
+        let ok: Bool
+        if isRunning && runningLink == nodeLink {
+            ok = true
+        } else {
+            // 手动 / 宿主 / 预热起核心：不归某个 App 所有，清掉
+            // 养号归属，之后 App 自动启动才可以重新抢核心
+            coreOwnerBundleId = nil
+            coreOwnerAppInfo = nil
+            ok = start(withLink: nodeLink)
+        }
         // 3.8.282：起成功了就记下“开着”，宿主重启后恢复
         // 成开着；起失败不写（状态没变）。stop() 里对称写“关着”。
         if ok { coreWasRunning = true }
@@ -2021,6 +2030,14 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
         guard !czfOpenedAfterTap else { return }
         stop()
+    }
+
+    /// 3.8.900（L593-A #1）：排队的手动起核心——执行时再验一次：点按时核心停着，排队这会儿钉死 App 的 ensureRunning 可能已把核心起好并认领；这时再调 start() 会清掉归属、停掉刚起的核心、按全局节点重起（L578-A1 起核方向同款，见 czfApplyActiveNodeChangeNow）。执行时核心已在跑就直接返 true，不动归属、不动链接、不重启——“启动核心”的意图已达成，调用方照常刷新镜像，显示“运行中”；核心仍停着才走现有 start() 本体。验 + 起在同一把锁下原子完成（NSRecursiveLock，start() 本体重入无死锁）。只给三处开关的排队起核用；显式切节点（czfApplyActiveNodeChangeNow）、轮换、测速收尾一字不动。
+    public func czfStartFromQueuedToggle() -> Bool {
+        vpnCoreLock.lock()
+        defer { vpnCoreLock.unlock() }
+        if isRunning { return true }
+        return start()
     }
 
     // MARK: - 节点自动轮换
@@ -2910,12 +2927,8 @@ public final class CZFVPNManager {
                     deferredHost = false
                 }
                 nodeSwitched = self.czfNodeSwitchDuringPing
-                // 链接没变时不清除：窗口内点的切换可能在收尾与
-                // restart 之间才发生，留给 restartCoreAfterPing
-                // 消费；变了就由跟随分支消费。
-                if postPingActiveLink != prePingActiveLink {
-                    self.czfNodeSwitchDuringPing = false
-                }
+                // 3.8.900（L592-A #1）：净零切换也要清——点 X 又点回原节点时链接没变、旧代码不清，残留的 true 会让 restartCoreAfterPing 丢掉快照归属、把钉死核心重启到全局节点；收尾与 restart 之间再点的切换会在清标志之后重记（setActiveNode 在快照还在时也记，V:586），不丢；链接真变了时跟随分支用上面已读出的 nodeSwitched 改写快照，行为一字不动。
+                self.czfNodeSwitchDuringPing = false
                 self.isPinging = false
             }
             self.vpnCoreLock.unlock()
@@ -3034,12 +3047,8 @@ public final class CZFVPNManager {
                     deferredHost = false
                 }
                 nodeSwitched = self.czfNodeSwitchDuringPing
-                // 链接没变时不清除：窗口内点的切换可能在收尾与
-                // restart 之间才发生，留给 restartCoreAfterPing
-                // 消费；变了就由跟随分支消费。
-                if postPingActiveLink != prePingActiveLink {
-                    self.czfNodeSwitchDuringPing = false
-                }
+                // 3.8.900（L592-A #1）：净零切换也要清——点 X 又点回原节点时链接没变、旧代码不清，残留的 true 会让 restartCoreAfterPing 丢掉快照归属、把钉死核心重启到全局节点；收尾与 restart 之间再点的切换会在清标志之后重记（setActiveNode 在快照还在时也记，V:586），不丢；链接真变了时跟随分支用上面已读出的 nodeSwitched 改写快照，行为一字不动。
+                self.czfNodeSwitchDuringPing = false
                 self.isPinging = false
             }
             self.vpnCoreLock.unlock()
@@ -3610,12 +3619,13 @@ public final class CZFVPNManager {
         pendingStopWork?.cancel()
         pendingStopWork = nil
         vpnCoreLock.unlock()
+        // 3.8.900（L593-A #1）：验 + 起原子完成——锁外读 !isRunning 与 start() 之间，钉死 App 的 ensureRunning 可能已把核心起好；这时 start() 会清归属、按全局重起。同一把锁下验完直接起（NSRecursiveLock，start() 本体重入无死锁）；测速守卫与 guard isHostProxyEnabled 入口一字不动。
+        vpnCoreLock.lock()
         if !isRunning {
-            vpnCoreLock.lock()
             coreActionEpoch += 1
-            vpnCoreLock.unlock()
             _ = start()
         }
+        vpnCoreLock.unlock()
     }
 
     /// 读按包名统计文件并解析成 k=v 表；文件没有/读不出返回 nil。

@@ -70,9 +70,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create --repo "${{ github.repository }}" \
-            --title "上游同步冲突：需要手动合并" \
-            --body "上游 LiveContainer 有新提交，但与本仓库的定制改动产生冲突，自动合并失败。请手动合并 upstream/main 并解决冲突。" \
-            || true
+          # 3.8.900（L593-C1）：冲突未解时每天跑一次就多一个同标题 issue——先查有无未关闭的同标题 issue，有则跳过创建，只保留 ::error:: + exit 1 的红 job 告警；首次冲突查询为空，照常建一个。gh issue list 走同一 GH_TOKEN，无新增权限；查询失败时走 else 分支建 issue（fail-open，不丢告警）。
+          if [ "$(gh issue list --repo "${{ github.repository }}" --search "上游同步冲突" --state open --json number --jq 'length')" -gt 0 ]; then
+            echo "已有未关闭的上游同步冲突 issue，不重复建"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "上游同步冲突：需要手动合并" \
+              --body "上游 LiveContainer 有新提交，但与本仓库的定制改动产生冲突，自动合并失败。请手动合并 upstream/main 并解决冲突。" \
+              || true
+          fi
           echo "::error::上游合并冲突，需要手动处理"
           exit 1
