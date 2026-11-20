@@ -5807,7 +5807,7 @@ private struct RunningAppsStripView: View {
                             dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
                             onSwitch()
                         }
-                    } else if let model = await MainActor.run({ (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == runningApp.appUUID || $0.uiContainers.contains(where: { c in c.folderName == runningApp.appUUID }) }) }) {
+                    } else if let model = await MainActor.run(body: { (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == runningApp.appUUID || $0.uiContainers.contains(where: { c in c.folderName == runningApp.appUUID }) }) }) {
                         // 先选上死窗的容器（助手内部读 czfInstanceUUID，即选中容器；不先选就可能开成当前选中的另一个实例）；选不上（容器已被删）就只关面板，与今天一致。
                         let czfDeadContainer = await MainActor.run { model.uiContainers.first(where: { $0.folderName == runningApp.appUUID }) }
                         if let container = czfDeadContainer {
@@ -5843,7 +5843,7 @@ private struct RunningAppsStripView: View {
                         }
                     } else {
                         await MainActor.run { onSwitch() }
-                        if let model = await MainActor.run({ (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == runningApp.appUUID || $0.uiContainers.contains(where: { c in c.folderName == runningApp.appUUID }) }) }) {
+                        if let model = await MainActor.run(body: { (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == runningApp.appUUID || $0.uiContainers.contains(where: { c in c.folderName == runningApp.appUUID }) }) }) {
                             _ = try? await model.runApp(containerFolderName: runningApp.appUUID)
                             await MainActor.run { LCAppModel.czfPollAndMaximizeFreshWindow(app: model) }
                         }
@@ -6154,7 +6154,7 @@ struct AppIconView: View {
                         dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
                     }
                     if !brought {
-                        if let model = await MainActor.run({ (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == app.appUUID || $0.uiContainers.contains(where: { c in c.folderName == app.appUUID }) }) }) {
+                        if let model = await MainActor.run(body: { (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == app.appUUID || $0.uiContainers.contains(where: { c in c.folderName == app.appUUID }) }) }) {
                             _ = try? await model.runApp(containerFolderName: app.appUUID)
                         }
                     }
