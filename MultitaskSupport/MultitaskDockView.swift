@@ -1400,12 +1400,15 @@ extension Notification.Name {
                 await MainActor.run { self.czfSchedMinFailCounts[bundleId] = 0 }
                 // 启动完再注册窗口出现回调（见上）：窗已在 apps 里时当场回调。
                 await MainActor.run {
-                    self.czfOnWindowAppeared(uuid: dataUUID, timeout: 12) { [weak self] in
+                    // 3.8.900（L600-B #2）：启动完重读 uuid——拆容器换号时窗落在新 uuid 上，跟新号记标记、注册回调；没拆时与 dataUUID 相同，行为不变。
+                    let waitUUID = app.czfInstanceUUID ?? dataUUID
+                    self.czfMarkSchedMinOpened(uuid: waitUUID)
+                    self.czfOnWindowAppeared(uuid: waitUUID, timeout: 12) { [weak self] in
                         // L142-1：启动失败后标记已清（见下面 catch），残留回调
                         // 不再动手——用户在 12 秒内手动打开时不该被它悄悄最小化；
                         // 重试会重新记标记、重注册回调，成功路不受影响。
-                        guard let self, self.czfIsSchedMinOpened(uuid: dataUUID) else { return }
-                        self.minimizeWindow(uuid: dataUUID)
+                        guard let self, self.czfIsSchedMinOpened(uuid: waitUUID) else { return }
+                        self.minimizeWindow(uuid: waitUUID)
                     }
                 }
             } catch {

@@ -92,10 +92,14 @@ class LCAppModel: ObservableObject, Hashable {
     /// F-10 回落：当前选中容器下没找到在跑窗口时，找本条目别的容器里
     /// 唯一在跑的窗口——App 在跑时用户切了容器，当前 uuid 已不是在跑
     /// 窗口的号；最小化/小窗口再按当前 uuid 查就查不到，会新起一个窗口
-    /// 再最小化/缩小它，旧窗口还留在台面上。只认唯一：在跑窗口的容器
+    /// 再最小化/缩小它，旧窗口还留在台面上。只认本条目：在跑窗口的容器
     /// 须在本条目的 uiContainers 里、归属须按路径对得上，且同包名别的
     /// 条目都没登记过这个容器（共享容器归属说不清，宁可不回落）；零个
-    /// 或多个都返回 nil，调用方走老路新起。主线程调（读 dockManager.apps
+    /// 返回 nil，调用方走老路新起；一个直接回它；多个时取其中可见且在
+    /// 最前的那一个（3.8.900（L600-B #1）：L207 的“多个时不猜”是没前
+    /// 台序信号时的保守选择，现按 czfFrontmostApp 同款口径取可见最前
+    /// 者——z 序号唯一，正在看的窗没有歧义；都不可见仍不猜，返回 nil
+    /// 走老路）。主线程调（读 dockManager.apps
     /// 与 DataManager.shared.model，与 czfOwnedDockEntry 同约定）。
     /// 3.8.550（L207）
     @available(iOS 16.0, *)
@@ -103,7 +107,7 @@ class LCAppModel: ObservableObject, Hashable {
         let myFolders = Set(app.uiContainers.map { $0.folderName })
         guard let myPath = app.appInfo.relativeBundlePath, !myPath.isEmpty else { return nil }
         let currentUUID = app.czfInstanceUUID
-        var found: DockAppModel?
+        var candidates: [DockAppModel] = []
         for entry in MultitaskDockManager.shared.apps {
             guard entry.appUUID != currentUUID,
                   myFolders.contains(entry.appUUID),
@@ -115,10 +119,23 @@ class LCAppModel: ObservableObject, Hashable {
                     && $0.uiContainers.contains { $0.folderName == entry.appUUID }
             }
             guard !sharedWithOther else { continue }
-            guard found == nil else { return nil }
-            found = entry
+            candidates.append(entry)
         }
-        return found
+        if candidates.count == 1 { return candidates[0] }
+        // 3.8.900（L600-B #1）：多个时取可见且最前的那一个——死窗（view 已脱离 superview）与已最小化窗（hidden）天然排除；都没有可见的仍返回 nil 走老路。可见口径与 czfFrontmostApp 同款（view 非空、未隐藏、alpha ≥ 0.1、delegate 是 DecoratedAppSceneViewController），另加 superview != nil（czfFrontmostApp 的 ?? 0 回落不能照抄，死窗会得 z=0 混进候选）。
+        var frontmost: DockAppModel?
+        var frontmostZ = -1
+        for entry in candidates {
+            guard let view = entry.view, !view.isHidden, view.alpha >= 0.1,
+                  view.superview != nil,
+                  view._viewDelegate() is DecoratedAppSceneViewController else { continue }
+            let z = view.superview?.subviews.firstIndex(where: { $0 === view }) ?? 0
+            if z > frontmostZ {
+                frontmostZ = z
+                frontmost = entry
+            }
+        }
+        return frontmost
     }
 
     /// F-4：带回共用——banner / 网格 / 面板三处原来各写一遍。
@@ -212,9 +229,10 @@ class LCAppModel: ObservableObject, Hashable {
         czfUnmaximizeWindow(uuid: uuid)
     }
 
-    /// F-10 小窗口回落：本条目别的容器里唯一在跑的窗口，直接还原成
+    /// F-10 小窗口回落：本条目别的容器里在跑的窗口，直接还原成
     /// 小窗（已是小窗或拿不到 VC 时 czfUnmaximizeWindow 本来就是空操作，
-    /// 仍返回 true、不新起——与带回路“小窗路只还原不重起”同款）。
+    /// 仍返回 true、不新起——与带回路“小窗路只还原不重起”同款；多个时
+    /// 取可见最前者，见 czfRunningEntryUnderOtherContainer）。
     /// 3.8.550（L207）
     @available(iOS 16.0, *)
     private static func czfSmallWindowFallback(app: LCAppModel) -> Bool {
@@ -235,8 +253,8 @@ class LCAppModel: ObservableObject, Hashable {
         }
         // 3.8.550（L207）：App 在跑时切了容器，当前 uuid 下没窗口；
         // 别走未运行分支新起一个窗口再最小化它——旧窗口还留在台面上。
-        // 本条目别的容器里唯一在跑的窗口就直接最小化它；没有或多个
-        // 时走老路（多个时不猜，宁可新起）。
+        // 本条目别的容器里在跑的窗口就直接最小化它；没有时走老路，
+        // 多个时取可见最前者（3.8.900（L600-B #1））。
         guard let entry = czfRunningEntryUnderOtherContainer(app: app) else { return false }
         MultitaskDockManager.shared.minimizeWindow(uuid: entry.appUUID)
         return true
@@ -1204,15 +1222,17 @@ class LCAppModel: ObservableObject, Hashable {
         let czfCoreWasRunningAtEntry = CZFVPNManager.shared.isRunning
         // 3.8.900（L598-A #1）：归属快照与上行同批取、放在 Task.detached 创建之前——本次启动自己的 ensureRunning 会认领归属，失败时现读就分不清手动核心还是归属核心。
         let czfCoreOwnerAtEntry = CZFVPNManager.shared.czfCoreHasOwner
+        // 3.8.900（L600-A #2）：同款快照——进启动前有没有已排好的待停：本次启动的 ensureRunning 会取消它，失败时现读分不清“本来就有”还是“本来就没有”；必须与上面两枚快照同批取、放在 Task.detached 创建之前。
+        let czfCoreHadPendingStopAtEntry = CZFVPNManager.shared.czfCoreHasPendingStop
         // 3.8.900（L583-A2）：经典模式不启动核心——核心是进程内库，经典交接（launchToGuestAppWithClassicMode 成功即 raise(SIGKILL) 杀宿主）后核心即死，客进程（LCBootstrap invokeAppMain）从不建核，注入的插件只探活；在这里起核 + 探通 5 秒全是白演，跟随全局的 App 走直连漏真实 IP、钉死/严格的 App 全程断网。经典路跳过起核与探通（下面的 waitUntilNodeReady 跟 vpnCoreTask 走，自动跳过）；多任务路不动。
         let vpnCoreTask: Task<Void, Never>? = (multitask && CZFVPNManager.isEnabled(for: vpnAppInfo))
             ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: vpnAppInfo) }
             : nil
-        // 3.8.900（L591-A #1/#2）：启动失败的共用收尾——取消本次启动挂起的 deferred 补跑；本次启动真起了核心（vpnCoreTask 非 nil 且进启动前没在跑）、或进启动前已在跑的核心有归属（L598-A #1），才按“无标 VPN 的 App 在跑”排一次待停（czfForceSchedule：核心可能还在起，isRunning 守卫挪到到点时判）。两调用都在 MainActor.run 里（cancelDeferredEnsure 直读 bundleIdentifier()，离主线程读是 L72/L75 同款竞态）。
+        // 3.8.900（L591-A #1/#2，L598-A #1，L600-A #2）：启动失败的共用收尾——取消本次启动挂起的 deferred 补跑；本次启动真起了核心（vpnCoreTask 非 nil 且进启动前没在跑）、或进启动前已在跑的核心有归属（czfCoreOwnerAtEntry）、或进启动前已有已排好的待停被本次启动取消（czfCoreHadPendingStopAtEntry）时，才按“无标 VPN 的 App 在跑”排一次待停（czfForceSchedule：核心可能还在起，isRunning 守卫挪到到点时判）。两调用都在 MainActor.run 里（cancelDeferredEnsure 直读 bundleIdentifier()，离主线程读是 L72/L75 同款竞态）。
         let czfScheduleStopOnLaunchFailure: () async -> Void = {
             await MainActor.run {
                 CZFVPNManager.shared.cancelDeferredEnsure(for: vpnAppInfo)
-                if vpnCoreTask != nil && (!czfCoreWasRunningAtEntry || czfCoreOwnerAtEntry) {
+                if vpnCoreTask != nil && (!czfCoreWasRunningAtEntry || czfCoreOwnerAtEntry || czfCoreHadPendingStopAtEntry) {
                     CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false, czfForceSchedule: true)
                 }
             }
@@ -1246,7 +1266,7 @@ class LCAppModel: ObservableObject, Hashable {
         // start() 是无界阻塞 CGoInvoke，等它会把报错弹窗拖住；
         // detached 任务在入口即调度、signApp 走完 patch+签插件
         // 要数秒，ensureRunning 入口（取消待停/挂补跑）早已跑完。
-        // 3.8.900（L591-A #1）：上面排队只在本次启动真起了核心、或进启动前已在跑的核心有归属时——亲手起/预热恢复的无归属核心仍不在此列（见两枚入口快照），失败启动与它无关。
+        // 3.8.900（L591-A #1，L598-A #1，L600-A #2）：上面排队只在本次启动真起了核心、或进启动前已在跑的核心有归属、或进启动前已有已排好的待停被本次启动取消时——亲手起/预热恢复的无归属核心、且入口没有已排待停时仍不在此列（见三枚入口快照），失败启动与它无关。
         do {
             try await signApp(force: false)
         } catch {

@@ -37,6 +37,12 @@ public final class CZFVPNManager {
         defer { vpnCoreLock.unlock() }
         return coreOwnerBundleId != nil
     }
+    // 3.8.900（L600-A #2）：进启动前有没有已排好的待停——runApp 失败收尾判“被本次启动取消的待停要不要补排”用；与 czfCoreHasOwner 同款锁下读。
+    public var czfCoreHasPendingStop: Bool {
+        vpnCoreLock.lock()
+        defer { vpnCoreLock.unlock() }
+        return pendingStopWork != nil
+    }
     private var runningLink: String?
     // B-3 sing-box 配置缓存：上次成功启动的（链接，配置 JSON）。
     // configJSON 只由链接 + 固定端口（10827/10828）+ 固定日志

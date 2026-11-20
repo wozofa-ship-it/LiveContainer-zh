@@ -2404,6 +2404,8 @@ struct LCDataManagementView : View {
         // 3.8.900（L599-A #1/#2）：恢复前先记下宿主代理与轮换开关的现值——下面循环直写 CZF 键，值变了要补开关副作用（见循环后）；现值必须在写之前取。
         let czfHostProxyBefore = CZFVPNManager.isHostProxyEnabled
         let czfAutoRotateBefore = CZFVPNManager.isAutoRotateEnabled
+        // 3.8.900（L600-A #1）：恢复前先记下核心“上次开着”位——下面循环直写 CZF 键会把它也写回备份里的旧值（见循环后），现值必须在写之前取。
+        let czfCoreWasRunningBefore = UserDefaults.standard.object(forKey: "CZFVPNCoreWasRunning") as? Bool
         for (key, value) in dict {
             if Self.settingsBackupAppGroupKeys.contains(key) {
                 LCUtils.appGroupUserDefault.set(value, forKey: key)
@@ -2412,6 +2414,12 @@ struct LCDataManagementView : View {
                 UserDefaults.standard.set(value, forKey: key)
                 count += 1
             }
+        }
+        // 3.8.900（L600-A #1）：核心“上次开着”位是运行态、不是设置——备份写盘时核心在跑就记 true，亲手停核心后 stop() 已写回 false；恢复直写会把旧 true 写回来，下次进前台 prewarmIfNeeded（LCTabView onAppear/回前台，ignoringSuppression: true）见 true 就把刚亲手停的核心又起回来。恢复不碰它，留现值。
+        if let czfCoreWasRunningBefore {
+            UserDefaults.standard.set(czfCoreWasRunningBefore, forKey: "CZFVPNCoreWasRunning")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "CZFVPNCoreWasRunning")
         }
         // 3.8.900（L599-A #1）：恢复把宿主代理开关翻了——备份含全部 CZF 前缀键（writeCZFSettingsBackup 按前缀扫），恢复按前缀直写 UserDefaults，Toggle 的 onChange（S:744-777）走不到：关了不排待停（核心无限空转）、开了不起核心（开关显示开、源下载却直连）。只在值真变了时补副作用，与现值相同是空操作；排停走主线程（读坞表 @Published），与 S 同款口径。
         if let czfHostProxyRestored = dict["CZFVPNHostProxyEnabled"] as? Bool, czfHostProxyRestored != czfHostProxyBefore {

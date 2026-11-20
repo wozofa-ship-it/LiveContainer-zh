@@ -1087,6 +1087,15 @@ struct LCAppSettingsView: View {
                 return
             }
             
+            // 3.8.900（L600-C #1）：重复导入已登记在本 App 的文件夹——L596-C #1 第二道只拦“已登记给别家”（$0 !== model），本 App 自己的容器重导入无拦：plist 分支里 czfIsKeychainGroupUsed 会把原容器占着的组判成“被占”，撞组重分就把磁盘 plist 的组号改成新组，客端下次按新组读、旧组令牌全变孤儿，登录直接丢；还会多登记一条同名容器。已解绑后重导入不在此列（已不在 uiContainers 里，放行）。
+            let czfAlreadyOwnContainer = await MainActor.run { model.uiContainers.contains { $0.folderName == url.lastPathComponent } }
+            if czfAlreadyOwnContainer {
+                await MainActor.run {
+                    errorInfo = "该文件夹已是本 App 的数据容器，不能重复导入。"
+                    errorShow = true
+                }
+                return
+            }
             var container: LCContainer? = nil
             if fm.fileExists(atPath: url.appendingPathComponent("LCContainerInfo.plist").path) {
                 // 3.8.502（L24）：用户挑的文件夹可能在 iCloud Drive、plist 未下载——
