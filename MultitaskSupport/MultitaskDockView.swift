@@ -877,7 +877,7 @@ extension Notification.Name {
                     if PiPManager.shared?.isPiP(withDecoratedVC: decoratedVC) == true {
                         PiPManager.shared?.stopPiP()
                     }
-                    decoratedVC.removeFromParentViewController()
+                    decoratedVC.removeFromParent()
                     targetView.removeFromSuperview()
                     appSceneVC.appTerminationCleanUp()
                     return false

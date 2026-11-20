@@ -1707,8 +1707,9 @@ public final class CZFVPNManager {
         // 下次复核即停。陈旧注册项（jetsam 后清理链丢了）也只拖一轮档位，
         // 不永久拦停。
         let czfNativeStillRunning = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps).contains { app in
-            guard let info = app.appInfo, let uuid = info.dataUUID else { return false }
-            return Self.isEnabled(for: info) && MultitaskManager.isUsing(container: uuid)
+            guard Self.isEnabled(for: app.appInfo) else { return false }
+            guard let uuid = app.appInfo.dataUUID else { return false }
+            return MultitaskManager.isUsing(container: uuid)
         }
         if czfNativeStillRunning {
             guard !delay.isInfinite else { return }
