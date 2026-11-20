@@ -1706,10 +1706,12 @@ public final class CZFVPNManager {
         // 丢了就一直跑到下次虚拟关窗；重排后 App 关掉、注册表清掉，
         // 下次复核即停。陈旧注册项（jetsam 后清理链丢了）也只拖一轮档位，
         // 不永久拦停。
+        // 3.8.900（L589-A1）：复核按 App 的全部容器查，不只认 dataUUID——注册表记的是启动时选中的容器（runApp 写 selectedContainer = uiSelectedContainer），面板按实例行 / 死窗重开可带非默认容器启动；dataUUID 只是默认容器，两者分叉时只认 dataUUID 就漏掉原生窗里还在跑的 App，到点停核心把它断网（L588-A1 同款伤害）。启动容器一定在 uiContainers 里，dataUUID 兜底。
         let czfNativeStillRunning = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps).contains { app in
             guard Self.isEnabled(for: app.appInfo) else { return false }
-            guard let uuid = app.appInfo.dataUUID else { return false }
-            return MultitaskManager.isUsing(container: uuid)
+            var czfUUIDs = Set(app.uiContainers.map { $0.folderName })
+            if let uuid = app.appInfo.dataUUID { czfUUIDs.insert(uuid) }
+            return czfUUIDs.contains { MultitaskManager.isUsing(container: $0) }
         }
         if czfNativeStillRunning {
             guard !delay.isInfinite else { return }

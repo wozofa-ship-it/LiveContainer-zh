@@ -587,7 +587,8 @@ extension Notification.Name {
             // 不碰 VPN 待停等后续。守卫放块里与删条目同线程，
             // 不在调用线程读 @Published。
             // 3.8.566（L295-1）：原生模式 ping 窗口内关掉的 App，它排进 deferredEnsureApps 的启动请求也要取消——原生条目从不进 apps 表，顶上 guard 拦住后下面旧取消点够不到（closedAppInfo 取自 apps 表，原生恒为 nil）；收尾补跑会把核心起在已关 App 的节点上，起后无人能停（V:1050-1061 注释自述）。guard 之前按 dataUUID 从 apps + hiddenApps 取 appInfo（先例 K:781）；没排进的取消是空操作；关与 async 块执行之间 App 被删则查不到、跳过。
-            if let closedAppInfo = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == appUUID })?.appInfo {
+            // 3.8.900（L589-A2）：按 App 的全部容器找，不只认 dataUUID——关掉的窗的 appUUID 是启动时选中的容器，面板按实例行 / 死窗重开带非默认容器启动时 dataUUID（默认容器）对不上，查不到就取消不掉 deferred 启动请求，测速收尾补跑会把核心起在已关 App 的节点上、还取消掉 L588-A2 排好的待停，核心此后一直跑到下次 App 开关。
+            if let closedAppInfo = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == appUUID || $0.uiContainers.contains(where: { c in c.folderName == appUUID }) })?.appInfo {
                 CZFVPNManager.shared.cancelDeferredEnsure(for: closedAppInfo)
             }
             guard self.isDockEnabled() || self.apps.contains(where: { $0.appUUID == appUUID }) else { return }
@@ -5797,10 +5798,26 @@ private struct RunningAppsStripView: View {
                     // bring 是纯 UIKit 活、onSwitch 关面板写 @State，
                     // 必须回主线程再调（restoreSmallWindow 自己内部
                     // 已 dispatch，包进来无害）。
-                    await MainActor.run {
-                        let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                        dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
-                        onSwitch()
+                    // 3.8.900（L589-B1）：bring 返 false 是 C4 死窗（拆条目 + 摘视图 + 清场景）——原来直接 restoreSmallWindow + 关面板，App 没重开、等于点了没反应；返 false 时走小窗口助手新起死掉的那个实例（容器名直接用死窗 uuid；助手内部读 czfInstanceUUID，先把死窗容器选上再调）。
+                    let brought = await MainActor.run {
+                        dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                    }
+                    if brought {
+                        await MainActor.run {
+                            dockManager.restoreSmallWindow(uuid: runningApp.appUUID)
+                            onSwitch()
+                        }
+                    } else if let model = await MainActor.run({ (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == runningApp.appUUID || $0.uiContainers.contains(where: { c in c.folderName == runningApp.appUUID }) }) }) {
+                        // 先选上死窗的容器（助手内部读 czfInstanceUUID，即选中容器；不先选就可能开成当前选中的另一个实例）；选不上（容器已被删）就只关面板，与今天一致。
+                        let czfDeadContainer = await MainActor.run { model.uiContainers.first(where: { $0.folderName == runningApp.appUUID }) }
+                        if let container = czfDeadContainer {
+                            await MainActor.run { model.uiSelectedContainer = container }
+                            await LCAppModel.czfSmallWindowApp(model, onError: { _ in }, onProceed: { onSwitch() })
+                        } else {
+                            await MainActor.run { onSwitch() }
+                        }
+                    } else {
+                        await MainActor.run { onSwitch() }
                     }
                 }
             }
@@ -5815,10 +5832,21 @@ private struct RunningAppsStripView: View {
                     // @MainActor）；bring 是纯 UIKit 活、onSwitch 关面板
                     // 写 @State，必须回主线程再调（maximizeWindow 自己
                     // 内部已 dispatch，包进来无害）。
-                    await MainActor.run {
-                        let _ = dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
-                        dockManager.maximizeWindow(uuid: runningApp.appUUID)
-                        onSwitch()
+                    // 3.8.900（L589-B1）：bring 返 false 是 C4 死窗——原来直接 maximizeWindow + 关面板，App 没重开、等于点了没反应；返 false 时先关面板、再走 runApp 新起死掉的那个实例（容器名直接用死窗 uuid，不是 czfInstanceUUID 的选中容器；launchApp 同款顺序）。面板行无报错面，起失败与今天一样静默。
+                    let brought = await MainActor.run {
+                        dockManager.bringMultitaskViewToFront(uuid: runningApp.appUUID, from: nil)
+                    }
+                    if brought {
+                        await MainActor.run {
+                            dockManager.maximizeWindow(uuid: runningApp.appUUID)
+                            onSwitch()
+                        }
+                    } else {
+                        await MainActor.run { onSwitch() }
+                        if let model = await MainActor.run({ (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == runningApp.appUUID || $0.uiContainers.contains(where: { c in c.folderName == runningApp.appUUID }) }) }) {
+                            _ = try? await model.runApp(containerFolderName: runningApp.appUUID)
+                            await MainActor.run { LCAppModel.czfPollAndMaximizeFreshWindow(app: model) }
+                        }
                     }
                 }
             }))
@@ -6121,8 +6149,14 @@ struct AppIconView: View {
                     }
                     // 3.8.514（L38）：同上，裸 Task 不在主 actor 上，
                     // bring 是纯 UIKit 活，必须回主线程再调。
-                    await MainActor.run {
-                        let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
+                    // 3.8.900（L589-B1）：bring 返 false 是 C4 死窗——原来什么都不做，App 没重开；返 false 时走 runApp 新起死掉的那个实例（容器名直接用死窗 uuid）。坞无报错面，失败与今天一样静默。
+                    let brought = await MainActor.run {
+                        dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
+                    }
+                    if !brought {
+                        if let model = await MainActor.run({ (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == app.appUUID || $0.uiContainers.contains(where: { c in c.folderName == app.appUUID }) }) }) {
+                            _ = try? await model.runApp(containerFolderName: app.appUUID)
+                        }
                     }
                 }
             }
