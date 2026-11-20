@@ -1179,8 +1179,8 @@ class LCAppModel: ObservableObject, Hashable {
         // 行等是白白加起来的秒数。核心启动是同步阻塞的
         // CGoInvoke，放 detached 后台线程跑，不冻主线程；
         // 游客仍等核心就绪才起（免得头几秒走直连），只是
-        // 不再串行等签名。签名失败时核心照常起着（等同预
-        // 热），闲置后自动停；核心起失败也不拦启动（游客侧
+        // 不再串行等签名。签名失败时下面 catch 即排待停
+        //（等同预热完就停）；核心起失败也不拦启动（游客侧
         // fail-open 兜底，直连）。appInfo 先提成本地常量：
         // detached 闭包是 escaping，不能隐式抓 self 的属性。
         let vpnAppInfo = appInfo
@@ -1188,7 +1188,35 @@ class LCAppModel: ObservableObject, Hashable {
         let vpnCoreTask: Task<Void, Never>? = (multitask && CZFVPNManager.isEnabled(for: vpnAppInfo))
             ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: vpnAppInfo) }
             : nil
-        try await signApp(force: false)
+        // 3.8.900（L590-A1）：签名失败时核心白起且永不停——
+        // vpnCoreTask 在 signApp 之前就 detached 起核（M:1188），
+        // signApp 抛错（证书缺失 M:1614 / 签名失败 M:1560 /
+        // 5 分钟超时）时窗口根本没建出来（bringExisting 在
+        // M:1081 已返 false，launch 段在后面），不会有关窗
+        // 事件排自动停；ensureRunning 入口（V:1308）还取消了
+        // 旧待停；上面“闲置后自动停”的注释是错的——自动停全
+        // 靠关窗事件，没有闲置巡检（cancelDeferredEnsure 文档
+        // V:1395 同款自认）。抛错即清：测速窗口内挂起的补跑
+        // 取消，再按“无标 VPN 的 App 在跑”排一次待停——排队
+        // 不看当前 isRunning（czfForceSchedule）：签名失败那
+        // 刻核心可能还在起，isRunning 在起成功后才置 true；
+        // 到点 checkPendingStop 的 isRunning 守卫与停前复核
+        // 兜底（核心没起来是空操作，真有别的标 VPN 的 App
+        // 在跑就不停）。两调用都在 MainActor.run 里：
+        // cancelDeferredEnsure 直读 bundleIdentifier()（_info），
+        // 离主线程读是 L72/L75 同款竞态。这里不等 vpnCoreTask：
+        // start() 是无界阻塞 CGoInvoke，等它会把报错弹窗拖住；
+        // detached 任务在入口即调度、signApp 走完 patch+签插件
+        // 要数秒，ensureRunning 入口（取消待停/挂补跑）早已跑完。
+        do {
+            try await signApp(force: false)
+        } catch {
+            await MainActor.run {
+                CZFVPNManager.shared.cancelDeferredEnsure(for: vpnAppInfo)
+                CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false, czfForceSchedule: true)
+            }
+            throw error
+        }
         await vpnCoreTask?.value
         // P1（3.8.279）：探节点与开窗并行——277 是“探通再放行”，
         // 探的 0.2–0.5 秒（坏节点数秒）全堵在开窗前。改核心起来

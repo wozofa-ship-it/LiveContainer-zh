@@ -1589,7 +1589,7 @@ public final class CZFVPNManager {
     // 多任务列表变化后由 MultitaskDockManager 调用：还在跑的
     // App 里已经没有被标记的了，就按自动停档位排一个停核心；
     // 期间有被标记 App 起来（ensureRunning 会取消）就不停
-    public func noteRunningAppsChanged(stillHasFlagged: Bool) {
+    public func noteRunningAppsChanged(stillHasFlagged: Bool, czfForceSchedule: Bool = false) {
         // 宿主自身走节点的开关开着时，核心同样算"还在被用"
         if stillHasFlagged || Self.isHostProxyEnabled {
             // 3.8.900（L567-2）：cancel 与置 nil 在同一把锁下——
@@ -1611,7 +1611,8 @@ public final class CZFVPNManager {
         vpnCoreLock.lock()
         let czfCoreRunningOrPingPending = isRunning || pingStoppedLink != nil
         vpnCoreLock.unlock()
-        guard czfCoreRunningOrPingPending else { return }
+        // 3.8.900（L590-A1）：czfForceSchedule 时不看当前 isRunning——签名失败那刻核心可能还在起（isRunning 在起成功后才置 true），照常排队；到点 checkPendingStop 的 isRunning 守卫兜底（核心没起来就是空操作），停前复核兜底（真有标 VPN 的 App 在跑就不停）。
+        guard czfForceSchedule || czfCoreRunningOrPingPending else { return }
         // 3.8.900（L567-2）：取消旧任务、建新任务、赋值三步在
         // 同一把锁下——建任务不碰共享状态，锁里建无妨；分开写
         // 会在取消与赋值之间留窗口，ensureRunning 的 cancel+nil

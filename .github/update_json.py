@@ -19,6 +19,10 @@ def fetch_latest_release(repo_url, is_nightly: bool):
     headers = {
         "Accept": "application/vnd.github+json",
     }
+    # 3.8.900（L590-C1）：不带 token 拉 releases 只有 60 次/小时的共享出口限额，跑几轮就 403，apps.json 更新不到新版；工作流已传 GITHUB_TOKEN（build.yml:268），带上它走 5000 次/小时。
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
         response = requests.get(api_url, headers=headers)
         response.raise_for_status()

@@ -5812,7 +5812,15 @@ private struct RunningAppsStripView: View {
                         let czfDeadContainer = await MainActor.run { model.uiContainers.first(where: { $0.folderName == runningApp.appUUID }) }
                         if let container = czfDeadContainer {
                             await MainActor.run { model.uiSelectedContainer = container }
-                            await LCAppModel.czfSmallWindowApp(model, onError: { _ in }, onProceed: { onSwitch() })
+                            // 3.8.900（L590-B1）：原生模式下没有小窗口——czfSmallWindowApp 的 L587-B1 守卫会直接报实话返回，
+                            // onError 又被上面吞掉，面板关了、App 没重开（点按 fallback 走 runApp 能重开）；原生模式改走点按同款整窗重开。
+                            if LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode") == 1 {
+                                await MainActor.run { onSwitch() }
+                                _ = try? await model.runApp(containerFolderName: runningApp.appUUID)
+                                await MainActor.run { LCAppModel.czfPollAndMaximizeFreshWindow(app: model) }
+                            } else {
+                                await LCAppModel.czfSmallWindowApp(model, onError: { _ in }, onProceed: { onSwitch() })
+                            }
                         } else {
                             await MainActor.run { onSwitch() }
                         }
