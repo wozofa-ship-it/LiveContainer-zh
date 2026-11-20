@@ -31,6 +31,12 @@ public final class CZFVPNManager {
     private static let followGlobalKeyPrefix = "CZFVPNFollowGlobal-"
 
     public private(set) var isRunning = false
+    // 3.8.900（L598-A #1）：进启动前核心有没有归属——runApp 失败收尾判“进启动前已在跑的核心要不要排待停”用：有归属 = 它在给某个标 VPN 的 App 跑（归属只由标 VPN App 的启动认领，见 coreOwnerBundleId），不是亲手起/预热的手动核心。锁下读。
+    public var czfCoreHasOwner: Bool {
+        vpnCoreLock.lock()
+        defer { vpnCoreLock.unlock() }
+        return coreOwnerBundleId != nil
+    }
     private var runningLink: String?
     // B-3 sing-box 配置缓存：上次成功启动的（链接，配置 JSON）。
     // configJSON 只由链接 + 固定端口（10827/10828）+ 固定日志

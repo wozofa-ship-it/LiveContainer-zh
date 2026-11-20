@@ -2246,6 +2246,12 @@ struct LCDataManagementView : View {
             for (_, containers) in appContainers {
                 for container in containers {
                     let containerPath = container.containerURL
+                    // 3.8.900（L598-C #2）：死书签容器不静默跳过——containerURL 已回落本地空壳，壳里没有 Library/Caches，
+                    // fileExists 为假就悄悄过掉，清理完还报“已完成”（L39 只修了活外置没访问权那路）；记一笔失败，汇总里点名。
+                    if container.storageBookMark != nil && !container.bookmarkResolved {
+                        failedCount += 1
+                        continue
+                    }
                     // 3.8.515（L39）：外部容器（bookmark）须先
                     // startAccessing 才能读到——存储统计那路
                     //（LCStorageManagementModel）已是这么括着
@@ -6408,6 +6414,9 @@ struct LCDataManagementView : View {
                 // 读——非原子写中途用户点了启动，桥会读到半截 plist、
                 // 解析失败、这次排队导入悄悄丢了；原子写堵死这一路。
                 for container in queueContainers {
+                    // 3.8.900（L598-C #1）：死书签容器不排队——containerURL 已回落本地空壳（LCContainer:186-195），
+                    // 写进去客端永远读不到（客读外置真夹），却会把 queuedAny 置真、回执谎报“已排队”。
+                    if container.storageBookMark != nil && !container.bookmarkResolved { continue }
                     // 3.8.582（BKP-3）：原子写 + fsync（见
                     // czfWriteAtomicallyAndSync；3.8.584 只做了原子写）。
                     // 3.8.900（L568-15）：排队文件写进外置容器同款——
@@ -7010,7 +7019,11 @@ struct LCDataManagementView : View {
     // 本 target 是 Swift 5 mode，捕获 items（[[String: Any]]）
     // 可编译；CI 为最终 verdict。
     static func importKeychainItems(_ items: [[String: Any]], container: LCContainer) async -> (imported: Int, lastStatus: OSStatus) {
-        let group = keychainGroupString(groupId: container.keychainGroupId)
+        // 3.8.900（L598-C #1）：目标组号 -1 = 读不到（死书签冷启动/缺 plist，LCContainer:200-222），不是 0 组；
+        // keychainGroupString(-1) 拼出 "...shared.-1"，不在授权表里（entitlements.xml 只到 .shared.127），
+        // SecItemAdd 逐条报 -34018 全失败；快照条目自带原组（CZFKBCleanItem 不摘 access group），-1 时留原组写——
+        // 死书签的外置真夹 plist 完好，文件夹回来后客端仍按原组读，登录才回得来。
+        let czfTargetGroup: String? = container.keychainGroupId >= 0 ? keychainGroupString(groupId: container.keychainGroupId) : nil
         let folderName = container.folderName
         return await Task.detached {
             var imported = 0
@@ -7020,7 +7033,7 @@ struct LCDataManagementView : View {
                 attrs.removeValue(forKey: "cdat")
                 attrs.removeValue(forKey: "mdat")
                 attrs.removeValue(forKey: kSecAttrSynchronizable as String)
-                attrs[kSecAttrAccessGroup as String] = group
+                if let czfTargetGroup { attrs[kSecAttrAccessGroup as String] = czfTargetGroup }
                 attrs["alis"] = folderName
                 var status = SecItemAdd(attrs as CFDictionary, nil)
                 if status == errSecDuplicateItem {
@@ -7043,9 +7056,9 @@ struct LCDataManagementView : View {
                         kSecValueData as String
                     ]
                     var minimal: [String: Any] = [
-                        kSecAttrAccessGroup as String: group,
                         "alis": folderName
                     ]
+                    if let czfTargetGroup { minimal[kSecAttrAccessGroup as String] = czfTargetGroup }
                     for key in minimalKeys {
                         if let value = attrs[key] {
                             minimal[key] = value

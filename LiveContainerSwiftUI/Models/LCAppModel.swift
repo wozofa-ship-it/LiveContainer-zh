@@ -1202,15 +1202,17 @@ class LCAppModel: ObservableObject, Hashable {
         let vpnAppInfo = appInfo
         // 3.8.900（L591-A #1）：进启动前核心在跑没跑快照在先——catch 只在本次启动真起了核心时才排待停；亲手起/预热恢复的无归属核心与进启动前已在跑的核心，失败启动与它无关，排了就会在档位后被两道只认标 VPN App 的复核误停。快照必须在 Task.detached 创建之前（detached 任务入口即调度，放它之后就可能读到本次启动刚起的核心）。
         let czfCoreWasRunningAtEntry = CZFVPNManager.shared.isRunning
+        // 3.8.900（L598-A #1）：归属快照与上行同批取、放在 Task.detached 创建之前——本次启动自己的 ensureRunning 会认领归属，失败时现读就分不清手动核心还是归属核心。
+        let czfCoreOwnerAtEntry = CZFVPNManager.shared.czfCoreHasOwner
         // 3.8.900（L583-A2）：经典模式不启动核心——核心是进程内库，经典交接（launchToGuestAppWithClassicMode 成功即 raise(SIGKILL) 杀宿主）后核心即死，客进程（LCBootstrap invokeAppMain）从不建核，注入的插件只探活；在这里起核 + 探通 5 秒全是白演，跟随全局的 App 走直连漏真实 IP、钉死/严格的 App 全程断网。经典路跳过起核与探通（下面的 waitUntilNodeReady 跟 vpnCoreTask 走，自动跳过）；多任务路不动。
         let vpnCoreTask: Task<Void, Never>? = (multitask && CZFVPNManager.isEnabled(for: vpnAppInfo))
             ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: vpnAppInfo) }
             : nil
-        // 3.8.900（L591-A #1/#2）：启动失败的共用收尾——取消本次启动挂起的 deferred 补跑；本次启动真起了核心（vpnCoreTask 非 nil 且进启动前没在跑）才按“无标 VPN 的 App 在跑”排一次待停（czfForceSchedule：核心可能还在起，isRunning 守卫挪到到点时判）。两调用都在 MainActor.run 里（cancelDeferredEnsure 直读 bundleIdentifier()，离主线程读是 L72/L75 同款竞态）。
+        // 3.8.900（L591-A #1/#2）：启动失败的共用收尾——取消本次启动挂起的 deferred 补跑；本次启动真起了核心（vpnCoreTask 非 nil 且进启动前没在跑）、或进启动前已在跑的核心有归属（L598-A #1），才按“无标 VPN 的 App 在跑”排一次待停（czfForceSchedule：核心可能还在起，isRunning 守卫挪到到点时判）。两调用都在 MainActor.run 里（cancelDeferredEnsure 直读 bundleIdentifier()，离主线程读是 L72/L75 同款竞态）。
         let czfScheduleStopOnLaunchFailure: () async -> Void = {
             await MainActor.run {
                 CZFVPNManager.shared.cancelDeferredEnsure(for: vpnAppInfo)
-                if vpnCoreTask != nil && !czfCoreWasRunningAtEntry {
+                if vpnCoreTask != nil && (!czfCoreWasRunningAtEntry || czfCoreOwnerAtEntry) {
                     CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false, czfForceSchedule: true)
                 }
             }
@@ -1244,7 +1246,7 @@ class LCAppModel: ObservableObject, Hashable {
         // start() 是无界阻塞 CGoInvoke，等它会把报错弹窗拖住；
         // detached 任务在入口即调度、signApp 走完 patch+签插件
         // 要数秒，ensureRunning 入口（取消待停/挂补跑）早已跑完。
-        // 3.8.900（L591-A #1）：上面排队只在本次启动真起了核心时——亲手起/预热恢复的无归属核心与进启动前已在跑的核心不在此列（见 czfCoreWasRunningAtEntry 快照），失败启动与它无关。
+        // 3.8.900（L591-A #1）：上面排队只在本次启动真起了核心、或进启动前已在跑的核心有归属时——亲手起/预热恢复的无归属核心仍不在此列（见两枚入口快照），失败启动与它无关。
         do {
             try await signApp(force: false)
         } catch {
