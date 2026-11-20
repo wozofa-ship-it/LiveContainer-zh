@@ -869,6 +869,8 @@ struct CZFVPNSettingsView: View {
         // 存，下次进页“切到最快”继续认错）。起跑时快照列表，
         // 部分结果与完成时先对快照。
         let pingNodes = CZFVPNManager.shared.nodeLinks
+        // 3.8.900（L601-A#1）：起跑时快照活动下标——completion 的自动切最快只认列表没变（listUnchanged），点节点行只改下标不改列表，测速窗口内亲手换的节点会被自动切盖掉；快照下标，收尾仅当下标未变才自动切。
+        let czfPingStartActiveIndex = CZFVPNManager.shared.activeNodeIndex
         CZFVPNManager.shared.pingAllNodes(onPartial: { partial in
             // 列表中途被换过就别按下标合部分结果（见起跑时快照）。
             guard CZFVPNManager.shared.nodeLinks == pingNodes else { return }
@@ -929,7 +931,7 @@ struct CZFVPNSettingsView: View {
             // 手动"切到最快"按钮还在（按缓存切，不用重测）。
             // 3.8.518（L43）：列表中途被换过时 results 的下标
             // 已不对号，不自动切（见本函数起跑时快照）。
-            if listUnchanged, let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }),
+            if listUnchanged, CZFVPNManager.shared.activeNodeIndex == czfPingStartActiveIndex, let best = results.enumerated().filter({ $0.element.success }).min(by: { $0.element.delay < $1.element.delay }),
                best.offset != CZFVPNManager.shared.activeNodeIndex,
                best.offset < CZFVPNManager.shared.nodeLinks.count {
                 CZFVPNManager.shared.setActiveNode(at: best.offset)

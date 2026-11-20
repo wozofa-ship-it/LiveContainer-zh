@@ -740,6 +740,10 @@
     // 就停掉本窗的 PiP（只认 isPiPWithDecoratedVC:self，别家
     // 窗口的画中画不动）；WillStop/DidStop 照常把 contentView
     // 插回窗口、取消最小化，窗口随后照旧被拿掉。
+    // 3.8.900（L601-B#1）：待发中的 PiP 启动也作废——退出时浮窗还没
+    // 激活，上面 isPiPWithDecoratedVC 恒为 NO，够不到待发启动；
+    // 不作废，0.3 秒后浮窗照常弹出飘死画面。
+    [[PiPManager shared] czfCancelPendingPiPStartForVC:vc];
     if ([[PiPManager shared] isPiPWithDecoratedVC:self]) {
         [[PiPManager shared] stopPiP];
     }

@@ -226,23 +226,36 @@ static BOOL CZFReadAll(int fd, void *buf, size_t len) {
 // 核心在不在：临时 socket 连本地 SOCKS 口 + 打个招呼，成功即在。
 // 结果缓存：活 10 秒、死 3 秒（核心刚起来能很快被发现；核心
 // 死了 10 秒内就不再往死口送，不会断网一分钟）。
+// 3.8.900（L601-A#3）：探活缓存的状态放文件级——原来是 CZFCoreAlive 内
+// 的函数级 static，SOCKS 口拒连的调用方够不到；口拒连是“核心已死”的
+// 铁证，必须能从连接路径回写缓存（见 CZFCoreAliveMarkDead）。
+static double czfCoreAliveLastCheck = 0;
+static BOOL czfCoreAliveLastResult = NO;
+static pthread_mutex_t czfCoreAliveLock = PTHREAD_MUTEX_INITIALIZER;
+
+// SOCKS 口拒连时立即把探活缓存置死：下次连接重探，不再等 10 秒 TTL；
+// 死结论本身只缓存 3 秒，核心回来能很快重新发现。
+static void CZFCoreAliveMarkDead(void) {
+    pthread_mutex_lock(&czfCoreAliveLock);
+    czfCoreAliveLastResult = NO;
+    czfCoreAliveLastCheck = [NSDate timeIntervalSinceReferenceDate];
+    pthread_mutex_unlock(&czfCoreAliveLock);
+}
+
 static BOOL CZFCoreAlive(void) {
-    static double lastCheck = 0;
-    static BOOL lastResult = NO;
-    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     double now = [NSDate timeIntervalSinceReferenceDate];
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&czfCoreAliveLock);
     // "活着"的结论缓存 10 秒（11，3.8.277）：原来 60 秒太久——
     // 核心死了 60 秒内还在往死掉的 SOCKS 口送，App 表现为断网。
     // 10 秒仍够挡偶发探活抖动（探活是回环毫秒级）；死了的结论
     // 只缓存 3 秒，核心被重新拉起后能很快恢复。
-    double ttl = lastResult ? 10.0 : 3.0;
-    if (now - lastCheck < ttl && lastCheck > 0) {
-        BOOL r = lastResult;
-        pthread_mutex_unlock(&lock);
+    double ttl = czfCoreAliveLastResult ? 10.0 : 3.0;
+    if (now - czfCoreAliveLastCheck < ttl && czfCoreAliveLastCheck > 0) {
+        BOOL r = czfCoreAliveLastResult;
+        pthread_mutex_unlock(&czfCoreAliveLock);
         return r;
     }
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&czfCoreAliveLock);
 
     BOOL alive = NO;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -267,10 +280,10 @@ static BOOL CZFCoreAlive(void) {
         close(fd);
     }
 
-    pthread_mutex_lock(&lock);
-    lastCheck = [NSDate timeIntervalSinceReferenceDate];
-    lastResult = alive;
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&czfCoreAliveLock);
+    czfCoreAliveLastCheck = [NSDate timeIntervalSinceReferenceDate];
+    czfCoreAliveLastResult = alive;
+    pthread_mutex_unlock(&czfCoreAliveLock);
     return alive;
 }
 
@@ -449,7 +462,20 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         // 仍失败才如实计失败；请求阶段失败（fd 已连 SOCKS）不重试。
         usleep(200 * 1000);
         savedErrno = ECONNREFUSED;
-        result = CZFDoSocksTCPConnect(sockfd, host, ip, sin->sin_port, &savedErrno, NULL);
+        result = CZFDoSocksTCPConnect(sockfd, host, ip, sin->sin_port, &savedErrno, &socksConnFailed);
+    }
+    // 3.8.900（L601-A#3）：口拒连 = 核心已死，不是请求失败——
+    // 探活缓存里的“活着”结论已过期，立即置死，下次连接重探，
+    // 不再等 10 秒 TTL；此时 fd 尚未连上 SOCKS，非严格模式直接
+    // 改作直连（文件头“核心不在 → 全部直连”契约），严格模式
+    // 如实失败（下面原分支）。
+    if (result != 0 && socksConnFailed) {
+        CZFCoreAliveMarkDead();
+        if (!gStrictMode) {
+            __sync_add_and_fetch(&gStatConnDirect, 1);
+            CZFWriteStats(NO);
+            return orig_connect(sockfd, addr, addrlen);
+        }
     }
     if (result != 0) {
         // fd 已连到 SOCKS 口但请求失败时，这个 fd 没法再改作直连，
@@ -556,7 +582,17 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
         // 请求阶段失败（fd 已连 SOCKS）不重试，语义与 connect 一致。
         usleep(200 * 1000);
         savedErrno = ECONNREFUSED;
-        result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno, NULL);
+        result = CZFDoSocksTCPConnect(s, host, ip, sin->sin_port, &savedErrno, &socksConnFailed);
+    }
+    // 3.8.900（L601-A#3）：connect 同款——口拒连时探活缓存立即置死 +
+    // 非严格模式本次改作直连（见 CZFConnect；直连分支照本函数入口
+    // !CZFCoreAlive() 那路，不另计 ConnDirect）。
+    if (result != 0 && socksConnFailed) {
+        CZFCoreAliveMarkDead();
+        if (!gStrictMode) {
+            CZFWriteStats(NO);
+            return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+        }
     }
     if (result != 0) {
         errno = savedErrno;

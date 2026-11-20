@@ -2320,10 +2320,19 @@ extension Notification.Name {
         if apps.count == 1 {
             let only = apps[0]
             if czfFrontmostApp()?.appUUID == only.appUUID {
-                // 最小化是隐藏，不露内容，不守。
-                minimizeWindow(uuid: only.appUUID)
-                edgeCallbackBuzz()
-                return
+                // 3.8.900（L601-B#2）：台前即最小化不查客是否活着——死窗（客已死、画面残留）也会被藏起来，再滑又顶回来，30 秒内在藏/现死画面之间横跳、一次都不重开（多 App 快路径有 isAppRunning 守卫，本处是漏掉的一半）。客已死就不最小化，落到下面带回分支（bring C4 清掉 + runApp 重开；30 秒内的死窗 C4 年龄门槛仍拦着重开，到点后才重开，至少不再藏/现横跳）。appSceneVC 取不到时按活窗处理（旧行为）。
+                var czfFrontDead = false
+                if let frontView = only.view,
+                   let frontDecorated = frontView._viewDelegate() as? DecoratedAppSceneViewController,
+                   let frontSceneVC = frontDecorated.appSceneVC {
+                    czfFrontDead = !frontSceneVC.isAppRunning
+                }
+                if !czfFrontDead {
+                    // 最小化是隐藏，不露内容，不守。
+                    minimizeWindow(uuid: only.appUUID)
+                    edgeCallbackBuzz()
+                    return
+                }
             }
             // F-2：叫回分支带回前过锁守卫（只有 LCAppInfo，走静态守卫）。
             Task {
@@ -4376,6 +4385,8 @@ struct SourcesPanelView: View {
     private func panelToolbarPingNodes() {
         guard !vpnPinging else { return }
         let links = CZFVPNManager.shared.nodeLinks
+        // 3.8.900（L601-A#1）：起跑时快照活动下标（设置页 startVPNPing 同款）——completion 的自动切最快不认窗口内亲手换的节点，测速中途在节点子菜单点的节点会被自动切盖掉；仅当下标未变才自动切。
+        let czfPingStartActiveIndex = CZFVPNManager.shared.activeNodeIndex
         guard !links.isEmpty else { return }
         let pingStoppedCore = CZFVPNManager.shared.stopCoreForPing()
         vpnPinging = true
@@ -4405,6 +4416,7 @@ struct SourcesPanelView: View {
             // L58-2 同款）。
             if let best = bestIndex, best < links.count,
                let liveIdx = CZFVPNManager.shared.nodeLinks.firstIndex(of: links[best]),
+               CZFVPNManager.shared.activeNodeIndex == czfPingStartActiveIndex,
                liveIdx != CZFVPNManager.shared.activeNodeIndex {
                 CZFVPNManager.shared.setActiveNode(at: liveIdx)
             }

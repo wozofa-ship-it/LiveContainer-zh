@@ -522,10 +522,12 @@ public final class CZFVPNManager {
         if let wasRunning = coreWasRunning {
             // 3.8.900（L593-A #1）：验 + 起原子完成——同 ensureRunningForHost：锁外读 !isRunning 与 start() 之间钉死 App 可能已把核心起好。同一把锁下验完直接起（NSRecursiveLock，start() 本体重入无死锁）。
             vpnCoreLock.lock()
-            if wasRunning, !isRunning, !nodeLinks.isEmpty {
-                _ = start()
-            }
+            let czfRestoredCore = wasRunning && !isRunning && !nodeLinks.isEmpty && start()
             vpnCoreLock.unlock()
+            // 3.8.900（L601-A#2）：恢复只恢复了“跑”，没恢复“闲置计时/待停”——宿主重启后无任何标 VPN 的 App 在跑，等价于早已关窗，但恢复路径绕过了关窗事件，核心无限空转（L583-A3 经典交接路同款）。恢复成功就按档位排一次待停：无人用时到点停；宿主代理开着时 noteRunningAppsChanged 内部第一分支会取消，行为不变；到点仍有虚拟 + 原生两道复核兜底，正开着的 App 不会被停。
+            if czfRestoredCore {
+                noteRunningAppsChanged(stillHasFlagged: false)
+            }
         }
     }
 

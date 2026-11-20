@@ -18,5 +18,7 @@ API_AVAILABLE(ios(16.0))
 - (BOOL)isPiPWithDecoratedVC:(UIViewController*)vc;
 - (void)stopPiP;
 - (void)startPiPWithVC:(AppSceneViewController*)vc;
+// 3.8.900（L601-B#1）：客退出时定向作废待发中的 PiP 启动。
+- (void)czfCancelPendingPiPStartForVC:(AppSceneViewController *)vc;
 
 @end

@@ -472,6 +472,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private func toolbarPingNodes(afterPing: (([CZFVPNManager.CZFNodePingResult], [String]) -> Void)? = nil) {
         guard !vpnPinging else { return }
         let links = CZFVPNManager.shared.nodeLinks
+        // 3.8.900（L601-A#1）：起跑时快照活动下标（设置页 startVPNPing 同款）——completion 的自动切最快不认窗口内亲手换的节点，测速中途在盾牌菜单点的节点会被自动切盖掉；仅当下标未变才自动切。
+        let czfPingStartActiveIndex = CZFVPNManager.shared.activeNodeIndex
         guard !links.isEmpty else {
             vpnPingMessage = "还没加节点"
             return
@@ -541,6 +543,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // （已删）就不切，只报最快那条。
             if let best = bestIndex, best < links.count,
                let liveIdx = CZFVPNManager.shared.nodeLinks.firstIndex(of: links[best]),
+               CZFVPNManager.shared.activeNodeIndex == czfPingStartActiveIndex,
                liveIdx != CZFVPNManager.shared.activeNodeIndex {
                 CZFVPNManager.shared.setActiveNode(at: liveIdx)
                 let name = CZFVPNManager.nodeDisplay(for: CZFVPNManager.shared.nodeLinks[liveIdx]).name

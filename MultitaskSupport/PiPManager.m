@@ -19,6 +19,12 @@ API_AVAILABLE(ios(16.0))
 // displayingVC 原来是 assign：窗口关掉、VC 释放后它就悬空，
 // 下次进 PiP 的 if(self.displayingVC) 会读野指针；改 weak 自动置空。
 @property(nonatomic, strong) NSMapTable<AVPictureInPictureController *, CALayer *> *pipObservedLayers;
+// 3.8.900（L601-B#1）：待发 PiP 启动的序号 + 待发目标——startPiPWithVC
+// 有 0.3 秒外层延时 + 0.3 秒内层延时，客在这段里死掉时内层仍会把
+// 浮窗弹出来（isPictureInPictureActive 恒 NO，全部停 PiP 收尾都
+// 够不到待发启动）；序号让迟到的块自废，目标让退出回调能定向作废。
+@property(nonatomic) NSInteger czfPendingPiPStartSeq;
+@property(nonatomic, weak) AppSceneViewController *czfPendingPiPVC;
 @end
 
 
@@ -57,12 +63,18 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)startPiPWithVC:(AppSceneViewController*)vc {
+    // 3.8.900（L601-B#1）：待发启动记序号（见属性注释）；新一次启动/
+    // stopPiP/退出回调作废都会 +1，迟到的外层/内层块凭序号自废。
+    self.czfPendingPiPStartSeq += 1;
+    NSInteger czfSeq = self.czfPendingPiPStartSeq;
+    self.czfPendingPiPVC = vc;
     [self.pipController stopPictureInPicture];
     if(self.displayingVC) {
         [self.displayingDecoratedVC unminimizeWindowPiP];
         [self pictureInPictureControllerDidStopPictureInPicture:self.pipController];
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)([self.pipController isPictureInPictureActive] * 0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (czfSeq != self.czfPendingPiPStartSeq) return;
         self.displayingVC = vc;
         self.pipVideoCallViewController = [AVPictureInPictureVideoCallViewController new];
         self.pipVideoCallViewController.preferredContentSize = vc.view.bounds.size;
@@ -81,6 +93,13 @@ static PiPManager* sharedInstance = nil;
         self.pipController.delegate = self;
         [self.pipController setValue:@1 forKey:@"controlsStyle"];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // 3.8.900（L601-B#1）：启动前再验——序号已作废（又点了
+            // 别的 PiP/stopPiP/客已退出）或客已死/窗口已拆时放弃，
+            // 不弹一张死画面的浮窗；pid 未落位的新窗读作未在跑，
+            // 但 0.6 秒延时后 pid 早已落位，误拦面极小，点 PiP 重试即可。
+            if (czfSeq != self.czfPendingPiPStartSeq) return;
+            AppSceneViewController *czfVC = self.displayingVC;
+            if (!czfVC || !czfVC.view.window || !czfVC.isAppRunning) return;
             [self.pipController startPictureInPicture];
         });
     });
@@ -88,11 +107,27 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)stopPiP {
+    // 3.8.900（L601-B#1）：作废待发启动（见 startPiPWithVC）——
+    // 待发期内 pipController 还没激活，stopPictureInPicture
+    // 拦不住内层块，不加序号它照样弹出来。
+    self.czfPendingPiPStartSeq += 1;
+    self.czfPendingPiPVC = nil;
     // C2：同步清残留标志，不再全靠异步 WillStop 回调——
     // 回调漏掉时标志永久残留，此后全部场景更新被丢。
     // WillStop 到时还会再清一次，幂等。
     self.displayingVC.shouldIgnoreSceneUpdates = NO;
     [self.pipController stopPictureInPicture];
+}
+
+// 3.8.900（L601-B#1）：客退出时定向作废待发启动——只有待发目标
+// 恰是退出的这个 VC 时才 +1，别家窗口待发的 PiP 不动；外层延时
+// 还没跑到时 displayingVC 还是旧值，够不到那路，但内层启动前
+// 的 isAppRunning 检查兜底（客已死必拦）。
+- (void)czfCancelPendingPiPStartForVC:(AppSceneViewController *)vc {
+    if (vc && self.czfPendingPiPVC == vc) {
+        self.czfPendingPiPStartSeq += 1;
+        self.czfPendingPiPVC = nil;
+    }
 }
 
 // PIP delegate
