@@ -518,6 +518,11 @@ struct CZFVPNSettingsView: View {
                 // 文案仍按镜像显示，决定只认现值；镜像对上时行为
                 // 一字不动。
                 let czfCoreRunningNow = CZFVPNManager.shared.isRunning
+                // 3.8.900（L595-A #1）：同 App 页盾牌开关——文案与现值分叉时不执行，只把镜像刷成现值（见 App 页）。
+                guard vpnCoreRunning == czfCoreRunningNow else {
+                    vpnCoreRunning = czfCoreRunningNow
+                    return
+                }
                 CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
                 // 3.8.900（L577-1）：起/停核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放 manager 的串行队列跑（点按顺序不变），做完回主线程刷新状态。noteManualCoreToggle 仍同步记（它只动锁下标志、清测速快照，必须在起停之前落定）；起失败的原因走状态行 lastError（refreshVPNState 里读），与原来一致。
                 CZFVPNManager.czfCoreStartQueue.async {

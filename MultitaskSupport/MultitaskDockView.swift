@@ -4308,6 +4308,11 @@ struct SourcesPanelView: View {
         // 核心起停、镜像收不到通知）。钉死核心正跑着时镜像仍是“未启
         // 动”，点“启动核心”走 start() 抢回全局节点、悄悄换 IP。
         let czfCoreRunningNow = CZFVPNManager.shared.isRunning
+        // 3.8.900（L595-A #1）：同 App 页盾牌开关——文案与现值分叉时不执行，只把镜像刷成现值（见 App 页）。
+        guard vpnCoreRunning == czfCoreRunningNow else {
+            vpnCoreRunning = czfCoreRunningNow
+            return
+        }
         CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
         // 3.8.900（L577-1）：同 App 页盾牌开关——起/停核心是同步阻塞的 CGoInvoke，主线程直调冻界面；放 manager 的串行队列跑（点按顺序不变），做完回主线程刷新状态、起失败再弹原因（L576-2 同款，只改到后台跑）。noteManualCoreToggle 仍同步记（见设置页同款）。
         CZFVPNManager.czfCoreStartQueue.async {

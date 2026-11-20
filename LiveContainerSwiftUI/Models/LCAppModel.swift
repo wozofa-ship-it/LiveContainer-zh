@@ -34,6 +34,9 @@ class LCAppModel: ObservableObject, Hashable {
         czfLaunchLock.unlock()
     }
 
+    // 3.8.900（L595-C #2）：数据搬移（共享/私人）在途标志——搬移逐个 rename 容器、尾部才翻 isShared；搬移进行中启动该 App，客端按旧路径读写，会话写入丢进孤儿目录、下次启动即丢。只在 MainActor.run 里置/清（设置页搬移函数的 6 处）与读（runApp 入口门），与 isAppRunning 同款主线程纪律，不另加锁。
+    var czfDataMoveInFlight = false
+
     // S-1/F-1/F-2：共享锁守卫（全仓唯一一份新入口共用；banner、
     // 列表、launchAppWithBundleId 的现有守卫不动，不改它们的认证
     // 流程与报错出口）。锁了且没解锁过就先弹人脸，通过返回 true；
@@ -957,6 +960,10 @@ class LCAppModel: ObservableObject, Hashable {
         // 3.8.547（L77）：isAppRunning 是 @Published，runApp 是非隔离 async、裸 Task 执行器上读是 L69/L70 同款；回主线程读（锁已抢到手，读与置位之间别的启动进不来）。
         if await MainActor.run(body: { isAppRunning }) {
             return
+        }
+        // 3.8.900（L595-C #2）：搬移在途时不启动——搬移的在用检查只在 alert 之前做，启动侧原来没有任何在途概念；抛错走 17 处 do/catch 的既有报出来路（reportLaunchError/errorInfo），不静默吞掉。
+        if await MainActor.run(body: { czfDataMoveInFlight }) {
+            throw "正在搬移数据，请稍后再打开"
         }
 
         // 3.8.510（L32）：容器准备整段放主 actor 上——LCAppModel.runApp

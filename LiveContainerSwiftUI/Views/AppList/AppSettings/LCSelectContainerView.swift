@@ -116,6 +116,12 @@ struct LCSelectContainerView : View{
                 folderNameToAppDict[container.folderName] = app;
             }
         }
+        // 3.8.900（L595-C #1）：32 位 App 的容器也要排——只扫 apps + hiddenApps 时 arm32EmuApps 表里的文件夹恒判“未用”，会在别的 App 的添加列表里出现，登记后两 App 共用同一数据夹与同一钥匙串组（addContainers 只在组号 -1 时重分，合法组号原样保留）。
+        for app in sharedModel.arm32EmuApps {
+            for container in app.appInfo.containers {
+                folderNameToAppDict[container.folderName] = app;
+            }
+        }
         
         var unusedFolders : [String]  = []
         for appDataFolderName in appDataFolderNames {

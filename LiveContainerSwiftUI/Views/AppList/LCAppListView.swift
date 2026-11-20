@@ -398,6 +398,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // （删/清理/排序按 manager 现值）同款；镜像对上时行为
         // 一字不动，决定完照常写回镜像。
         let czfCoreRunningNow = CZFVPNManager.shared.isRunning
+        // 3.8.900（L595-A #1）：文案与现值分叉时不执行——按钮文案读本页镜像 vpnCoreRunning，决定读 manager 现值；镜像只在进页/回前台刷新，页内停留时自动停/别处起停会让它过期；分叉时点按会按与文案相反的动作执行（“停止核心”走 start() 把停掉的核心又起回来；“启动核心”走 stop() 把点按前进来的钉死 App 的核心停掉，L587-A1 守卫只认点按后开的 App，拦不住）。分叉时本次不执行任何起停，只把镜像刷成现值，用户再点一次即按新文案执行；noteManualCoreToggle 的副作用（清预热抑制/epoch+1/清测速快照）也只在真实执行时才记。
+        guard vpnCoreRunning == czfCoreRunningNow else {
+            vpnCoreRunning = czfCoreRunningNow
+            return
+        }
         CZFVPNManager.shared.noteManualCoreToggle(started: !czfCoreRunningNow)
         // 3.8.900（L577-1）：起/停核心是同步阻塞的 CGoInvoke（转换 + 起核，几秒，见 L567-1），主线程直调会把界面冻住；放 manager 的串行队列跑（点按顺序不变），做完回主线程刷新状态、起失败再弹原因（VPN-6 同款，只改到后台跑）。noteManualCoreToggle 仍同步记（见设置页同款）。
         CZFVPNManager.czfCoreStartQueue.async {

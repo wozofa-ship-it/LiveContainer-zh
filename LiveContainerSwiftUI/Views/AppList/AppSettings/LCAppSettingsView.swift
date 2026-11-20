@@ -1176,12 +1176,16 @@ struct LCAppSettingsView: View {
         let czfAlreadyConverting = await MainActor.run {
             if czfConvertingShared { return true }
             czfConvertingShared = true
+            model.czfDataMoveInFlight = true
             return false
         }
         guard !czfAlreadyConverting else { return }
 
         guard let result = await moveToAppGroupAlert.open(), result else {
-            await MainActor.run { czfConvertingShared = false }
+            await MainActor.run {
+                czfConvertingShared = false
+                model.czfDataMoveInFlight = false
+            }
             return
         }
         
@@ -1259,7 +1263,10 @@ struct LCAppSettingsView: View {
         }
         // 3.8.900（L567-6）：收尾清位（成功与失败都走这里；取消
         // 路在上面 alert 处已清，运行中检查路在置位前就返回了）。
-        await MainActor.run { czfConvertingShared = false }
+        await MainActor.run {
+            czfConvertingShared = false
+            model.czfDataMoveInFlight = false
+        }
         
     }
     
@@ -1280,12 +1287,16 @@ struct LCAppSettingsView: View {
         let czfAlreadyConverting = await MainActor.run {
             if czfConvertingShared { return true }
             czfConvertingShared = true
+            model.czfDataMoveInFlight = true
             return false
         }
         guard !czfAlreadyConverting else { return }
 
         guard let result = await moveToPrivateDocAlert.open(), result else {
-            await MainActor.run { czfConvertingShared = false }
+            await MainActor.run {
+                czfConvertingShared = false
+                model.czfDataMoveInFlight = false
+            }
             return
         }
         
@@ -1357,7 +1368,10 @@ struct LCAppSettingsView: View {
             }
         }
         // 3.8.900（L567-6）：收尾清位（同 moveToAppGroup）。
-        await MainActor.run { czfConvertingShared = false }
+        await MainActor.run {
+            czfConvertingShared = false
+            model.czfDataMoveInFlight = false
+        }
         
     }
     
