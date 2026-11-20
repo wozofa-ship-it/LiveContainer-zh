@@ -1754,7 +1754,7 @@
 				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LiveContainer/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = LiveContainer;
+				INFOPLIST_KEY_CFBundleDisplayName = 解剖自我 🅥自用版;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
@@ -1798,7 +1798,7 @@
 				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LiveContainer/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = LiveContainer;
+				INFOPLIST_KEY_CFBundleDisplayName = 解剖自我 🅥自用版;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;

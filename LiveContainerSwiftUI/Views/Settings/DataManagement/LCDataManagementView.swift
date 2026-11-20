@@ -2401,6 +2401,9 @@ struct LCDataManagementView : View {
     @discardableResult
     static func applySettingsDictionary(_ dict: [String: Any]) -> (count: Int, sortRestored: Bool) {
         var count = 0
+        // 3.8.900（L599-A #1/#2）：恢复前先记下宿主代理与轮换开关的现值——下面循环直写 CZF 键，值变了要补开关副作用（见循环后）；现值必须在写之前取。
+        let czfHostProxyBefore = CZFVPNManager.isHostProxyEnabled
+        let czfAutoRotateBefore = CZFVPNManager.isAutoRotateEnabled
         for (key, value) in dict {
             if Self.settingsBackupAppGroupKeys.contains(key) {
                 LCUtils.appGroupUserDefault.set(value, forKey: key)
@@ -2409,6 +2412,31 @@ struct LCDataManagementView : View {
                 UserDefaults.standard.set(value, forKey: key)
                 count += 1
             }
+        }
+        // 3.8.900（L599-A #1）：恢复把宿主代理开关翻了——备份含全部 CZF 前缀键（writeCZFSettingsBackup 按前缀扫），恢复按前缀直写 UserDefaults，Toggle 的 onChange（S:744-777）走不到：关了不排待停（核心无限空转）、开了不起核心（开关显示开、源下载却直连）。只在值真变了时补副作用，与现值相同是空操作；排停走主线程（读坞表 @Published），与 S 同款口径。
+        if let czfHostProxyRestored = dict["CZFVPNHostProxyEnabled"] as? Bool, czfHostProxyRestored != czfHostProxyBefore {
+            if czfHostProxyRestored {
+                CZFVPNManager.czfCoreStartQueue.async {
+                    CZFVPNManager.shared.ensureRunningForHost()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    if #available(iOS 16.0, *),
+                       (MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow) == .virtualWindow {
+                        let stillHasFlagged = MultitaskDockManager.shared.apps.contains { app in
+                            guard let info = app.appInfo else { return false }
+                            return CZFVPNManager.isEnabled(for: info)
+                        }
+                        CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: stillHasFlagged)
+                    } else if #available(iOS 16.0, *) {
+                        CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false)
+                    }
+                }
+            }
+        }
+        // 3.8.900（L599-A #2）：恢复把轮换开关翻成开——同款绕过：setAutoRotate(true) 才排巡检，恢复直写键不排，开关显示开、死节点却不轮换；翻成关时巡检入口守卫自愈（rotateCheck 验开关），只补开那路。
+        if let czfAutoRotateRestored = dict["CZFVPNAutoRotate"] as? Bool, czfAutoRotateRestored != czfAutoRotateBefore, czfAutoRotateRestored {
+            CZFVPNManager.setAutoRotate(true)
         }
         // 排序键写回来了：当场让排序管理器重读重排，列表立即
         // 按恢复的顺序走，不用等重启（以前只改了 defaults，
@@ -6269,6 +6297,14 @@ struct LCDataManagementView : View {
                         newContainer.makeLCContainerInfoPlist(appIdentifier: bundleID, keychainGroupId: await Self.czfRestoreKeychainGroup(manifestId: manifestKeychainGroupId))
                     }
                     target = newContainer
+                }
+                // 3.8.900（L599-C #1）：死书签守卫（L596-C #2 同款漏网）——loginOnly 合并循环的 target 是按名对上的现有容器，
+                // 死书签时 containerURL 已回落本地空壳，mergeLoginStateOffMain 往壳里写得成功、merged 照计、回执报“已恢复”，
+                // 文件夹移回原位后登录还是回不来（会话文件全在壳里）。记合并失败，不写壳、不计数。
+                if target.storageBookMark != nil && !target.bookmarkResolved {
+                    mergedLoginFailed += 1
+                    if mergedLoginFailedPaths.count < 50 { mergedLoginFailedPaths.append(n) }
+                    continue
                 }
                 // 合并拷盘挪后台（见三件套注释）：目标值先在
                 // 调用方线程取出，只把纯 URL 传进 detached。
