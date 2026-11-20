@@ -1101,6 +1101,25 @@ struct LCAppSettingsView: View {
                     let name = plistInfo["folderName"] as? String ?? url.lastPathComponent
                     container = LCContainer(infoDict: ["folderName": url.lastPathComponent, "name": name, "bookmarkData":bookmark], isShared: false)
                     // 3.8.900（L594-C #2）：plist 里的组号要验——撞组或缺组（-1）时重分，否则原样保留（旧文件夹与钥匙串的对应关系不断）；重分走恢复侧同款 makeLCContainerInfoPlist（D:6003）。await 不进 if 条件，先算好再判（607 教训）。
+                    // 3.8.900（L596-C #1）：先验 plist 的归属再验组号——只验组号时，误挑别家 App 的容器文件夹（文件夹名全是 UUID，分辨不出）会把对方的数据和登录态登进本 App；撞组时下面还会用本 App 包名重写对方磁盘上的 plist，改了对方归属、对方下次启动组号变了就掉登录。appIdentifier 与本 App 包名不一致（且非空）就拒登、不写盘、不登记；缺 appIdentifier 的老 plist 按现行逻辑放行（兼容）。同包名的多开分身靠下一条“已登记给别家”拦。
+                    let czfImportedOwner = plistInfo["appIdentifier"] as? String
+                    let czfMyBid = await MainActor.run { appInfo.bundleIdentifier() }
+                    if let czfImportedOwner, !czfImportedOwner.isEmpty, let czfMyBid, czfImportedOwner != czfMyBid {
+                        await MainActor.run {
+                            errorInfo = "该文件夹属于其他 App（\(czfImportedOwner)），不能导入到本 App。"
+                            errorShow = true
+                        }
+                        return
+                    }
+                    // 3.8.900（L596-C #1）：再拦“已登记给别家”——同包名多开分身的 appIdentifier 相同，上面一条拦不住；文件夹已是别家 App 的容器时，登进来就是两 App 共用同一数据夹与同一钥匙串组（L595-C #1 同款伤害），撞组重分还会改掉对方的组号、丢对方登录。本 App 自己的容器不在此列（重导入走原逻辑）。
+                    let czfFolderTakenByOther = await MainActor.run { (sharedModel.apps + sharedModel.hiddenApps).contains { $0 !== model && $0.uiContainers.contains { $0.folderName == url.lastPathComponent } } }
+                    if czfFolderTakenByOther {
+                        await MainActor.run {
+                            errorInfo = "该文件夹已是其他 App 的数据容器，不能导入到本 App。"
+                            errorShow = true
+                        }
+                        return
+                    }
                     let czfImportedContainer = container!
                     let czfImportedGroup = czfImportedContainer.keychainGroupId
                     let czfGroupTaken = await MainActor.run { model.czfIsKeychainGroupUsed(czfImportedGroup, excluding: czfImportedContainer) }

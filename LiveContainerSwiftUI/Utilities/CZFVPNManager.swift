@@ -1646,8 +1646,23 @@ public final class CZFVPNManager {
     /// 重试同样逐项重查：期间有 App 启动/宿主开关打开，重查会
     /// 拦下，不会误停。
     private func checkPendingStop() {
-        guard isRunning else { return }
         if Self.isHostProxyEnabled { return }
+        // 3.8.900（L596-A #1）：测速重排必须在 isRunning 守卫之前——测速窗口内核心是 stopCoreForPing 停掉的，isRunning 恒 false；守卫在前会把到点落在测速窗口内的这次自动停直接丢掉（restartCoreAfterPing 只把核心起回来，不重排待停），之后无人再排、核心一直跑。移到前面后，到点在测速窗口内就按原样 30 秒后重查；重试时测速已结束，照常走下面各分支。
+        vpnCoreLock.lock()
+        let pinging = isPinging
+        vpnCoreLock.unlock()
+        if pinging {
+            let retry = DispatchWorkItem { [weak self] in
+                self?.checkPendingStop()
+            }
+            // 3.8.900（L567-2）：同上，赋值进锁。
+            vpnCoreLock.lock()
+            pendingStopWork = retry
+            vpnCoreLock.unlock()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: retry)
+            return
+        }
+        guard isRunning else { return }
         // 档位改长了：到点时闲置还不够新档位，别直接丢掉这次
         // 自动停——否则核心一直跑到下次 App 变化才停。按剩余
         // 时间重排（改短不影响：到点时闲置已够，直接往下走）。
@@ -1666,20 +1681,6 @@ public final class CZFVPNManager {
             pendingStopWork = retry
             vpnCoreLock.unlock()
             DispatchQueue.main.asyncAfter(deadline: .now() + (delay - idle), execute: retry)
-            return
-        }
-        vpnCoreLock.lock()
-        let pinging = isPinging
-        vpnCoreLock.unlock()
-        if pinging {
-            let retry = DispatchWorkItem { [weak self] in
-                self?.checkPendingStop()
-            }
-            // 3.8.900（L567-2）：同上，赋值进锁。
-            vpnCoreLock.lock()
-            pendingStopWork = retry
-            vpnCoreLock.unlock()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: retry)
             return
         }
         // 3.8.900（L567-2）：停之前再复核一次还有没有标 VPN 的

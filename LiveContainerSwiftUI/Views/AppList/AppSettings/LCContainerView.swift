@@ -565,7 +565,8 @@ struct LCContainerView : View {
     /// 窗口（含签名），isSigningInProgress 覆盖签名段；只认选中
     /// 容器就是本容器的那一个模型，别的容器不误拦。
     private func isOwningAppLaunching() -> Bool {
-        guard let app = sharedModel.apps.first(where: { $0.uiContainers.contains { $0.folderName == container.folderName } }) else {
+        // 3.8.900（L596-C #3）：三表口径——只查 apps 时隐藏 App（hiddenApps 表）启动窗口期内删数据/删容器/清钥匙串不受拦；32 位 App 是 apps/hiddenApps 的重叠子集，不用另加第三表。
+        guard let app = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.uiContainers.contains { $0.folderName == container.folderName } }) else {
             return false
         }
         guard app.uiSelectedContainer?.folderName == container.folderName else {

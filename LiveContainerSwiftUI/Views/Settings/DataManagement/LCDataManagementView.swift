@@ -5932,6 +5932,12 @@ struct LCDataManagementView : View {
             // 3.8.544（L74）：逐点取当前值——本函数跑全局执行器，uiContainers 是 @Published；前面轮次刚注册的容器（L37 块写回主线程）本轮必须可见，一次快照到底会漏。
             let live = await MainActor.run { app.uiContainers.first(where: { $0.containerURL.lastPathComponent == folderName }) }
             if let live {
+                // 3.8.900（L596-C #2）：死书签守卫（备份侧 L570-5 同款）——外置书签已死时 containerURL 已回落本地 dataPath/<夹名> 空壳（LCContainer:193-201，init 顺手建出来），原地覆盖/登录合并都会把备份写进空壳还计成功；文件夹移回原位、书签恢复后，恢复的数据不在真夹里，看着像恢复后又“丢了”。死书签的容器记合并失败进报告，不写空壳、不计数；本机容器（无书签）不受影响。
+                if live.storageBookMark != nil && !live.bookmarkResolved {
+                    mergedLoginFailed += 1
+                    if mergedLoginFailedPaths.count < 50 { mergedLoginFailedPaths.append(folderName) }
+                    continue
+                }
                 if isLoginBackup {
                     // 登录态备份只有半套会话文件：合并进现有
                     // 容器（同名文件覆盖、其他数据不动），整

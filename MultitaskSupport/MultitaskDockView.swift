@@ -2326,9 +2326,14 @@ extension Notification.Name {
                 // 调层级/清死窗/脉冲动画），必须回主线程再调，
                 // 否则视图层级改动离主线程、切 App 可能丢动画
                 // 甚至撞上主线程的布局；震动也在同一跳里。
-                await MainActor.run {
-                    guard bringMultitaskViewToFront(uuid: only.appUUID, from: nil) else { return }
-                    edgeCallbackBuzz()
+                // 3.8.900（L596-B #1）：bring 返 false 是 C4 死窗（拆条目 + 摘视图 + 清场景）或条目已摘——原来直接 return，滑了没反应；返 false 时走 runApp 新起死掉的那个实例（容器名直接用死窗 uuid；面板行点按 L589-B1 同款，认证已在上面做过）。起失败静默，与今天一致。
+                let brought = await MainActor.run {
+                    bringMultitaskViewToFront(uuid: only.appUUID, from: nil)
+                }
+                if brought {
+                    await MainActor.run { edgeCallbackBuzz() }
+                } else if let model = await MainActor.run(body: { (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == only.appUUID || $0.uiContainers.contains(where: { c in c.folderName == only.appUUID }) }) }) {
+                    _ = try? await model.runApp(containerFolderName: only.appUUID)
                 }
             }
             return
@@ -2351,7 +2356,8 @@ extension Notification.Name {
             // 3.8.514（L38）：同上，认证后整段都是 UIKit 活
             //（读视图/调层级/脉冲动画/最小化他人），一并回主线
             // 程；认证本身留在外面（async，可在后台等）。
-            await MainActor.run {
+            // 3.8.900（L596-B #1）：同单 App 分支——bring 返 false 时走 runApp 新起死窗实例（L589-B1 同款）；快路径再加客进程存活条件，死窗不走快路径顶回一帧死画面，落到 bring 的 C4 清理 + 重开。
+            let brought = await MainActor.run {
                 // 切到大窗口：直接全屏调出来（用户定 2026-10-25）。
                 // 通用带脉冲动画的路径在 1 大 1 小时盖不住小窗口（实测）；
                 // 大窗口不走缩放脉冲（全屏窗脉冲多余），改走静默直提 + 重申最大化状态，
@@ -2362,6 +2368,7 @@ extension Notification.Name {
                 if let targetView = target.view,
                    let targetVC = targetView._viewDelegate() as? DecoratedAppSceneViewController,
                    targetVC.isMaximized,
+                   targetVC.appSceneVC?.isAppRunning == true,
                    !targetView.isHidden, targetView.alpha >= 0.1,
                    let targetWindow = targetView.window ?? targetView.superview?.window {
                     passURLSchemeToView(targetView)
@@ -2371,9 +2378,16 @@ extension Notification.Name {
                     bringViewToFront(targetView, in: targetWindow)
                     maximizeWindow(uuid: target.appUUID)
                     edgeCallbackBuzz()
+                    return true
                 } else {
-                    guard bringMultitaskViewToFront(uuid: target.appUUID, from: nil) else { return }
+                    guard bringMultitaskViewToFront(uuid: target.appUUID, from: nil) else { return false }
                     edgeCallbackBuzz()
+                    return true
+                }
+            }
+            if !brought {
+                if let model = await MainActor.run(body: { (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).first(where: { $0.appInfo.dataUUID == target.appUUID || $0.uiContainers.contains(where: { c in c.folderName == target.appUUID }) }) }) {
+                    _ = try? await model.runApp(containerFolderName: target.appUUID)
                 }
             }
         }
