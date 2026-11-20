@@ -133,13 +133,8 @@ class LCAppModel: ObservableObject, Hashable {
         guard let uuid = app.czfInstanceUUID else { return false }
         let dockManager = MultitaskDockManager.shared
         if let runningApp = czfOwnedDockEntry(app: app, uuid: uuid) {
-            var brought = false
-            if #available(iOS 16.1, *) {
-                brought = MultitaskWindowManager.openExistingAppWindow(dataUUID: uuid)
-            }
-            if !brought {
-                brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
-            }
+            // 3.8.900（L591-B #1）：有 dock 条目即虚拟窗（活或死），直接走 bring（带回/C4）；不再先试 openExisting——appDict 按容器记名、不认模式，原生开过的容器留残留项，openExisting 会把已销毁的原生场景当活窗顶回来（无 JIT、无 VPN 核心），活虚拟窗时还会多开一个原生场景。
+            let brought = dockManager.bringMultitaskViewToFront(uuid: uuid)
             // 带回成功拉满；带回失败但条目还在且不是本次 C4 清掉的
             // 死窗（窗已在前台、只是 bring 没抬动）同样拉满，别再
             // 静默空转回小窗。
@@ -1184,10 +1179,30 @@ class LCAppModel: ObservableObject, Hashable {
         // fail-open 兜底，直连）。appInfo 先提成本地常量：
         // detached 闭包是 escaping，不能隐式抓 self 的属性。
         let vpnAppInfo = appInfo
+        // 3.8.900（L591-A #1）：进启动前核心在跑没跑快照在先——catch 只在本次启动真起了核心时才排待停；亲手起/预热恢复的无归属核心与进启动前已在跑的核心，失败启动与它无关，排了就会在档位后被两道只认标 VPN App 的复核误停。快照必须在 Task.detached 创建之前（detached 任务入口即调度，放它之后就可能读到本次启动刚起的核心）。
+        let czfCoreWasRunningAtEntry = CZFVPNManager.shared.isRunning
         // 3.8.900（L583-A2）：经典模式不启动核心——核心是进程内库，经典交接（launchToGuestAppWithClassicMode 成功即 raise(SIGKILL) 杀宿主）后核心即死，客进程（LCBootstrap invokeAppMain）从不建核，注入的插件只探活；在这里起核 + 探通 5 秒全是白演，跟随全局的 App 走直连漏真实 IP、钉死/严格的 App 全程断网。经典路跳过起核与探通（下面的 waitUntilNodeReady 跟 vpnCoreTask 走，自动跳过）；多任务路不动。
         let vpnCoreTask: Task<Void, Never>? = (multitask && CZFVPNManager.isEnabled(for: vpnAppInfo))
             ? Task.detached(priority: .userInitiated) { CZFVPNManager.shared.ensureRunning(for: vpnAppInfo) }
             : nil
+        // 3.8.900（L591-A #1/#2）：启动失败的共用收尾——取消本次启动挂起的 deferred 补跑；本次启动真起了核心（vpnCoreTask 非 nil 且进启动前没在跑）才按“无标 VPN 的 App 在跑”排一次待停（czfForceSchedule：核心可能还在起，isRunning 守卫挪到到点时判）。两调用都在 MainActor.run 里（cancelDeferredEnsure 直读 bundleIdentifier()，离主线程读是 L72/L75 同款竞态）。
+        let czfScheduleStopOnLaunchFailure: () async -> Void = {
+            await MainActor.run {
+                CZFVPNManager.shared.cancelDeferredEnsure(for: vpnAppInfo)
+                if vpnCoreTask != nil && !czfCoreWasRunningAtEntry {
+                    CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false, czfForceSchedule: true)
+                }
+            }
+        }
+        // 3.8.900（L591-A #2）：launch 段抛错走同一收尾——两个 withCheckedThrowingContinuation 都经它转一次：pid 报错 / pid 为 nil / 30 秒超时时先排待停再原样抛错。直接在原地包 do/catch 要把两个 continuation 各重缩进几十行，改走助手只换调用点一行；成功路一字不动。M:1957 的 Bool continuation 是启动门 acquire 的等待者，不归 launch 段管，不走这里。
+        func czfCheckedLaunchContinuation(_ body: (CheckedContinuation<Void, Error>) -> Void) async throws {
+            do {
+                try await withCheckedThrowingContinuation(body)
+            } catch {
+                await czfScheduleStopOnLaunchFailure()
+                throw error
+            }
+        }
         // 3.8.900（L590-A1）：签名失败时核心白起且永不停——
         // vpnCoreTask 在 signApp 之前就 detached 起核（M:1188），
         // signApp 抛错（证书缺失 M:1614 / 签名失败 M:1560 /
@@ -1208,13 +1223,11 @@ class LCAppModel: ObservableObject, Hashable {
         // start() 是无界阻塞 CGoInvoke，等它会把报错弹窗拖住；
         // detached 任务在入口即调度、signApp 走完 patch+签插件
         // 要数秒，ensureRunning 入口（取消待停/挂补跑）早已跑完。
+        // 3.8.900（L591-A #1）：上面排队只在本次启动真起了核心时——亲手起/预热恢复的无归属核心与进启动前已在跑的核心不在此列（见 czfCoreWasRunningAtEntry 快照），失败启动与它无关。
         do {
             try await signApp(force: false)
         } catch {
-            await MainActor.run {
-                CZFVPNManager.shared.cancelDeferredEnsure(for: vpnAppInfo)
-                CZFVPNManager.shared.noteRunningAppsChanged(stillHasFlagged: false, czfForceSchedule: true)
-            }
+            await czfScheduleStopOnLaunchFailure()
             throw error
         }
         await vpnCoreTask?.value
@@ -1335,7 +1348,7 @@ class LCAppModel: ObservableObject, Hashable {
         var czfDidLaunch = true
         if jitNeeded {
             if multitask, #available(iOS 17.4, *) {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                try await czfCheckedLaunchContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     // 3.8.496（L12）：启动窗在客端初始化完成前被关掉时 pid
                     // 回调永不触发——terminate 在未运行时是空操作，不走
                     // delegate；pidCallbacks 只在 onAppInitialize 里取走
@@ -1412,7 +1425,7 @@ class LCAppModel: ObservableObject, Hashable {
             // runApp 永远挂起、isAppRunning 与启动锁一直占着，
             // App 再也点不开，只能重启 LiveContainer。照 JIT 分支
             // 同款包一层 continuation + CZFOnceBox + 30 秒超时。
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            try await czfCheckedLaunchContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let czfPidBox = CZFOnceBox()
                 let czfPidTimeout = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 30_000_000_000)
@@ -1794,6 +1807,15 @@ class LCAppModel: ObservableObject, Hashable {
                 if dockPath != appInfo.relativeBundlePath {
                     return false
                 }
+                // 3.8.900（L591-B #1）：条目在且归属对得上 = 活虚拟窗或死虚拟窗，直接走 bring（带回/C4），不再落到下面的 openExisting——appDict 残留会把已销毁的原生场景当活窗顶回来（无 JIT、无 VPN 核心）；死窗时 bring 走 C4 清掉再返 false，runApp 照常新起；urlScheme 键按下面 !found 路同款清掉。
+                if let urlScheme {
+                    UserDefaults.standard.setValue(urlScheme, forKey: "launchAppUrlScheme")
+                }
+                let czfFound = MultitaskDockManager.shared.bringMultitaskViewToFront(uuid: dataUUID)
+                if let urlScheme, !czfFound {
+                    UserDefaults.standard.removeObject(forKey: "launchAppUrlScheme")
+                }
+                return czfFound
             }
             if let urlScheme {
                 UserDefaults.standard.setValue(urlScheme, forKey: "launchAppUrlScheme")

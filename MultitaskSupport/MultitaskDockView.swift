@@ -5958,15 +5958,19 @@ struct AppCardRow: View {
             Label(pinnedStore.isPinned(app) ? "取消固定" : "固定到顶部",
                   systemImage: pinnedStore.isPinned(app) ? "pin.slash" : "pin")
         }
-        if let uuid = app.appInfo.dataUUID,
-           dockManager.apps.contains(where: { $0.appUUID == uuid }) {
+        // 3.8.900（L591-B #2）：重启/关闭按在跑的容器认，不只认默认容器——非默认容器在跑时（多开/死窗重开）dataUUID 对不上，按钮直接不出现；优先选中容器的条目，否则取第一个在跑条目（L589-A2/B1 同款谓词）。
+        if let czfRunningUUID = app.czfInstanceUUID.flatMap({ czfUUID in
+            dockManager.apps.contains(where: { $0.appUUID == czfUUID }) ? czfUUID : nil
+        }) ?? dockManager.apps.first(where: { entry in
+            app.uiContainers.contains(where: { $0.folderName == entry.appUUID }) || entry.appUUID == app.appInfo.dataUUID
+        })?.appUUID {
             Button {
-                dockManager.restartApp(uuid: uuid)
+                dockManager.restartApp(uuid: czfRunningUUID)
             } label: {
                 Label("重启 App", systemImage: "arrow.clockwise")
             }
             Button(role: .destructive) {
-                dockManager.closeAppWindow(uuid: uuid)
+                dockManager.closeAppWindow(uuid: czfRunningUUID)
             } label: {
                 Label("关闭 App", systemImage: "xmark.circle")
             }
