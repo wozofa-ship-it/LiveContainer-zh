@@ -1841,13 +1841,34 @@ class LCAppModel: ObservableObject, Hashable {
             // 按 dataUUID 找会把别人的窗口顶回来；归属对不上
             // 就不顶，交给 runApp 去拆容器、起新窗口。
             if let dockApp = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == dataUUID }) {
+                // 3.8.900（L601-B#3）：归属验不过时，死条目会让重开的窗口变
+                // 孤儿——条目还在表里，下次启动又按 dataUUID 找到它、
+                // 归属又验不过，新窗口永远顶不回来。死条目才摘：视图
+                // 已无，或客人已死（DecoratedVC 的 appSceneVC 取得到
+                // 且 isAppRunning 为假）；客人活着或取不到 VC 时不摘
+                //（今日行为），runApp 照常新起。无 30 秒门槛——死活
+                // 是定论，年龄不是判据。
+                let czfDockDead: Bool = {
+                    guard let dockView = dockApp.view else { return true }
+                    if let dockDecorated = dockView._viewDelegate() as? DecoratedAppSceneViewController,
+                       let dockSceneVC = dockDecorated.appSceneVC {
+                        return !dockSceneVC.isAppRunning
+                    }
+                    return false
+                }()
                 // dock 条目存在却无法证明归属（appInfo 缺失或路径
                 // 为空）时视为未知，一律不顶窗口，交给 runApp；
                 // 宁可多起一个窗口，不顶错别人的。
                 guard let dockPath = dockApp.appInfo?.relativeBundlePath, !dockPath.isEmpty else {
+                    if czfDockDead {
+                        MultitaskDockManager.shared.removeRunningApp(dataUUID)
+                    }
                     return false
                 }
                 if dockPath != appInfo.relativeBundlePath {
+                    if czfDockDead {
+                        MultitaskDockManager.shared.removeRunningApp(dataUUID)
+                    }
                     return false
                 }
                 // 3.8.900（L591-B #1）：条目在且归属对得上 = 活虚拟窗或死虚拟窗，直接走 bring（带回/C4），不再落到下面的 openExisting——appDict 残留会把已销毁的原生场景当活窗顶回来（无 JIT、无 VPN 核心）；死窗时 bring 走 C4 清掉再返 false，runApp 照常新起；urlScheme 键按下面 !found 路同款清掉。

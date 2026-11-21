@@ -1563,10 +1563,18 @@ extension LCAppSettingsView : LCSelectContainerViewDelegate {
         }
         
         for folderName in containers {
+            // 3.8.900（L601-C#1）：同名容器已在表里时跳过——重导入
+            // 同一文件夹会再 append 一份，列表多一条重复记录
+            //（登录态丢的那半见 L600-C#1 的同名门）。
+            if model.uiContainers.contains(where: { $0.folderName == folderName }) {
+                continue
+            }
             let newContainer = LCContainer(folderName: folderName, name: folderName, isShared: false)
             newContainer.loadName()
-            if newContainer.keychainGroupId == -1 {
-                // 3.8.900（L594-C #1）：组号走全局分配器（同 createFolder；本函数在主线程按钮回调里，直接调）。
+            if newContainer.keychainGroupId == -1 || model.czfIsKeychainGroupUsed(newContainer.keychainGroupId, excluding: newContainer) {
+                // 3.8.900（L594-C #1 + L601-C#1）：组号走全局分配器（同 createFolder；本函数在主线程按钮回调里，直接调）。
+                // -1（未分配）或该组已被别的容器占了，都重抽——
+                // 否则两个容器共用一组，登录态会串（L594-C#2 的漏网）。
                 let freeKeyChainGroup = model.czfFreeKeychainGroup(excluding: newContainer)
                 newContainer.makeLCContainerInfoPlist(appIdentifier: appInfo.bundleIdentifier()!, keychainGroupId: freeKeyChainGroup)
             }

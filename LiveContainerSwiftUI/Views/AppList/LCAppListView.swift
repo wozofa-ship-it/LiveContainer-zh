@@ -1133,7 +1133,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     }
                 }
                 if !ok.isEmpty {
-                    LCDataManagementView.syncBackupsToExternalFolder(appNames: ok, backupRoot: backupRoot)
+                    failed.append(contentsOf: LCDataManagementView.syncBackupsToExternalFolder(appNames: ok, backupRoot: backupRoot))
                     LCDataManagementView.writeCZFSettingsBackupDebounced()
                 }
                 continuation.resume(returning: (ok, failed, skipped, overwritten, copyFailed))

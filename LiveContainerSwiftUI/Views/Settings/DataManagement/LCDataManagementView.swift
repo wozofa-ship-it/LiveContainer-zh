@@ -1671,7 +1671,7 @@ struct LCDataManagementView : View {
         if Date().timeIntervalSince1970 - lastSync > 6 * 3600 {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "LCExternalSyncLastRun")
             Task.detached {
-                Self.syncAllLocalBackupsToExternalFolder()
+                _ = Self.syncAllLocalBackupsToExternalFolder()
             }
         }
         // 检查定时备份
@@ -1710,7 +1710,7 @@ struct LCDataManagementView : View {
         externalFolderName = url.lastPathComponent
         // 立即把已有本地备份同步过去（后台线程）
         Task.detached {
-            Self.syncAllLocalBackupsToExternalFolder()
+            _ = Self.syncAllLocalBackupsToExternalFolder()
         }
         successInfo = "备份文件夹已设置：\(url.lastPathComponent)\n之后的备份会同步到该文件夹，恢复时也会从该文件夹读取"
         successShow = true
@@ -1742,12 +1742,13 @@ struct LCDataManagementView : View {
     // 把刚备份好的 App 文件夹同步到外部文件夹（同名覆盖）
     // 静态化：函数体只用 externalBackupFolderURL 和 FileManager，不碰
     // 视图状态，静态后可从后台线程直接调（备份重活整体挪后台用）。
-    static func syncBackupsToExternalFolder(appNames: [String], backupRoot: URL) {
+    static func syncBackupsToExternalFolder(appNames: [String], backupRoot: URL) -> [String] {
         // 3.8.527（L54）：与兜底同步串行（见 czfExternalSyncLock）。
         czfExternalSyncLock.lock()
         defer { czfExternalSyncLock.unlock() }
-        guard let extURL = Self.externalBackupFolderURL() else { return }
+        guard let extURL = Self.externalBackupFolderURL() else { return [] }
         let fm = FileManager.default
+        var failed: [String] = []
         for name in appNames {
             let src = backupRoot.appendingPathComponent(name)
             let dest = extURL.appendingPathComponent(name)
@@ -1758,12 +1759,26 @@ struct LCDataManagementView : View {
             if fm.fileExists(atPath: tmp.path) {
                 try? fm.removeItem(at: tmp)
             }
-            guard (try? fm.copyItem(at: src, to: tmp)) != nil else { continue }
+            // 3.8.900（L601-C#2）：拷失败 / 换上失败都记名返回，
+            // 不再静默跳过——调用方收进回执或只记日志；删旧换上
+            // 改走 replaceItemAt（失败时旧份保留，见 D:3579 同款），
+            // 无旧份时 moveItem；换上失败留下的 tmp 下次同步清掉。
+            guard (try? fm.copyItem(at: src, to: tmp)) != nil else { failed.append(name); continue }
             if fm.fileExists(atPath: dest.path) {
-                try? fm.removeItem(at: dest)
+                do {
+                    _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+                } catch {
+                    failed.append(name)
+                }
+            } else {
+                do {
+                    try fm.moveItem(at: tmp, to: dest)
+                } catch {
+                    failed.append(name)
+                }
             }
-            try? fm.moveItem(at: tmp, to: dest)
         }
+        return failed
     }
 
     // 生成设置备份 JSON 并落盘：本地文稿根目录一份；已设置外部
@@ -1980,15 +1995,16 @@ struct LCDataManagementView : View {
     }
 
     // 兜底同步：把本地备份里外部文件夹还缺的/过期的补过去（选文件夹后、打开数据管理页时调用）
-    static func syncAllLocalBackupsToExternalFolder() {
+    static func syncAllLocalBackupsToExternalFolder() -> [String] {
         // 3.8.527（L54）：与备份结束同步串行（见 czfExternalSyncLock）。
         czfExternalSyncLock.lock()
         defer { czfExternalSyncLock.unlock() }
-        guard let extURL = Self.externalBackupFolderURL() else { return }
+        guard let extURL = Self.externalBackupFolderURL() else { return [] }
         let fm = FileManager.default
-        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return [] }
         let backupRoot = docsURL.appendingPathComponent("Backups")
-        guard let localFolders = try? fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else { return }
+        guard let localFolders = try? fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else { return [] }
+        var failed: [String] = []
         for src in localFolders {
             guard (try? src.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             // 本地空壳不同步到 iCloud，免得那边也多个空备份。
@@ -2018,12 +2034,24 @@ struct LCDataManagementView : View {
             if fm.fileExists(atPath: tmp.path) {
                 try? fm.removeItem(at: tmp)
             }
-            guard (try? fm.copyItem(at: src, to: tmp)) != nil else { continue }
+            // 3.8.900（L601-C#2）：同 syncBackupsToExternalFolder——
+            // 拷失败 / 换上失败记名返回，删旧换上改 replaceItemAt。
+            guard (try? fm.copyItem(at: src, to: tmp)) != nil else { failed.append(src.lastPathComponent); continue }
             if fm.fileExists(atPath: dest.path) {
-                try? fm.removeItem(at: dest)
+                do {
+                    _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+                } catch {
+                    failed.append(src.lastPathComponent)
+                }
+            } else {
+                do {
+                    try fm.moveItem(at: tmp, to: dest)
+                } catch {
+                    failed.append(src.lastPathComponent)
+                }
             }
-            try? fm.moveItem(at: tmp, to: dest)
         }
+        return failed
     }
         func cleanUpUnusedFolders() async {
         // 3.8.540（L70）：本函数从按钮的裸 Task 调来（L40 注释自认），
@@ -3607,7 +3635,12 @@ struct LCDataManagementView : View {
                     // 后按显示名同步，同款多开会同步错文件夹）。
                     // 备份失败时不触发同步，外部文件夹里不留半成品。
                     if let one = try? Self.backupOneAppSync(app, backupRoot: root, fm: fm, keychainSnapshotStale: autoRefreshResult == .stale) {
-                        Self.syncBackupsToExternalFolder(appNames: [one.folderName], backupRoot: root)
+                        // 3.8.900（L601-C#2）：外部同步失败只记日志，不进回执——
+                        // 自动备份静默跳过不挡安装（B-2 同款）；App 名 + 失败文件夹名留痕。
+                        let czfSyncFailed = Self.syncBackupsToExternalFolder(appNames: [one.folderName], backupRoot: root)
+                        if !czfSyncFailed.isEmpty {
+                            print("[AutoBackup] \(Self.czfAppDisplayName(for: app)) 同步到外部备份文件夹失败：\(czfSyncFailed.joined(separator: "、"))")
+                        }
                         // B-2：单 App 里个别文件拷失败不抛错、也算
                         // “成功”，原来只取 folderName、失败数直接
                         // 丢了；自动备份静默跳过不挡安装，记一条
@@ -3915,7 +3948,7 @@ struct LCDataManagementView : View {
                         self.backupRestoreProgress = "正在同步到备份文件夹…"
                     }
                     // 同步到外部备份文件夹（如已设置 iCloud 文件夹）
-                    Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
+                    failedNames.append(contentsOf: Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot))
                     // 设置备份跟着一起自动刷新（本地 + 所选备份文件夹）
                     Self.writeCZFSettingsBackupDebounced()
                     continuation.resume(returning: (count, nil, keychainTotal, snapshotMissing, bridgeStatuses, loginFileTotal, loginBreakdownTotal, loginSkippedTotal, snapshotDates, failedNames, loginSkippedPathsTotal, healthLines, skippedNames, loginFailedTotal, loginFailedPathsTotal, staleSnapshotNames))
@@ -8071,7 +8104,7 @@ struct LCDataManagementView : View {
                         }
                     }
                     if !backedUpFolderNames.isEmpty {
-                        Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot)
+                        copyFailedNames.append(contentsOf: Self.syncBackupsToExternalFolder(appNames: backedUpFolderNames, backupRoot: backupRoot))
                         Self.writeCZFSettingsBackupDebounced()
                     }
                     if !failedNames.isEmpty || !copyFailedNames.isEmpty || skippedLockedCount > 0 || !staleSnapshotNames.isEmpty {
