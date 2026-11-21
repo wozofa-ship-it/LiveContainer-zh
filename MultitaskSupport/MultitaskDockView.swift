@@ -2032,14 +2032,9 @@ extension Notification.Name {
             if dx < 0, Self.czfEdgeGesturesEnabled, !isAppPanelOpen, !isSourcesPanelOpen,
                abs(dx) > 24 * s, abs(dy) > 24 * s,
                abs(dy) / abs(dx) >= 0.5, abs(dy) / abs(dx) <= 2.0,
-               let front = czfFrontmostApp() {
-                if dy < 0 {
-                    fireDockAction { self.maximizeFrontmostWindow() }
-                } else {
-                    // 3.8.586（GEST-4）：兜底下滑同款震一下（见中途分支）。
-                    self.edgeCallbackBuzz()
-                    fireDockAction { self.restoreSmallWindow(uuid: front.appUUID) }
-                }
+               czfFrontmostApp() != nil {
+                // 用户 2026-11-21 定：右缘斜滑不再分上下——上拉满/下小窗二分里，下滑一次都没成功过（用户报划的是近 90° 竖滑）；改成大小切换：大窗变小窗、小窗变大窗。vc.maximizeWindow() 本身就是切换式的，快捷面板放大开关（3.8.359）同款函数。
+                fireDockAction { self.toggleMaximizeFrontmostWindow() }
             } else if dx > 12, endX >= width - 12, abs(dx) > 0.4 * abs(dy), startInBand {
                 fireDockAction { self.czfEdgeRightOutward() }
             } else if dx <= -44 * s, abs(dx) > 0.8 * abs(dy), startInBand {
@@ -2072,6 +2067,9 @@ extension Notification.Name {
         // 本来小窗无操作）——都只动台前已在跑的窗口，不新起窗口。
         // 兜底（.ended/.cancelled）GEST-2 补上：中途没触发的快甩/短滑在抬指时按终态再判一次，斜滑先判、再判往里，
         // 斜滑带与往里分支重叠处归斜滑（斜滑本就是要抢这段方向）；先横后竖的变向路径仍待真机调。
+        // 用户 2026-11-21 定：斜滑不再分上下——两处分支（中途 + 兜底）都改成 toggleMaximizeFrontmostWindow() 大小切换，
+        // 大窗变小窗、小窗变大窗；下滑小窗那路删掉（一次都没成功过），GEST-4 的诊断震动随之下线。左缘面板手势、
+        // 右缘横滑切 App、右缘往外弹一律不动。
         if startEdge == 2, !draggingRight,
            Self.czfEdgeGesturesEnabled, !isAppPanelOpen, !isSourcesPanelOpen {
             let s = Self.czfThresholdScale
@@ -2079,14 +2077,9 @@ extension Notification.Name {
             let ady = abs(translation.y)
             if adx > 24 * s, ady > 24 * s {
                 let ratio = ady / adx
-                if ratio >= 0.5, ratio <= 2.0, let front = czfFrontmostApp() {
-                    if translation.y < 0 {
-                        fireDockAction { self.maximizeFrontmostWindow() }
-                    } else {
-                        // 3.8.586（GEST-4）：下滑斜滑认到时震一下——真机上滑能出、下滑一次没出，震动是诊断信号：震了没出小窗 = 手势认到了、还原路没动作；没震 = 手势根本没认到。
-                        self.edgeCallbackBuzz()
-                        fireDockAction { self.restoreSmallWindow(uuid: front.appUUID) }
-                    }
+                if ratio >= 0.5, ratio <= 2.0, czfFrontmostApp() != nil {
+                    // 用户 2026-11-21 定：同兜底——斜滑不分上下，大小切换。
+                    fireDockAction { self.toggleMaximizeFrontmostWindow() }
                     return true
                 }
             }
