@@ -536,6 +536,11 @@ struct LCContainerView : View {
         guard let ans = await removeContainerAlert.open(), ans else {
             return
         }
+        // 3.8.900（L602-C#2）：只在本地容器删盘成功后才清名单里的夹名——
+        // 外置只解绑、文件夹还在，不清名；走到尾部即删盘已成功（失败路
+        // 前面已 return）。不清的话同会话再点“清理闲置文件夹”必报一
+        // 条幽灵失败，直到重启冷扫描重建名单才消失。
+        let czfDeletedLocalFolder = container.storageBookMark == nil
         do {
             // 3.8.900（L566-3）：外置容器（storageBookMark != nil）是用户
             // 自管的外置文件夹，本来就不该由本 App 删盘——只解绑、不删文件。
@@ -544,7 +549,14 @@ struct LCContainerView : View {
             // 条目永远删不掉；同名本地夹恰好存在时还会删错。本地容器才删盘。
             if container.storageBookMark == nil {
                 let fm = FileManager.default
+                // 3.8.900（L602-C#1）：先取组号再删盘——keychainGroupId 是
+                // 惰性读盘值，plist 随文件夹一起删、删后读不到；删完调
+                // removeAppKeychain 清本夹令牌（-1 → nil 走 128 组全扫，
+                // D:2117 同款），否则组号回池后新容器抽中同组就继承
+                // 已删分身的登录态。外置只解绑那路不动。
+                let czfGid = container.keychainGroupId
                 try fm.removeItem(at: container.containerURL)
+                LCUtils.removeAppKeychain(dataUUID: container.folderName, keychainGroupId: czfGid >= 0 ? czfGid : nil)
             }
         } catch {
             await MainActor.run {
@@ -557,6 +569,9 @@ struct LCContainerView : View {
         await MainActor.run {
             dismiss()
             delegate.unbindContainer(container: container)
+            if czfDeletedLocalFolder {
+                sharedModel.appDataFolderNames.removeAll { $0 == container.folderName }
+            }
         }
     }
     

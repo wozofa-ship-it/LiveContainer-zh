@@ -491,6 +491,16 @@ class LCAppModel: ObservableObject, Hashable {
         }
         // 3.8.544（L74）：同上，启动完重读 uuid 也是离主线程读；现取。
         guard let waitUUID = await MainActor.run(body: { app.czfInstanceUUID }) else { return }
+        // 3.8.900（L602-B#1）：拆容器换号时旧号一次性小窗标记泄漏——
+        // 动作走新号跑了（done == true），catch（失败路）与超时 Task
+        // （!done 路）都够不着它；新窗只认新号，旧号标记从此无人消费、
+        // 无 TTL，下次正常打开旧容器 App 莫名开一次小窗。换号才清：
+        // 不拆容器且窗口尚未建出来时，标记还得留给将建的窗口消费。
+        if waitUUID != uuid {
+            var czfSmallOnceUUIDs = UserDefaults.standard.stringArray(forKey: "CZFLaunchSmallOnceUUIDs") ?? []
+            czfSmallOnceUUIDs.removeAll { $0 == uuid }
+            UserDefaults.standard.set(czfSmallOnceUUIDs, forKey: "CZFLaunchSmallOnceUUIDs")
+        }
         let deadline = Date().addingTimeInterval(timeout)
         MultitaskDockManager.shared.czfOnWindowAppeared(uuid: waitUUID, timeout: timeout) {
             act(waitUUID)

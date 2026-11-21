@@ -61,6 +61,8 @@ static ssize_t (*orig_recv)(int, void *, size_t, int);
 static int (*orig_connectx)(int, const void *, uint32_t, unsigned int, const void *, unsigned int, size_t *, uint32_t *);
 
 static int CZFConnect(int, const struct sockaddr *, socklen_t);
+// 3.8.900（L602-A#1）：假 IP 翻译 helper 定义在 CZFIsFakeIP 之前，先声明。
+static BOOL CZFIsFakeIP(uint32_t hostOrderIP);
 
 // 中继结构体在后面定义，这里先以前置声明供 connect 钩子调用
 // （建中继不需要发包，只做 SOCKS UDP ASSOCIATE）。
@@ -144,6 +146,36 @@ static NSString *CZFHostForFakeIP(NSString *ip) {
     NSString *host = gHostByIP[ip];
     pthread_mutex_unlock(&gMapLock);
     return host;
+}
+
+// 3.8.900（L602-A#1）：fail-open 直连时，调用方给的地址可能是
+// getaddrinfo 钩子发的假 IP（198.18.x.x）——直连它永远到不了真主机
+// （保留段、现实网络里不会有真主机，见文件头假 IP 段注释）。先翻回域名、再经
+// orig_getaddrinfo 解出真实地址（端口沿用原地址）；映射丢失或解
+// 析失败时回落原地址（与今天一致）。严格模式不动（那几处分支
+// 本来就拒绝，不走直连）。
+static const struct sockaddr *CZFRealAddrForFakeIP(const struct sockaddr *addr, struct sockaddr_storage *out, socklen_t *outLen) {
+    if (!addr || addr->sa_family != AF_INET) return addr;
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+    if (!CZFIsFakeIP(ntohl(sin->sin_addr.s_addr))) return addr;
+    char buf[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
+    NSString *host = CZFHostForFakeIP([NSString stringWithUTF8String:buf]);
+    if (!host) return addr;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    if (orig_getaddrinfo(host.UTF8String, NULL, &hints, &res) != 0 || !res) {
+        if (res) freeaddrinfo(res);
+        return addr;
+    }
+    memcpy(out, res->ai_addr, res->ai_addrlen);
+    ((struct sockaddr_in *)out)->sin_port = sin->sin_port;
+    *outLen = (socklen_t)res->ai_addrlen;
+    freeaddrinfo(res);
+    return (const struct sockaddr *)out;
 }
 
 static BOOL CZFIsFakeIP(uint32_t hostOrderIP) {
@@ -443,7 +475,10 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         }
         __sync_add_and_fetch(&gStatConnDirect, 1);
         CZFWriteStats(NO);
-        return orig_connect(sockfd, addr, addrlen);
+        struct sockaddr_storage czfRealAddr;
+        socklen_t czfRealLen = addrlen;
+        const struct sockaddr *czfDirectAddr = CZFRealAddrForFakeIP(addr, &czfRealAddr, &czfRealLen);
+        return orig_connect(sockfd, czfDirectAddr, czfRealLen);
     }
 
     NSString *host = nil;
@@ -474,7 +509,10 @@ static int CZFConnect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         if (!gStrictMode) {
             __sync_add_and_fetch(&gStatConnDirect, 1);
             CZFWriteStats(NO);
-            return orig_connect(sockfd, addr, addrlen);
+            struct sockaddr_storage czfRealAddr;
+            socklen_t czfRealLen = addrlen;
+            const struct sockaddr *czfDirectAddr = CZFRealAddrForFakeIP(addr, &czfRealAddr, &czfRealLen);
+            return orig_connect(sockfd, czfDirectAddr, czfRealLen);
         }
     }
     if (result != 0) {
@@ -564,7 +602,13 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
             return -1;
         }
         CZFWriteStats(NO);
-        return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+        struct sockaddr_storage czfRealAddr;
+        socklen_t czfRealLen = eps->sae_dstaddrlen;
+        const struct sockaddr *czfDirectDst = CZFRealAddrForFakeIP(eps->sae_dstaddr, &czfRealAddr, &czfRealLen);
+        struct CZFSaeEndpoints czfDirectEp = *eps;
+        czfDirectEp.sae_dstaddr = czfDirectDst;
+        czfDirectEp.sae_dstaddrlen = czfRealLen;
+        return orig_connectx(s, &czfDirectEp, aid, flags, iov, iovcnt, len, cid);
     }
     NSString *host = nil;
     if (CZFIsFakeIP(ip)) {
@@ -591,7 +635,13 @@ static int CZFConnectx(int s, const void *ep, uint32_t aid, unsigned int flags, 
         CZFCoreAliveMarkDead();
         if (!gStrictMode) {
             CZFWriteStats(NO);
-            return orig_connectx(s, ep, aid, flags, iov, iovcnt, len, cid);
+            struct sockaddr_storage czfRealAddr;
+            socklen_t czfRealLen = eps->sae_dstaddrlen;
+            const struct sockaddr *czfDirectDst = CZFRealAddrForFakeIP(eps->sae_dstaddr, &czfRealAddr, &czfRealLen);
+            struct CZFSaeEndpoints czfDirectEp = *eps;
+            czfDirectEp.sae_dstaddr = czfDirectDst;
+            czfDirectEp.sae_dstaddrlen = czfRealLen;
+            return orig_connectx(s, &czfDirectEp, aid, flags, iov, iovcnt, len, cid);
         }
     }
     if (result != 0) {
@@ -823,13 +873,39 @@ static ssize_t CZFUDPRelaySend(int appFd, const struct sockaddr_in *dst, const v
     CZFUDPRelay *r = CZFUDPRelayGetOrCreate(appFd, dst);
     if (!r) { errno = ECONNREFUSED; return -1; }
     CZFUDPRelaySyncFlags(appFd, r->udpFd);
-    size_t total = 10 + len;
+    // 3.8.900（L602-A#2）：目标可能是 getaddrinfo 钩子发的假 IP——
+    // 按 IPv4 原样发给核心，包进保留段永远无回包，只能等 QUIC 超时
+    // 后走 TCP 回退。先翻回域名，走 SOCKS UDP 头的 ATYP 0x03（域名）；
+    // 映射丢失或域名超长时回落现有 ATYP 0x01（IP）。三路入口（connect
+    // 的 DGRAM 分支、sendto、sendmsg）都经本函数拼头，修一处盖三路。
+    // 回包侧已会解析 ATYP 0x03（CZFUDPRelayRecv），无须另改。
+    NSString *dstHost = nil;
+    const char *hostUTF8 = NULL;
+    size_t hostLen = 0;
+    if (CZFIsFakeIP(ntohl(dst->sin_addr.s_addr))) {
+        char buf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &dst->sin_addr, buf, sizeof(buf));
+        dstHost = CZFHostForFakeIP([NSString stringWithUTF8String:buf]);
+        hostUTF8 = dstHost ? dstHost.UTF8String : NULL;
+        hostLen = hostUTF8 ? strlen(hostUTF8) : 0;
+        if (hostLen == 0 || hostLen > 255) { dstHost = nil; hostUTF8 = NULL; hostLen = 0; }
+    }
+    size_t hdrLen = dstHost ? 6 + hostLen : 10;
+    size_t total = hdrLen + len;
     unsigned char *pkt = (unsigned char *)malloc(total);
     if (!pkt) { errno = ENOMEM; return -1; }
-    pkt[0] = 0; pkt[1] = 0; pkt[2] = 0; pkt[3] = 0x01;
-    memcpy(pkt + 4, &dst->sin_addr, 4);
-    memcpy(pkt + 8, &dst->sin_port, 2);
-    memcpy(pkt + 10, data, len);
+    pkt[0] = 0; pkt[1] = 0; pkt[2] = 0;
+    if (dstHost) {
+        pkt[3] = 0x03;
+        pkt[4] = (unsigned char)hostLen;
+        memcpy(pkt + 5, hostUTF8, hostLen);
+        memcpy(pkt + 5 + hostLen, &dst->sin_port, 2);
+    } else {
+        pkt[3] = 0x01;
+        memcpy(pkt + 4, &dst->sin_addr, 4);
+        memcpy(pkt + 8, &dst->sin_port, 2);
+    }
+    memcpy(pkt + hdrLen, data, len);
     ssize_t n = send(r->udpFd, pkt, total, 0);
     free(pkt);
     if (n < 0) return -1;
