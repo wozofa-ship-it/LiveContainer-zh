@@ -603,8 +603,9 @@ extension Notification.Name {
                 // App，算时排除刚关的这个容器（注册表注销与 disconnect
                 // 通知的时序未定，排除才稳）；没有就排一次待停。虚拟路
                 // 一字不动；到点仍有虚拟 + 原生两道复核兜底；宿主代理开
-                // 着时 noteRunningAppsChanged 内部第一分支会取消待停，
-                // 行为不变。CZFHostKeepAlive.refresh 不跟进——它只读坞表，
+                // 着时也照常排待停（2026-11-24 发热 H-2：第一分支不再因
+                // 开关开而取消，到点凭宿主最后活动时间判闲置）。
+                // CZFHostKeepAlive.refresh 不跟进——它只读坞表，
                 // 原生关窗本来就不调它，行为不变。
                 let czfNativeStillRunning = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps).contains { app in
                     guard CZFVPNManager.isEnabled(for: app.appInfo) else { return false }
@@ -1289,6 +1290,10 @@ extension Notification.Name {
             self.czfSchedMinTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
                 self?.checkScheduledMinimizeOpen()
             }
+            // H-7：tolerance 60 秒让系统并批唤醒（照抄宿主看门狗
+            // CZFHostKeepAlive.watchdog 的 tolerance = 60.0 先例）；
+            // 检查按分钟粒度比对目标时间，晚一轮也只晚开约 1 分钟。
+            self.czfSchedMinTimer?.tolerance = 60.0
             self.checkScheduledMinimizeOpen()
         }
     }
@@ -1469,6 +1474,9 @@ extension Notification.Name {
             self.czfMinAutoCloseTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
                 self?.checkMinAutoClose()
             }
+            // H-7：tolerance 60 秒让系统并批唤醒（宿主看门狗同款）；
+            // 关窗时长最短 10 分钟，一轮晚到 60 秒无影响。
+            self.czfMinAutoCloseTimer?.tolerance = 60.0
             self.checkMinAutoClose()
         }
     }
@@ -3825,20 +3833,17 @@ struct PinnedAppsStripView: View {
     }
 
     // 3.8.291：固定区图标——已装走 RunningAppIcon，源固定项
-    // 走 iconURL 的 AsyncImage（与源行同款写法）。
+    // 走 iconURL 的 SourceIconView（与源行同款写法）。
     @ViewBuilder
     private func pinnedIcon(for item: PinnedStripItem) -> some View {
         switch item {
         case .installed(let app):
             RunningAppIcon(appInfo: app.appInfo)
         case .source(let app):
-            AsyncImage(url: app.iconURL) { phase in
-                if let image = phase.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    Color.gray.opacity(0.25)
-                }
-            }
+            // H-7：走源页已有的 CZFSourceIconCache（内存 + 落盘 +
+            // 384px 降采样），不再裸 AsyncImage 每次重建都重新联网
+            // 下图标；失败时 SourceIconView 自带灰底占位。
+            SourceIconView(url: app.iconURL)
         }
     }
     @State private var draggedPinKey: String?
@@ -5591,13 +5596,10 @@ private struct SourcePanelRow: View {
         // subheadline 不加粗，与 AppCardRow 同款。按钮不动，
         // 还是下载/安装/打开/更新。
         HStack(spacing: 8) {
-            AsyncImage(url: app.iconURL) { phase in
-                if let image = phase.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    Color.gray.opacity(0.25)
-                }
-            }
+            // H-7：走源页已有的 CZFSourceIconCache（内存 + 落盘 +
+            // 384px 降采样），面板每次重建不再重新联网下图标；
+            // 失败时 SourceIconView 自带灰底占位。
+            SourceIconView(url: app.iconURL)
             .frame(width: 52, height: 52)
             // #15：圆角统一 12，跟顶部状态栏条/面板行同款（原来这里 10）
             .clipShape(RoundedRectangle(cornerRadius: 12))

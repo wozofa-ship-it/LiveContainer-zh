@@ -146,6 +146,12 @@ public final class DownloadHelper : ObservableObject {
             
             let bgConfig = CZFVPNManager.hostDownloadConfiguration(identifier: "com.livecontainer.download.\(UUID().uuidString)")
             let session = URLSession(configuration: bgConfig, delegate: DownloadDelegate(progressCallback: { progress, downloaded, total in
+                // 2026-11-24（发热 H-2 宿主代理闲置上限）：下载还在走字节
+                // 就是宿主在用核心，刷新闲置计时——长下载超过自动停档位
+                // 也不被到点停核打断。回调代理关时也会来，直连下载由
+                // noteHostActivity 内部验开关拦下，不记；只是一次 Date 写，
+                // 不发 UI 更新。
+                CZFVPNManager.shared.noteHostActivity()
                 Task{ await MainActor.run {
                     // 节流：进度回调一秒能来几十次，每次都发布
                     // 会让监听这个对象的整个 App 列表跟着重绘，
@@ -240,6 +246,11 @@ public final class DownloadHelper : ObservableObject {
                 downloadTask = session.downloadTask(with: url)
             }
             downloadTask?.resume()
+            // 2026-11-24（发热 H-2 宿主代理闲置上限）：下载会话建好、
+            // 任务开始跑就是一次宿主活动（首字节未到也算一次）；
+            // 进行中由上面进度回调续记，停在 0 字节的下载也至少
+            // 得一个档位的宽限，不会被待停在起步一分钟内打断。
+            CZFVPNManager.shared.noteHostActivity()
         }
         // 会话用完释放：以前每次下载（重试、预取都会叠加）都新
         // 建一个后台会话且从不 invalidate，只增不减地挂在系统

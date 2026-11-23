@@ -69,6 +69,15 @@ public final class CZFVPNManager {
     // 启动时间"+ 30 分钟延迟双保险，避免 App 重启时反复启停
     private var pendingStopWork: DispatchWorkItem?
     private var lastFlaggedLaunchAt = Date.distantPast
+    // 2026-11-24（发热 H-2 宿主代理闲置上限）：宿主自己经节点
+    // 的最后活动时间（源刷新/订阅/图标/下载）。只由 noteHostActivity
+    // 写，代理开且核心在跑时才刷新；代理关/核心停时不写，时间戳
+    // 只会越来越旧，不拦停。单独记，不复用 lastFlaggedLaunchAt——
+    // 后者还被排队停核（czfStopFromQueuedToggle）当“点按后有无
+    // App 开过”的判据，宿主流量写进去会把下载误认成开 App、
+    // 拦住亲手停核。读写与 lastFlaggedLaunchAt 同款不加锁
+    // （Date 单字写，读点 checkPendingStop 同样不加锁）。
+    private var czfLastHostActivityAt = Date.distantPast
     // 3.8.900（L587-A1）：点按“停止核心”那一刻的 lastFlaggedLaunchAt 快照——排队停核执行时再验一次：排队这会儿刚开起来的标 VPN App 已把 lastFlaggedLaunchAt 刷成现在（ensureRunning 入口，V:1307，起核/等锁之前就写），快照之后有新值 = 点按后有 App 开过，跳过这次停。
     private var czfManualStopTapLaunchAt = Date.distantPast
     // O-29：每链接上次探通时间——连开几个 VPN App 时每个都实网探
@@ -535,7 +544,7 @@ public final class CZFVPNManager {
             vpnCoreLock.lock()
             let czfRestoredCore = wasRunning && !isRunning && !nodeLinks.isEmpty && start()
             vpnCoreLock.unlock()
-            // 3.8.900（L601-A#2）：恢复只恢复了“跑”，没恢复“闲置计时/待停”——宿主重启后无任何标 VPN 的 App 在跑，等价于早已关窗，但恢复路径绕过了关窗事件，核心无限空转（L583-A3 经典交接路同款）。恢复成功就按档位排一次待停：无人用时到点停；宿主代理开着时 noteRunningAppsChanged 内部第一分支会取消，行为不变；到点仍有虚拟 + 原生两道复核兜底，正开着的 App 不会被停。
+            // 3.8.900（L601-A#2）：恢复只恢复了“跑”，没恢复“闲置计时/待停”——宿主重启后无任何标 VPN 的 App 在跑，等价于早已关窗，但恢复路径绕过了关窗事件，核心无限空转（L583-A3 经典交接路同款）。恢复成功就按档位排一次待停：无人用时到点停；宿主代理开着时也照常排待停（2026-11-24 发热 H-2：第一分支不再因开关开而取消），到点 checkPendingStop 凭宿主最后活动时间判闲置；到点仍有虚拟 + 原生两道复核兜底，正开着的 App 不会被停。
             if czfRestoredCore {
                 noteRunningAppsChanged(stillHasFlagged: false)
             }
@@ -1519,13 +1528,14 @@ public final class CZFVPNManager {
         }
         // 不通立刻切下一个（不等攒够 3 次失败才轮换）：
         // 候选按新鲜测速从快到慢（startFallback 同款排序），
-        // 最多再试 2 个；都探不通就 fail-open，调用方照常启动。
+        // 最多再试 1 个（2026-11-24 发热 H-6：候选重试 2→1，少一次
+        // 起核 + 15 秒探针）；都探不通就 fail-open，调用方照常启动。
         let links = nodeLinks
         guard links.count >= 2 else { return false }
         let cands = Self.sortedSupportedCandidates(links: links, excluding: [link])
         // 3.8.562（L93）：bid 锁外取好传进 start（同 ensureRunning）。
         let czfBid = Self.czfBundleId(for: appInfo)
-        for cand in cands.prefix(2) {
+        for cand in cands.prefix(1) {
             // 测速窗口内不切节点起核心：这轮探针是 runApp 派的，
             // 用户此时点“测延迟”会先停核心再测；这里中途起核心
             // 会让 pingBatch 被拒、整轮测速作废。直接返回 false，
@@ -1618,8 +1628,13 @@ public final class CZFVPNManager {
     // App 里已经没有被标记的了，就按自动停档位排一个停核心；
     // 期间有被标记 App 起来（ensureRunning 会取消）就不停
     public func noteRunningAppsChanged(stillHasFlagged: Bool, czfForceSchedule: Bool = false) {
-        // 宿主自身走节点的开关开着时，核心同样算"还在被用"
-        if stillHasFlagged || Self.isHostProxyEnabled {
+        // 2026-11-24（发热 H-2 宿主代理闲置上限）：宿主代理开着
+        // 不再直接取消待停——只剩“还有标 VPN 的 App 在跑”才取消；
+        // 没标 App 时照常按档位排待停，到点 checkPendingStop 凭宿主
+        // 最后活动时间（czfLastHostActivityAt）判闲置够不够，够了
+        // 才停。以前这里 `|| isHostProxyEnabled` 直接取消，开关开 +
+        // 核心起过一次 = 再没有任何代码会停它。
+        if stillHasFlagged {
             // 3.8.900（L567-2）：cancel 与置 nil 在同一把锁下——
             // ensureRunning 在 detached 任务里同时碰它（见该函数
             // 注释），两条语句之间插队会抹掉对方刚排的任务。
@@ -1663,15 +1678,15 @@ public final class CZFVPNManager {
     }
 
     /// 到点的自动停检查（noteRunningAppsChanged 排的任务与测速中
-    /// 的重试共用）：逐项重查——核心还在跑、宿主开关关着、闲置
-    /// 够分钟数、测速窗口外、停前复核无标 VPN 的 App 在跑，五项
-    /// 全过才停（3.8.900（L567-2）：最后一项是漏网待停任务的兜底）。测速窗口内不算数：
+    /// 的重试共用）：逐项重查——核心还在跑、闲置够分钟数（自上次
+    /// 标 VPN App 启动与宿主最后活动两者中较晚的算起）、测速窗口外、
+    /// 停前复核无标 VPN 的 App 在跑，四项全过才停（3.8.900（L567-2）：
+    /// 最后一项是漏网待停任务的兜底）。测速窗口内不算数：
     /// 30 秒后重查一次（测速有界、一定会结束），而不是丢掉这次
     /// 自动停、等下一次 App 变化（可能永远不来，核心就一直跑）。
-    /// 重试同样逐项重查：期间有 App 启动/宿主开关打开，重查会
+    /// 重试同样逐项重查：期间有 App 启动或宿主活动，重查会
     /// 拦下，不会误停。
     private func checkPendingStop() {
-        if Self.isHostProxyEnabled { return }
         // 3.8.900（L596-A #1）：测速重排必须在 isRunning 守卫之前——测速窗口内核心是 stopCoreForPing 停掉的，isRunning 恒 false；守卫在前会把到点落在测速窗口内的这次自动停直接丢掉（restartCoreAfterPing 只把核心起回来，不重排待停），之后无人再排、核心一直跑。移到前面后，到点在测速窗口内就按原样 30 秒后重查；重试时测速已结束，照常走下面各分支。
         vpnCoreLock.lock()
         let pinging = isPinging
@@ -1694,7 +1709,13 @@ public final class CZFVPNManager {
         // 改成“永不”时这次自动停作废（asyncAfter 拿 .infinity
         // 排期行为未定义，绝不能排）。
         let delay = Self.autoStopDelay
-        let idle = Date().timeIntervalSince(lastFlaggedLaunchAt)
+        // 2026-11-24（发热 H-2 宿主代理闲置上限）：闲置自“最后使用”
+        // 算起——标 VPN App 启动与宿主活动两者中较晚的那个；代理关
+        // 着时宿主时间戳不再刷新（noteHostActivity 内部验开关），
+        // 只会越来越旧，不拦停。闲置不够时下面原样按剩余时间重排，
+        // 不丢这次自动停。
+        let czfLastUsedAt = Self.isHostProxyEnabled ? max(lastFlaggedLaunchAt, czfLastHostActivityAt) : lastFlaggedLaunchAt
+        let idle = Date().timeIntervalSince(czfLastUsedAt)
         if idle < delay {
             guard !delay.isInfinite else { return }
             let retry = DispatchWorkItem { [weak self] in
@@ -1819,8 +1840,9 @@ public final class CZFVPNManager {
         // 不走 start()，关窗事件照常排，不受影响；prewarm 已有
         // L601-A2 那一行，这里再排一次只是取消旧任务重排，无害。
         // 到点仍有虚拟 + 原生两道复核兜底，正开着的 App 不会被停；
-        // 宿主代理开着时 noteRunningAppsChanged 内部第一分支会
-        // 取消，行为不变。
+        // 宿主代理开着时也照常排待停（2026-11-24 发热 H-2 宿主代理
+        // 闲置上限：第一分支不再因开关开而取消，到点凭宿主最后
+        // 活动时间判闲置）。
         if ok { noteRunningAppsChanged(stillHasFlagged: false) }
         return ok
     }
@@ -3674,7 +3696,26 @@ public final class CZFVPNManager {
     /// 否则系统共享会话（fail-open，不断网）
     public static func hostSession() -> URLSession {
         guard isHostProxyEnabled, shared.isRunning else { return .shared }
+        // 2026-11-24（发热 H-2 宿主代理闲置上限）：经节点取会话
+        // 就是一次宿主活动，刷新闲置计时——订阅拉取与 freshData
+        // 四路调用方（源刷新/图标/自装 plist/源表恢复）全盖住，
+        // 不用每处各埋一笔；直连重试走 URLSession.shared 不经这里，
+        // 不记。请求本身失败也记：方向是安全侧（晚停不断网），
+        // 绝不早停。
+        shared.noteHostActivity()
         return proxiedHostSession
+    }
+
+    /// 2026-11-24（发热 H-2 宿主代理闲置上限）：记一笔宿主经节点
+    /// 的活动——只在真的经核心出网时调（hostSession() 回代理会话、
+    /// 下载会话建好/进度回调）。内部再验一次开关与核心在跑：
+    /// 下载进度回调代理关时也会来，直连下载不算用核心，不记。
+    /// 巡检探针（probeNodeThroughCore）与测速探针不调这里——那是
+    /// 核心自己的健康检查，记了它闲置永远不到档位、核心永远不停，
+    /// H-2 修法直接作废。
+    public func noteHostActivity() {
+        guard Self.isHostProxyEnabled, isRunning else { return }
+        czfLastHostActivityAt = Date()
     }
 
     // 3.8.547（L181）：取会变的内容必须绕开 URLCache——hostSession()
@@ -3737,6 +3778,12 @@ public final class CZFVPNManager {
             _ = start()
         }
         vpnCoreLock.unlock()
+        // 2026-11-24（发热 H-2 宿主代理闲置上限）：开关打开时核心
+        // 已在跑（上面没走 start()）、只取消了旧待停——不重排就
+        // 回到“开着开关、核心永不停”。核心刚起那路 start() 尾部
+        // 已补排，这里只补“已在跑”那路；测速窗口内上面已早返，
+        // 不排。重排只是取消旧任务再按档位排一次，无害。
+        noteRunningAppsChanged(stillHasFlagged: false)
     }
 
     /// 读按包名统计文件并解析成 k=v 表；文件没有/读不出返回 nil。
