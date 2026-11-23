@@ -847,6 +847,10 @@ struct CZFVPNSettingsView: View {
         // 把核心起回来，后完那轮探针撞“核心占用”、整批结果作废，
         // 还附赠一条误导警告。入口拦住，第二下直接返回。
         guard !vpnPinging && !vpnSinglePinging else { return }
+        // 2026-11-24（发热 H-6）：60 秒内不重复全量测（App 页同款）；
+        // 放停核心之前——节流拦下时核心不能停，停了就没人重启它。
+        // 本页无测速提示通道，静默跳过，上次结果仍在表上。
+        guard !CZFVPNManager.shared.czfFullPingThrottled() else { return }
         // 测速期间保留旧结果不清空：原来一开测就清表，
         // 测速中界面是空的、要等整轮测完才回来；现在旧
         // 结果先留着（按钮进度另行显示“测速 3/10”），

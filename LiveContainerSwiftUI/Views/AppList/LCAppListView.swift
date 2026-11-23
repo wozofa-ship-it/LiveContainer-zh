@@ -478,6 +478,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             vpnPingMessage = "还没加节点"
             return
         }
+        // 2026-11-24（发热 H-6）：60 秒内不重复全量测，刚测过
+        // 就直接回，核心不停车、不重测；看上次结果。
+        // 放停核心之前——节流拦下时核心不能停，停了就没人重启它。
+        if CZFVPNManager.shared.czfFullPingThrottled() {
+            vpnPingMessage = "刚测过，60 秒后再测"
+            return
+        }
         // 3.8.305：跟设置页 startVPNPing 同规则——核心在跑先停、
         // 测完重启原来那条；没在跑直接测、测完不启动。停核心在
         // 测速标志立起来之前做，免得测速窗口内起停被 deferred

@@ -359,9 +359,13 @@ public enum CZFSingBoxConfig {
     }
 
     /// 生成完整 sing-box 配置 JSON（JSONSerialization，sortedKeys）。
-    /// 固定骨架：log.level=info + log.output 落盘到
+    /// 固定骨架：log.level=warning + log.output 落盘到
     /// Documents/singbox/sing-box.log（O-7；原来是 warning 且
-    /// 不写文件，节点断流时无据可查）；
+    /// 不写文件，节点断流时无据可查；2026-11-24 发热 H-5：
+    /// level 由 info 降回 warning，降持续写盘量——sing-box
+    /// 的连接日志也受 level 控，warning 下不再逐连接记，
+    /// 只留警告与错误；Xray 侧 access.log 不受 loglevel
+    /// 影响，仍逐连接记）；
     /// dns.servers=[{tag:local,type:local}] + final=local；
     /// inbounds：mixed（listen 127.0.0.1，listen_port=socksPort），
     /// httpPort 非 nil 时再加一个 http 入站（listen_port=httpPort）；
@@ -397,7 +401,7 @@ public enum CZFSingBoxConfig {
         }
 
         var root: [String: Any] = [
-            "log": ["level": "info", "output": singBoxLogPath],
+            "log": ["level": "warning", "output": singBoxLogPath],
             "dns": [
                 "servers": [["tag": "local", "type": "local"]],
                 "final": "local",
@@ -469,7 +473,7 @@ public enum CZFSingBoxConfig {
             ])
         }
         var root: [String: Any] = [
-            "log": ["level": "info", "output": singBoxLogPath],
+            "log": ["level": "warning", "output": singBoxLogPath],
             "dns": [
                 "servers": [["tag": "local", "type": "local"]],
                 "final": "local",

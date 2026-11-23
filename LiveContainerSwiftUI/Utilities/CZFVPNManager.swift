@@ -14,6 +14,7 @@
 //
 
 import Foundation
+import UIKit
 import LibXray
 import LiveContainerShared
 
@@ -109,6 +110,12 @@ public final class CZFVPNManager {
     /// rotateCheck 的 work item 也在主队列，与 rotateTriedLinks
     /// 同款约束。探通清零；连续两次失败才轮换。
     private var rotateProbeFailures = 0
+    /// 探针退避截止（2026-11-24 发热 H-3）：连续探针失败后，下一
+    /// 次实网探针不早于这个时间——第一次失败后 2 分钟、第二次
+    /// 失败（触发轮换）后 5 分钟；探通或换节点就清掉。只退探
+    /// 针：30 秒统计巡检照常排，不动轮换语义。只在主队列上
+    /// 读写（与 rotateProbeFailures 同款约束）。
+    private var czfRotateProbeBackoffUntil = Date.distantPast
     /// 探针连续失败所属的节点链接（3.8.900（L563-1））：计数是“同一节点连续
     /// 失败”的次数，节点一切换就重开一轮——原来只记次数不记归属，旧节点攒了
     /// 1 次失败后手动切节点/统计路轮换，新节点再抖一次就满两次被轮换。
@@ -174,6 +181,10 @@ public final class CZFVPNManager {
     // isPinging 不拦第二轮，先完的那轮不能清标志、不能
     // 补跑被挡请求（见 pingAllNodes/pingSingleNode 尾部）。
     private var pingGeneration = 0
+    // 2026-11-24（发热 H-6）：上次全量测速开始时间——三处测速
+    // 按钮入口先查 czfFullPingThrottled()，60 秒内不重复全量
+    // 测。只在 vpnCoreLock 下读写（与 isPinging 同款）。
+    private var czfLastFullPingAt: Date?
     // 测速结束时核心没在跑时对预热的持久抑制：v186 只压
     // 10 秒，超过窗口、切走再进 App，预热又把核心起回来，
     // 用户认定的就是“测速改了核心”。本标志只在测速收尾
@@ -1800,6 +1811,17 @@ public final class CZFVPNManager {
         // 这里调 scheduleRotateCheck 不死锁；归属为 nil 时下面
         // rotateCheck 走探针兜底。
         if ok { scheduleRotateCheck() }
+        // 2026-11-24（发热 H-2）：起成功后统一补排一次待停（L601-A2
+        // 预热恢复路同款）——设置页手动起核、切节点、宿主代理拉起
+        // 之前成功后都不排待停，之后一个标 VPN 的 App 都没开过/关
+        // 过，待停永远没排过、核心无限空转。start() 是上述三路的
+        // 公共出口，在这里补排一次全盖住；ensureRunning（开 App）
+        // 不走 start()，关窗事件照常排，不受影响；prewarm 已有
+        // L601-A2 那一行，这里再排一次只是取消旧任务重排，无害。
+        // 到点仍有虚拟 + 原生两道复核兜底，正开着的 App 不会被停；
+        // 宿主代理开着时 noteRunningAppsChanged 内部第一分支会
+        // 取消，行为不变。
+        if ok { noteRunningAppsChanged(stillHasFlagged: false) }
         return ok
     }
 
@@ -1903,14 +1925,23 @@ public final class CZFVPNManager {
         // 目录不存在时 access/error 文件打不开。建失败也不拦
         // 启动（try?，失败时 Xray 侧写日志失败而已）。
         try? FileManager.default.createDirectory(at: Self.xrayLogDirectory, withIntermediateDirectories: true)
+        // 2026-11-24（发热 H-5）：access.log 按大小轮转——
+        // 每连接一行、无上限，长期刷视频会越写越大；起核前
+        // （旧核心已在上面停掉、无写者）超过 1MB 就挪到
+        // access.log.1，只保留 1 份旧的。error.log 在 warning
+        // 级下量很小，不轮转。
+        Self.czfRotateXrayAccessLogIfNeeded()
 
         let config: [String: Any] = [
-            // O-7：loglevel warning → info，并落盘 access/error
-            // 到 Documents/xray/（原来只 warning 且不写文件，
-            // 节点断流时无据可查）。sing-box 侧同款在
-            // CZFSingBoxConfig.configJSON 里（level info +
-            // output → Documents/singbox/sing-box.log）。
-            "log": ["loglevel": "info", "access": Self.xrayAccessLogURL.path, "error": Self.xrayErrorLogURL.path],
+            // O-7：落盘 access/error 到 Documents/xray/（原来
+            // 只 warning 且不写文件，节点断流时无据可查）。
+            // 2026-11-24（发热 H-5）：loglevel info → warning，
+            // 降持续写盘量；access 日志按连接记（只认 access
+            // 字段，与 loglevel 无关），error 只留 warning 及
+            // 以上。sing-box 侧同款在 CZFSingBoxConfig.configJSON
+            // 里（level warning + output →
+            // Documents/singbox/sing-box.log）。
+            "log": ["loglevel": "warning", "access": Self.xrayAccessLogURL.path, "error": Self.xrayErrorLogURL.path],
             "inbounds": [
                 [
                     "tag": "socks-in",
@@ -2155,9 +2186,31 @@ public final class CZFVPNManager {
         // rotateCheck/rotateToNextNode 同在主队列，rotateTriedLinks
         // 等状态仍只在主队列上碰）。
         scheduleRotateCheck()
+        // 2026-11-24（发热 H-3）：后台只走统计路——后台本来就没
+        // 人在用节点，实网探针探了也无人受益；统计路（上面分支）
+        // 不受影响，照常 30 秒一轮。
+        guard UIApplication.shared.applicationState != .background else { return }
+        // 2026-11-24（发热 H-3）：退避期内不发实网探针——下一轮
+        // 统计已在上面排好，到点再来判；统计路不受影响。
+        guard Date() >= czfRotateProbeBackoffUntil else { return }
         Task { [weak self] in
             guard let self else { return }
+            // 2026-11-24（发热 H-3）：探前查 O-29 缓存——60 秒内
+            // 刚探通过就跳过实网探针，探通结果照常记（清零失败
+            // 计数），不重复发请求；巡检探针之前完全绕过它。
+            if let link {
+                vpnCoreLock.lock()
+                let czfProbeFresh = czfLastProbeOK[link].map { Date().timeIntervalSince($0) < czfProbeTTL } ?? false
+                vpnCoreLock.unlock()
+                if czfProbeFresh {
+                    await MainActor.run { self.handleRotateProbeResult(ok: true, link: link) }
+                    return
+                }
+            }
             let ok = await self.probeNodeThroughCore(timeout: 5)
+            if ok, let link {
+                self.noteProbeOK(link: link)
+            }
             // 3.8.900（L563-1）：把探针发起时的链接带给结果处理——探针跑完
             // 时节点可能已换，旧节点的结果不能记到新节点头上。
             await MainActor.run { self.handleRotateProbeResult(ok: ok, link: link) }
@@ -2183,18 +2236,30 @@ public final class CZFVPNManager {
         if rotateProbeLink != probeLink {
             rotateProbeLink = probeLink
             rotateProbeFailures = 0
+            // 2026-11-24（发热 H-3）：换了节点，旧退避作废。
+            czfRotateProbeBackoffUntil = Date.distantPast
         }
         if ok {
             rotateProbeFailures = 0
+            // 2026-11-24（发热 H-3）：探通清退避，下一轮恢复
+            // 30 秒探针节奏。
+            czfRotateProbeBackoffUntil = Date.distantPast
             scheduleRotateCheck()
             return
         }
         rotateProbeFailures += 1
         guard rotateProbeFailures >= 2 else {
+            // 2026-11-24（发热 H-3）：第一次连续失败，下一次实
+            // 网探针 2 分钟后再发；30 秒统计巡检照常。
+            czfRotateProbeBackoffUntil = Date().addingTimeInterval(120)
             scheduleRotateCheck()
             return
         }
         rotateProbeFailures = 0
+        // 2026-11-24（发热 H-3）：第二次连续失败（触发轮换），
+        // 下一次实网探针 5 分钟后再发——新节点靠开 App 探针
+        // （waitUntilNodeReady）与统计路验证，不靠巡检探针。
+        czfRotateProbeBackoffUntil = Date().addingTimeInterval(300)
         vpnCoreLock.lock()
         let owner = coreOwnerAppInfo
         let link = runningLink
@@ -2816,6 +2881,19 @@ public final class CZFVPNManager {
         vpnCoreLock.unlock()
     }
 
+    /// 全量测速节流（2026-11-24 发热 H-6）：60 秒内不重复全量测。
+    /// 三处调用方（设置页 startVPNPing、App 页 toolbarPingNodes、
+    /// 坞面板 panelToolbarPingNodes）入口先查这里；测速进行中
+    /// 也算节流（跨页连点时第二下直接拦）。单节点复测
+    /// pingSingleNode 不走这里，不受影响。
+    public func czfFullPingThrottled() -> Bool {
+        vpnCoreLock.lock()
+        defer { vpnCoreLock.unlock() }
+        if isPinging { return true }
+        if let last = czfLastFullPingAt, Date().timeIntervalSince(last) < 60 { return true }
+        return false
+    }
+
     /// 测全部节点的延迟（libXray 的 pingBatch：临时实例并发
     /// 测、每批最多 5 个，经节点真实发一次 HEAD 量往返）。
     /// 测速只读：绝不 stop/start 核心、不改核心启停状态，
@@ -2839,6 +2917,9 @@ public final class CZFVPNManager {
         // 几乎同时进时先后不定，先完的轮次可能误认最新。
         vpnCoreLock.lock()
         isPinging = true
+        // 2026-11-24（发热 H-6）：记本轮开始时间，60 秒节流的
+        // 依据；三处入口先查 czfFullPingThrottled()。
+        czfLastFullPingAt = Date()
         pingGeneration += 1
         let generation = pingGeneration
         vpnCoreLock.unlock()
@@ -3727,6 +3808,20 @@ public final class CZFVPNManager {
     public static var xrayAccessLogURL: URL { xrayLogDirectory.appendingPathComponent("access.log") }
     public static var xrayErrorLogURL: URL { xrayLogDirectory.appendingPathComponent("error.log") }
 
+    /// access.log 按大小轮转（2026-11-24 发热 H-5）：超过 1MB 就
+    /// 挪到 access.log.1（旧的 .1 先删，只保留 1 份）。只在起核
+    /// 前调——旧核心已停、文件没人写着；运行中不碰（Xray 正
+    /// 写着，挪了它还会继续往旧句柄写）。
+    private static func czfRotateXrayAccessLogIfNeeded() {
+        let url = xrayAccessLogURL
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int,
+              size > 1 * 1024 * 1024 else { return }
+        let old = xrayLogDirectory.appendingPathComponent("access.log.1")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: url, to: old)
+    }
+
     /// 读核心日志尾部（VPN 页“查看核心日志”只读展示用）：
     /// sing-box 日志 + Xray error 日志各取尾部 maxLinesPerFile
     /// 行（默认 60 行/文件），逐行按探针同款规则脱敏（见
@@ -3734,7 +3829,8 @@ public final class CZFVPNManager {
     /// 都是连接记录、几乎全是目标地址，脱敏后剩不下可读内容，
     /// 文件仍落盘，供 Files 里查。文件不存在（核心还没跑过）
     /// 时该段写“（无日志文件）”。只读文件尾部 64KB，不整
-    /// 文件读进内存；日志文件无轮转/上限（O-7 不做，见汇报）。
+    /// 文件读进内存；access.log 在起核前按大小轮转（>1MB → access.log.1，
+    /// 只留 1 份旧的，2026-11-24 发热 H-5），error.log 与 sing-box.log 不轮转。
     public static func coreLogTail(maxLinesPerFile: Int = 60) -> String {
         let sections: [(title: String, url: URL)] = [
             ("sing-box", singBoxLogURL),

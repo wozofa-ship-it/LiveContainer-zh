@@ -4381,6 +4381,9 @@ struct SourcesPanelView: View {
         // 3.8.900（L601-A#1）：起跑时快照活动下标（设置页 startVPNPing 同款）——completion 的自动切最快不认窗口内亲手换的节点，测速中途在节点子菜单点的节点会被自动切盖掉；仅当下标未变才自动切。
         let czfPingStartActiveIndex = CZFVPNManager.shared.activeNodeIndex
         guard !links.isEmpty else { return }
+        // 2026-11-24（发热 H-6）：60 秒内不重复全量测（App 页同款）；
+        // 放停核心之前——节流拦下时核心不能停，停了就没人重启它。
+        guard !CZFVPNManager.shared.czfFullPingThrottled() else { return }
         let pingStoppedCore = CZFVPNManager.shared.stopCoreForPing()
         vpnPinging = true
         CZFVPNManager.shared.pingAllNodes { results, rejected in
