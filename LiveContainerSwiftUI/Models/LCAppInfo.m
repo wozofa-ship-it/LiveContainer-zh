@@ -469,7 +469,7 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
                     info[@"LCTweakLoaderCantInject"] = @YES;
                     info[@"dontInjectTweakLoader"] = @YES;
                 }
-                if(patchResult & PATCH_EXEC_RESULT_SEG_COUNT_MISMATCH) {
+                if(patchResult & (PATCH_EXEC_RESULT_SEG_COUNT_MISMATCH | PATCH_EXEC_RESULT_MISALIGNED_LINKEDIT_STRING_POOL)) {
                     info[@"segCountMismatch"] = @YES;
                 }
             }
@@ -630,7 +630,8 @@ static NSCache<NSString *, UIImage *> *LCAppInfoIconCache(void) {
             hasARM64 = YES;
             encrypted |= LCIsMachOEncrypted(header);
             if (!encrypted) {
-                mismatch |= (LCPatchExecSlice(path.fileSystemRepresentation, header, false) & PATCH_EXEC_RESULT_SEG_COUNT_MISMATCH) != 0;
+                int patchResult = LCPatchExecSlice(path.fileSystemRepresentation, header, false);
+                mismatch |= (patchResult & (PATCH_EXEC_RESULT_SEG_COUNT_MISMATCH | PATCH_EXEC_RESULT_MISALIGNED_LINKEDIT_STRING_POOL)) != 0;
             }
         });
         if (!error && (!hasARM64 || encrypted)) {

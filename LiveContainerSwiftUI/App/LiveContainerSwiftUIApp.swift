@@ -9,7 +9,7 @@ import SwiftUI
 @main
 struct LiveContainerSwiftUIApp : SwiftUI.App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
+
     init() {
         // 壁纸顶栏黑底（3.8.457）：App 页顶栏与源页同款
         // czfSolidToolbarBackground（.toolbarBackground 实底），
@@ -56,9 +56,6 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
     /// 未动，只挪出来。返回五份清单 + URL schemes（非主 App 时为 nil）。
     private static func scanAppLists() -> (apps: [LCAppModel], arm32EmuApps: [LCAppModel], hiddenApps: [LCAppModel], appDataFolderNames: [String], tweakFolderNames: [String], urlSchemes: Set<String>?) {
         let fm = FileManager()
-        var tempAppDataFolderNames : [String] = []
-        var tempTweakFolderNames : [String] = []
-        
         var tempApps: [LCAppModel] = []
         var tempArm32EmuApps: [LCAppModel] = []
         var tempHiddenApps: [LCAppModel] = []
@@ -116,6 +113,23 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
                     }
                 }
             }
+        } catch {
+            NSLog("[LC] error:\(error)")
+        }
+
+        // 文件夹名后台扫（上游 bac7b8cd：initMiscellaneous 扫完再写回
+        // model）；这里只返回 App 清单，文件夹名先给空数组。
+        Task {
+            await Self.initMiscellaneous()
+        }
+        return (tempApps, tempArm32EmuApps, tempHiddenApps, [], [], tempURLSchemes)
+    }
+    private static func initMiscellaneous() async {
+        let fm = FileManager()
+        var tempAppDataFolderNames : [String] = []
+        var tempTweakFolderNames : [String] = []
+
+        do {
             // load document folders
             try fm.createDirectory(at: LCPath.dataPath, withIntermediateDirectories: true)
             let dataDirs = try fm.contentsOfDirectory(atPath: LCPath.dataPath.path)
@@ -171,9 +185,10 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
             NSLog("[LC] error:\(error)")
         }
 
-        return (tempApps, tempArm32EmuApps, tempHiddenApps, tempAppDataFolderNames, tempTweakFolderNames, tempURLSchemes)
+        DataManager.shared.model.appDataFolderNames = tempAppDataFolderNames
+        DataManager.shared.model.tweakFolderNames = tempTweakFolderNames
     }
-    
+
     var body: some Scene {
         WindowGroup(id: "Main") {
             LCTabView()
@@ -181,7 +196,7 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
                 .environmentObject(DataManager.shared.model)
                 .environmentObject(LCAppSortManager.shared)
         }
-        
+
         if UIApplication.shared.supportsMultipleScenes, #available(iOS 16.1, *) {
             WindowGroup(id: "appView", for: String.self) { $id in
                 if let id {
@@ -191,5 +206,5 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
 
         }
     }
-    
+
 }

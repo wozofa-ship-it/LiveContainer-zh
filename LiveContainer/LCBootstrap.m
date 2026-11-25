@@ -309,7 +309,7 @@ NSString *LCPrepareGuestExtension(NSDictionary *request) {
     };
     NSDictionary *patchInfo = [NSDictionary dictionaryWithContentsOfFile:[bundlePath stringByAppendingPathComponent:@"LCAppExtension.plist"]];
     if (@available(iOS 27.0, *)) {
-        if ([patchInfo[@"segCountMismatch"] boolValue]) bypass_seg_count_check(load);
+        if ([patchInfo[@"segCountMismatch"] boolValue]) bypass_linkedit_checks(load);
         else load();
     } else {
         load();
@@ -376,7 +376,7 @@ NSString *LCRunGuestExtensionWithArgs(NSDictionary *request, int argc, char *arg
     };
     NSDictionary *patchInfo = [NSDictionary dictionaryWithContentsOfFile:[bundlePath stringByAppendingPathComponent:@"LCAppExtension.plist"]];
     if (@available(iOS 27.0, *)) {
-        if ([patchInfo[@"segCountMismatch"] boolValue]) bypass_seg_count_check(load);
+        if ([patchInfo[@"segCountMismatch"] boolValue]) bypass_linkedit_checks(load);
         else load();
     } else {
         load();
@@ -801,9 +801,18 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     
     BOOL is26up = false;
     if(@available(iOS 26, *)) { is26up = true; }
-    if(is26up) {
-        // iOS 26+ 需要 mmap hook 绕过沙盒限制
-        bypass_seg_count_check(dlopenBlock);
+    // 合并：iOS 27+ 走上游门（segCountMismatch 才绕过 linkedit 检查，
+    // bypass_linkedit_checks 是 bypass_seg_count_check 的后继，
+    // 另加 Header::validStructureLinkedit 第二断点）；iOS 26.x
+    // 仍走原来无条件绕过（用户在 iOS 26 上）。
+    if(@available(iOS 27, *)) {
+        if ([guestAppInfo[@"segCountMismatch"] boolValue]) {
+            bypass_linkedit_checks(dlopenBlock);
+        } else {
+            dlopenBlock();
+        }
+    } else if(is26up) {
+        bypass_linkedit_checks(dlopenBlock);
     } else {
         dlopenBlock();
     }
@@ -1111,11 +1120,3 @@ int LiveContainerMain(int argc, char *argv[]) {
     return LiveContainerSwiftUIMain();
 
 }
-
-#ifdef DEBUG
-int callAppMain(int argc, char *argv[], char *envp[]) {
-    assert(appMain != NULL);
-    __attribute__((musttail)) return appMain(argc, argv, envp);
-}
-#endif
-

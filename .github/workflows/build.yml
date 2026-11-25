@@ -85,6 +85,9 @@ jobs:
           file_to_build=`ls -A | grep -i \\.xcworkspace\$ || ls -A | grep -i \\.xcodeproj\$`
           file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
           echo "file_to_build=$file_to_build" >> $GITHUB_OUTPUT
+      - name: Prepare Dependencies
+        run: |
+          sh .github/prepare_dependencies.sh
       # 构建缓存提速（3.8.410）：LibXray 的 zip（40MB）每次都下；
       # 按版本号缓存，版本变了改 key 才重新下。
       - name: Cache LibXray
