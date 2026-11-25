@@ -16,9 +16,13 @@ import UIKit
 // 又一遍（每遍调一次 ObjC bundleIdentifier()），插件再加两次
 // fileExists；源里几十个格子 × 已装几百个 App，每刷表一次就
 // 是几万次比对。查表后每格子 O(1)，行为不变：modelsByBundleID
-// 保持 apps 在前、hiddenApps 在后的顺序，installedModel 取首个
-// 与原来 first(where:) 一致；插件两条候选路径（新“名-包名”
+// 保持 apps 在前、hiddenApps 在后的顺序；插件两条候选路径（新“名-包名”
 // 文件夹、老只有名的文件夹）与原来 isPluginInstalled 同款。
+// 3.8.649（B2）：installedModel 不再取首个——首个由扫描顺序定，
+// 同包名两队各签一版、版本不同时，首个新、旧分身的更新永不检出；
+// 改取最旧实例（版本 + build 最小），任一实例低于源最新版即算
+// 有更新。installedModel 只有两处调用方，都是 hasUpdate 版本
+// 比较（格子与 banner），启动路不走它。
 struct CZFInstalledLookup {
     private let modelsByBundleID: [String: [LCAppModel]]
     private let pluginInstalledByPath: [String: Bool]
@@ -53,7 +57,11 @@ struct CZFInstalledLookup {
     }
 
     func installedModel(bundleIdentifier: String) -> LCAppModel? {
-        modelsByBundleID[bundleIdentifier]?.first
+        // 3.8.649（B2）：取最旧实例——min(by:) 的谓词“a 在 b 前”
+        // 当且仅当 b 比 a 新，即 a 更旧；版本相等时比 build。
+        modelsByBundleID[bundleIdentifier]?.min(by: { a, b in
+            czfIsNewerVersion(b.appInfo.version() ?? "", build: b.appInfo.buildVersion(), newerThan: a.appInfo.version() ?? "", installedBuild: a.appInfo.buildVersion())
+        })
     }
 
     func installedModels(bundleIdentifier: String) -> [LCAppModel] {

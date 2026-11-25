@@ -28,6 +28,13 @@ struct AltStoreSourceAppVersion: Identifiable, Hashable {
     var czfStableID: String {
         version + "|" + (buildVersion ?? "")
     }
+
+    // 3.8.649（F2）：版本 + build 拼法——只升 build 的更新
+    //（2.0/build 50 → 2.0/build 100）在详情页是两个看不出区别的
+    //“2.0”；详情页版本行与旧版页两处行文案都走这里。
+    var czfVersionWithBuild: String {
+        buildVersion.map { "\(version) (\($0))" } ?? version
+    }
 }
 
 struct AltStoreSourceApp: Identifiable, Hashable {
@@ -765,9 +772,13 @@ struct CZFUpdatableAppsSheet: View {
     private func installedVersion(for app: AltStoreSourceApp) -> String {
         // 3.8.637（B1）：同款归一——个人 ID 改写后的已装 ID 与源里的
         // 原始 ID 精确比对查不到，更新单里的“已装版本”恒为空。
-        (sharedModel.apps + sharedModel.hiddenApps)
-            .first(where: { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) })?
-            .appInfo.version() ?? ""
+        // 3.8.649（B2）：多分身取最旧实例的版本——首个实例由扫描
+        // 顺序定，显示较新的分身会把旧分身的更新藏起来。
+        let matches = (sharedModel.apps + sharedModel.hiddenApps)
+            .filter { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) }
+        return matches.min(by: { a, b in
+            czfIsNewerVersion(b.appInfo.version() ?? "", build: b.appInfo.buildVersion(), newerThan: a.appInfo.version() ?? "", installedBuild: a.appInfo.buildVersion())
+        })?.appInfo.version() ?? ""
     }
 
     var body: some View {
@@ -1346,13 +1357,14 @@ struct LCSourcesView: View {
                     case .failed(let error):
                         return error.localizedDescription
                     }
-                    // 3.8.581（L411-1）：同上，install(app:) 在这里直接调；它里面写 @Published selectedTab（切 App 页）+ 无锁静态数组 CZFSourcePendingInstall.append（与 App 页 onAppear/onReceive 的主线程排空竞态），必须回主线程再调；后面的名单/红标写同款包进同一跳。另两处（:1032/:1059）是传给网格/列表行的 onInstall，行按钮是主线程同步动作，不走这条裸 Task 路。
+                    // 3.8.581（L411-1）：同上，install(app:) 在这里直接调；它里面写 @Published selectedTab（切 App 页）+ 无锁静态数组 CZFSourcePendingInstall.append（与 App 页 onAppear/onReceive 的主线程排空竞态），必须回主线程再调。
+                    // 3.8.649（B3）：这里不乐观剔除——install(app:) 只切
+                    // Tab + 写待装队列，成败未定；先剔除再装、装失败
+                    // 时 apps 不变、onChange 不重算，行与红点就此消失、
+                    // 直到下次进源页才回来。改等 apps 变化后由 onChange
+                    // 重算自然消失（成功装完行即走，失败行与红点保留）。
                     await MainActor.run {
                         install(app: app)
-                        cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
-                        // 单行更新也同步红点：不写这里 Tab 红标就一直挂着，
-                        // 跟跳过同款毛病（只删名单不改 CZFUpdatableAppCount）。
-                        updatableCountBadge = cachedUpdatableApps.count
                     }
                     return nil
                 },
@@ -1705,12 +1717,26 @@ struct LCSourcesView: View {
     private func computeUpdatableApps() -> [AltStoreSourceApp] {
         // 3.8.637（B1）：已装键是个人 ID 改写后的 ID、源里的键是原始 ID，
         // 精确比对查不到、Tab 红点不到它。两边都归一到去队尾段的 ID。
-        let installed = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
-            (czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? ""), $0.appInfo.version() ?? "")
-        }, uniquingKeysWith: { first, _ in first })
-        let installedBuilds = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
-            (czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? ""), $0.appInfo.buildVersion() ?? "0")
-        }, uniquingKeysWith: { first, _ in first })
+        // 3.8.649（B2）：同包名多分身时取最旧实例的版本 / build——
+        // 只留首个实例（uniquingKeysWith: { first, _ in first }）时，
+        // 首个新、旧分身仍低于源最新版，更新永不检出；哪边排前面
+        // 由扫描顺序定，行为还不稳定。取最旧 = 任一实例低于源
+        // 最新版即算有更新。
+        var czfOldestByID: [String: (version: String, build: String)] = [:]
+        for app in sharedModel.apps + sharedModel.hiddenApps {
+            let key = czfNormalizedBundleID(app.appInfo.bundleIdentifier() ?? "")
+            let version = app.appInfo.version() ?? ""
+            let build = app.appInfo.buildVersion() ?? "0"
+            if let existing = czfOldestByID[key] {
+                if czfIsNewerVersion(existing.version, build: existing.build, newerThan: version, installedBuild: build) {
+                    czfOldestByID[key] = (version, build)
+                }
+            } else {
+                czfOldestByID[key] = (version, build)
+            }
+        }
+        let installed = Dictionary(uniqueKeysWithValues: czfOldestByID.map { ($0.key, $0.value.version) })
+        let installedBuilds = Dictionary(uniqueKeysWithValues: czfOldestByID.map { ($0.key, $0.value.build) })
         var bestByBundle: [String: AltStoreSourceApp] = [:]
         var order: [String] = []
         for item in viewModel.sources {
@@ -3158,7 +3184,7 @@ struct LCSourceAppDetailView: View {
                             LCSourceAppVersionDetailView(app: app, version: version, onDownloadVersion: onDownloadVersion)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(version.version)
+                                Text(version.czfVersionWithBuild)
                                     .font(.subheadline).bold()
                                 if let date = version.releaseDate {
                                     Text(date, style: .date)
@@ -3248,7 +3274,7 @@ private struct LCSourceAppVersionDetailView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(app.name)
                         .font(.headline)
-                    Text("版本 \(version.version)")
+                    Text("版本 \(version.czfVersionWithBuild)")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                     if let date = version.releaseDate {

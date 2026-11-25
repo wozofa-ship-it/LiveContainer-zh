@@ -100,6 +100,19 @@ final class CZFAppSizeCache {
         DispatchQueue.main.async { [weak self] in self?.onChange?() }
     }
 
+    /// 3.8.649（B1）：按 bundlePath 删旧条目——覆盖安装同文件夹名
+    /// 原地替换，缓存 key 不变、旧大小永不重算；安装完成时先失效，
+    /// 下次重排即重算。在途的也一并清掉（inFlight），否则
+    /// czfEnsureSizes 会把它当“已在算”跳过、失效等于没失。
+    /// 不发 onChange——失效后紧接着的 czfEnsureSizes 重算完会
+    /// 经 setSize 发一次，够了。
+    func removeSize(forBundlePath path: String) {
+        lock.lock()
+        sizes.removeValue(forKey: path)
+        inFlight.remove(path)
+        lock.unlock()
+    }
+
     /// 缺失的后台逐个算（czfTotalSize：快照主线程取、算大小放
     /// 后台）；在途的只算一次，算完写缓存、触发重排。调用方在
     /// 主线程上调（appSortType 的 didSet / reloadSortSettings），
@@ -312,12 +325,24 @@ class LCAppSortManager: ObservableObject {
         DataManager.shared.model.$apps
             .sink { newValue in
                 self.sortedApps = self.getSortedApps(newValue, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+                // 3.8.649（B1）：bySize 期间新增 App（安装 / 恢复 /
+                // 下拉刷新后出现）没有缓存大小，size(for:) 为 nil
+                // 就沉底；这里对缺失的当场补算，算完 onChange 回来
+                // 重排、插到正确位置。czfEnsureSizes 自带在途去重，
+                // 重复调无害；非 bySize 不调，不浪费 CPU。
+                if self.appSortType == .bySize {
+                    CZFAppSizeCache.shared.czfEnsureSizes(for: newValue)
+                }
             }
             .store(in: &cancellables)
         
         DataManager.shared.model.$hiddenApps
             .sink { newValue in
                 self.sortedHiddenApps = self.getSortedApps(newValue, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+                // 3.8.649（B1）：隐藏区同款补算。
+                if self.appSortType == .bySize {
+                    CZFAppSizeCache.shared.czfEnsureSizes(for: newValue)
+                }
             }
             .store(in: &cancellables)
         

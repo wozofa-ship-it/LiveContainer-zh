@@ -3472,6 +3472,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         DispatchQueue.main.async {
+            // 3.8.649（B1）：覆盖安装同 bundlePath 原地替换，大小缓存
+            // 里的旧数不失效就永不重算——先失效，再摘旧行 / 追加新行；
+            // 顺序不能反：$apps sink 在 append 时同步触发，bySize 下
+            // 当场调 czfEnsureSizes，失效晚了就还按旧缓存跳过。
+            // 全新安装同款：删后重装同一路径，旧大小也不能留。
+            if let czfBundlePath = finalNewApp.bundlePath() {
+                CZFAppSizeCache.shared.removeSize(forBundlePath: czfBundlePath)
+            }
             if let appToReplace {
                 let newAppModel = LCAppModel(appInfo: finalNewApp, delegate: self)
                 // 3.8.647（B1）：按 bundlePath 摘旧行，不按实例 ==——

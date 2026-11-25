@@ -3,6 +3,7 @@
 // 和图标，点一下就安装。文件夹用 security-scoped bookmark
 // 记住，下次点按钮直接打开，不用重新选。
 import SwiftUI
+import UIKit
 import CryptoKit
 
 // 本地 IPA 文件夹的持久化（3.8.454）：App 页与源页共用——
@@ -93,6 +94,10 @@ struct CZFLocalIpaItem: Identifiable {
     var sizeText: String
     var icon: UIImage?
     var detailLoaded = false
+    // 3.8.649（F3）：按大小/最新排序要数字大小与修改时间——
+    // sizeText 是格式化字符串，比不了大小。
+    var fileSize: Int64 = 0
+    var modificationDate: Date?
     // 3.8.444：包名（CFBundleIdentifier），供格子打“已安装”
     // 绿勾——读 Info.plist 得来，读不到时不打勾。
     var bundleIdentifier: String?
@@ -251,14 +256,19 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             fmt.countStyle = .file
             // 3.8.900（L585-C1）：条目先在后台拼好，赋值回主线程；代次不对（已有新一轮在扫）就不写，旧列表不盖新列表。
             let czfNewItems = sortedURLs.map { url in
-                let size = ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
+                // 3.8.649（F3）：attributesOfItem 只调一次，顺手取
+                // 大小（数字）与修改时间——不新增磁盘 I/O。
+                let attrs = try? fm.attributesOfItem(atPath: url.path)
+                let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
                 return CZFLocalIpaItem(
                     url: url,
                     fileName: url.lastPathComponent,
                     displayName: url.deletingPathExtension().lastPathComponent,
                     version: nil,
                     sizeText: size > 0 ? fmt.string(fromByteCount: size) : "",
-                    icon: nil
+                    icon: nil,
+                    fileSize: size,
+                    modificationDate: attrs?[.modificationDate] as? Date
                 )
             }
             await MainActor.run {
@@ -574,6 +584,24 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     }
 }
 
+// 3.8.649（F3）：本地 IPA 文件夹排序——名字（现状）/ 大小
+// （大→小）/ 最新（修改时间新→旧）。键 `CZFLocalIpaFolderSort`
+// 是新 @AppStorage 键，默认名字序；菜单标题硬编码中文，沿用
+// “复制 Bundle ID”同款先例。0 新 L() key。iOS 15 无新 API。
+enum CZFLocalIpaFolderSort: String, CaseIterable {
+    case name
+    case size
+    case recent
+
+    var czfDisplayName: String {
+        switch self {
+        case .name: return "按名字"
+        case .size: return "按大小"
+        case .recent: return "按最新"
+        }
+    }
+}
+
 // App 页下方内嵌文件夹 IPA 区（3.8.436，用户 11:15 令，红框处）：
 // 选过的文件夹的 IPA 直接显示在已装 App 下方，不用再点
 // 文件夹按钮弹 sheet（sheet 426/429/430/435 四版都没稳住）。
@@ -587,6 +615,10 @@ struct CZFInlineIpaFolderSection: View {
     // czfIpaFolderURL = nil（本节不直接碰那把 @State）。
     var onClearFolder: () -> Void
 
+    // 3.8.649（F3）：文件夹排序开关——与下面格子读同一把
+    // @AppStorage 键（UserDefaults 共享，两处都跟随）。
+    @AppStorage("CZFLocalIpaFolderSort") private var czfSort = CZFLocalIpaFolderSort.name
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -596,6 +628,20 @@ struct CZFInlineIpaFolderSection: View {
                     .font(.headline)
                 Spacer()
                 if folderURL != nil {
+                    // 3.8.649（F3）：排序切换——Picker 放 Menu 里
+                    //（App 页排序菜单 LCAppListView:904 同款写法）。
+                    Menu {
+                        Picker("排序", selection: $czfSort) {
+                            ForEach(CZFLocalIpaFolderSort.allCases, id: \.self) { sort in
+                                Text(sort.czfDisplayName).tag(sort)
+                            }
+                        }
+                    } label: {
+                        // UI 打磨（3.8.649）：按钮直接显示当前排序，
+                        // 不用点开菜单才知道现在按什么排。
+                        Label(czfSort.czfDisplayName, systemImage: "arrow.up.arrow.down")
+                            .font(.footnote)
+                    }
                     Button("清除文件夹", role: .destructive, action: onClearFolder)
                         .font(.footnote)
                     Button("换文件夹", action: onPickFolder)
@@ -655,6 +701,29 @@ struct CZFInlineIpaFolderGrid: View {
     // 查表，没有插件判据，pluginPaths 为空。
     @EnvironmentObject private var sharedModel: SharedModel
 
+    // 3.8.649（F3）：与上面标题行读同一把排序键。
+    @AppStorage("CZFLocalIpaFolderSort") private var czfSort = CZFLocalIpaFolderSort.name
+
+    // 3.8.649（F1）：长按菜单的分享目标与待删项——分享走系统
+    // 分享表（ActivityViewController），删除先弹确认框。
+    @State private var czfShareURL: URL?
+    @State private var czfDeleteItem: CZFLocalIpaItem?
+
+    // 3.8.649（F3）：display 排序只能是渲染层派生数组——items
+    // 本身必须保持文件名序，O-5 短路（:180–183）拿
+    // sortedFound == items.map(\.url) 比地址集，改 items 顺序
+    // 会让短路恒失效、每次切回都全扫重解。
+    private var czfSortedItems: [CZFLocalIpaItem] {
+        switch czfSort {
+        case .name:
+            return model.items
+        case .size:
+            return model.items.sorted { $0.fileSize > $1.fileSize }
+        case .recent:
+            return model.items.sorted { ($0.modificationDate ?? .distantPast) > ($1.modificationDate ?? .distantPast) }
+        }
+    }
+
     private var czfInstalledLookup: CZFInstalledLookup {
         CZFInstalledLookup(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps, pluginPaths: [])
     }
@@ -688,10 +757,15 @@ struct CZFInlineIpaFolderGrid: View {
                 // 同一份网格设置，横向间距 16、纵向 12），末行
                 // 不用再手填 Color.clear 占位。
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: czfColCount), spacing: 12) {
-                    ForEach(model.items) { item in
-                        CZFLocalIpaGridCell(item: item, installedLookup: czfInstalledLookup) {
-                            onInstall(item.url)
-                        }
+                    ForEach(czfSortedItems) { item in
+                        CZFLocalIpaGridCell(
+                            item: item,
+                            installedLookup: czfInstalledLookup,
+                            onShare: { czfShareURL = item.url },
+                            onDelete: { czfDeleteItem = item },
+                            onCopyFileName: { UIPasteboard.general.string = item.fileName },
+                            onTap: { onInstall(item.url) }
+                        )
                         .onAppear { model.loadDetailIfNeeded(for: item) }
                     }
                 }
@@ -699,6 +773,30 @@ struct CZFInlineIpaFolderGrid: View {
         }
         .onAppear { model.scan() }
         .onDisappear { model.cancelDetailTasks() }
+        // 3.8.649（F1）：分享走系统分享表——分享的 URL 在内容闭包
+        // 里当场抓住（CZFAppGridView:745 同款），不走 onDismiss 删文件。
+        .sheet(isPresented: Binding(get: { czfShareURL != nil }, set: { if !$0 { czfShareURL = nil } })) {
+            if let url = czfShareURL {
+                ActivityViewController(activityItems: [url]) { _, _, _, _ in
+                    czfShareURL = nil
+                }
+            }
+        }
+        // 3.8.649（F1）：删除是用户自选文件夹里的真实文件，必须带
+        // 确认框；确认后删文件再重扫——删完地址集变了，O-5 短路
+        // 不命中，走全扫，列表即时去掉已删的行。
+        .alert("删除 IPA", isPresented: Binding(get: { czfDeleteItem != nil }, set: { if !$0 { czfDeleteItem = nil } })) {
+            Button("删除", role: .destructive) {
+                if let item = czfDeleteItem {
+                    try? FileManager.default.removeItem(at: item.url)
+                    czfDeleteItem = nil
+                    model.scan()
+                }
+            }
+            Button("取消", role: .cancel) { czfDeleteItem = nil }
+        } message: {
+            Text("将删除“\(czfDeleteItem?.fileName ?? "")”，文件会从文件夹中移除，此操作无法撤销。")
+        }
     }
 }
 
@@ -709,6 +807,14 @@ struct CZFLocalIpaGridCell: View {
     let item: CZFLocalIpaItem
     // 3.8.604（O-18）：父级一次算好的已装查找表，格子只查表。
     let installedLookup: CZFInstalledLookup
+    // 3.8.649（F1）：长按菜单回调——分享 / 删除 / 复制文件名，
+    // 动作由父级格子持有（分享表与确认框的 state 在父级）。
+    // 声明顺序注意：onTap 必须留在最后，调用点用 trailing
+    // closure 传它（新闭包放它前面，否则 trailing closure
+    // 会绑到最后一个新闭包上、编不过）。
+    var onShare: () -> Void = {}
+    var onDelete: () -> Void = {}
+    var onCopyFileName: () -> Void = {}
     var onTap: () -> Void
 
     // 3.8.444：已安装标记（用户 13:51 令“不知道哪个安装了
@@ -788,5 +894,13 @@ struct CZFLocalIpaGridCell: View {
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
+        // 3.8.649（F1）：长按菜单——分享 IPA / 复制文件名 / 删除。
+        // 标题硬编码中文，沿用“复制 Bundle ID”同款先例；删除是
+        // 真实文件，确认框在父级格子弹，这里只回调。
+        .contextMenu {
+            Button("分享 IPA", systemImage: "square.and.arrow.up", action: onShare)
+            Button("复制文件名", systemImage: "doc.on.doc", action: onCopyFileName)
+            Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
+        }
     }
 }
