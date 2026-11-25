@@ -444,6 +444,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             UIPasteboard.general.string = appInfo.bundleIdentifier() ?? ""
         })
 
+        // 3.8.641（F1）：置顶/取消置顶——与网格菜单同款（列表置顶键，
+        // 与坞固定区无关）；标题硬编码中文，同“复制 Bundle ID”先例。
+        sectionChildren.append(UIAction(
+            title: CZFListPinnedStore.shared.isPinned(model) ? "取消置顶" : "置顶",
+            image: UIImage(systemName: CZFListPinnedStore.shared.isPinned(model) ? "pin.fill" : "pin")
+        ) { _ in
+            CZFListPinnedStore.shared.toggle(model)
+            LCAppSortManager.shared.czfResortAfterPinChange()
+        })
+
         // 3.8.431 设置低 #10：网格菜单有隐藏/锁定，列表菜单没有，
         // 两边补齐（调的都是 LCAppModel 已有方法，与网格同款）。
         sectionChildren.append(UIAction(

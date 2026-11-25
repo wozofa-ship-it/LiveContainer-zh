@@ -204,6 +204,12 @@ extension Notification.Name {
     // 它已最小化的时间；恢复可见、关窗、画中画、开关关时清掉。
     private var czfMinAutoCloseTimer: Timer?
     private var czfMinimizedSince: [String: Date] = [:]
+    // 3.8.641（H4）：后台一次性排期——进后台时两只重复表停掉，改按最近
+    // 目标时间一次排期（见下面 czfSchedule...OneShot）；回前台重建重复表。
+    // czfDockTimersBgSuspended 为真时 start...Timer 不重建重复表、只排一次。
+    private var czfSchedMinBgWork: DispatchWorkItem?
+    private var czfMinAutoCloseBgWork: DispatchWorkItem?
+    private var czfDockTimersBgSuspended = false
     // 同时运行上限（CZF）：3 个，第 4 个窗口注册时弹确认，
     // 防连续注册时弹框叠加，只弹一个。
     private var czfCapAlertShowing = false
@@ -394,6 +400,20 @@ extension Notification.Name {
             self,
             selector: #selector(deviceOrientationDidChange),
             name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
+        // 3.8.641（H4）：前后台切换时停/重建两只坞定时器（见下面
+        // czfDockTimersDidEnterBackground / czfDockTimersWillEnterForeground）。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(czfDockTimersDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(czfDockTimersWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
         // 宿主主界面（App 页）手势不灵的根因：全局滑动识别器只在
@@ -1287,6 +1307,11 @@ extension Notification.Name {
     private func startScheduledMinimizeOpenTimer() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // 3.8.641（H4）：后台挂起期间不重建重复表，改排一次（kick 也走这里）。
+            if self.czfDockTimersBgSuspended {
+                self.czfScheduleSchedMinOneShot()
+                return
+            }
             self.czfSchedMinTimer?.invalidate()
             self.czfSchedMinTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
                 self?.checkScheduledMinimizeOpen()
@@ -1474,6 +1499,11 @@ extension Notification.Name {
     private func startMinAutoCloseTimer() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // 3.8.641（H4）：后台挂起期间不重建重复表，改排一次（kick 也走这里）。
+            if self.czfDockTimersBgSuspended {
+                self.czfScheduleMinAutoCloseOneShot()
+                return
+            }
             self.czfMinAutoCloseTimer?.invalidate()
             self.czfMinAutoCloseTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
                 self?.checkMinAutoClose()
@@ -1489,6 +1519,126 @@ extension Notification.Name {
     /// .minimizeWindow）：确保自动关定时器在跑，重复调无害。
     @objc public func czfKickMinAutoCloseTimer() {
         startMinAutoCloseTimer()
+    }
+
+    // MARK: - 坞定时器后台一次性排期（3.8.641，H4）
+    // 627 只给两只重复表加了 tolerance 60，没改重复 cadence；用户设了
+    // 定时打开或留着最小化窗口过夜，两表整夜 30/60 秒唤醒。进后台时
+    // 取消重复表、改按最近目标时间一次排期（定时打开取最近一个未到的
+    // CZFSchedMinMinutes，自动关取最近一个最小化窗口的到期时间）；
+    // 回前台重建重复表。只改起停与排期，到点执行的动作与自停逻辑一字不动。
+    // 最坏情况：后台期间定时打开/自动关晚到下次回前台才执行一次（用户锁屏
+    // 时本来也看不见窗口开关）；到点动作本身不变。
+    @objc private func czfDockTimersDidEnterBackground() {
+        czfDockTimersBgSuspended = true
+        czfSchedMinTimer?.invalidate()
+        czfSchedMinTimer = nil
+        czfMinAutoCloseTimer?.invalidate()
+        czfMinAutoCloseTimer = nil
+        czfScheduleSchedMinOneShot()
+        czfScheduleMinAutoCloseOneShot()
+    }
+
+    @objc private func czfDockTimersWillEnterForeground() {
+        czfDockTimersBgSuspended = false
+        czfSchedMinBgWork?.cancel()
+        czfSchedMinBgWork = nil
+        czfMinAutoCloseBgWork?.cancel()
+        czfMinAutoCloseBgWork = nil
+        startScheduledMinimizeOpenTimer()
+        startMinAutoCloseTimer()
+    }
+
+    /// 最近一个未到的定时打开目标（今天未到的取最小分钟数；今天的都
+    /// 已过/已开过时取明天的最早一个；一个定时都没开返回 nil）。
+    /// 与 checkScheduledMinimizeOpen 同口径：只认 CZFSchedMinEnabled
+    /// 开着的、按 czfSchedMinKey（实例稳定键）取键。
+    private func czfNextSchedMinFireDate() -> Date? {
+        let defaults = UserDefaults.standard
+        let today = Self.schedMinDayFormatter.string(from: Date())
+        let cal = Calendar.current
+        let now = Date()
+        let nowTotal = cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now)
+        let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        var todayTargets: [Int] = []
+        var anyTargets: [Int] = []
+        var overdueToday = false
+        for app in allApps {
+            let bundleId = czfSchedMinKey(for: app.appInfo)
+            guard !bundleId.isEmpty, defaults.bool(forKey: "CZFSchedMinEnabled-\(bundleId)") else { continue }
+            let target = defaults.integer(forKey: "CZFSchedMinMinutes-\(bundleId)")
+            anyTargets.append(target)
+            if defaults.string(forKey: "CZFSchedMinLastDate-\(bundleId)") == today { continue }
+            if target >= nowTotal {
+                todayTargets.append(target)
+            } else {
+                // 今天已过点、还没开过（进后台前那一轮没赶上）：立即跑一次，
+                // 与重复表下一轮补开同款，不推到明天。
+                overdueToday = true
+            }
+        }
+        if overdueToday { return Date() }
+        if let next = todayTargets.min() {
+            return cal.date(bySettingHour: next / 60, minute: next % 60, second: 0, of: now)
+        }
+        if let first = anyTargets.min() {
+            let tomorrow = cal.date(byAdding: .day, value: 1, to: now) ?? now
+            return cal.date(bySettingHour: first / 60, minute: first % 60, second: 0, of: tomorrow)
+        }
+        return nil
+    }
+
+    private func czfScheduleSchedMinOneShot() {
+        czfSchedMinBgWork?.cancel()
+        czfSchedMinBgWork = nil
+        guard czfDockTimersBgSuspended, let fire = czfNextSchedMinFireDate() else { return }
+        let delay = max(0, fire.timeIntervalSinceNow)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.czfSchedMinBgWork = nil
+            self.checkScheduledMinimizeOpen()
+            // 仍在后台：按新目标再排一次（链式；check 已把到点的记账，
+            // 下一目标是明天最早的，不会原地空转）。回前台时 work 已取消。
+            self.czfScheduleSchedMinOneShot()
+        }
+        czfSchedMinBgWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// 最近一个最小化窗口的自动关到期时间（czfMinimizedSince 里未到期的
+    /// 最小值；已到期的立即跑一次）。豁免（画中画/白名单/定时打开当天）
+    /// 不在这里算——check 里认到豁免会清掉计时，下次重排即不再含它，
+    /// 不会原地空转。
+    private func czfNextMinAutoCloseFireDate() -> Date? {
+        let defaults = LCUtils.appGroupUserDefault
+        let enabled = defaults.object(forKey: "CZFMinAutoCloseEnabled") == nil || defaults.bool(forKey: "CZFMinAutoCloseEnabled")
+        guard enabled else { return nil }
+        let closeMinutes = defaults.object(forKey: "CZFMinAutoCloseMinutes") as? Int ?? 30
+        guard closeMinutes != 0 else { return nil }
+        let closeDelay = TimeInterval([10, 30, 60].contains(closeMinutes) ? closeMinutes : 30) * 60
+        var nearest: Date?
+        for since in czfMinimizedSince.values {
+            let fire = since.addingTimeInterval(closeDelay)
+            if nearest == nil || fire < nearest! { nearest = fire }
+        }
+        return nearest
+    }
+
+    private func czfScheduleMinAutoCloseOneShot() {
+        czfMinAutoCloseBgWork?.cancel()
+        czfMinAutoCloseBgWork = nil
+        guard czfDockTimersBgSuspended, let fire = czfNextMinAutoCloseFireDate() else { return }
+        let delay = max(0, fire.timeIntervalSinceNow)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.czfMinAutoCloseBgWork = nil
+            self.checkMinAutoClose()
+            // 仍在后台：按新目标再排一次（链式；到期的已关掉清计时，
+            // 豁免的已清计时，下一目标严格在未来，不会原地空转）。
+            self.czfScheduleMinAutoCloseOneShot()
+        }
+        czfMinAutoCloseBgWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func checkMinAutoClose() {

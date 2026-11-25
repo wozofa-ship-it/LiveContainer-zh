@@ -418,6 +418,18 @@ struct LCAppSettingsView: View {
                         .foregroundColor(.gray)
                         .multilineTextAlignment(.trailing)
                 }
+                // 3.8.641（F3）：版本 / 构建号只读行——信息区已有 Bundle ID /
+                // 相对路径 / 备注 / 显示名，唯独无版本行；version() 缺省回
+                // "Unknown"、buildVersion() 缺省回 "0"，不会出现 nil。
+                // 标签硬编码“版本”，沿用同区“相对路径/显示名”先例。
+                HStack {
+                    Text("版本")
+                    Spacer()
+                    Text("\(appInfo.version() ?? "?") (\(appInfo.buildVersion() ?? "0"))")
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                }
                 if !model.uiIsShared {
                     Menu {
                         Button {

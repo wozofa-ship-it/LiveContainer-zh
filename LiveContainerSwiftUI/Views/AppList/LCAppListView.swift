@@ -133,6 +133,23 @@ enum CZFSourcePendingInstall {
     }
 }
 
+// 3.8.641（F2）：仅运行中筛选的坞表订阅——@ObservedObject 订
+// MultitaskDockManager.shared.apps（窗口开关即变），坞表一变就
+// 回调列表页重跑过滤；只认 appUUID 集合（窗口开关才变它，最小化/
+// 切前台不改运行集合，不会多刷）。MultitaskDockManager 是 16+
+// 类型，本结构体标 @available，调用方用 if #available 包（与
+// CZFRunningDot 同款门控）；16 以下无多任务、无此订阅。
+@available(iOS 16.0, *)
+private struct CZFRunningFilterWatcher: View {
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+    var onRunningChanged: () -> Void
+
+    var body: some View {
+        Color.clear
+            .onChange(of: dockManager.apps.map { $0.appUUID }) { _ in onRunningChanged() }
+    }
+}
+
 struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var didAppear = false
     // ipa choosing stuff
@@ -233,6 +250,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 走数据管理页）。选中集存唯一 ID，不存下标——搜索过滤
     // 与排序变化都不会串选。
     @State private var batchMode = false
+    // 3.8.641（F2）：仅运行中筛选——打开后列表只显示正在跑的 App
+    //（可见 + 已解锁隐藏区都过滤）；判据复用 czfIsRunningInDock，
+    // iOS 15 下开关隐藏（MultitaskDockManager 是 16+ 类型）。
+    @State private var czfRunningOnly = false
     // 顶栏三个工具（数据管理/VPN/多选）收起/展开：默认收起，点
     // 箭头展开、再点收起；只管显隐，三个功能本身不动。
     @State private var topToolsExpanded = false
@@ -793,6 +814,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.641（F2）：仅运行中开关——多选按钮旁；16 以下隐藏
+        //（MultitaskDockManager 是 16+ 类型，见 CZFRunningDot 注释）。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, #available(iOS 16.0, *) {
+                Button {
+                    czfRunningOnly.toggle()
+                } label: {
+                    Label("仅运行中", systemImage: czfRunningOnly ? "play.circle.fill" : "play.circle")
+                }
+            }
+        }
+
         // 3.8.337：用户 14:17 顶栏全藏只留展开箭头——链接也收进
         // 折叠里，默认不显示，点箭头才出来。
         ToolbarItem(placement: .topBarTrailing) {
@@ -935,7 +968,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State private var czfFilteredAppsCache: [LCAppModel] = []
     var filteredApps: [LCAppModel] { czfFilteredAppsCache }
     private func czfRefreshFilteredApps() {
-        let apps = sortedApps
+        var apps = sortedApps
+        // 3.8.641（F2）：仅运行中——先按运行筛，再按搜索筛；判据复用
+        // czfIsRunningInDock（坞表 + isUsing 回落）；#available 包住，
+        // 16 以下开关本身隐藏、这里也到不了。
+        if czfRunningOnly, #available(iOS 16.0, *) {
+            apps = apps.filter { LCAppModel.czfIsRunningInDock(app: $0) }
+        }
         if searchContext.debouncedQuery.isEmpty {
             czfFilteredAppsCache = apps
         } else {
@@ -1000,14 +1039,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
     
     var filteredHiddenApps: [LCAppModel] {
-        let apps = sortedHiddenApps
+        var apps = sortedHiddenApps
+        // 3.8.641（F2）：隐藏区同加运行条件——与可见区同一判据、同一开关。
+        if czfRunningOnly, #available(iOS 16.0, *) {
+            apps = apps.filter { LCAppModel.czfIsRunningInDock(app: $0) }
+        }
         if searchContext.debouncedQuery.isEmpty || !sharedModel.isHiddenAppUnlocked {
             return apps
         } else {
             return apps.filter { app in
                 app.appInfo.displayName().localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
                 (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
-                (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery))
+                (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery)) ||
+                // 3.8.641（B-hidden）：备注与容器名也命中——与可见区
+                // czfRefreshFilteredApps 内同款两路；A1（d6d6447e）只改了
+                // 可见区那处闭包，这里漏了，解锁隐藏 App 后搜备注/容器名
+                // 一直无结果。
+                app.uiRemark.localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
+                app.uiContainers.contains { $0.name.localizedCaseInsensitiveContains(searchContext.debouncedQuery) }
             }
         }
     }
@@ -1963,6 +2012,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // F1（3.8.635）：列表变了（冷启动扫描换模型/新装 App 追加）
             // 也刷签名剩余天数——装完即显示，不用等下次进页。
             czfRefreshSignatureExpiry()
+        }
+        // 3.8.641（F2）：开关翻动即重跑过滤；坞表变化（窗口开关）也重跑，
+        // 否则开着筛选时 App 退出后仍赖在列表里——订阅走下面后台挂的
+        // CZFRunningFilterWatcher（16+，iOS 15 下不存在）。
+        .onChange(of: czfRunningOnly) { _ in
+            czfRefreshFilteredApps()
+        }
+        .background {
+            if #available(iOS 16.0, *) {
+                CZFRunningFilterWatcher { czfRefreshFilteredApps() }
+            }
         }
         .onChange(of: scenePhase) { newPhase in
             // 3.8.404：从后台切回前台时扫分享收件箱（本页已在

@@ -703,6 +703,18 @@ struct CZFAppGridCell: View {
                     .offset(x: 4, y: -4)
             }
         }
+        .overlay(alignment: .topLeading) {
+            // 3.8.641（F1 + UI 打磨）：置顶标记——左上角小图钉，置顶的
+            // App 一眼认得出（勾选圈与绿点都在右上角，不叠）；切换置顶
+            // 即重排，父视图重建时本标记跟着刷，不用另订阅。
+            if CZFListPinnedStore.shared.isPinned(app) {
+                Image(systemName: "pin.fill")
+                    .font(.caption)
+                    .foregroundColor(.accentColor)
+                    .background(Color(.systemBackground).opacity(0.85), in: Circle())
+                    .offset(x: -6, y: -6)
+            }
+        }
         .contextMenu {
             // 低 #9：批量模式下不挂 contextMenu——原来长按仍能调出
             // 删除/隐藏/锁定等破坏性菜单；空内容时不弹菜单。
@@ -790,6 +802,13 @@ struct CZFAppGridCell: View {
         // 标题硬编码中文，沿用本菜单“隐藏/锁定/恢复显示”硬编码先例。
         Button("复制 Bundle ID", systemImage: "doc.on.doc") {
             UIPasteboard.general.string = app.appInfo.bundleIdentifier() ?? ""
+        }
+        // 3.8.641（F1）：置顶/取消置顶——列表置顶（CZFListPinnedApps 键，
+        // 与坞固定区无关）；切换后重排，六种排序下置顶组都固定在前。
+        // 标题硬编码中文，沿用本菜单“复制 Bundle ID”硬编码先例。
+        Button(CZFListPinnedStore.shared.isPinned(app) ? "取消置顶" : "置顶", systemImage: CZFListPinnedStore.shared.isPinned(app) ? "pin.fill" : "pin") {
+            CZFListPinnedStore.shared.toggle(app)
+            LCAppSortManager.shared.czfResortAfterPinChange()
         }
         // 单 App VPN（banner 同款文案与开关语义）。
         Button(

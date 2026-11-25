@@ -85,15 +85,22 @@ static void CZFStartKeepAlive(void) {
     @try {
         CZFStartPlayer();
         if (!gWatchdog) {
-            gWatchdog = [NSTimer scheduledTimerWithTimeInterval:30.0 repeats:YES block:^(NSTimer *timer) {
+            // 3.8.641（H5）：与宿主侧看门狗看齐——原来 30 秒一轮，
+            // 每个 guest 进程各跑一只，后台有游客在跑时每小时 120 次
+            // 唤醒；宿主侧早已降到 300 秒 + tolerance 60
+            //（CZFHostKeepAlive.swift，注释原话同款）。看门狗只是
+            // “播放器静默停播”的兜底检查，中断恢复走通知快路径
+            //（AVAudioSessionInterruptionNotification），不受影响；
+            // 无通知静默停播后最长 5 分钟才恢复，是宿主侧已接受的
+            // 同款 trade-off。保活默认、白名单、前台停后台开的语义不动。
+            gWatchdog = [NSTimer scheduledTimerWithTimeInterval:300.0 repeats:YES block:^(NSTimer *timer) {
                 @try {
                     if (gInBackground && !gPlayer.isPlaying) {
                         CZFStartPlayer(); // 被打断/暂停后自动恢复
                     }
                 } @catch (__unused NSException *e) {}
             }];
-            // v1.3 减发热：容差 10 秒，系统可合并唤醒
-            gWatchdog.tolerance = 10.0;
+            gWatchdog.tolerance = 60.0;
         }
     } @catch (__unused NSException *e) {}
 }

@@ -56,6 +56,33 @@ enum AppSortType: String, CaseIterable {
     }
 }
 
+/// 3.8.641（F1）：App 列表置顶的存储（与坞面板固定区无关）。
+/// 键 `CZFListPinnedApps` 是新键，绝不复用坞的 `CZFPinnedPanelApps`
+///（否则列表置顶会串进坞固定区）；键格式复用 `CZFPinnedAppsStore.pinKey`
+///（`bundleID_dataUUID`，实例粒度，多开分身各置各的）；删 App 重装换
+/// dataUUID 后置顶丢失，是与坞固定区同款的已知行为（MultitaskDockView
+/// :3587-3590 注释）。0 新本地化 key（菜单标题硬编码中文）。
+final class CZFListPinnedStore: ObservableObject {
+    static let shared = CZFListPinnedStore()
+    @Published private(set) var pinnedIds: [String] = []
+    private let defaultsKey = "CZFListPinnedApps"
+    init() {
+        pinnedIds = LCUtils.appGroupUserDefault.stringArray(forKey: defaultsKey) ?? []
+    }
+    func isPinned(_ app: LCAppModel) -> Bool { pinnedIds.contains(Self.pinKey(for: app)) }
+    /// 键格式唯一来源：坞的 `CZFPinnedAppsStore.pinKey`（实例粒度）。
+    static func pinKey(for app: LCAppModel) -> String { CZFPinnedAppsStore.pinKey(for: app) }
+    func toggle(_ app: LCAppModel) {
+        let key = Self.pinKey(for: app)
+        if let idx = pinnedIds.firstIndex(of: key) {
+            pinnedIds.remove(at: idx)
+        } else {
+            pinnedIds.append(key)
+        }
+        LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+    }
+}
+
 /// Manages the state and logic for sorting the list of applications.
 class LCAppSortManager: ObservableObject {
     
@@ -277,7 +304,31 @@ class LCAppSortManager: ObservableObject {
         return uniqueId == appUniqueId
     }
     
+    /// 3.8.641（F1）：置顶切换后重排——只重算排序后列表，不重读排序方式/
+    /// 方案；sortedApps/sortedHiddenApps 是 @Published，列表页
+    /// onChange(of: sortedApps) 随之刷过滤缓存。
+    func czfResortAfterPinChange() {
+        self.sortedApps = self.getSortedApps(DataManager.shared.model.apps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+        if DataManager.shared.model.isHiddenAppUnlocked {
+            self.sortedHiddenApps = self.getSortedApps(DataManager.shared.model.hiddenApps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+        }
+    }
+
     func getSortedApps(_ appList: [LCAppModel], sortType: AppSortType, customSortOrder: [String]) -> [LCAppModel] {
+        // 3.8.641（F1）：置顶组固定在前——先按置顶键分区，两组各按当前
+        // 排序排，再拼起来；六种排序（含默认顺序与自定义）全走同一条路，
+        // 置顶组内仍按当前排序排。无置顶时一字不动（直接走老路）。
+        let pinnedIds = Set(CZFListPinnedStore.shared.pinnedIds)
+        guard appList.contains(where: { pinnedIds.contains(CZFListPinnedStore.pinKey(for: $0)) }) else {
+            return czfSortSingleGroup(appList, sortType: sortType, customSortOrder: customSortOrder)
+        }
+        let pinned = appList.filter { pinnedIds.contains(CZFListPinnedStore.pinKey(for: $0)) }
+        let unpinned = appList.filter { !pinnedIds.contains(CZFListPinnedStore.pinKey(for: $0)) }
+        return czfSortSingleGroup(pinned, sortType: sortType, customSortOrder: customSortOrder)
+            + czfSortSingleGroup(unpinned, sortType: sortType, customSortOrder: customSortOrder)
+    }
+
+    private func czfSortSingleGroup(_ appList: [LCAppModel], sortType: AppSortType, customSortOrder: [String]) -> [LCAppModel] {
         switch sortType {
         case .defaultOrder:
             return appList
