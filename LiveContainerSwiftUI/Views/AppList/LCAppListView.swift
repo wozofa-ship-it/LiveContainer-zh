@@ -137,6 +137,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State var didAppear = false
     // ipa choosing stuff
     @State var choosingIPA = false
+    // APK choosing stuff (3.8.632)：“+”菜单第三项——选 .apk 走 czfHandleApk。
+    @State var choosingAPK = false
     // 本地 IPA 文件夹已移到源页（3.8.454）：保存/恢复见
     // CZFLocalIpaFolderStore；安装时取权（3.8.428 安装#3）
     // 仍调它。App 页不再有文件夹按钮/内嵌区/sheet。
@@ -689,6 +691,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         })
                         Button("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus", action: {
                             Task{ await startInstallFromUrl() }
+                        })
+                        Button("lc.appList.installFromApk".loc, systemImage: "square.and.arrow.down", action: {
+                            choosingAPK = true
                         })
                     } label: {
                         // App #21：文案走 .loc（没配翻译时回落原文）。
@@ -2214,6 +2219,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             Task { await startInstallApp(fileUrls[0]) }
         }, onDismiss: {
             choosingIPA = false
+        })
+        // 3.8.632：“+”菜单第三项——选 .apk 直接走 czfHandleApk
+        //（App Group 暂存 + runApp 递 TwoYi），不另起安装管线。
+        .betterFileImporter(isPresented: $choosingAPK, types: [.apk], multiple: false, callback: { fileUrls in
+            Task { await czfHandleApk(fileUrls[0]) }
+        }, onDismiss: {
+            choosingAPK = false
         })
         // 文件夹选择器与文件夹 sheet 已随文件夹移到源页
         // （3.8.454），App 页不再挂 betterFolderImporter。

@@ -297,6 +297,7 @@ extension String: @retroactive LocalizedError {
 extension UTType {
     static let ipa = UTType(filenameExtension: "ipa")!
     static let tipa = UTType(filenameExtension: "tipa")!
+    static let apk = UTType(filenameExtension: "apk")!
     static let dylib = UTType(filenameExtension: "dylib")!
     static let deb = UTType(filenameExtension: "deb")!
     static let lcFramework = UTType(filenameExtension: "framework", conformingTo: .package)!
