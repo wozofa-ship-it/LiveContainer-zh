@@ -887,6 +887,10 @@ struct LCSourcesView: View {
     @State private var czfSourceGridSettingsShow = false
     // 可更新数量写到这里，底部「源」标签上显示红点数字
     @AppStorage("CZFUpdatableAppCount") private var updatableCountBadge = 0
+    // 3.8.643（F3）：可更新名单的归一 Bundle ID 集合（逗号串）——
+    // App 页“仅可更新”开关按它过滤；与红点数同一处写、新鲜度同款
+    // （只在源页刷新缓存时更新，长期不进源页会旧）。
+    @AppStorage("CZFUpdatableBundleIDs") private var updatableBundleIDs = ""
     // 可更新名单缓存：原来 updatableApps 是计算属性，body 每次
     // 渲染（搜字、展开、加载状态变）都把全部源 × 全部 App 比一
     // 遍版本、还逐个读忽略记录；改成算一次存起来，只在源/已装/
@@ -1743,6 +1747,11 @@ struct LCSourcesView: View {
         let list = computeUpdatableApps().filter { !CZFSkippedUpdate.isSkipped($0) }
         cachedUpdatableApps = list
         updatableCountBadge = list.count
+        // 3.8.643（F3）：顺带把名单的归一 Bundle ID 集合写进 AppStorage，
+        // 供 App 页“仅可更新”开关过滤；归一口径与 computeUpdatableApps
+        // 同款 czfNormalizedBundleID（去队尾段），不归一就比对不上
+        // 个人 ID 改写后的 ID（3.8.637 B1 同款教训）。
+        updatableBundleIDs = list.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
     }
 
     @MainActor

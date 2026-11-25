@@ -190,4 +190,18 @@ enum CZFExpiryReminder {
             }
         }
     }
+
+    // 3.8.643（B1）：删 App 时清它的三档到期提醒——排期只按当前
+    // 列表里的 items 清前缀（见 scheduleAuthorized），已删 App 的
+    // bundlePath 不再出现在 items 里，提醒永远清不到、到期前仍会推。
+    // 与 scheduleAuthorized 同款写法：先取待发、按前缀过滤再删。
+    static func cancel(forBundlePath bundlePath: String) {
+        let center = UNUserNotificationCenter.current()
+        let prefix = "CZFExpiry-\(bundlePath)-"
+        center.getPendingNotificationRequests { pending in
+            let ids = pending.map(\.identifier).filter { $0.hasPrefix(prefix) }
+            guard !ids.isEmpty else { return }
+            center.removePendingNotificationRequests(withIdentifiers: ids)
+        }
+    }
 }

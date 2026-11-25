@@ -254,6 +254,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     //（可见 + 已解锁隐藏区都过滤）；判据复用 czfIsRunningInDock，
     // iOS 15 下开关隐藏（MultitaskDockManager 是 16+ 类型）。
     @State private var czfRunningOnly = false
+    // 3.8.643（F3）：仅可更新筛选——打开后列表只显示源里有新版本
+    // 的已装 App；可更新数为 0 时开关隐藏（读 CZFUpdatableAppCount）。
+    // 纯数据过滤，iOS 15 也可用。集合来自源页写进来的
+    // CZFUpdatableBundleIDs（归一 Bundle ID 逗号串）。
+    @AppStorage("CZFUpdatableBundleIDs") private var czfUpdatableBundleIDs = ""
+    @AppStorage("CZFUpdatableAppCount") private var czfUpdatableCount = 0
+    @State private var czfUpdatableOnly = false
+    // 3.8.643（F1）：坞内运行中窗口数——“关闭坞内全部窗口”按钮的
+    // 显隐口径（0 即藏）；只计坞表条目，不计 isUsing 回落的原生窗——
+    // closeAllWindows 只遍历 dockManager.apps，不进坞表的原生窗
+    // 关不掉，计数若含它们，按钮会说全部、实际关不全。
+    @State private var czfDockRunningCount = 0
+    // 3.8.643（F1）：关闭坞内全部窗口的确认框开关。
+    @State private var czfShowCloseAllConfirm = false
     // 顶栏三个工具（数据管理/VPN/多选）收起/展开：默认收起，点
     // 箭头展开、再点收起；只管显隐，三个功能本身不动。
     @State private var topToolsExpanded = false
@@ -826,6 +840,37 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.643（F3）：仅可更新开关——与“仅运行中”开关并列；
+        // 可更新数为 0 时隐藏（读 CZFUpdatableAppCount）；纯数据过滤，
+        // iOS 15 也可用，不需 16+ 门控。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, czfUpdatableCount > 0 {
+                Button {
+                    czfUpdatableOnly.toggle()
+                } label: {
+                    Label("仅可更新", systemImage: czfUpdatableOnly ? "arrow.down.circle.fill" : "arrow.down.circle")
+                }
+            }
+        }
+
+        // 3.8.643（F1）：一键关闭坞内全部窗口——“仅运行中”开关旁；
+        // 无坞内运行窗口时隐藏。文案收窄为“关闭坞内全部窗口”：
+        // closeAllWindows 只遍历 dockManager.apps，原生窗口模式
+        // 下不进坞表的 App 关不掉（addRunningAppWithInfo 顶上的
+        // isDockEnabled 守卫只放虚拟窗），按钮不许说“全部”却关不全。
+        // 红色是 UI 打磨：与坞里 closeAllStripButton 的红字同款，
+        // 标明这是破坏性操作。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, #available(iOS 16.0, *), czfDockRunningCount > 0 {
+                Button {
+                    czfShowCloseAllConfirm = true
+                } label: {
+                    Label("关闭坞内全部窗口", systemImage: "xmark.circle")
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+
         // 3.8.337：用户 14:17 顶栏全藏只留展开箭头——链接也收进
         // 折叠里，默认不显示，点箭头才出来。
         ToolbarItem(placement: .topBarTrailing) {
@@ -967,6 +1012,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 逻辑本身不动（名字/Bundle ID/版本号三路匹配）。
     @State private var czfFilteredAppsCache: [LCAppModel] = []
     var filteredApps: [LCAppModel] { czfFilteredAppsCache }
+    // 3.8.643（F3）：可更新归一 ID 集合（逗号串拆开；空串即空集）。
+    private var czfUpdatableBundleIDSet: Set<String> {
+        Set(czfUpdatableBundleIDs.split(separator: ",").map(String.init))
+    }
+    // 3.8.643（F1）：坞内运行数刷新——MultitaskDockManager 是 16+
+    // 类型，本函数标 @available，调用方用 if #available 包（472
+    // 同款：只包调用方不够，被调函数本身也要标）。
+    @available(iOS 16.0, *)
+    private func czfRefreshDockRunningCount() {
+        czfDockRunningCount = MultitaskDockManager.shared.apps.count
+    }
     private func czfRefreshFilteredApps() {
         var apps = sortedApps
         // 3.8.641（F2）：仅运行中——先按运行筛，再按搜索筛；判据复用
@@ -974,6 +1030,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 16 以下开关本身隐藏、这里也到不了。
         if czfRunningOnly, #available(iOS 16.0, *) {
             apps = apps.filter { LCAppModel.czfIsRunningInDock(app: $0) }
+        }
+        // 3.8.643（F3）：仅可更新——按源页写进来的归一 ID 集合筛；
+        // 与仅运行中同款位置（先筛再按搜索筛）。
+        if czfUpdatableOnly {
+            let ids = czfUpdatableBundleIDSet
+            apps = apps.filter { ids.contains(czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? "")) }
         }
         if searchContext.debouncedQuery.isEmpty {
             czfFilteredAppsCache = apps
@@ -1043,6 +1105,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.641（F2）：隐藏区同加运行条件——与可见区同一判据、同一开关。
         if czfRunningOnly, #available(iOS 16.0, *) {
             apps = apps.filter { LCAppModel.czfIsRunningInDock(app: $0) }
+        }
+        // 3.8.643（F3）：隐藏区同加可更新条件——与可见区同一集合、同一开关。
+        if czfUpdatableOnly {
+            let ids = czfUpdatableBundleIDSet
+            apps = apps.filter { ids.contains(czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? "")) }
         }
         if searchContext.debouncedQuery.isEmpty || !sharedModel.isHiddenAppUnlocked {
             return apps
@@ -1984,6 +2051,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfRefreshFilteredApps()
             // F1（3.8.635）：进页刷一次签名剩余天数。
             czfRefreshSignatureExpiry()
+            // 3.8.643（F1）：进页刷一次坞内运行数（按钮显隐口径）。
+            if #available(iOS 16.0, *) {
+                czfRefreshDockRunningCount()
+            }
             // 每次进页都重赋 delegate（见 czfAssignAppDelegates 注释）：
             // 冷启动扫描可能在 onAppear() 跑完后才换上新模型。
             czfAssignAppDelegates()
@@ -2019,9 +2090,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .onChange(of: czfRunningOnly) { _ in
             czfRefreshFilteredApps()
         }
+        // 3.8.643（F3）：开关翻动即重跑过滤（与仅运行中同款）。
+        .onChange(of: czfUpdatableOnly) { _ in
+            czfRefreshFilteredApps()
+        }
         .background {
             if #available(iOS 16.0, *) {
-                CZFRunningFilterWatcher { czfRefreshFilteredApps() }
+                CZFRunningFilterWatcher {
+                    czfRefreshFilteredApps()
+                    // 3.8.643（F1）：坞表变了也刷按钮显隐口径（窗口开关即变）。
+                    czfRefreshDockRunningCount()
+                }
             }
         }
         .onChange(of: scenePhase) { newPhase in
@@ -2404,6 +2483,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     }
                 } message: {
                     Text("「\(czfRunningAppName)」正在运行，覆盖安装前请先退出它，否则可能装坏或丢数据。确定要继续吗？")
+                }
+        )
+        // 3.8.643（F1）：关闭坞内全部窗口的确认——复用本页“该 App
+        // 正在运行”同款 .alert 形态；确认即调现成 closeAllWindows
+        //（内部已 DispatchQueue.main.async，虚拟窗走 closeWindow、
+        // 原生条目走 .czfCloseNativeWindow 通知，3.8.555 已补齐原生一路）。
+        .background(
+            EmptyView()
+                .alert("关闭坞内全部窗口", isPresented: $czfShowCloseAllConfirm) {
+                    Button("关闭", role: .destructive) {
+                        if #available(iOS 16.0, *) {
+                            MultitaskDockManager.shared.closeAllWindows()
+                        }
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                    }
+                } message: {
+                    Text("将关闭坞内全部 \(czfDockRunningCount) 个运行中窗口。")
                 }
         )
         // 3.8.589（L121）：同款——也挪 background 叶子。
@@ -4759,6 +4856,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             CZFVPNManager.shared.cancelDeferredEnsure(for: app.appInfo)
             // 3.8.900（L585-A2）：删 App 也清它的三枚 VPN 键（开关/钉死/跟随）——不清除掉的钉死 override 会让已删 App 的节点永远判钉死，被动跟随再也不敢挪走核心。
             CZFVPNManager.clearVPNSettings(for: app.appInfo)
+            // 3.8.643（B1）：删 App 也清它的证书到期提醒——排期只按
+            // 当前列表里的 items 清前缀（CZFSignatureExpiry），已删
+            // App 的 bundlePath 不再出现在 items 里，不清的话三档
+            // 待发（3/1/0 天）会在到期前继续推已删的 App。
+            if let bundlePath = app.appInfo.bundlePath() {
+                CZFExpiryReminder.cancel(forBundlePath: bundlePath)
+            }
             // 删 App 后 AppInfo 缓存与 dock 残留条目一起清，否
             // 则删掉的 App 还会按旧 LCAppInfo 被解析、旧 dock
             // 条目还会被顶回前台（MultitaskDockManager 是

@@ -41,6 +41,10 @@ final class LCStorageManagementModel: ObservableObject {
     @Published var breakdown: LCStorageBreakdown?
     @Published var isCalculating = false
     @Published var errorInfo: String?
+    // 3.8.643（B2）：本次快照是否把隐藏 App 的占用算进了“其他”——
+    // 锁定时隐藏 App 不进快照、明细里没有它们，但包 + 容器仍在残差
+    // 里（otherSize）；与快照同一时刻取值，免得解锁后数字与说明对不上。
+    @Published var czfHiddenAppsInOther = false
 
     func refresh(apps: [LCAppModel], hiddenApps: [LCAppModel]) async {
         guard !isCalculating else {
@@ -51,6 +55,8 @@ final class LCStorageManagementModel: ObservableObject {
         defer { isCalculating = false }
         errorInfo = nil
         breakdown = nil
+        // 3.8.643（B2）：与下面快照同一时刻取值（见 czfHiddenAppsInOther 注释）。
+        czfHiddenAppsInOther = !DataManager.shared.model.isHiddenAppUnlocked && !hiddenApps.isEmpty
 
         // 3.8.557（L87）：快照在主线程上取——calculateBreakdown 是
         // nonisolated，后台任务组并发跑；直接读 isHiddenAppUnlocked /

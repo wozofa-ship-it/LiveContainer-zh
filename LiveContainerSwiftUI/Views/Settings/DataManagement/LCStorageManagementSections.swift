@@ -89,6 +89,7 @@ struct LCStorageSummarySection: View {
     let breakdown: LCStorageBreakdown?
     let isCalculating: Bool
     let errorInfo: String?
+    let czfHiddenAppsInOther: Bool
 
     var body: some View {
         Section("lc.storage.totalStorage".loc) {
@@ -130,6 +131,17 @@ struct LCStorageSummarySection: View {
                         }
                     }
                     .padding(.top, 4)
+
+                    // 3.8.643（B2）：锁定时隐藏 App 不进逐 App 明细、但
+                    // 占用仍在残差里（“其他”），只加一句说明、不动数字、
+                    // 不列隐藏 App 的名字与大小（锁定的隐藏区不应泄露）。
+                    // 文案硬编码中文（沿用“关闭全部”等先例），0 新 key。
+                    if czfHiddenAppsInOther {
+                        Text("隐藏 App 的占用已计入“其他”，解锁隐藏区后显示明细")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                    }
                 }
             }
             .padding(.vertical, 2)

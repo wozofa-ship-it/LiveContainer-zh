@@ -20,6 +20,10 @@ struct LCTabView: View {
     @StateObject var downloadHelper = DownloadHelper()
     // 「源」标签的更新红点数字（源页算好写进来的）
     @AppStorage("CZFUpdatableAppCount") var updatableAppCount = 0
+    // 3.8.643（F2）：“App”标签的运行中数量角标（0 即不显示，
+    // 与“源”标签的可更新红点同款行为）；初值在 onAppear 里算，
+    // 坞表变了由 CZFRunningCountWatcher 回调重算。
+    @State private var czfRunningCount = 0
 
     let pub = NotificationCenter.default.publisher(for: UIScene.didDisconnectNotification)
     
@@ -37,6 +41,9 @@ struct LCTabView: View {
                 .tabItem {
                     Label("lc.tabView.apps".loc, systemImage: "square.stack.3d.up.fill")
                 }
+                // 3.8.643（F2）：运行中数量角标——与“源”标签的红点
+                // 同款写法（0 即不显示），纯数字、无文案、0 新 key。
+                .badge(czfRunningCount > 0 ? czfRunningCount : 0)
                 .tag(LCTabIdentifier.apps)
             if DataManager.shared.model.multiLCStatus != 2 {
                 LCTweaksView()
@@ -64,6 +71,8 @@ struct LCTabView: View {
             // 管理器是 iOS 16+ 类型，与 AppDelegate 部署插件同款守卫
             if #available(iOS 16.0, *) {
                 _ = MultitaskDockManager.shared
+                // 3.8.643（F2）：进页算一次运行中角标初值。
+                czfRefreshRunningCount()
             }
             // 每次打开 App 通知源页自动刷新一次（节流在源页那边）
             NotificationCenter.default.post(name: Notification.Name("CZFRefreshSourcesRequest"), object: nil)
@@ -85,6 +94,12 @@ struct LCTabView: View {
                 await LCDataManagementView.runScheduledCacheIfDue()
             }
         }
+        // 3.8.643（F2）：坞表订阅挂在这里——窗口开关即回调重算角标。
+        .background {
+            if #available(iOS 16.0, *) {
+                CZFRunningCountWatcher { czfRefreshRunningCount() }
+            }
+        }
         .onChange(of: scenePhase) { newPhase in
             // 从后台切回前台时也预热一次（核心可能已被自动停）；
             // 同上，不过测速后的抑制。
@@ -92,6 +107,11 @@ struct LCTabView: View {
                 // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，别卡主线程。
                 Task.detached {
                     CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
+                }
+                // 3.8.643（F2）：切回前台也重算运行中角标——原生窗口
+                // 模式下 App 开关不走坞表，watcher 收不到，靠回前台补一次。
+                if #available(iOS 16.0, *) {
+                    czfRefreshRunningCount()
                 }
                 // 优5（3.8.277）：定时备份/清理的到点检查原来只在
                 // 冷打开时跑（onAppear）；从后台切回也查一次，
@@ -391,5 +411,32 @@ struct LCTabView: View {
             return
         }
         LCUtils.appGroupUserDefault.set(bookmark, forKey: "LCLaunchExtensionPrivateDocBookmark")
+    }
+
+    // 3.8.643（F2）：运行中数量重算——判据复用 czfIsRunningInDock
+    //（坞表 + isUsing 回落），范围是可见 + 隐藏区（Shared.swift
+    // :165/167 皆 @Published）；MultitaskDockManager 与判据皆 16+，
+    // 本函数标 @available，调用方用 if #available 包（472 同款：
+    // 只包调用方不够，被调函数本身也要标）。
+    @available(iOS 16.0, *)
+    private func czfRefreshRunningCount() {
+        czfRunningCount = (sharedModel.apps + sharedModel.hiddenApps).filter { LCAppModel.czfIsRunningInDock(app: $0) }.count
+    }
+}
+
+// 3.8.643（F2）：“App”标签运行中数量角标的坞表订阅——照抄
+// CZFRunningFilterWatcher（LCAppListView.swift:141）：@ObservedObject
+// 订 MultitaskDockManager.shared.apps，appUUID 集合一变就回调重算；
+// MultitaskDockManager 是 16+ 类型，本结构体标 @available，
+// 调用方用 if #available 包（与 CZFRunningDot 同款门控）；
+// 16 以下无多任务、无角标，自然缺席。
+@available(iOS 16.0, *)
+private struct CZFRunningCountWatcher: View {
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+    var onRunningChanged: () -> Void
+
+    var body: some View {
+        Color.clear
+            .onChange(of: dockManager.apps.map { $0.appUUID }) { _ in onRunningChanged() }
     }
 }

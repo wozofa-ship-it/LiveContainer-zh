@@ -1127,7 +1127,16 @@ struct LCSettingsView: View {
     func clearNotifications() {
         let notificationCenter = UNUserNotificationCenter.current()
         notificationCenter.removeAllDeliveredNotifications()
-        notificationCenter.removeAllPendingNotificationRequests()
+        // 3.8.643（B3）：只清非到期提醒的待发——原来 removeAllPending
+        // 把 CZFExpiry- 三档到期提醒一并清掉，之后要等下次进 App 列表
+        // （czfRefreshSignatureExpiry 重排）才恢复，中间证书到期就
+        // 没提醒了。到期提醒按前缀保留，其余待发（批量安装完成通知等）
+        // 照常清除，行为不变。
+        notificationCenter.getPendingNotificationRequests { pending in
+            let ids = pending.map(\.identifier).filter { !$0.hasPrefix("CZFExpiry-") }
+            guard !ids.isEmpty else { return }
+            notificationCenter.removePendingNotificationRequests(withIdentifiers: ids)
+        }
         if #available(iOS 16.0, *) {
             notificationCenter.setBadgeCount(0)
         } else {

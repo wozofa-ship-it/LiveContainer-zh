@@ -11,7 +11,8 @@ struct LCStorageManagementView: View {
             LCStorageSummarySection(
                 breakdown: model.breakdown,
                 isCalculating: model.isCalculating,
-                errorInfo: model.errorInfo
+                errorInfo: model.errorInfo,
+                czfHiddenAppsInOther: model.czfHiddenAppsInOther
             )
             LCInstalledAppsSection(breakdown: model.breakdown)
         }
