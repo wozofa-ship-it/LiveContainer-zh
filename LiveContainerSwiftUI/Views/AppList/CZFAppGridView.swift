@@ -641,10 +641,23 @@ struct CZFAppGridCell: View {
             // F1（3.8.635）：签名剩余天数角标——读不到不显示；
             // ≤7 天或已过期变红（与列表横幅同款口径，文案走
             // CZFSignatureExpiry.label 同一份）。
-            if let daysLeft = expiryDays[app.appInfo.bundlePath()] {
-                Text(CZFSignatureExpiry.label(forDaysLeft: daysLeft))
+            // F2（3.8.639）：版本号拼在同一行 caption 里（`"版本 · 剩 5 天"`，
+            // 无到期时只显版本，版本号取不到 `"?"` 时不显示），不新增行、
+            // 不改 cell 高度；`app.version` 是 `LCAppModel` 公开计算属性。
+            let czfCaptionText: String = {
+                let versionText = app.version == "?" ? nil : app.version
+                if let daysLeft = expiryDays[app.appInfo.bundlePath()] {
+                    let expiryText = CZFSignatureExpiry.label(forDaysLeft: daysLeft)
+                    if let versionText { return "\(versionText) · \(expiryText)" }
+                    return expiryText
+                }
+                return versionText ?? ""
+            }()
+            let czfCaptionDaysLeft = expiryDays[app.appInfo.bundlePath()]
+            if !czfCaptionText.isEmpty {
+                Text(czfCaptionText)
                     .font(.caption2)
-                    .foregroundStyle(daysLeft <= 7 ? .red : .secondary)
+                    .foregroundStyle((czfCaptionDaysLeft.map { $0 <= 7 } ?? false) ? .red : .secondary)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
@@ -771,6 +784,12 @@ struct CZFAppGridCell: View {
         }
         Button("lc.tabView.settings".loc, systemImage: "gear") {
             actions.onOpenSettings(app)
+        }
+        // 3.8.639（F3）：复制 Bundle ID——排续签/双图标问题时常要报
+        // Bundle ID，原来只能进设置页长按选中信息区那行文本复制；
+        // 标题硬编码中文，沿用本菜单“隐藏/锁定/恢复显示”硬编码先例。
+        Button("复制 Bundle ID", systemImage: "doc.on.doc") {
+            UIPasteboard.general.string = app.appInfo.bundleIdentifier() ?? ""
         }
         // 单 App VPN（banner 同款文案与开关语义）。
         Button(

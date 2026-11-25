@@ -1279,7 +1279,8 @@ extension Notification.Name {
 
     // MARK: - 定时最小化打开（CZF）
     // 每个 App 在其设置页单独开关+定时间（UserDefaults 键 CZFSchedMin*，
-    // 按 bundleIdentifier 存）。宿主活着时每 30 秒查一轮：到点且今天
+    // 3.8.639 B2：改按实例稳定键 `relativeBundlePath` 存，换队重签不丢）。
+    // 宿主活着时每 30 秒查一轮：到点且今天
     // 还没开过 → 拉起并最小化，一轮最多开一个（避免同时拉起多个）。
     // 宿主被彻底关掉时 iOS 不会唤醒它，到点没开成的会在下次打开
     // LiveContainer 时由同一轮检查补开。
@@ -1324,7 +1325,10 @@ extension Notification.Name {
         let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
         var hasEnabled = false
         for app in allApps {
-            guard let bundleId = app.appInfo.bundleIdentifier() else { continue }
+            // 3.8.639（B2）：`bundleId` 自此是稳定键（`relativeBundlePath`），
+            // 三枚持久键与当天内存失败计数同口径；取不到键的 App 跳过。
+            let bundleId = czfSchedMinKey(for: app.appInfo)
+            guard !bundleId.isEmpty else { continue }
             guard defaults.bool(forKey: "CZFSchedMinEnabled-\(bundleId)") else { continue }
             hasEnabled = true
             if defaults.string(forKey: "CZFSchedMinLastDate-\(bundleId)") == today { continue }
@@ -1528,8 +1532,8 @@ extension Notification.Name {
             // 打架；现在名单里的最小化窗口自动关直接跳过。
             // 文件不存在时 isInKeepAliveWhitelist 返回 false，
             // 自动关照常跑，不会把默认自动关废掉。
-            if let bid = app.appInfo?.bundleIdentifier(), !bid.isEmpty,
-               CZFHostKeepAlive.isInKeepAliveWhitelist(for: bid) {
+            if let info = app.appInfo,
+               CZFHostKeepAlive.isInKeepAliveWhitelist(for: info) {
                 czfMinimizedSince.removeValue(forKey: app.appUUID)
                 continue
             }
@@ -4694,12 +4698,14 @@ struct SourcesPanelView: View {
     // 默认 8:00；切开关不重置已设时间；开定时要踢一下轮询表，
     // 否则之前停掉的表不会自己恢复）。
     private func isSchedMinOn(for app: LCAppModel) -> Bool {
-        guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return false }
+        let bid = czfSchedMinKey(for: app.appInfo)
+        guard !bid.isEmpty else { return false }
         return UserDefaults.standard.bool(forKey: "CZFSchedMinEnabled-\(bid)")
     }
 
     private func toggleSchedMin(for app: LCAppModel) {
-        guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return }
+        let bid = czfSchedMinKey(for: app.appInfo)
+        guard !bid.isEmpty else { return }
         let defaults = UserDefaults.standard
         let newValue = !defaults.bool(forKey: "CZFSchedMinEnabled-\(bid)")
         defaults.set(newValue, forKey: "CZFSchedMinEnabled-\(bid)")

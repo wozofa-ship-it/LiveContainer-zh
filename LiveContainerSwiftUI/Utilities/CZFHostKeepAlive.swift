@@ -120,13 +120,29 @@ final class CZFHostKeepAlive {
         }
         return nil
     }
-    private static func keepAliveNeeded(for bid: String) -> Bool {
-        cachedWhitelist()?.contains(bid) ?? true
+    private static func keepAliveNeeded(for appInfo: LCAppInfo) -> Bool {
+        // 3.8.639（B2）：白名单条目改按实例稳定键（`relativeBundlePath`，
+        // 换队重签不改）；旧 bid 条目也认（未迁移的旧名单不断保），
+        // 迁移由设置页首次读时做（`LCAppSettingsView`）。
+        guard let list = cachedWhitelist() else { return true }
+        let key = czfStableSettingsKey(for: appInfo)
+        guard !key.isEmpty else { return true }
+        if list.contains(key) { return true }
+        if let bid = appInfo.bundleIdentifier(), !bid.isEmpty, bid != key {
+            return list.contains(bid)
+        }
+        return false
     }
     /// 供最小化自动关豁免用：只有白名单文件存在、且该 App 在
     /// 名单里时才豁免；文件不存在时返回 false，自动关照常跑。
-    static func isInKeepAliveWhitelist(for bid: String) -> Bool {
-        cachedWhitelist()?.contains(bid) ?? false
+    static func isInKeepAliveWhitelist(for appInfo: LCAppInfo) -> Bool {
+        guard let list = cachedWhitelist() else { return false }
+        let key = czfStableSettingsKey(for: appInfo)
+        if list.contains(key) { return true }
+        if let bid = appInfo.bundleIdentifier(), !bid.isEmpty, bid != key {
+            return list.contains(bid)
+        }
+        return false
     }
 
     /// 开关/游客数/前后台/白名单任一变化时调：重算该不该播（主队列）。
@@ -141,8 +157,8 @@ final class CZFHostKeepAlive {
                 // 到 scenes：dock 有记录却全被排除时，scenes 仍可能 > 1，
                 // fallback 会把白名单排除又拉回全保。
                 guestsNeedKeepAlive = dockApps.contains { app in
-                    guard let bid = app.appInfo?.bundleIdentifier(), !bid.isEmpty else { return true }
-                    return Self.keepAliveNeeded(for: bid)
+                    guard let info = app.appInfo else { return true }
+                    return Self.keepAliveNeeded(for: info)
                 }
             } else {
                 // 原生模式下 dock 不启用：游客是系统场景，主场景之外多一个

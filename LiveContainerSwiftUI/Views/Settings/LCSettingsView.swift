@@ -719,6 +719,17 @@ struct LCSettingsView: View {
                     .buttonStyle(.borderless)
                 }
             }
+            // 3.8.639（UI 打磨）：证书到期提醒说明行——F1 到期前 3 天 /
+            // 1 天 / 当天 09:00 各推一条；纯说明行，无开关、无新 key，
+            // 权限状态看上面权限行，不另读状态。
+            HStack {
+                LCSettingsIcon(systemName: "bell.badge", color: .orange)
+                Text("证书到期提醒")
+                Spacer()
+                Text("到期前 3 天 / 1 天 / 当天 09:00")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             .onAppear { refreshNotificationAuth() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 refreshNotificationAuth()

@@ -434,6 +434,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             self?.openSettings()
         })
 
+        // 3.8.639（F3）：复制 Bundle ID——排续签/双图标问题时常要报
+        // Bundle ID，原来只能进设置页长按选中信息区那行文本复制；
+        // 标题硬编码中文，沿用本菜单“隐藏/锁定/恢复显示”硬编码先例。
+        sectionChildren.append(UIAction(
+            title: "复制 Bundle ID",
+            image: UIImage(systemName: "doc.on.doc")
+        ) { _ in
+            UIPasteboard.general.string = appInfo.bundleIdentifier() ?? ""
+        })
+
         // 3.8.431 设置低 #10：网格菜单有隐藏/锁定，列表菜单没有，
         // 两边补齐（调的都是 LCAppModel 已有方法，与网格同款）。
         sectionChildren.append(UIAction(

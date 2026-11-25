@@ -118,10 +118,14 @@ static BOOL CZFShouldActivate(void) {
     NSString *listPath = [dir stringByAppendingPathComponent:@"CZFKeepAliveApps.txt"];
     NSString *content = [NSString stringWithContentsOfFile:listPath encoding:NSUTF8StringEncoding error:nil];
     if (!content) return YES;
+    // 3.8.639（B2）：白名单条目改按实例稳定键（安装文件夹名，如
+    // Xianyu.app，换队重签不改）；旧 bid 条目也认（未迁移的旧名单
+    // 不断保），迁移由设置页首次读时做。
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+    NSString *folderName = [[[NSBundle mainBundle] bundlePath] lastPathComponent] ?: @"";
     for (NSString *line in [content componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
         NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (trimmed.length && [trimmed isEqualToString:bundleId]) return YES;
+        if (trimmed.length && ([trimmed isEqualToString:bundleId] || [trimmed isEqualToString:folderName])) return YES;
     }
     return NO;
 }

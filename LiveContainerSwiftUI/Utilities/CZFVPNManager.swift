@@ -1081,14 +1081,36 @@ public final class CZFVPNManager {
         return DispatchQueue.main.sync { appInfo.bundleIdentifier() }
     }
 
+    /// 3.8.639（B2）：三枚 VPN 键改按实例稳定键（`relativeBundlePath`，
+    /// 换队重签不改）存，取不到时回落 `bundleIdentifier()`；首次读
+    /// 到旧 bid 键有值、新键无值时搬过去并删旧键（重签后旧 bid 已
+    /// 不可知，丢了的追不回来）。`relativeBundlePath` 是扫描时写死
+    /// 的存储属性，不读 `_info`，任意线程可读；回落的 bid 只在
+    /// `czfBundleId` 里取（后台经 `main.sync`，与原来同款；绝不在
+    /// 持 `vpnCoreLock` 时调，与 `czfBundleId` 同一约束）。
+    private static func czfKey(_ prefix: String, for appInfo: LCAppInfo) -> String? {
+        let bid = czfBundleId(for: appInfo)
+        let stable: String?
+        if let path = appInfo.relativeBundlePath, !path.isEmpty {
+            stable = path
+        } else {
+            stable = bid
+        }
+        guard let stable, !stable.isEmpty else { return nil }
+        if let bid, bid != stable {
+            czfMigrateDefaultsKey(prefix: prefix, stableKey: stable, oldBid: bid)
+        }
+        return prefix + stable
+    }
+
     public static func isEnabled(for appInfo: LCAppInfo) -> Bool {
-        guard let bundleId = czfBundleId(for: appInfo) else { return false }
-        return UserDefaults.standard.bool(forKey: enabledKeyPrefix + bundleId)
+        guard let key = czfKey(enabledKeyPrefix, for: appInfo) else { return false }
+        return UserDefaults.standard.bool(forKey: key)
     }
 
     public static func setEnabled(_ enabled: Bool, for appInfo: LCAppInfo) {
-        guard let bundleId = czfBundleId(for: appInfo) else { return }
-        UserDefaults.standard.set(enabled, forKey: enabledKeyPrefix + bundleId)
+        guard let key = czfKey(enabledKeyPrefix, for: appInfo) else { return }
+        UserDefaults.standard.set(enabled, forKey: key)
         // 养号锁定（1）：刚打开 VPN 且还没钉过节点、也没亲手选
         // 过跟随全局时，立刻把当前全局节点钉成这个 App 的专属
         // 节点；以后全局怎么换都不动它。已经钉过的、亲手选过
@@ -1107,8 +1129,8 @@ public final class CZFVPNManager {
 
     // 用户是否在 App 设置里亲手选过"跟随全局"（缺省 false）
     public static func isFollowGlobalExplicit(for appInfo: LCAppInfo) -> Bool {
-        guard let bundleId = czfBundleId(for: appInfo) else { return false }
-        return UserDefaults.standard.bool(forKey: followGlobalKeyPrefix + bundleId)
+        guard let key = czfKey(followGlobalKeyPrefix, for: appInfo) else { return false }
+        return UserDefaults.standard.bool(forKey: key)
     }
 
     // 按 App 指定节点：存链接本身而不是下标，节点列表增删、
@@ -1117,19 +1139,20 @@ public final class CZFVPNManager {
     // App 的 IP 归属；删了菜单项就悄悄换 IP，正是养号最忌
     // 讳的。亲手选跟随全局时才回落全局
     public static func nodeOverride(for appInfo: LCAppInfo) -> String? {
-        guard let bundleId = czfBundleId(for: appInfo) else { return nil }
-        let saved = UserDefaults.standard.string(forKey: nodeOverrideKeyPrefix + bundleId)
+        guard let key = czfKey(nodeOverrideKeyPrefix, for: appInfo) else { return nil }
+        let saved = UserDefaults.standard.string(forKey: key)
         return (saved?.isEmpty == false) ? saved : nil
     }
 
     public static func setNodeOverride(_ link: String?, for appInfo: LCAppInfo) {
-        guard let bundleId = czfBundleId(for: appInfo) else { return }
+        guard let overrideKey = czfKey(nodeOverrideKeyPrefix, for: appInfo),
+              let followKey = czfKey(followGlobalKeyPrefix, for: appInfo) else { return }
         if let link, !link.isEmpty {
-            UserDefaults.standard.set(link, forKey: nodeOverrideKeyPrefix + bundleId)
-            UserDefaults.standard.removeObject(forKey: followGlobalKeyPrefix + bundleId)
+            UserDefaults.standard.set(link, forKey: overrideKey)
+            UserDefaults.standard.removeObject(forKey: followKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: nodeOverrideKeyPrefix + bundleId)
-            UserDefaults.standard.set(true, forKey: followGlobalKeyPrefix + bundleId)
+            UserDefaults.standard.removeObject(forKey: overrideKey)
+            UserDefaults.standard.set(true, forKey: followKey)
         }
         // L143-1：配置变了就刷设置备份（见 refreshSettingsBackup）。
         shared.refreshSettingsBackup()
@@ -1137,11 +1160,18 @@ public final class CZFVPNManager {
 
     // 3.8.900（L585-A2）：删 App 时清掉它的三枚 VPN 键——开关/钉死/跟随全按 bundleId 存，删 App 只删包、容器、钥匙串、备份，从不清这三枚；钉死键残留时 czfIsPinnedLiveLink 永远认已删 App 的节点还钉着，被动跟随（订阅刷新/删节点/恢复）再也不敢挪走核心，界面显示的全局在用节点与核心实际跑的节点对不上，节点死后 App 断网/直连却无处可查。清掉后备份也一并刷新，不让恢复把幽灵钉死带回来。
     public static func clearVPNSettings(for appInfo: LCAppInfo) {
-        guard let bundleId = czfBundleId(for: appInfo) else { return }
         let defaults = UserDefaults.standard
-        defaults.removeObject(forKey: enabledKeyPrefix + bundleId)
-        defaults.removeObject(forKey: nodeOverrideKeyPrefix + bundleId)
-        defaults.removeObject(forKey: followGlobalKeyPrefix + bundleId)
+        // 新键与旧 bid 键都清：删 App 时旧键残留会让钉死键继续认
+        // 已删 App 的节点（L585-A2 同款）；稳定键是删 App 的主体。
+        if let key = czfKey(enabledKeyPrefix, for: appInfo) { defaults.removeObject(forKey: key) }
+        if let key = czfKey(nodeOverrideKeyPrefix, for: appInfo) { defaults.removeObject(forKey: key) }
+        if let key = czfKey(followGlobalKeyPrefix, for: appInfo) { defaults.removeObject(forKey: key) }
+        if let bid = czfBundleId(for: appInfo), !bid.isEmpty,
+           bid != appInfo.relativeBundlePath {
+            defaults.removeObject(forKey: enabledKeyPrefix + bid)
+            defaults.removeObject(forKey: nodeOverrideKeyPrefix + bid)
+            defaults.removeObject(forKey: followGlobalKeyPrefix + bid)
+        }
         shared.refreshSettingsBackup()
     }
 

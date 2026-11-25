@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import UserNotifications
 
 // 签名剩余时间：读各 App 包里 embedded.mobileprovision 的
 // ExpirationDate（Side 同款字节扫描法：CMS 包里找 plist，
@@ -122,4 +123,71 @@ enum CZFSignatureExpiryReader {
         return nil
     }
 
+}
+
+// 3.8.639（F1）：证书到期前本地提醒——上一轮 F1 只在列表里
+// 显示剩余天数，不打开 App 就看不到；用户证书到期是反复踩的
+// 坑（解剖自我 2026-12-02 到期，全靠外部 cron 提醒），应用内
+// 提醒覆盖全部 App。只提醒，不续签：不恢复设置页已删的续签区，
+// 不加任何续签动作。
+// 口径：到期前 3 天 / 1 天 / 当天 09:00 各推一条；已过的档位不补
+// 推（当天 09:00 已过就不排当天的），已过期不排。identifier 用
+// 确定性 `CZFExpiry-<bundlePath>-<3|1|0>`，每次刷新先按前缀清
+// 掉该 App 的旧待发再重排（重签后续期、旧提醒自动作废）。
+// 仅 `.authorized` 才排；`.notDetermined` 时调一次
+// `requestAuthorization`（设置页已有申请入口，通知区权限行）。
+// UserNotifications 全版本可用，部署目标 iOS 15 无需 #available。
+// 文案沿用 `notifyBatchDone` 硬编码中文先例，0 新 key。
+enum CZFExpiryReminder {
+    private static let thresholds = [3, 1, 0]
+
+    static func schedule(for items: [CZFSignatureExpiry]) {
+        guard !items.isEmpty else { return }
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized:
+                scheduleAuthorized(items, center: center)
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    guard granted else { return }
+                    scheduleAuthorized(items, center: center)
+                }
+            default:
+                return
+            }
+        }
+    }
+
+    private static func scheduleAuthorized(_ items: [CZFSignatureExpiry], center: UNUserNotificationCenter) {
+        let now = Date()
+        let calendar = Calendar.current
+        // 先清旧待发再重排：同一 App 的三档 identifier 前缀固定，
+        // 清掉重排才不会让重签前的旧提醒留着误报。
+        center.getPendingNotificationRequests { pending in
+            var removeIDs: [String] = []
+            var adds: [UNNotificationRequest] = []
+            for item in items {
+                let prefix = "CZFExpiry-\(item.bundlePath)-"
+                removeIDs += pending.map(\.identifier).filter { $0.hasPrefix(prefix) }
+                for daysBefore in thresholds {
+                    guard let fireDate = calendar.date(byAdding: .day, value: -daysBefore, to: calendar.startOfDay(for: item.expiryDate))?.addingTimeInterval(9 * 60 * 60),
+                          fireDate > now else { continue }
+                    let content = UNMutableNotificationContent()
+                    content.title = "签名快到期"
+                    content.body = daysBefore == 0 ? "\(item.name) 今天到期" : "\(item.name) 还有 \(daysBefore) 天到期"
+                    content.sound = .default
+                    let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: fireDate)
+                    let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+                    adds.append(UNNotificationRequest(identifier: "\(prefix)\(daysBefore)", content: content, trigger: trigger))
+                }
+            }
+            if !removeIDs.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: removeIDs)
+            }
+            for request in adds {
+                center.add(request)
+            }
+        }
+    }
 }

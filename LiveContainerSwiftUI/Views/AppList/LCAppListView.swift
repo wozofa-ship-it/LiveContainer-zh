@@ -965,6 +965,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         let entries = CZFSignatureExpiryReader.snapshotEntries(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps)
         Task.detached(priority: .utility) {
             let loaded = CZFSignatureExpiryReader.loadAll(entries: entries)
+            // 3.8.639（F1）：到期提醒排期——每次刷新重排（重签后续期、
+            // 旧提醒在排期里按前缀清掉重排，不会误报旧日期）。
+            CZFExpiryReminder.schedule(for: loaded)
             var days: [String: Int] = [:]
             for item in loaded { days[item.bundlePath] = item.daysLeft }
             await MainActor.run { czfExpiryDays = days }
@@ -3273,7 +3276,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // enable SDK version spoof by defalut
             finalNewApp.spoofSDKVersion = true
         }
-        finalNewApp.installationDate = Date.now
+        // 3.8.639（B3）：覆盖更新沿用被替换实例的安装日期——原来无条件
+        // 写 `Date.now`，源里更新一个已装 App 后设置页“安装日期”变成
+        // 当天，按安装日期排序时该 App 也跳到最前。旧值缺失时才写当天
+        // （全新安装走 else，仍写 `Date.now`）；已重置的旧数据无法追溯。
+        if let appToReplace {
+            finalNewApp.installationDate = appToReplace.appInfo.installationDate ?? Date.now
+        } else {
+            finalNewApp.installationDate = Date.now
+        }
         
         DispatchQueue.main.async {
             if let appToReplace {

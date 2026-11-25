@@ -73,15 +73,19 @@ struct LCAppSettingsView: View {
         self._model = ObservedObject(wrappedValue: model)
     }
 
-    // 定时最小化打开：开关与时间按 bundleIdentifier 存 UserDefaults，
-    // 由 MultitaskDockManager 的轮询到点执行（键名前缀 CZFSchedMin）。
+    // 定时最小化打开：开关与时间按实例稳定键（`relativeBundlePath`，
+    // 3.8.639 B2）存 UserDefaults，换队重签不丢；由 MultitaskDockManager
+    // 的轮询到点执行（键名前缀 CZFSchedMin）。
     private var schedMinBundleId: String {
-        appInfo.bundleIdentifier() ?? ""
+        czfStableSettingsKey(for: appInfo)
     }
 
     private func loadSchedMinSettings() {
         let defaults = UserDefaults.standard
-        let bid = schedMinBundleId
+        // 3.8.639（B2）：`czfSchedMinKey` 返稳定键并顺带把旧 bid 键的
+        // 值搬过去（Enabled/Minutes/LastDate 三枚；重签后旧 bid 已
+        // 不可知，丢了的追不回来）。
+        let bid = czfSchedMinKey(for: appInfo)
         schedMinEnabled = defaults.bool(forKey: "CZFSchedMinEnabled-\(bid)")
         let minutes: Int
         if defaults.object(forKey: "CZFSchedMinMinutes-\(bid)") == nil {
@@ -126,36 +130,47 @@ struct LCAppSettingsView: View {
     }
 
     private func loadKeepAliveSetting() {
-        let bid = appInfo.bundleIdentifier() ?? ""
+        // 3.8.639（B2）：白名单条目改按实例稳定键（`relativeBundlePath`，
+        // 换队重签不改）；读时旧 bid 条目也认（未迁移的旧名单不断保），
+        // 认到旧条目就顺带迁成稳定键写回去。
+        let key = czfStableSettingsKey(for: appInfo)
+        let oldBid = appInfo.bundleIdentifier() ?? ""
         if let list = readKeepAliveList() {
-            keepAliveOn = list.contains(bid)
+            keepAliveOn = list.contains(key) || (!oldBid.isEmpty && oldBid != key && list.contains(oldBid))
+            if !key.isEmpty, !list.contains(key), !oldBid.isEmpty, oldBid != key, list.contains(oldBid) {
+                try? writeKeepAliveList(list.map { $0 == oldBid ? key : $0 })
+            }
         } else {
             keepAliveOn = true
         }
     }
 
     private func setKeepAlive(_ on: Bool) {
-        let bid = appInfo.bundleIdentifier() ?? ""
-        guard !bid.isEmpty else { return }
+        let key = czfStableSettingsKey(for: appInfo)
+        guard !key.isEmpty else { return }
+        let oldBid = appInfo.bundleIdentifier() ?? ""
         do {
             if on {
                 if var list = readKeepAliveList() {
-                    if !list.contains(bid) {
-                        list.append(bid)
+                    if !list.contains(key) {
+                        if !oldBid.isEmpty, oldBid != key {
+                            list.removeAll { $0 == oldBid }
+                        }
+                        list.append(key)
                         try writeKeepAliveList(list)
                     }
                 }
                 // 文件不存在 = 本来就全保，不用写
             } else {
                 if var list = readKeepAliveList() {
-                    list.removeAll { $0 == bid }
+                    list.removeAll { $0 == key || (!oldBid.isEmpty && oldBid != key && $0 == oldBid) }
                     try writeKeepAliveList(list)
                 } else {
                     // 首次关：用全部 App 名单种子，只去掉这个 App。
                     // 只装 1 个 App 时 all 为空也照写：空文件就是合法的
                     // “无人保活”态（readKeepAliveList 返 []），原来 guard
                     // 拒掉空名单，开关关不掉。
-                    let all = (sharedModel.apps + sharedModel.hiddenApps).compactMap { $0.appInfo.bundleIdentifier() }.filter { !$0.isEmpty && $0 != bid }
+                    let all = (sharedModel.apps + sharedModel.hiddenApps).map { czfStableSettingsKey(for: $0.appInfo) }.filter { !$0.isEmpty && $0 != key }
                     try writeKeepAliveList(all)
                 }
             }

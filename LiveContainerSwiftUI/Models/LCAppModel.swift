@@ -101,7 +101,18 @@ class LCAppModel: ObservableObject, Hashable {
     @available(iOS 16.0, *)
     static func czfIsRunningInDock(app: LCAppModel) -> Bool {
         guard let myPath = app.appInfo.relativeBundlePath, !myPath.isEmpty else { return false }
-        return MultitaskDockManager.shared.apps.contains { $0.appInfo?.relativeBundlePath == myPath }
+        if MultitaskDockManager.shared.apps.contains { $0.appInfo?.relativeBundlePath == myPath } { return true }
+        // 3.8.639（B1）：原生窗口模式下 App 不进坞表（`addRunningAppWithInfo`
+        // 顶上的 `isDockEnabled()` 守卫只放虚拟窗），绿点永远不亮；切回
+        // 虚拟窗即正常。坞本身是虚拟窗专属，不改坞表，只修绿点判据——
+        // 坞表查不到时回落查客注册表 `MultitaskManager.isUsing`（与窗口
+        // 模式无关，`AppSceneViewController.m:139/:398` 注册/注销；口径
+        // 照抄 L594-A #2：本 App 的 `dataUUID` + 全部 `uiContainers`
+        // 的 `folderName`，任一命中即在跑）。`MultitaskManager` 无
+        // `@available` 标注，`isUsing` 自带 `NSLock`，任意线程可调。
+        var czfUUIDs = Set(app.uiContainers.map { $0.folderName })
+        if let uuid = app.appInfo.dataUUID { czfUUIDs.insert(uuid) }
+        return czfUUIDs.contains { MultitaskManager.isUsing(container: $0) }
     }
 
     /// F-10 回落：当前选中容器下没找到在跑窗口时，找本条目别的容器里
