@@ -21,6 +21,10 @@ final class LCAppBannerRootView: UIView {
     private let iconImageView = UIImageView()
     private let nameLabel = UILabel()
     private let versionLabel = UILabel()
+    // F1（3.8.635）：签名剩余天数角标——版本行旁的第二段文字。
+    private let expiryLabel = UILabel()
+    // F3（3.8.635）：运行中绿点——runControl 右上角。
+    private let runningDot = UIView()
     private let remarkLabel = UILabel()
     private let containerLabel = UILabel()
     private let sharedBadge = LCAppBannerBadgeView(symbolName: "arrowshape.turn.up.left.fill")
@@ -29,6 +33,8 @@ final class LCAppBannerRootView: UIView {
     private let bit32Badge = LCAppBannerBadgeView(text: "32")
     private let nameSpacer = UIView()
     private let nameStack = UIStackView()
+    // F1（3.8.635）：版本行——版本 + 剩余天数并排。
+    private let versionStack = UIStackView()
     private let detailStack = UIStackView()
 
     // O-13：最近一次 update 的图标归属键（bundlePath+明暗）；
@@ -69,6 +75,7 @@ final class LCAppBannerRootView: UIView {
 
         configureLabel(nameLabel, font: .systemFont(ofSize: 16, weight: .bold))
         configureLabel(versionLabel, font: .systemFont(ofSize: 12))
+        configureLabel(expiryLabel, font: .systemFont(ofSize: 12))
         configureLabel(remarkLabel, font: .systemFont(ofSize: 10))
         configureLabel(containerLabel, font: .systemFont(ofSize: 8))
 
@@ -87,23 +94,47 @@ final class LCAppBannerRootView: UIView {
         nameStack.addArrangedSubview(lockBadge)
         nameStack.addArrangedSubview(nameSpacer)
 
+        // F1（3.8.635）：版本行——版本 + 剩余天数并排；版本先截断，
+        // 角标不被挤掉（expiryLabel 横向抗压 required）。
+        versionStack.translatesAutoresizingMaskIntoConstraints = false
+        versionStack.axis = .horizontal
+        versionStack.alignment = .center
+        versionStack.spacing = 6
+        versionStack.addArrangedSubview(versionLabel)
+        versionStack.addArrangedSubview(expiryLabel)
+        versionLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        versionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        expiryLabel.setContentHuggingPriority(.required, for: .horizontal)
+        expiryLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         detailStack.translatesAutoresizingMaskIntoConstraints = false
         detailStack.axis = .vertical
         detailStack.alignment = .fill
         detailStack.distribution = .fill
         detailStack.spacing = 1
         detailStack.addArrangedSubview(nameStack)
-        detailStack.addArrangedSubview(versionLabel)
+        detailStack.addArrangedSubview(versionStack)
         detailStack.addArrangedSubview(remarkLabel)
         detailStack.addArrangedSubview(containerLabel)
         detailStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         detailStack.isAccessibilityElement = true
+
+        // F3（3.8.635）：运行中绿点——runControl 右上角 12pt；
+        // 不接手势，点按落在下面的 runControl 上（本来就先带回
+        // 已有窗口）。白圈描边在 update 里按当前 trait 取色。
+        runningDot.translatesAutoresizingMaskIntoConstraints = false
+        runningDot.backgroundColor = .systemGreen
+        runningDot.layer.cornerRadius = 6
+        runningDot.layer.borderWidth = 2
+        runningDot.isHidden = true
+        runningDot.isUserInteractionEnabled = false
 
         runControl.translatesAutoresizingMaskIntoConstraints = false
         addSubview(visualBackgroundView)
         addSubview(iconImageView)
         addSubview(detailStack)
         addSubview(runControl)
+        addSubview(runningDot)
 
         // 面板胶囊同款次级按钮：只在 16+ 建，16 以下不进层级、
         // 不占布局，卡片与原来完全一致。
@@ -135,6 +166,13 @@ final class LCAppBannerRootView: UIView {
             runControl.centerYAnchor.constraint(equalTo: centerYAnchor),
             runControl.widthAnchor.constraint(equalToConstant: 70),
             runControl.heightAnchor.constraint(equalToConstant: 32)
+        ])
+
+        NSLayoutConstraint.activate([
+            runningDot.widthAnchor.constraint(equalToConstant: 12),
+            runningDot.heightAnchor.constraint(equalToConstant: 12),
+            runningDot.trailingAnchor.constraint(equalTo: runControl.trailingAnchor, constant: 2),
+            runningDot.topAnchor.constraint(equalTo: runControl.topAnchor, constant: -2),
         ])
 
         // 次级按钮链：名字列先让（detailStack 横向抗压本来就是
@@ -182,12 +220,21 @@ final class LCAppBannerRootView: UIView {
         label.isAccessibilityElement = false
     }
 
+    // F3（3.8.635）：坞表真值。MultitaskDockManager 是 16+ 类型，
+    // 见 LCAppModel.czfIsRunningInDock 注释；16 以下无多任务、无角标。
+    private func czfIsRunning(model: LCAppModel) -> Bool {
+        guard #available(iOS 16.0, *) else { return false }
+        return LCAppModel.czfIsRunningInDock(app: model)
+    }
+
     func update(
         model: LCAppModel,
         appInfo: LCAppInfo,
         dynamicColors: Bool,
         darkModeIcon: Bool,
-        traitCollection: UITraitCollection
+        traitCollection: UITraitCollection,
+        // F1（3.8.635）：签名剩余天数（nil = 没读到，不显示）。
+        expiryDaysLeft: Int? = nil
     ) {
         // O-13：update 只同步读内存/磁盘缓存（快路径）；未命中
         // 才后台生成，生成完重跑一次 update（此时内存缓存已
@@ -216,6 +263,22 @@ final class LCAppBannerRootView: UIView {
         // （容器在 App 设置里看和改）；备注是用户自己写的内容，保留
         versionLabel.text = "\(model.version)"
         versionLabel.textColor = textColor
+        // F1（3.8.635）：签名剩余天数角标——版本行旁；读不到
+        // （无 mobileprovision / 未读到）不显示；≤7 天或已过期变红。
+        // 文案走 CZFSignatureExpiry.label 同一份。
+        if let daysLeft = expiryDaysLeft {
+            expiryLabel.text = CZFSignatureExpiry.label(forDaysLeft: daysLeft)
+            expiryLabel.textColor = daysLeft <= 7 ? .systemRed : textColor.withAlphaComponent(0.8)
+            expiryLabel.isHidden = false
+        } else {
+            expiryLabel.isHidden = true
+        }
+        // F3（3.8.635）：运行中绿点——runControl 右上角；
+        // VC 已订阅坞表 $apps，窗口开关即 refreshView，点 ▶
+        // 本来就先带回已有窗口（见下面 runControl.update 注释）。
+        // 白圈描边按当前深浅取色（CGColor 是快照，深浅切换时重取）。
+        runningDot.layer.borderColor = UIColor.systemBackground.resolvedColor(with: traitCollection).cgColor
+        runningDot.isHidden = !czfIsRunning(model: model)
         remarkLabel.text = model.uiRemark
         remarkLabel.textColor = textColor.withAlphaComponent(0.8)
         remarkLabel.isHidden = model.uiRemark.isEmpty

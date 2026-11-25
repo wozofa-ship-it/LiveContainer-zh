@@ -1947,23 +1947,28 @@ public final class CZFVPNManager {
         // 目录不存在时 access/error 文件打不开。建失败也不拦
         // 启动（try?，失败时 Xray 侧写日志失败而已）。
         try? FileManager.default.createDirectory(at: Self.xrayLogDirectory, withIntermediateDirectories: true)
-        // 2026-11-24（发热 H-5）：access.log 按大小轮转——
-        // 每连接一行、无上限，长期刷视频会越写越大；起核前
-        // （旧核心已在上面停掉、无写者）超过 1MB 就挪到
-        // access.log.1，只保留 1 份旧的。error.log 在 warning
-        // 级下量很小，不轮转。
-        Self.czfRotateXrayAccessLogIfNeeded()
+        // 3.8.635（发热 H1）：access.log 不再落盘——Xray 的
+        // access 字段不受 loglevel 控制，每条经核心的 TCP 连接
+        // 写一行，刷视频时持续建连 = 持续磁盘写；起核前轮转
+        // 只能封顶，不能止血。配表里删 access 键（下面 log 字典），
+        // Xray 即不写 access 日志。旧的 access.log 仍留在
+        // Files 里，不删（用户自己的排障记录）。
+        // error.log 在起核前同款轮转（>1MB → .1，只留 1 份旧的）：
+        // 量小但无上限，起核前（旧核心已停、文件没人写着）挪走安全。
+        Self.czfRotateLogIfNeeded(Self.xrayErrorLogURL)
 
         let config: [String: Any] = [
-            // O-7：落盘 access/error 到 Documents/xray/（原来
+            // O-7：落盘 error 到 Documents/xray/（原来
             // 只 warning 且不写文件，节点断流时无据可查）。
             // 2026-11-24（发热 H-5）：loglevel info → warning，
-            // 降持续写盘量；access 日志按连接记（只认 access
-            // 字段，与 loglevel 无关），error 只留 warning 及
-            // 以上。sing-box 侧同款在 CZFSingBoxConfig.configJSON
-            // 里（level warning + output →
-            // Documents/singbox/sing-box.log）。
-            "log": ["loglevel": "warning", "access": Self.xrayAccessLogURL.path, "error": Self.xrayErrorLogURL.path],
+            // 降持续写盘量；error 只留 warning 及以上。
+            // 3.8.635（发热 H1）：access 键已删——access 日志
+            // 按连接记（只认 access 字段，与 loglevel 无关），
+            // 每连接一行持续写盘；App 内根本没人读它（coreLogTail
+            // 只读 error 日志），不配即不写。sing-box 侧同款在
+            // CZFSingBoxConfig.configJSON 里（level warning +
+            // output → Documents/singbox/sing-box.log）。
+            "log": ["loglevel": "warning", "error": Self.xrayErrorLogURL.path],
             "inbounds": [
                 [
                     "tag": "socks-in",
@@ -2029,6 +2034,10 @@ public final class CZFVPNManager {
     // 跟随全局的 App 维持既有 fail-open——失败本身绝不
     // 偷偷改成直连或改标记。
     private func startSingBox(withLink link: String) -> Bool {
+        // 3.8.635（发热 H1）：起核前轮转 sing-box.log（>1MB → .1，
+        // 只留 1 份旧的）——旧核心已停、文件没人写着，挪走安全；
+        // 与 Xray 路的 error.log 轮转同款。
+        Self.czfRotateLogIfNeeded(Self.singBoxLogURL)
         // B-3：链接与上次成功启动的相同，直接复用已校验过的
         // 配置 JSON 并跳过 CheckConfig（同一份 JSON 校验结果
         // 确定，重复生成 + 全量校验是纯浪费）；链接变了或无
@@ -2126,7 +2135,17 @@ public final class CZFVPNManager {
             self?.rotateCheck()
         }
         pendingRotateWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: work)
+        // 3.8.635（发热 H3）：后台 5 分钟一轮、前台 30 秒——
+        // 原来无任何前后台分支、asyncAfter +30 无 tolerance，
+        // 每 30 秒准时唤醒；rotateCheck 里先重排下一轮、才拦
+        // 后台探针，后台每轮仍要读一次插件统计文件；保活默认
+        // 开让宿主后台常驻，30 秒一轮整夜跑。统计路用累计增量，
+        // 5 分钟 cadence 下 failedDelta >= 3 判据照常工作；
+        // 退避（120/300 秒）与轮换语义不动。本函数与 rotateCheck
+        // 同在主队列上调（pendingRotateWork 本来就无锁），读
+        // applicationState 安全。
+        let interval: TimeInterval = UIApplication.shared.applicationState == .background ? 300 : 30
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: work)
     }
 
     private func cancelRotateCheck() {
@@ -3804,9 +3823,10 @@ public final class CZFVPNManager {
     }
 
     /// 3.8.900（L568-1）：统计文件 90 秒内写过才算新鲜——插件只在
-    /// 有网络动作时写统计（节流 1.5 秒，见 CZFProxy.m 的
-    /// CZFWriteStats 调用点）；90 秒（三个巡检周期）一个字节没写，
-    /// 客进程要么已死、要么已挂起、要么一直没流量，文件里的数不
+    /// 有网络动作时写统计（节流 10 秒，见 CZFProxy.m 的
+    /// CZFWriteStats 调用点；3.8.635 发热 H2 由 1.5 秒提到 10 秒）；
+    /// 90 秒（三个巡检周期）一个字节没写，客进程要么已死、要么已挂起、
+    /// 要么一直没流量，文件里的数不
     /// 是活证据，不能拿它拦轮换。只给 rotateCheck 用，设置页的
     /// 统计显示一字不动（陈旧数照常显示，只是不再当轮换判据）。
     private static func czfProxyStatsFresh(for appInfo: LCAppInfo) -> Bool {
@@ -3852,19 +3872,20 @@ public final class CZFVPNManager {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("xray", isDirectory: true)
     }
-    public static var xrayAccessLogURL: URL { xrayLogDirectory.appendingPathComponent("access.log") }
     public static var xrayErrorLogURL: URL { xrayLogDirectory.appendingPathComponent("error.log") }
 
-    /// access.log 按大小轮转（2026-11-24 发热 H-5）：超过 1MB 就
-    /// 挪到 access.log.1（旧的 .1 先删，只保留 1 份）。只在起核
-    /// 前调——旧核心已停、文件没人写着；运行中不碰（Xray 正
-    /// 写着，挪了它还会继续往旧句柄写）。
-    private static func czfRotateXrayAccessLogIfNeeded() {
-        let url = xrayAccessLogURL
+    /// 日志按大小轮转（3.8.635 发热 H1）：超过 1MB 就挪到
+    /// <.1>（旧的 .1 先删，只保留 1 份）。只在起核前调——
+    /// 旧核心已停、文件没人写着；运行中不碰（核心正写着，
+    /// 挪了它还会继续往旧句柄写）。
+    /// 旧名 czfRotateXrayAccessLogIfNeeded：access.log 已不再
+    /// 落盘（配表删 access 键），旧函数随之删掉，改走这份
+    /// 通用版（sing-box.log 与 error.log 用）。
+    private static func czfRotateLogIfNeeded(_ url: URL) {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? Int,
               size > 1 * 1024 * 1024 else { return }
-        let old = xrayLogDirectory.appendingPathComponent("access.log.1")
+        let old = url.deletingPathExtension().appendingPathExtension("\(url.pathExtension).1")
         try? FileManager.default.removeItem(at: old)
         try? FileManager.default.moveItem(at: url, to: old)
     }
@@ -3872,12 +3893,13 @@ public final class CZFVPNManager {
     /// 读核心日志尾部（VPN 页“查看核心日志”只读展示用）：
     /// sing-box 日志 + Xray error 日志各取尾部 maxLinesPerFile
     /// 行（默认 60 行/文件），逐行按探针同款规则脱敏（见
-    /// sanitizeCoreLogLine）。Xray access 日志不展示——每行
-    /// 都是连接记录、几乎全是目标地址，脱敏后剩不下可读内容，
-    /// 文件仍落盘，供 Files 里查。文件不存在（核心还没跑过）
-    /// 时该段写“（无日志文件）”。只读文件尾部 64KB，不整
-    /// 文件读进内存；access.log 在起核前按大小轮转（>1MB → access.log.1，
-    /// 只留 1 份旧的，2026-11-24 发热 H-5），error.log 与 sing-box.log 不轮转。
+    /// sanitizeCoreLogLine）。Xray access 日志不展示也不落盘——
+    /// 每行都是连接记录、几乎全是目标地址，脱敏后剩不下可读内容，
+    /// App 内根本没人读它（3.8.635 发热 H1：配表删 access 键，
+    /// Xray 即不写 access 日志；旧文件仍留在 Files 里，不删）。
+    /// 文件不存在（核心还没跑过）时该段写“（无日志文件）”。
+    /// 只读文件尾部 64KB，不整文件读进内存；sing-box.log 与
+    /// error.log 在起核前按大小轮转（>1MB → .1，只留 1 份旧的）。
     public static func coreLogTail(maxLinesPerFile: Int = 60) -> String {
         let sections: [(title: String, url: URL)] = [
             ("sing-box", singBoxLogURL),

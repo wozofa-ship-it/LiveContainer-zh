@@ -89,6 +89,21 @@ class LCAppModel: ObservableObject, Hashable {
         return entry
     }
 
+    /// F3（3.8.635）：本条目任一容器是否在坞里有窗口（运行中角标真值）。
+    /// isAppRunning 不能当信号：它只在启动过程中为真（runApp 里置真、
+    /// defer 复位），启动完即 false。坞表是唯一真值。
+    /// 匹配口径与 czfOwnedDockEntry 同款（relativeBundlePath），但不
+    /// 限定容器——任一容器在跑都算运行中。
+    /// MultitaskDockManager 带 @available(iOS 16.0, *)（MultitaskDockView.swift:165），
+    /// 16 以下编译期就没有这个符号，直接引用会红（270 构建 #314 同款红字）；
+    /// 本函数也标 @available，调用方用 if #available 包（或在 @available
+    /// 上下文里调）；16 以下无多任务、无角标，自然缺席。
+    @available(iOS 16.0, *)
+    static func czfIsRunningInDock(app: LCAppModel) -> Bool {
+        guard let myPath = app.appInfo.relativeBundlePath, !myPath.isEmpty else { return false }
+        return MultitaskDockManager.shared.apps.contains { $0.appInfo?.relativeBundlePath == myPath }
+    }
+
     /// F-10 回落：当前选中容器下没找到在跑窗口时，找本条目别的容器里
     /// 唯一在跑的窗口——App 在跑时用户切了容器，当前 uuid 已不是在跑
     /// 窗口的号；最小化/小窗口再按当前 uuid 查就查不到，会新起一个窗口

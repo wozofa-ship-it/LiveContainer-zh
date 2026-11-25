@@ -12,6 +12,8 @@ struct LCAppBannerConfiguration {
     let model: LCAppModel
     let dynamicColors: Bool
     let darkModeIcon: Bool
+    // F1（3.8.635）：签名剩余天数（nil = 没读到，不显示）。
+    let expiryDaysLeft: Int?
 }
 
 
@@ -101,13 +103,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     func update(
         model: LCAppModel,
         dynamicColors: Bool,
-        darkModeIcon: Bool
+        darkModeIcon: Bool,
+        // F1（3.8.635）：签名剩余天数（nil = 没读到，不显示）。
+        expiryDaysLeft: Int? = nil
     ) {
         loadViewIfNeeded()
         configuration = LCAppBannerConfiguration(
             model: model,
             dynamicColors: dynamicColors,
-            darkModeIcon: darkModeIcon
+            darkModeIcon: darkModeIcon,
+            expiryDaysLeft: expiryDaysLeft
         )
         refreshView()
         // 3.8.313：记一笔“待布局后重刷”（见 viewDidLayoutSubviews）。
@@ -139,7 +144,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             appInfo: configuration.model.appInfo,
             dynamicColors: configuration.dynamicColors,
             darkModeIcon: configuration.darkModeIcon,
-            traitCollection: traitCollection
+            traitCollection: traitCollection,
+            expiryDaysLeft: configuration.expiryDaysLeft
         )
     }
 

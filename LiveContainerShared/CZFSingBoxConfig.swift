@@ -365,7 +365,8 @@ public enum CZFSingBoxConfig {
     /// level 由 info 降回 warning，降持续写盘量——sing-box
     /// 的连接日志也受 level 控，warning 下不再逐连接记，
     /// 只留警告与错误；Xray 侧 access.log 不受 loglevel
-    /// 影响，仍逐连接记）；
+    /// 影响（3.8.635 发热 H1：配表直接删 access 键，
+    /// Xray 即不写 access 日志）；
     /// dns.servers=[{tag:local,type:local}] + final=local；
     /// inbounds：mixed（listen 127.0.0.1，listen_port=socksPort），
     /// httpPort 非 nil 时再加一个 http 入站（listen_port=httpPort）；

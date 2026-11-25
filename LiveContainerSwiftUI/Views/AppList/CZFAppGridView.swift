@@ -119,6 +119,9 @@ struct CZFAppGridView: View {
     // 默认 false，老调用点不传也能编；有词时空态不显示安装提示。
     // LCAppListView 接线：isSearching: searchContext.debouncedQuery != ""
     var isSearching: Bool = false
+    // F1（3.8.635）：签名剩余天数——bundlePath → daysLeft，列表页
+    // 后台读盘后传进来；没读到的 App 不显示，不影响别的格子。
+    var expiryDays: [String: Int] = [:]
     var actions: CZFAppGridActions
     var onRemoveApp: (LCAppModel) -> Void
     var onAuthenticateHidden: () -> Void
@@ -354,6 +357,7 @@ struct CZFAppGridView: View {
                     iconFactor: czfIconFactor,
                     darkModeIcon: darkModeIcon,
                     batchMode: batchMode,
+                    expiryDays: expiryDays,
                     actions: czfCellActions()
                 )
                 // 网格拖拽重排（3.8.453）：长按图标拖到另一个图标上松手
@@ -380,6 +384,7 @@ struct CZFAppGridView: View {
                         iconFactor: czfIconFactor,
                         darkModeIcon: darkModeIcon,
                         batchMode: batchMode,
+                        expiryDays: expiryDays,
                         actions: czfCellActions()
                     )
                     .onDrag {
@@ -519,6 +524,32 @@ private class CZFIconExportCoordinator: NSObject, UIDocumentPickerDelegate, UIAd
     }
 }
 
+// F3（3.8.635）：运行中角标——图标右上角绿点，无文字。
+// 真值是坞表 MultitaskDockManager.shared.apps（@Published，窗口
+// 开关即变）；isAppRunning 只在启动过程中为真，启动完即复位，
+// 不能当信号。匹配口径走 LCAppModel.czfIsRunningInDock（与
+// czfOwnedDockEntry 同款 relativeBundlePath，不限定容器）。
+// 侦察员“不用 #available 包业务逻辑”的说法不对：MultitaskDockManager
+// 本身带 @available(iOS 16.0, *)（MultitaskDockView.swift:165），
+// 16 以下编译期就没有这个符号，直接引用会红（270 构建 #314 同款
+// 红字）。本视图标 @available，调用方用 if #available 包；
+// 16 以下无多任务、无角标，自然缺席。
+@available(iOS 16.0, *)
+private struct CZFRunningDot: View {
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+    var app: LCAppModel
+
+    var body: some View {
+        if LCAppModel.czfIsRunningInDock(app: app) {
+            Circle()
+                .fill(Color.green)
+                .frame(width: 12, height: 12)
+                // 白圈（UI 打磨）：深色壁纸/深色图标上绿点也看得清。
+                .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
+        }
+    }
+}
+
 // 网格单元：大图标 + 下方单行名字。图标取法与 banner 同款
 //（O-13：CZFAppIconLoader 快路径同步读缓存，未命中后台生成）。
 // GeometryReader + aspectRatio(1) 让图标区成正方形，图标宽 =
@@ -528,6 +559,9 @@ struct CZFAppGridCell: View {
     var iconFactor: CGFloat
     var darkModeIcon: Bool
     var batchMode: Bool
+    // F1（3.8.635）：签名剩余天数（bundlePath → daysLeft），
+    // 列表页传进来；没读到的 App 不显示。
+    var expiryDays: [String: Int] = [:]
     var actions: CZFAppGridActions
 
     @State private var czfCellError: String?
@@ -604,6 +638,16 @@ struct CZFAppGridCell: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
                 .shadow(color: colorScheme == .dark ? .black.opacity(0.95) : .white.opacity(0.95), radius: 4, x: 0, y: 0)
+            // F1（3.8.635）：签名剩余天数角标——读不到不显示；
+            // ≤7 天或已过期变红（与列表横幅同款口径，文案走
+            // CZFSignatureExpiry.label 同一份）。
+            if let daysLeft = expiryDays[app.appInfo.bundlePath()] {
+                Text(CZFSignatureExpiry.label(forDaysLeft: daysLeft))
+                    .font(.caption2)
+                    .foregroundStyle(daysLeft <= 7 ? .red : .secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
         }
         // 去阴影（3.8.418）：417 刚加的 AppBannerBG 卡片底撤掉——
         // 卡片在白底上看着像一层阴影，用户 19:09 报“源有阴影”。
@@ -634,6 +678,16 @@ struct CZFAppGridCell: View {
                     .background(Color(.systemBackground).opacity(0.85), in: Circle())
                     // 低 #55：勾选圈向外偏移，别压在图标一角。
                     .offset(x: 6, y: -6)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            // F3（3.8.635）：运行中角标——图标右上角绿点，无文字；
+            // 点图标本身即带回已有窗口（onLaunch 走带回路，不多起）。
+            // 批量模式下勾选圈已占右上角，绿点让位，不叠在一起。
+            // MultitaskDockManager 是 16+ 类型，见 CZFRunningDot 注释。
+            if !batchMode, #available(iOS 16.0, *) {
+                CZFRunningDot(app: app)
+                    .offset(x: 4, y: -4)
             }
         }
         .contextMenu {

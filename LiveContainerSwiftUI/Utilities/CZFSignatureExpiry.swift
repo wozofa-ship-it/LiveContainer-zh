@@ -17,6 +17,12 @@ struct CZFSignatureExpiry: Identifiable {
     }
 
     var label: String {
+        Self.label(forDaysLeft: daysLeft)
+    }
+
+    /// label 的纯函数版（3.8.635 F1）：列表/网格只拿到 daysLeft
+    /// 时共用同一份文案，不各写一份分支（分支一改三处全改）。
+    static func label(forDaysLeft daysLeft: Int) -> String {
         if daysLeft < 0 { return "已过期 \(-daysLeft) 天" }
         if daysLeft == 0 { return "今天到期" }
         return "剩 \(daysLeft) 天"

@@ -18,6 +18,8 @@ protocol LCAppBannerDelegate {
 
 struct LCAppBanner: UIViewControllerRepresentable {
     var delegate: LCAppBannerDelegate
+    // F1（3.8.635）：签名剩余天数（nil = 没读到，不显示）。
+    var expiryDaysLeft: Int? = nil
 
     @ObservedObject var model: LCAppModel
 
@@ -25,13 +27,14 @@ struct LCAppBanner: UIViewControllerRepresentable {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     private let sharedModel = DataManager.shared.model
 
-    init(appModel: LCAppModel, delegate: LCAppBannerDelegate) {
+    init(appModel: LCAppModel, delegate: LCAppBannerDelegate, expiryDaysLeft: Int? = nil) {
         _model = ObservedObject(wrappedValue: appModel)
         self.delegate = delegate
+        self.expiryDaysLeft = expiryDaysLeft
     }
 
     func makeUIViewController(context: Context) -> UIViewController {
-        let viewController = LCAppBannerViewController(delegate: delegate, config: LCAppBannerConfiguration(model: model, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon))
+        let viewController = LCAppBannerViewController(delegate: delegate, config: LCAppBannerConfiguration(model: model, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon, expiryDaysLeft: expiryDaysLeft))
         return viewController
     }
 
@@ -42,7 +45,8 @@ struct LCAppBanner: UIViewControllerRepresentable {
         viewController.update(
             model: model,
             dynamicColors: dynamicColors,
-            darkModeIcon: darkModeIcon
+            darkModeIcon: darkModeIcon,
+            expiryDaysLeft: expiryDaysLeft
         )
     }
 

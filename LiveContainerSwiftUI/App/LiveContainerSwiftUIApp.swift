@@ -54,7 +54,9 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
 
     /// 冷启动扫描（P2：后台跑）：原 init 里的同一段，逻辑一字
     /// 未动，只挪出来。返回五份清单 + URL schemes（非主 App 时为 nil）。
-    private static func scanAppLists() -> (apps: [LCAppModel], arm32EmuApps: [LCAppModel], hiddenApps: [LCAppModel], appDataFolderNames: [String], tweakFolderNames: [String], urlSchemes: Set<String>?) {
+    /// 3.8.635（F2）：private 去掉，下拉刷新复用同一套后台扫；
+    /// 只挪位置、不改逻辑。
+    static func scanAppLists() -> (apps: [LCAppModel], arm32EmuApps: [LCAppModel], hiddenApps: [LCAppModel], appDataFolderNames: [String], tweakFolderNames: [String], urlSchemes: Set<String>?) {
         let fm = FileManager()
         var tempApps: [LCAppModel] = []
         var tempArm32EmuApps: [LCAppModel] = []

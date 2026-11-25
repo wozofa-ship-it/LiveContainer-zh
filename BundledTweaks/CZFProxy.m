@@ -104,7 +104,11 @@ static void CZFWriteStats(BOOL force) {
     if (!gStatsPath) return;
     double now = [NSDate timeIntervalSinceReferenceDate];
     pthread_mutex_lock(&gStatLock);
-    if (!force && now - gLastStatWrite < 1.5) {
+    // 3.8.635（发热 H2）：节流 1.5 秒 → 10 秒——调用点全文件
+    // 32 处 CZFWriteStats(NO)，视频 App 持续建连时客进程每
+    // 1.5 秒一次整文件重写；rotateCheck 每 30 秒读一次增量，
+    // 10 秒粒度完全够用（增量晚 ≤10 秒可见，不丢数、不误判）。
+    if (!force && now - gLastStatWrite < 10) {
         pthread_mutex_unlock(&gStatLock);
         return;
     }

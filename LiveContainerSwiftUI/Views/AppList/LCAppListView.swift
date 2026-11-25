@@ -253,6 +253,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 现测时取当时）：切最快只认 24h 内的内存数，超了现场重测。
     @State private var vpnPingResultsFetchedAt: Date?
     @State private var vpnPingMessage: String?
+    // F1（3.8.635）：签名剩余天数——bundlePath → daysLeft，
+    // 后台读盘后进这里，列表/网格两路渲染都读它。
+    @State private var czfExpiryDays: [String: Int] = [:]
     @State private var batchSelectedIDs: Set<String> = []
     @State private var batchDeleteConfirm = false
     // 3.8.302：批量备份范围单开关——App 页多选备份原来点“备份”
@@ -947,6 +950,46 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
     }
+
+    // F1（3.8.635）：签名剩余天数刷新——只读各 App 包里
+    // embedded.mobileprovision 的 ExpirationDate，不写、不拉起
+    // 任何续签、不碰签名/续签逻辑。快照在主线程取（snapshotEntries
+    // 读模型），读盘放后台（loadAll 自带 mtime+size 缓存，重签
+    // 才重读），结果回主线程进 @State。进页/回前台/列表变时调。
+    private func czfRefreshSignatureExpiry() {
+        let entries = CZFSignatureExpiryReader.snapshotEntries(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps)
+        Task.detached(priority: .utility) {
+            let loaded = CZFSignatureExpiryReader.loadAll(entries: entries)
+            var days: [String: Int] = [:]
+            for item in loaded { days[item.bundlePath] = item.daysLeft }
+            await MainActor.run { czfExpiryDays = days }
+        }
+    }
+
+    // F2（3.8.635）：下拉刷新——后台重扫 Applications/ 目录，
+    // 列表即时更新。复用冷启动扫描同一套后台扫 + 回主线程赋值
+    // （LiveContainerSwiftUIApp.swift:42-47 的 5 行赋值），扫完
+    // 补 delegate + 过滤缓存 + 签名天数。scanAppLists 已从
+    // private static 提为内部入口，逻辑一字不动。
+    private func czfRefreshAppList() async {
+        let scanned = await Task.detached(priority: .userInitiated) {
+            LiveContainerSwiftUIApp.scanAppLists()
+        }.value
+        await MainActor.run {
+            let model = DataManager.shared.model
+            model.apps = scanned.apps
+            model.arm32EmuApps = scanned.arm32EmuApps
+            model.hiddenApps = scanned.hiddenApps
+            model.appDataFolderNames = scanned.appDataFolderNames
+            model.tweakFolderNames = scanned.tweakFolderNames
+            if let schemes = scanned.urlSchemes {
+                UserDefaults.lcShared().set(Array(schemes), forKey: "LCGuestURLSchemes")
+            }
+            czfAssignAppDelegates()
+            czfRefreshFilteredApps()
+            czfRefreshSignatureExpiry()
+        }
+    }
     
     var filteredHiddenApps: [LCAppModel] {
         let apps = sortedHiddenApps
@@ -993,7 +1036,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             .foregroundColor(isBatchSelected(app) ? .accentColor : .secondary)
                     }
                     .buttonStyle(.plain)
-                    LCAppBanner(appModel: app, delegate: self)
+                    LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
                         .frame(maxWidth: .infinity)
                         .overlay {
                             Color.clear
@@ -1007,7 +1050,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 优2：无搜索时行可长按拖动重排（搜索时显示是
             // 子集，拖了会丢位置，所以不挂拖拽）。
             VStack(alignment: .leading, spacing: 2) {
-                LCAppBanner(appModel: app, delegate: self)
+                LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
                     .onDrag {
                         if let id = sharedAppSortManager.getUniqueIdentifier(for: app) {
                             dragReorderID = id
@@ -1024,7 +1067,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         } else {
             VStack(alignment: .leading, spacing: 2) {
-                LCAppBanner(appModel: app, delegate: self)
+                LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
                 backupStatusCaption(for: app)
             }
         }
@@ -1719,6 +1762,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 columns: czfGridColumns,
                 iconSize: czfGridIconSize,
                 isSearching: !searchContext.debouncedQuery.isEmpty,
+                expiryDays: czfExpiryDays,
                 actions: CZFAppGridActions(
                     isBatchSelected: { app in self.isBatchSelected(app) },
                     onToggleBatchSelection: { app in self.toggleBatchSelection(app) },
@@ -1849,6 +1893,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
 
         }
+        // F2（3.8.635）：下拉刷新——后台重扫磁盘上的 App 列表。
+        // .refreshable 是 iOS 15.0+ API，部署目标 iOS 15 可直接用。
+        .refreshable {
+            await czfRefreshAppList()
+        }
         // 自定义背景（3.8.415）：图挂在 ScrollView 的 .background
         // 里，不包 ZStack——413 把 ScrollView 包进 ZStack 后，
         // NavigationView 的大标题/搜索栏/切换行全叠到一块
@@ -1876,6 +1925,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfBackgroundImage = CZFAppBackground.loadImage()
             // O-18：进页刷一次过滤缓存（输入=排序列表+搜索词）。
             czfRefreshFilteredApps()
+            // F1（3.8.635）：进页刷一次签名剩余天数。
+            czfRefreshSignatureExpiry()
             // 每次进页都重赋 delegate（见 czfAssignAppDelegates 注释）：
             // 冷启动扫描可能在 onAppear() 跑完后才换上新模型。
             czfAssignAppDelegates()
@@ -1901,6 +1952,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             czfRefreshFilteredApps()
             // 列表变了（冷启动扫描换模型/新装 App 追加），新模型补 delegate。
             czfAssignAppDelegates()
+            // F1（3.8.635）：列表变了（冷启动扫描换模型/新装 App 追加）
+            // 也刷签名剩余天数——装完即显示，不用等下次进页。
+            czfRefreshSignatureExpiry()
         }
         .onChange(of: scenePhase) { newPhase in
             // 3.8.404：从后台切回前台时扫分享收件箱（本页已在
@@ -1917,6 +1971,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // （VPN 页测完切回来时盾牌菜单不再"未测速"）。
                     czfRestorePingResultsFromCache()
                 }
+                // F1（3.8.635）：回前台也刷签名剩余天数（重签后回来即更新）。
+                czfRefreshSignatureExpiry()
             }
         }
     }
