@@ -132,6 +132,17 @@ struct LCSettingsView: View {
                         if current == info.commit {
                             updateInfo = nil
                             updateStatusText = "已是最新（\(current)）"
+                        } else if let publishedAt = info.publishedAt,
+                                  let buildDate = CZFUpdateCheck.currentBuildDate(),
+                                  publishedAt <= buildDate {
+                            // 3.8.637（B3）：本地比 update 发布源新——
+                            // update 标签由 CI 在 push 后发布，包是 CI
+                            // 产物先行交付的；标签发布前、或标签发布
+                            // 失败而构建成功时，本地提交就比标签新。
+                            // 此时按旧逻辑会判“有新版”并自动跳去装旧版，
+                            // 无声降级。只显示、不自动跳。
+                            updateInfo = nil
+                            updateStatusText = "本地已比更新源新（\(current)）"
                         } else {
                             updateInfo = info
                             var text = "有新版：\(info.commit)"

@@ -26,6 +26,17 @@ enum CZFUpdateCheck {
         return commit.isEmpty ? nil : String(commit)
     }
 
+    /// 本机构建日期（UTC）：3.8.637（B3）起 Run Script 把构建日期
+    /// 写进 LCVersionInfo 末尾，格式 "Release (main/25c5124)
+    /// 2026-11-26T01:40:00Z"。老包没有这一段，解析不到返回 nil，
+    /// 调用方回落到只比提交号的旧行为。SHA 本身无序、无法判断新旧，
+    /// 只有这个日期能判本地是不是比 update 发布源新。
+    static func currentBuildDate() -> Date? {
+        guard let info = Bundle.main.infoDictionary?["LCVersionInfo"] as? String,
+              let last = info.split(separator: " ").last else { return nil }
+        return ISO8601DateFormatter().date(from: String(last))
+    }
+
     /// 查一次 fork update：正文第一行就是 "**Commit:** [完整 SHA](...)"，
     /// 资产里找独立版 LiveContainer.ipa（不是 +SideStore 那个二合一版）。
     static func check(completion: @escaping (Result<CZFUpdateInfo, Error>) -> Void) {

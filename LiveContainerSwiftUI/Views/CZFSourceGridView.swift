@@ -29,6 +29,15 @@ struct CZFInstalledLookup {
         for app in apps + hiddenApps {
             guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { continue }
             byID[bid, default: []].append(app)
+            // 3.8.637（B1）：个人 ID 签名把 ID 改写成 `原ID.团队ID`，
+            // 源里的原始 ID 按精确键查不到已装。归一键（去 10 位队尾段）
+            // 再索引一份；归一键与全 ID 相同时只记一次，同一模型在
+            // 同一键下不重复。installedModels 返回全部命中——两队各
+            // 签一版是两个实例，都要返回（多开选实例用）。
+            let normalized = czfNormalizedBundleID(bid)
+            if normalized != bid {
+                byID[normalized, default: []].append(app)
+            }
         }
         modelsByBundleID = byID
         var plugins: [String: Bool] = [:]

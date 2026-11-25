@@ -23,6 +23,11 @@ final class LCAppBannerRootView: UIView {
     private let versionLabel = UILabel()
     // F1（3.8.635）：签名剩余天数角标——版本行旁的第二段文字。
     private let expiryLabel = UILabel()
+    // A3（3.8.637）：上次启动相对时间——版本行旁的小字；
+    // lastLaunched 已持久化（LCAppInfo.m 写 _info + save），
+    // “最近启动”排序已在用，行上从不显示。RelativeDateTimeFormatter
+    // 是 iOS 13+ API，部署目标 iOS 15，不用 #available。
+    private let lastLaunchedLabel = UILabel()
     // F3（3.8.635）：运行中绿点——runControl 右上角。
     private let runningDot = UIView()
     private let remarkLabel = UILabel()
@@ -76,6 +81,7 @@ final class LCAppBannerRootView: UIView {
         configureLabel(nameLabel, font: .systemFont(ofSize: 16, weight: .bold))
         configureLabel(versionLabel, font: .systemFont(ofSize: 12))
         configureLabel(expiryLabel, font: .systemFont(ofSize: 12))
+        configureLabel(lastLaunchedLabel, font: .systemFont(ofSize: 12))
         configureLabel(remarkLabel, font: .systemFont(ofSize: 10))
         configureLabel(containerLabel, font: .systemFont(ofSize: 8))
 
@@ -102,10 +108,13 @@ final class LCAppBannerRootView: UIView {
         versionStack.spacing = 6
         versionStack.addArrangedSubview(versionLabel)
         versionStack.addArrangedSubview(expiryLabel)
+        versionStack.addArrangedSubview(lastLaunchedLabel)
         versionLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         versionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         expiryLabel.setContentHuggingPriority(.required, for: .horizontal)
         expiryLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        lastLaunchedLabel.setContentHuggingPriority(.required, for: .horizontal)
+        lastLaunchedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         detailStack.translatesAutoresizingMaskIntoConstraints = false
         detailStack.axis = .vertical
@@ -273,6 +282,17 @@ final class LCAppBannerRootView: UIView {
         } else {
             expiryLabel.isHidden = true
         }
+        // A3（3.8.637）：上次启动相对时间——没启动过（lastLaunched
+        // 为 nil）不显示；RelativeDateTimeFormatter 按系统语言出
+        // “2小时前”这类相对文案，0 新 key。update 每次刷新都重算，
+        // 文案随时间变旧不会一直停在首次算的值。
+        if let lastLaunched = appInfo.lastLaunched {
+            lastLaunchedLabel.text = Self.czfRelativeFormatter.localizedString(for: lastLaunched, relativeTo: Date())
+            lastLaunchedLabel.textColor = textColor.withAlphaComponent(0.8)
+            lastLaunchedLabel.isHidden = false
+        } else {
+            lastLaunchedLabel.isHidden = true
+        }
         // F3（3.8.635）：运行中绿点——runControl 右上角；
         // VC 已订阅坞表 $apps，窗口开关即 refreshView，点 ▶
         // 本来就先带回已有窗口（见下面 runControl.update 注释）。
@@ -314,9 +334,21 @@ final class LCAppBannerRootView: UIView {
         if !model.uiRemark.isEmpty {
             accessibilityParts.append(model.uiRemark)
         }
+        if let lastLaunched = appInfo.lastLaunched {
+            accessibilityParts.append(Self.czfRelativeFormatter.localizedString(for: lastLaunched, relativeTo: Date()))
+        }
         accessibilityParts.append(model.uiSelectedContainer?.name ?? "lc.appBanner.noDataFolder".loc)
         detailStack.accessibilityLabel = accessibilityParts.joined(separator: ", ")
     }
+
+    // A3（3.8.637）：相对时间 formatter——静态复用，
+    // RelativeDateTimeFormatter 创建不便宜；abbreviated 样式
+    // 在中文下出“2小时前”这类短文案。
+    private static let czfRelativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
 
     private static func extractMainHueColor(appInfo: LCAppInfo, icon: UIImage, darkModeIcon: Bool) -> UIColor {
         if darkModeIcon, let cachedColor = appInfo.cachedColorDark {

@@ -5364,18 +5364,21 @@ private struct SourcePanelRow: View {
         var id: Self { self }
     }
 
+    // 3.8.637（B1）：同款归一——坞源面板这三处是手写的已装判定，
+    // 个人 ID 改写后的已装 ID 与源里的原始 ID 精确比对查不到，
+    // 面板里已装的 App 也显示“安装”、更新按钮也不出。
     private var isInstalled: Bool {
-        (sharedModel.apps + sharedModel.hiddenApps).contains { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+        (sharedModel.apps + sharedModel.hiddenApps).contains { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) }
     }
 
     // 注意：installedAppModel 只供 hasUpdate 版本比较；启动绝不走它
     //（多开时“打开”按下面 installedAppModels 走单开直启/多开选实例）。
     private var installedAppModel: LCAppModel? {
-        (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })
+        (sharedModel.apps + sharedModel.hiddenApps).first(where: { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) })
     }
 
     private var installedAppModels: [LCAppModel] {
-        (sharedModel.apps + sharedModel.hiddenApps).filter { $0.appInfo.bundleIdentifier() == app.bundleIdentifier }
+        (sharedModel.apps + sharedModel.hiddenApps).filter { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) }
     }
 
     private var hasUpdate: Bool {

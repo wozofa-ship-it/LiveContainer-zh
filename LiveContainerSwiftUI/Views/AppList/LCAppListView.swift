@@ -946,7 +946,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // LCAppModel 的公开计算属性（取自
                 // CFBundleShortVersionString，取不到是 "?"）；
                 // "?" 不参与匹配，免得只输一个问号就列出全部。
-                (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery))
+                (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery)) ||
+                // 3.8.637（A1）：备注与容器名也命中——备注是用户自己
+                // 写的内容（横幅上可见），容器名是各分身数据夹的名字；
+                // 以前只比名字/Bundle ID/版本号，这两路搜不到。
+                app.uiRemark.localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
+                app.uiContainers.contains { $0.name.localizedCaseInsensitiveContains(searchContext.debouncedQuery) }
             }
         }
     }

@@ -129,8 +129,10 @@ class LCAppModel: ObservableObject, Hashable {
                   let runningPath = entry.appInfo?.relativeBundlePath, !runningPath.isEmpty,
                   runningPath == myPath else { continue }
             // 同包名别的条目也登记过这个容器时归属说不清，不回落。
+            // 3.8.637（B1）：同款归一——两队签的同款分身改写后 ID
+            // 不同，精确比对互认不出，归属判据会漏判。
             let sharedWithOther = (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).contains {
-                $0 !== app && $0.bundleIdentifier == app.bundleIdentifier
+                $0 !== app && czfSameBundleID($0.bundleIdentifier, app.bundleIdentifier)
                     && $0.uiContainers.contains { $0.folderName == entry.appUUID }
             }
             guard !sharedWithOther else { continue }
@@ -782,8 +784,10 @@ class LCAppModel: ObservableObject, Hashable {
     // 后用户在容器设置里亲手改的开关不再被自动翻回去。
     private func czfOtherSameBundleApps() -> [LCAppModel] {
         let myPath = appInfo.relativeBundlePath
+        // 3.8.637（B1）：同款归一——两队签的同款分身改写后 ID 不同，
+        // 精确比对互认不出，钥匙串组隔离的“同包名排他”对它们失效。
         return (DataManager.shared.model.apps + DataManager.shared.model.hiddenApps).filter {
-            $0 !== self && $0.bundleIdentifier == bundleIdentifier && $0.appInfo.relativeBundlePath != myPath
+            $0 !== self && czfSameBundleID($0.bundleIdentifier, bundleIdentifier) && $0.appInfo.relativeBundlePath != myPath
         }
     }
     // 3.8.900（L594-C #1）：放开给设置页用——createFolder/importDataStorage/addContainers 原来各手写一份“本 App 内空闲”集合，只排本 App 容器，别的 App 占着的组号也能抽中；改调这里（三表全扫）。

@@ -688,14 +688,17 @@ enum CZFSkippedUpdate {
         // 删掉新分身、旧分身顶上来，更新行重现、跳过却丢了。
         var installedVersions: [String: [String]] = [:]
         for app in apps {
-            installedVersions[app.appInfo.bundleIdentifier() ?? "", default: []]
+            // 3.8.637（B1）：已装键是个人 ID 改写后的 ID（`原ID.团队ID`）、
+            // 跳过表键是源里的原始 ID，精确比对永不命中、过期条目永不清。
+            // 两边都归一到去队尾段的 ID 再比对。
+            installedVersions[czfNormalizedBundleID(app.appInfo.bundleIdentifier() ?? ""), default: []]
                 .append(app.appInfo.version() ?? "")
         }
         var dict = skippedVersions()
         let before = dict.count
         dict = dict.filter { stableID, skippedVersion in
             let bundleId = String(stableID.split(separator: "|", maxSplits: 1).first ?? Substring(stableID))
-            guard let versions = installedVersions[bundleId], !versions.isEmpty else { return true }
+            guard let versions = installedVersions[czfNormalizedBundleID(bundleId)], !versions.isEmpty else { return true }
             // 3.8.562（L93）：原来只留“跳过版本比已装新”的条目——
             // 已装与跳过版本号相等时（只升 build 的更新：已装
             // 2.0/build 50、源最新 2.0/build 100，用户跳过 2.0）
@@ -760,8 +763,10 @@ struct CZFUpdatableAppsSheet: View {
     @State private var sheetError: String?
 
     private func installedVersion(for app: AltStoreSourceApp) -> String {
+        // 3.8.637（B1）：同款归一——个人 ID 改写后的已装 ID 与源里的
+        // 原始 ID 精确比对查不到，更新单里的“已装版本”恒为空。
         (sharedModel.apps + sharedModel.hiddenApps)
-            .first(where: { $0.appInfo.bundleIdentifier() == app.bundleIdentifier })?
+            .first(where: { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) })?
             .appInfo.version() ?? ""
     }
 
@@ -1694,11 +1699,13 @@ struct LCSourcesView: View {
     /// 名单里就是 1.0，点更新装完 1.0、1.2 又冒出来，得更新
     /// 两次。顺序仍按首次出现的包名排，不改名单顺序。
     private func computeUpdatableApps() -> [AltStoreSourceApp] {
+        // 3.8.637（B1）：已装键是个人 ID 改写后的 ID、源里的键是原始 ID，
+        // 精确比对查不到、Tab 红点不到它。两边都归一到去队尾段的 ID。
         let installed = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
-            ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.version() ?? "")
+            (czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? ""), $0.appInfo.version() ?? "")
         }, uniquingKeysWith: { first, _ in first })
         let installedBuilds = Dictionary((sharedModel.apps + sharedModel.hiddenApps).map {
-            ($0.appInfo.bundleIdentifier() ?? "", $0.appInfo.buildVersion() ?? "0")
+            (czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? ""), $0.appInfo.buildVersion() ?? "0")
         }, uniquingKeysWith: { first, _ in first })
         var bestByBundle: [String: AltStoreSourceApp] = [:]
         var order: [String] = []
@@ -1706,8 +1713,8 @@ struct LCSourcesView: View {
             guard let source = item.source else { continue }
             for app in source.apps {
                 guard let latest = app.latestVersion,
-                      let installedVersion = installed[app.bundleIdentifier],
-                      czfIsNewerVersion(latest.version, build: latest.buildVersion, newerThan: installedVersion, installedBuild: installedBuilds[app.bundleIdentifier]),
+                      let installedVersion = installed[czfNormalizedBundleID(app.bundleIdentifier)],
+                      czfIsNewerVersion(latest.version, build: latest.buildVersion, newerThan: installedVersion, installedBuild: installedBuilds[czfNormalizedBundleID(app.bundleIdentifier)]),
                       CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) != latest.version else {
                     continue
                 }

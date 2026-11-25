@@ -85,6 +85,29 @@ final class LCStorageManagementModel: ObservableObject {
         let isSideStore: Bool
     }
 
+    /// 3.8.637（A2）：单 App 总占用（包 + 容器），供 App 设置页只读显示。
+    /// 复用存储管理页同一套快照 + 算法：快照在主线程取（读 _info /
+    /// @Published，见上面 refresh 的 L87 注释），算大小放后台；
+    /// 外置容器不计入（与 calculateAppItem 同款）。读盘失败回 0，
+    /// 设置页只显示、不报错。
+    static func czfTotalSize(for model: LCAppModel) async -> Int64 {
+        let snapshot = czfSnapshot(for: model)
+        guard let item = try? await calculateAppItem(from: snapshot) else { return 0 }
+        return item.totalSize
+    }
+
+    private static func czfSnapshot(for model: LCAppModel) -> CZFStorageAppSnapshot {
+        CZFStorageAppSnapshot(
+            model: model,
+            containers: model.uiContainers.map {
+                CZFStorageContainerSnapshot(name: $0.name, containerURL: $0.containerURL, storageBookMark: $0.storageBookMark, bookmarkResolved: $0.bookmarkResolved)
+            },
+            bundlePath: model.appInfo.bundlePath(),
+            displayName: model.displayName,
+            isSideStore: model.appInfo is BuiltInSideStoreAppInfo
+        )
+    }
+
     private static func czfSnapshots(apps: [LCAppModel], hiddenApps: [LCAppModel]) -> [CZFStorageAppSnapshot] {
         var allApps = DataManager.shared.model.isHiddenAppUnlocked ? apps + hiddenApps : apps
         if UserDefaults.sideStoreExist() {
@@ -93,17 +116,7 @@ final class LCStorageManagementModel: ObservableObject {
             // 建就是读-写并发。
             allApps.append(LCAppModel(appInfo: BuiltInSideStoreAppInfo.shared))
         }
-        return allApps.map { model in
-            CZFStorageAppSnapshot(
-                model: model,
-                containers: model.uiContainers.map {
-                    CZFStorageContainerSnapshot(name: $0.name, containerURL: $0.containerURL, storageBookMark: $0.storageBookMark, bookmarkResolved: $0.bookmarkResolved)
-                },
-                bundlePath: model.appInfo.bundlePath(),
-                displayName: model.displayName,
-                isSideStore: model.appInfo is BuiltInSideStoreAppInfo
-            )
-        }
+        return allApps.map { czfSnapshot(for: $0) }
     }
 
     private enum StorageCategory {

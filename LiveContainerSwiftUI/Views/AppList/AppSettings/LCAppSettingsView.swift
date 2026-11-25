@@ -53,6 +53,9 @@ struct LCAppSettingsView: View {
     // 修复区默认折叠（平时不常用，页面先短一截）
     @State private var fixesExpanded = false
     @State private var selectUnusedContainerSheetShow = false
+    // 3.8.637（A2）：本 App 总占用（包 + 容器），nil = 还在算；
+    // 只读显示，算在后台（LCStorageManagementModel.czfTotalSize）。
+    @State private var czfTotalSize: Int64?
     @State private var schedMinEnabled = false
     @State private var schedMinTime = Date()
     /// 单 App VPN 指定节点改动后自增，逼设置页重读一遍节点行。
@@ -515,17 +518,18 @@ struct LCAppSettingsView: View {
                     }
                 }
                 .disabled(containerLimitReached)
-                if(!model.uiIsShared) {
-                    Button {
-                        selectUnusedContainerSheetShow = true
-                    } label: {
-                        HStack {
-                            LCSettingsIcon(systemName: "archivebox.fill", color: .gray)
-                            Text("lc.container.selectUnused".loc)
-                        }
+                // 3.8.637（B2）：入口对共享 App 也开放——原来只在
+                // !uiIsShared 时显示，共享 App 全程没有“添加已有容器”，
+                // 共享树的旧数据夹接不回去。
+                Button {
+                    selectUnusedContainerSheetShow = true
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "archivebox.fill", color: .gray)
+                        Text("lc.container.selectUnused".loc)
                     }
-                    .disabled(containerLimitReached)
                 }
+                .disabled(containerLimitReached)
                 if containerLimitReached {
                     Text("数据文件夹已达上限（\(SharedModel.keychainAccessGroupCount) 个）。")
                         .font(.footnote)
@@ -985,8 +989,28 @@ struct LCAppSettingsView: View {
                     Text(formatDate(date: appInfo.installationDate))
                         .foregroundStyle(.gray)
                 }
+                // 3.8.637（A2）：总占用只读行——存储管理页已算好的
+                // totalSize（包 + 容器）在这里也能看到；文案复用
+                // 存储管理页的 lc.storage.totalStorage，0 新 key。
+                HStack {
+                    Text("lc.storage.totalStorage".loc)
+                    Spacer()
+                    if let totalSize = czfTotalSize {
+                        Text(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))
+                            .foregroundStyle(.gray)
+                    } else {
+                        Text("lc.storage.calculating".loc)
+                            .foregroundStyle(.gray)
+                    }
+                }
             } header: {
                 Text("lc.common.statistics")
+            }
+            .task {
+                // 算大小在后台；回主线程再写 @State（.task 闭包
+                // 不保证落在主 actor，显式回主线程，见 L40 同款）。
+                let size = await LCStorageManagementModel.czfTotalSize(for: model)
+                await MainActor.run { czfTotalSize = size }
             }
     }
 
@@ -1555,21 +1579,27 @@ extension LCAppSettingsView : LCContainerViewDelegate {
 }
 
 extension LCAppSettingsView : LCSelectContainerViewDelegate {
-    func addContainers(containers: Set<String>) {
+    func addContainers(containers: Set<LCContainer>) {
         if containers.count + model.uiContainers.count > SharedModel.keychainAccessGroupCount {
             errorInfo = "lc.container.tooMuchContainers".loc
             errorShow = true
             return
         }
         
-        for folderName in containers {
+        for newContainer in containers {
+            let folderName = newContainer.folderName
             // 3.8.900（L601-C#1）：同名容器已在表里时跳过——重导入
             // 同一文件夹会再 append 一份，列表多一条重复记录
             //（登录态丢的那半见 L600-C#1 的同名门）。
-            if model.uiContainers.contains(where: { $0.folderName == folderName }) {
+            // 3.8.637（B2）：去重按（folderName, isShared）——私人树
+            // 与共享树的同名夹是两个容器，只比 folderName 会把
+            // 共享夹当成已有的私人夹拦掉。
+            if model.uiContainers.contains(where: { $0.folderName == folderName && $0.isShared == newContainer.isShared }) {
                 continue
             }
-            let newContainer = LCContainer(folderName: folderName, name: folderName, isShared: false)
+            // 3.8.637（B2）：直接用选择页传来的容器——它已按自己的
+            // isShared 挂对了根目录、loadName 也读过了。原来这里写死
+            // isShared: false 重建，共享夹会被挂到不存在的私人路径下。
             newContainer.loadName()
             if newContainer.keychainGroupId == -1 || model.czfIsKeychainGroupUsed(newContainer.keychainGroupId, excluding: newContainer) {
                 // 3.8.900（L594-C #1 + L601-C#1）：组号走全局分配器（同 createFolder；本函数在主线程按钮回调里，直接调）。
