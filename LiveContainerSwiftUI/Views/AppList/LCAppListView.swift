@@ -5047,17 +5047,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
-    // TwoYi 安卓系统（3.8.628）：.apk 交接。
+    // TwoYi 安卓系统（3.8.630）：.apk 交接。
     // 未装 TwoYi → 提示去源页开开关，并切到源页让用户一眼
     // 看到开关在哪；已装 → 把 .apk 递给 TwoYi guest 装。
-    // 必须先拷到 tmp 再递 URL：从“文件”/分享进来的 .apk 是
+    // 必须先拷一份再递 URL：从“文件”/分享进来的 .apk 是
     // security-scoped URL，guest 跑在另一个进程（LiveProcess
-    // 扩展），安全域传不过去；拷完的 tmp 路径 guest 可读。
-    // 递送走 LCAppModel.runApp(urlStr:)（多任务路拼 open-url +
-    // base64 query、交接路写 App Group 的 LCLaunchExtensionLaunchURL，
-    // guest 按自己的 open-URL 处理；TwoYi 内有 NEO_GUEST_INSTALL
-    // 的安装入口且注册了 .apk 文档类型）。真机上 TwoYi 是否真
-    // 装上，由设备验定——这里不假装已验。
+    // 扩展），安全域传不过去。
+    // 拷到哪里是关键（3.8.628 的宿主 tmp 是错的）：宿主 tmp 在
+    // LiveContainer 自己的容器里，LiveProcess 扩展读不到——
+    // 扩展只共享 App Group 容器，宿主 tmp 不在组里；也没人给
+    // 这份文件写 LCLaunchExtensionFileBookmark（那把钥匙是
+    // installFromUrl 的共享键，APK 不能碰），且已在运行的窗
+    // 口那路（passURLSchemeToView → openURLScheme）根本不走
+    // 书签解析。改拷到 App Group 里的 LCApkStaging/：组容器
+    // 宿主与扩展共读，guest 收到 file URL 就能直接读，不用书签。
+    // 递送走 LCAppModel.runApp(urlStr:)（已开窗时
+    // bringExistingMultitaskWindowIfNeeded 写 launchAppUrlScheme
+    // + passURLSchemeToView 递给在跑的客；冷启动时经
+    // launchAppUrlScheme/LCLaunchExtensionLaunchURL 进客端
+    // open-URL；TwoYi 内有 NEO_GUEST_INSTALL 的安装入口且注册
+    // 了 .apk 文档类型）。真机上 TwoYi 是否真装上，由设备验定——
+    // 这里不假装已验。
+    // 残留：每次交接前清掉 1 小时前的旧分段（客读文件在交接后
+    // 数秒内，1 小时绰绰有余；两次快速连点也不会误删在途文件）。
     private func czfHandleApk(_ url: URL) async {
         let twoYi = await MainActor.run { CZFTwoYi.installedApp(in: sharedModel) }
         guard let twoYi else {
@@ -5076,7 +5088,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     url.stopAccessingSecurityScopedResource()
                 }
             }
-            let destURL = fm.temporaryDirectory.appendingPathComponent("LCApk-\(UUID().uuidString).apk")
+            let stagingDir = LCPath.lcGroupDocPath.appendingPathComponent("LCApkStaging")
+            try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+            if let oldFiles = try? fm.contentsOfDirectory(at: stagingDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                for stale in oldFiles where stale.lastPathComponent.hasPrefix("LCApk-") && stale.pathExtension.lowercased() == "apk" {
+                    let values = try? stale.resourceValues(forKeys: [.contentModificationDateKey])
+                    if let mtime = values?.contentModificationDate,
+                       Date().timeIntervalSince(mtime) > 3600 {
+                        try? fm.removeItem(at: stale)
+                    }
+                }
+            }
+            let destURL = stagingDir.appendingPathComponent("LCApk-\(UUID().uuidString).apk")
             try fm.copyItem(at: url, to: destURL)
             try await twoYi.runApp(urlStr: destURL.absoluteString)
         } catch {
