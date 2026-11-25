@@ -705,6 +705,58 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .foregroundStyle(vpnCoreRunning ? .green : .secondary)
     }
+    // 3.8.643：运行工具组抽成子 builder——@ToolbarContentBuilder 的
+    // buildBlock 最多 10 个分量，主顶栏原来已满 10 个，F1/F3 再加
+    // 两个就报 extra arguments at positions #11, #12（3.8.643 首推
+    // 唯一红字，LCAppListView.swift:718）。三个开关/按钮（仅运行中/
+    // 仅可更新/关闭坞内全部窗口）挪到这里，主 builder 里只占一个分量，
+    // 内容一字不动；builder 这一层一个 if 都不留（3.8.334 同款）。
+    @ToolbarContentBuilder
+    private var czfRunningTools: some ToolbarContent {
+        // 3.8.641（F2）：仅运行中开关——多选按钮旁；16 以下隐藏
+        //（MultitaskDockManager 是 16+ 类型，见 CZFRunningDot 注释）。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, #available(iOS 16.0, *) {
+                Button {
+                    czfRunningOnly.toggle()
+                } label: {
+                    Label("仅运行中", systemImage: czfRunningOnly ? "play.circle.fill" : "play.circle")
+                }
+            }
+        }
+
+        // 3.8.643（F3）：仅可更新开关——与“仅运行中”开关并列；
+        // 可更新数为 0 时隐藏（读 CZFUpdatableAppCount）；纯数据过滤，
+        // iOS 15 也可用，不需 16+ 门控。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, czfUpdatableCount > 0 {
+                Button {
+                    czfUpdatableOnly.toggle()
+                } label: {
+                    Label("仅可更新", systemImage: czfUpdatableOnly ? "arrow.down.circle.fill" : "arrow.down.circle")
+                }
+            }
+        }
+
+        // 3.8.643（F1）：一键关闭坞内全部窗口——“仅运行中”开关旁；
+        // 无坞内运行窗口时隐藏。文案收窄为“关闭坞内全部窗口”：
+        // closeAllWindows 只遍历 dockManager.apps，原生窗口模式
+        // 下不进坞表的 App 关不掉（addRunningAppWithInfo 顶上的
+        // isDockEnabled 守卫只放虚拟窗），按钮不许说“全部”却关不全。
+        // 红色是 UI 打磨：与坞里 closeAllStripButton 的红字同款，
+        // 标明这是破坏性操作。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, #available(iOS 16.0, *), czfDockRunningCount > 0 {
+                Button {
+                    czfShowCloseAllConfirm = true
+                } label: {
+                    Label("关闭坞内全部窗口", systemImage: "xmark.circle")
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
     // 3.8.330：顶栏抽出来——body 1911 行，328 的收起/展开
     // 让编译器 type-check 超时（构建 378 红字）。顶栏整段
     // 抽到 @ToolbarContentBuilder，body 里只留一行调用；
@@ -828,48 +880,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
-        // 3.8.641（F2）：仅运行中开关——多选按钮旁；16 以下隐藏
-        //（MultitaskDockManager 是 16+ 类型，见 CZFRunningDot 注释）。
-        ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, #available(iOS 16.0, *) {
-                Button {
-                    czfRunningOnly.toggle()
-                } label: {
-                    Label("仅运行中", systemImage: czfRunningOnly ? "play.circle.fill" : "play.circle")
-                }
-            }
-        }
-
-        // 3.8.643（F3）：仅可更新开关——与“仅运行中”开关并列；
-        // 可更新数为 0 时隐藏（读 CZFUpdatableAppCount）；纯数据过滤，
-        // iOS 15 也可用，不需 16+ 门控。
-        ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, czfUpdatableCount > 0 {
-                Button {
-                    czfUpdatableOnly.toggle()
-                } label: {
-                    Label("仅可更新", systemImage: czfUpdatableOnly ? "arrow.down.circle.fill" : "arrow.down.circle")
-                }
-            }
-        }
-
-        // 3.8.643（F1）：一键关闭坞内全部窗口——“仅运行中”开关旁；
-        // 无坞内运行窗口时隐藏。文案收窄为“关闭坞内全部窗口”：
-        // closeAllWindows 只遍历 dockManager.apps，原生窗口模式
-        // 下不进坞表的 App 关不掉（addRunningAppWithInfo 顶上的
-        // isDockEnabled 守卫只放虚拟窗），按钮不许说“全部”却关不全。
-        // 红色是 UI 打磨：与坞里 closeAllStripButton 的红字同款，
-        // 标明这是破坏性操作。
-        ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, #available(iOS 16.0, *), czfDockRunningCount > 0 {
-                Button {
-                    czfShowCloseAllConfirm = true
-                } label: {
-                    Label("关闭坞内全部窗口", systemImage: "xmark.circle")
-                        .foregroundStyle(.red)
-                }
-            }
-        }
+        // 3.8.643：三个运行工具进子 builder（见下面 czfRunningTools
+        // 注释）——主 builder 里只占一个分量。
+        czfRunningTools
 
         // 3.8.337：用户 14:17 顶栏全藏只留展开箭头——链接也收进
         // 折叠里，默认不显示，点箭头才出来。
