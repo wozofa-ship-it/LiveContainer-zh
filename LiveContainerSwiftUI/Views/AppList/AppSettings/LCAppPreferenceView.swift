@@ -244,7 +244,12 @@ struct PSGroup: View {
 
 struct AppPreferencePageView : View {
     let preferencePlistURL : URL
-    
+    // 3.8.647（B3 修法）：存一份 containerURL——原来 init 只拿它建
+    // UserDefaults、不存，body 里 onAppear/onDisappear 引它报
+    // cannot find 'containerURL' in scope（首推唯三红字）；存量与
+    // preferencePlistURL 同款（init 里赋值）。
+    let containerURL : URL
+
     @State var children : [AnyView] = []
     @State var errorInfo : String?
 
@@ -253,6 +258,7 @@ struct AppPreferencePageView : View {
         // 这里的拿覆盖子页首读（读在 body 求值时、onAppear 之前）；
         // 重复拿是空操作，离开时由 AppPreferenceView.onDisappear 放。
         LCAppSettingsView.czfAcquirePreferenceAccess(for: containerURL)
+        self.containerURL = containerURL
         var children : [AnyView] = []
         self.preferencePlistURL = preferencePlistURL
         guard let dict = NSMutableDictionary(contentsOf: preferencePlistURL) else {
