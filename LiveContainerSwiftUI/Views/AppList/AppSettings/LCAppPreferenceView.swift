@@ -251,6 +251,12 @@ struct AppPreferencePageView : View {
     // cannot find 'containerURL' in scope（首推唯三红字）；存量与
     // preferencePlistURL 同款（init 里赋值）。
     let containerURL : URL
+    // 3.8.651（B2 修法）：bundleId/settingsBundle 同款补存——onAppear/
+    // onReceive 里重建行表要传它们，init 参数在 body 里不可见，
+    // 不存就报 cannot find 'bundleId'/'settingsBundle' in scope
+    //（3.8.651 首推唯四红字，LCAppPreferenceView.swift:376/:382）。
+    let bundleId : String
+    let settingsBundle : Bundle
 
     @State var children : [AnyView] = []
     @State var errorInfo : String?
@@ -261,6 +267,8 @@ struct AppPreferencePageView : View {
         // 重复拿是空操作，离开时由 AppPreferenceView.onDisappear 放。
         LCAppSettingsView.czfAcquirePreferenceAccess(for: containerURL)
         self.containerURL = containerURL
+        self.bundleId = bundleId
+        self.settingsBundle = settingsBundle
         self.preferencePlistURL = preferencePlistURL
         let built = Self.czfBuildChildren(preferencePlistURL: preferencePlistURL, bundleId: bundleId, containerURL: containerURL, settingsBundle: settingsBundle)
         errorInfo = built.error
