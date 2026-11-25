@@ -261,6 +261,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @AppStorage("CZFUpdatableBundleIDs") private var czfUpdatableBundleIDs = ""
     @AppStorage("CZFUpdatableAppCount") private var czfUpdatableCount = 0
     @State private var czfUpdatableOnly = false
+    // 3.8.651（F2）：仅无备份筛选——打开后列表只显示备份表里明确
+    // 是“无备份”的 App；与两现有开关同款 @State（不持久化）。
+    @State private var czfNoBackupOnly = false
     // 3.8.643（F1）：坞内运行中窗口数——“关闭坞内全部窗口”按钮的
     // 显隐口径（0 即藏）；只计坞表条目，不计 isUsing 回落的原生窗——
     // closeAllWindows 只遍历 dockManager.apps，不进坞表的原生窗
@@ -305,6 +308,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 批量恢复范围单开关（同款：先弹范围单再跑）。
     @State private var batchRestoreScopeConfirm = false
     @State private var batchBusy = false
+    // 3.8.651（F3）：批量导出进行中标志（网格单路 czfExporting 同款语义，
+    // CZFAppGridView.swift:571）——按钮重入 guard；底栏禁用走 batchBusy。
+    @State private var batchExporting = false
+    // 3.8.651（F3）：批量导出待分享的 tmp .ipa（空 = 未导出/已分享完）；
+    // 部分失败时等分享完再报的汇总（分享表与提示框不能同时弹）。
+    @State private var czfBatchExportURLs: [URL] = []
+    @State private var czfBatchExportPendingSummary: String?
     // 每行备份状态：实例唯一 ID → “已备份 · 日期”/“无备份”，
     // 进页时一次扫完 Backups 目录算好，行上只查表不扫盘；
     // 批量备份/恢复跑完后刷新。
@@ -426,6 +436,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     }
                 }
                 backupStatusByID = table
+                // 3.8.651（F2）：表填好后开关还开着就重跑一次过滤——
+                // 否则备份做完行不会自动从筛选里消失（进页瞬间表
+                // 是空的，筛选那时按空表跑过一次）。
+                if czfNoBackupOnly {
+                    czfRefreshFilteredApps()
+                }
             }
         }
     }
@@ -742,6 +758,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.651（F2）：仅无备份开关——与“仅可更新”开关并列；
+        // 图标复用行下无备份小字的 externaldrive.badge.questionmark
+        //（backupStatusCaption 同款）；纯数据过滤，iOS 15 也可用，
+        // 不需 16+ 门控。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded {
+                Button {
+                    czfNoBackupOnly.toggle()
+                } label: {
+                    Label("仅无备份", systemImage: "externaldrive.badge.questionmark")
+                }
+            }
+        }
+
         // 3.8.643（F1）：一键关闭坞内全部窗口——“仅运行中”开关旁；
         // 无坞内运行窗口时隐藏。文案收窄为“关闭坞内全部窗口”：
         // closeAllWindows 只遍历 dockManager.apps，原生窗口模式
@@ -1033,6 +1063,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private var czfUpdatableBundleIDSet: Set<String> {
         Set(czfUpdatableBundleIDs.split(separator: ",").map(String.init))
     }
+    // 3.8.651（UI 打磨）：列表空态文案——任一筛选开着且筛空时，
+    // 别显示“去安装 App”的安装提示（App 都在，只是被筛掉了）。
+    private var czfEmptyListTip: String {
+        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly {
+            return "筛选条件下没有 App"
+        }
+        if sharedModel.multiLCStatus == 2 {
+            return "lc.appList.convertToSharedToShowInLC2".loc
+        }
+        return "lc.appList.installTip".loc
+    }
     // 3.8.643（F1）：坞内运行数刷新——MultitaskDockManager 是 16+
     // 类型，本函数标 @available，调用方用 if #available 包（472
     // 同款：只包调用方不够，被调函数本身也要标）。
@@ -1053,6 +1094,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         if czfUpdatableOnly {
             let ids = czfUpdatableBundleIDSet
             apps = apps.filter { ids.contains(czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? "")) }
+        }
+        // 3.8.651（F2）：仅无备份——只留备份表里明确等于“无备份”
+        // 的行；表是异步填的，进页瞬间表是空的，无表项的不筛
+        //（否则刚进页开筛选会把全部 App 列出来等于筛选失效）。
+        if czfNoBackupOnly {
+            apps = apps.filter { app in
+                guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
+                return backupStatusByID[id] == "无备份"
+            }
         }
         if searchContext.debouncedQuery.isEmpty {
             czfFilteredAppsCache = apps
@@ -1099,6 +1149,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 guard czfEpoch == czfExpiryRefreshEpoch else { return }
                 CZFExpiryReminder.schedule(for: loaded)
                 czfExpiryDays = days
+                // 3.8.651（F1）：天数顺手喂给排序缓存——按到期日排序
+                // 不自己读盘，只读这份表；就绪后 onChange 回来重排。
+                CZFAppExpiryCache.shared.setDays(days)
             }
         }
     }
@@ -1138,6 +1191,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         if czfUpdatableOnly {
             let ids = czfUpdatableBundleIDSet
             apps = apps.filter { ids.contains(czfNormalizedBundleID($0.appInfo.bundleIdentifier() ?? "")) }
+        }
+        // 3.8.651（F2）：隐藏区同加无备份条件——与可见区同一表、同一开关。
+        if czfNoBackupOnly {
+            apps = apps.filter { app in
+                guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
+                return backupStatusByID[id] == "无备份"
+            }
         }
         if searchContext.debouncedQuery.isEmpty || !sharedModel.isHiddenAppUnlocked {
             return apps
@@ -1604,6 +1664,62 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         refreshBackupStatus()
     }
 
+    // 3.8.651（F3）：批量导出 IPA——勾中的 App 逐个调
+    // LCUtils.czfExportIPA（UUID 唯一 tmp 目录、Payload 打包，
+    // 失败自清 tmp；ObjC 方法 Swift 标签按网格单路调用点核对，
+    // czfExportIPA(forBundlePath:) 带介词）；后台逐个做，跑完
+    // 再弹分享表；单个失败跳过、跑完汇总报数（批量备份汇总口径）。
+    // 不退批量模式、不清勾选——导出是只读操作，导完常接着备份同一批。
+    // 18 个全选导出是数 GB tmp，磁盘满时逐个失败进汇总，不可先算
+    // 总量再拦（大小现算成本高）。
+    private func batchExportIPA() async {
+        // 3.8.564（L289-1）同款：裸 Task 调来，快照回主线程取
+        //（bundlePath()/displayName() 读 _info，离主线程撞）。
+        let jobs: [(name: String, path: String?)] = await MainActor.run {
+            selectedBatchApps.map { app in
+                (name: app.appInfo.displayName() ?? app.appInfo.bundleIdentifier() ?? "", path: app.appInfo.bundlePath())
+            }
+        }
+        guard !jobs.isEmpty else {
+            // 按钮已按空选禁用，到这里是兜底；batchExporting 是
+            // 按钮里先置的真，空跑也得清掉，否则按钮永久置灰。
+            await MainActor.run { batchExporting = false }
+            return
+        }
+        await MainActor.run { batchBusy = true }
+        var urls: [URL] = []
+        var failed: [String] = []
+        for job in jobs {
+            guard let path = job.path else {
+                failed.append("\(job.name)：找不到 App 包路径")
+                continue
+            }
+            do {
+                let url = try LCUtils.czfExportIPA(forBundlePath: path)
+                urls.append(url)
+            } catch {
+                failed.append("\(job.name)：\(LCUtils.czfFriendlyError(error))")
+            }
+        }
+        // 610 修法同款：长串闭包外先拼好，MainActor.run 里只赋值，
+        // 免得类型检查超时。
+        let exportErrorText = "导出失败，一个都没导出来：\n" + failed.joined(separator: "\n")
+        let exportPartialText = "批量导出完成：成功 \(urls.count) 个，失败 \(failed.count) 个：\n" + failed.joined(separator: "\n")
+        await MainActor.run {
+            batchExporting = false
+            batchBusy = false
+            if urls.isEmpty {
+                errorInfo = exportErrorText
+                errorShow = true
+            } else {
+                if !failed.isEmpty {
+                    czfBatchExportPendingSummary = exportPartialText
+                }
+                czfBatchExportURLs = urls
+            }
+        }
+    }
+
     // 新4（3.8.277）：批量隐藏——复用单个隐藏函数
     // LCAppModel.toggleHidden（delegate 已指回本页，
     // changeAppVisibility 会把 App 搬进隐藏区）。只对当前
@@ -1868,7 +1984,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
 
                 let appCount = sharedModel.isHiddenAppUnlocked ? filteredApps.count + filteredHiddenApps.count : filteredApps.count
-                Text(appCount > 0 || searchContext.debouncedQuery != "" ? "lc.appList.appCounter %lld".localizeWithFormat(appCount) : (sharedModel.multiLCStatus == 2 ? "lc.appList.convertToSharedToShowInLC2".loc : "lc.appList.installTip".loc))
+                Text(appCount > 0 || searchContext.debouncedQuery != "" ? "lc.appList.appCounter %lld".localizeWithFormat(appCount) : czfEmptyListTip)
                     .padding(.horizontal)
                     .foregroundStyle(.secondary)
                     .animation(searchContext.isTyping ? nil : .easeInOut, value: appCount)
@@ -2122,6 +2238,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .onChange(of: czfUpdatableOnly) { _ in
             czfRefreshFilteredApps()
         }
+        // 3.8.651（F2）：开关翻动即重跑过滤（与仅可更新同款）。
+        .onChange(of: czfNoBackupOnly) { _ in
+            czfRefreshFilteredApps()
+        }
         .background {
             if #available(iOS 16.0, *) {
                 CZFRunningFilterWatcher {
@@ -2200,6 +2320,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         batchRestoreScopeConfirm = true
                     }
                     .disabled(batchSelectedIDs.isEmpty || batchBusy)
+                    // 3.8.651（F3）：批量导出 IPA——逐个导出、跑完弹
+                    // 分享表；进行中文案切换（网格单路“正在导出…”
+                    // 同款，底栏这里省字用“导出…”）；重入 guard 走
+                    // batchExporting（按钮里先置真再起 Task），底栏
+                    // 禁用走 batchBusy（batchExportIPA 自己置）。
+                    Button(batchExporting ? "导出…" : "导出") {
+                        guard !batchExporting else { return }
+                        batchExporting = true
+                        Task { await batchExportIPA() }
+                    }
+                    .disabled(batchSelectedIDs.isEmpty || batchBusy || batchExporting)
                     // 3.8.281：勾中的全是隐藏 App 时按钮变“恢复显示”
                     // （批量取消隐藏）；否则仍是“隐藏”（只藏可见的，
                     // 已隐藏的不动）。selectedBatchApps 已含隐藏 App，
@@ -2619,6 +2750,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .sheet(isPresented: $sortSchemesViewPresent) {
             LCAppSortSchemesView()
+        }
+        // 3.8.651（F3）：批量导出完弹系统分享表（多文件一次分享，
+        // activityItems 就是 [URL]）。URL 在内容闭包里当场抓住
+        //（网格单路同款）：state 在 sheet 已开时再变也不会换掉
+        // 已建好的活动控制器。清理走 onComplete（ViewExtensions
+        // :515 注释）：取消也删各 tmp 父目录；部分失败的汇总等
+        // 分享表关掉再弹（分享表与提示框不能同时弹，直接弹会被
+        // 吞掉，下一 runloop 再弹）。
+        .sheet(isPresented: Binding(get: { !czfBatchExportURLs.isEmpty }, set: { if !$0 { czfBatchExportURLs = [] } })) {
+            let urls = czfBatchExportURLs
+            ActivityViewController(activityItems: urls) { _, _, _, _ in
+                for url in urls {
+                    try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                }
+                czfBatchExportURLs = []
+                if let summary = czfBatchExportPendingSummary {
+                    czfBatchExportPendingSummary = nil
+                    DispatchQueue.main.async {
+                        installInfo = summary
+                        installInfoShow = true
+                    }
+                }
+            }
         }
         // 最小化的网页浮动按钮：点它即最大化（带着原页面回来）；
         // 小 X 直接丢弃最小化的页面，不打开。网页打开时不显示。
@@ -3540,6 +3694,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 记录，有就直接恢复并弹窗，没有就不弹窗
                 Task { await self.autoRestoreBackupAfterInstall(app: newAppModel) }
             }
+
+            // 3.8.651（B3）：模型追加完发一次重算——源页红点只认
+            // refreshUpdatableCache，安装完成路此前不发任何通知，
+            // 刚装好的 App 仍计在红点里、要点回源页才掉下去；
+            // CZFRecomputeUpdatableCache 只重算、不联网刷新源
+            //（别发 CZFRefreshSourcesRequest，源页 :1483 注释已有
+            // 此教训）。源页 onReceive 接住重算；重算幂等，隐藏
+            // Tab 的 onChange 万一本来就会触发，多发一次也无害。
+            NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
 
             // O-9：这里只做模型追加，不清 installprogressVisible——flag
             // 只由 installFromUrl 的 defer 一处清理（startInstallApp 路

@@ -5939,9 +5939,26 @@ struct LCDataManagementView : View {
     /// v216：downloadProgress 原样透传给三处 iCloud 等待
     /// （容器、组容器、登录态合并），调用方在主线程写文案。
     static func restoreOneApp(appFolder: URL, app: LCAppModel, loginOnly: Bool = false, downloadProgress: ((Int, Int) -> Void)? = nil) async throws -> RestoreOutcome {
-        return try await Self.withSerializedRestore {
+        let outcome = try await Self.withSerializedRestore {
             try await Self.restoreOneAppImpl(appFolder: appFolder, app: app, loginOnly: loginOnly, downloadProgress: downloadProgress)
         }
+        // 3.8.651（B1）：恢复原地覆盖同一容器、大小缓存 key 不变、
+        // 旧数永不失效——安装路 3.8.649 在模型追加前调 removeSize，
+        // 全仓只有那一处调用；恢复路不增删实例、$apps sink 也不
+        // 触发，czfEnsureSizes 只补缺失的、有旧值就跳过。成功才
+        // 失效（抛错时恢复未完成、大小没变）；bySize 下顺手重算
+        // 一脚（只失效不重算，列表仍按沉底排、要等下次进存储页）。
+        // 本函数跑在全局执行器上：bundlePath() 读 _info、ensure
+        // 也要求主线程调用方，整段回主线程做。
+        await MainActor.run {
+            if let path = app.appInfo.bundlePath() {
+                CZFAppSizeCache.shared.removeSize(forBundlePath: path)
+            }
+            if LCAppSortManager.shared.appSortType == .bySize {
+                CZFAppSizeCache.shared.czfEnsureSizes(for: [app])
+            }
+        }
+        return outcome
     }
 
     private static func restoreOneAppImpl(appFolder: URL, app: LCAppModel, loginOnly: Bool = false, downloadProgress: ((Int, Int) -> Void)? = nil) async throws -> RestoreOutcome {

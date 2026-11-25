@@ -57,7 +57,6 @@ struct PSTitleValue: View {
     let defaultValue : AnyHashable
     let values : [AnyHashable]?
     let titles : [String]?
-    let displayValue : String
     let delegate : LCAppPreferencesDelegate
     
     init(title: String, key: String, defaultValue: AnyHashable, values: [AnyHashable]?, titles: [String]?, delegate: LCAppPreferencesDelegate) {
@@ -67,38 +66,38 @@ struct PSTitleValue: View {
         self.values = values
         self.titles = titles
         self.delegate = delegate
+    }
+
+    // 3.8.651（B2）：显示值是 computed——原来是 init 里算一次的
+    // let，兄弟行/子页改了同一 key 后本行仍显示冻结的旧值；
+    // 每次 body 求值现读 delegate.get 再映射 titles（映射逻辑
+    // 与原 init 一字相同：无 values/titles 表时读原值，realValue
+    // 为空时读默认值对应的标题）。
+    var displayValue: String {
         let realValue = delegate.get(key: key)
         var defaultValueText = defaultValue as? String ?? ""
         let realValueText = realValue as? String ?? defaultValueText
         guard let values, let titles, values.count == titles.count else {
-            displayValue = realValueText
-            return
+            return realValueText
         }
 
         for i in 0..<values.count {
-            let value = values[i]
-            if value == defaultValue {
+            if values[i] == defaultValue {
                 defaultValueText = titles[i]
                 break
             }
         }
-        
-        
+
         guard let realValue else {
-            displayValue = defaultValueText
-            
-            return
+            return defaultValueText
         }
 
-        
         for i in 0..<values.count {
-            let value = values[i]
-            if value == realValue {
-                displayValue = titles[i]
-                return
+            if values[i] == realValue {
+                return titles[i]
             }
         }
-        displayValue = realValueText
+        return realValueText
     }
     
     var body: some View {
@@ -223,7 +222,10 @@ struct PSChildPane: View {
 }
 
 struct PSGroup: View {
-    @State var children : [AnyView]
+    // 3.8.651（B2）：children 改 plain let——原来是 @State，初值只
+    // 生效一次，父页重建行表后组内行还是首建那批（标题行照样不刷新）；
+    // 组内行从不被改写（只在 body 里读），plain let 即够用，重建即透传。
+    let children : [AnyView]
     let title : String
     let footerText : String
     let delegate : LCAppPreferencesDelegate
@@ -259,15 +261,25 @@ struct AppPreferencePageView : View {
         // 重复拿是空操作，离开时由 AppPreferenceView.onDisappear 放。
         LCAppSettingsView.czfAcquirePreferenceAccess(for: containerURL)
         self.containerURL = containerURL
-        var children : [AnyView] = []
         self.preferencePlistURL = preferencePlistURL
+        let built = Self.czfBuildChildren(preferencePlistURL: preferencePlistURL, bundleId: bundleId, containerURL: containerURL, settingsBundle: settingsBundle)
+        errorInfo = built.error
+        self._children = State(initialValue: built.children)
+    }
+
+    /// 3.8.651（B2）：建行表（plist → 行 + 读失败文案）——init 与
+    /// onAppear/onReceive 共用：原来只在 init 建一次、存进 @State，
+    /// 之后 body 再求值也不重建；兄弟行/子页改了 key 后标题行一直
+    /// 是首建那批。每次建都新起一个 AppPreferenceModel（同一
+    /// UserDefaults 套件），行内 @State（文本框/多选/开关）按
+    /// 下标+类型复用，不丢正在输的内容。
+    private static func czfBuildChildren(preferencePlistURL: URL, bundleId: String, containerURL: URL, settingsBundle: Bundle) -> (children: [AnyView], error: String?) {
+        var children : [AnyView] = []
         guard let dict = NSMutableDictionary(contentsOf: preferencePlistURL) else {
-            errorInfo = "Failed to load preference."
-            return
+            return ([], "Failed to load preference.")
         }
         guard let items = dict["PreferenceSpecifiers"] as? [[String:Any]] else {
-            errorInfo = "Failed to load preference."
-            return
+            return ([], "Failed to load preference.")
         }
         let suiteName = dict["ApplicationGroupContainerIdentifier"] as? String ?? bundleId
         let stringTable = dict["StringsTable"] as? String ?? nil
@@ -335,7 +347,7 @@ struct AppPreferencePageView : View {
             let currView = PSGroup(children: currGroupChildren, title: currGroup["Title"] as? String ?? "", footerText: currGroup["FooterText"] as? String ?? "", delegate: delegate)
             children.append(AnyView(currView))
         }
-        self._children = State(initialValue: children)
+        return (children, nil)
     }
     
     var body: some View {
@@ -358,6 +370,16 @@ struct AppPreferencePageView : View {
             .onAppear {
                 LCAppSettingsView.czfAcquirePreferenceAccess(for: containerURL)
                 LCAppSettingsView.czfPreferencePageAppeared(for: containerURL)
+                // 3.8.651（B2）：回页重建行表——进子页改完同一 key
+                // 回来，标题行才跟上新值（只靠 computed 值不够，
+                // children 是 @State、body 不重建行实例）。
+                children = Self.czfBuildChildren(preferencePlistURL: preferencePlistURL, bundleId: bundleId, containerURL: containerURL, settingsBundle: settingsBundle).children
+            }
+            // 3.8.651（B2）：同页联动——兄弟行改了 key 就重建行表
+            //（标题行现读新值；多选/开关自己的 @State 按下标+类型
+            // 复用，改它的那行不会丢状态、不会触发 onChange 回环）。
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFPreferenceValueChanged"))) { _ in
+                children = Self.czfBuildChildren(preferencePlistURL: preferencePlistURL, bundleId: bundleId, containerURL: containerURL, settingsBundle: settingsBundle).children
             }
             .onDisappear {
                 LCAppSettingsView.czfPreferencePageDisappeared(for: containerURL)
@@ -397,6 +419,11 @@ class AppPreferenceModel: LCAppPreferencesDelegate {
     
     func set(key: String, val: AnyHashable?) {
         self.userDefaults.set(val, forKey: key)
+        // 3.8.651（B2）：同页联动——兄弟行（标题值）不订阅任何
+        // 状态，set 完不通知就没人重渲染；发一次通知，偏好页
+        // 接住重建行表（标题行现读新值）。子页的 set 也会发，
+        // 父页接住重建的是屏下行表，无害、回页时本来也要重建。
+        NotificationCenter.default.post(name: Notification.Name("CZFPreferenceValueChanged"), object: nil)
     }
     
     func localize(_ key: String) -> String {

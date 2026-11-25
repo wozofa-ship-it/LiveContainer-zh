@@ -840,7 +840,7 @@ struct CZFAppGridCell: View {
         }
         .disabled(czfExporting)
         // 3.8.641（F1）：置顶/取消置顶——列表置顶（CZFListPinnedApps 键，
-        // 与坞固定区无关）；切换后重排，七种排序下置顶组都固定在前。
+        // 与坞固定区无关）；切换后重排，八种排序下置顶组都固定在前。
         // 标题硬编码中文，沿用本菜单“复制 Bundle ID”硬编码先例。
         Button(CZFListPinnedStore.shared.isPinned(app) ? "取消置顶" : "置顶", systemImage: CZFListPinnedStore.shared.isPinned(app) ? "pin.fill" : "pin") {
             CZFListPinnedStore.shared.toggle(app)

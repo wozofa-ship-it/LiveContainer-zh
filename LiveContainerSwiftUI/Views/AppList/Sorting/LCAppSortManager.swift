@@ -18,6 +18,8 @@ enum AppSortType: String, CaseIterable {
     case custom = "custom"
     // 3.8.645（F2）：按占用大小（从大到小）。
     case bySize = "by_size"
+    // 3.8.651（F1）：按签名到期日（最早到期在前）。
+    case byExpiry = "by_expiry"
     
     var displayName: String {
         switch self {
@@ -35,6 +37,8 @@ enum AppSortType: String, CaseIterable {
             return "lc.appList.sort.custom".loc
         case .bySize:
             return "lc.appList.sort.bySize".loc
+        case .byExpiry:
+            return "lc.appList.sort.byExpiry".loc
         }
     }
     
@@ -59,6 +63,9 @@ enum AppSortType: String, CaseIterable {
         case .bySize:
             // iOS 15 已有（SF Symbols 1 时代的符号），无门控问题。
             return "arrow.up.arrow.down"
+        case .byExpiry:
+            // iOS 15 已有（SF Symbols 1 时代的符号），无门控问题。
+            return "hourglass"
         }
     }
 }
@@ -142,6 +149,36 @@ final class CZFAppSizeCache {
                 self.setSize(size, forBundlePath: path)
             }
         }
+    }
+}
+
+/// 3.8.651（F1）：签名剩余天数缓存（bundlePath → daysLeft），照抄
+/// CZFAppSizeCache 的形状：排序是同步的、天数是后台读盘——不能现算
+/// 现排。由列表页 czfRefreshSignatureExpiry 喂数（后台读完一次性
+/// 写进来），就绪调 onChange（主线程），排序管理器订阅它、byExpiry
+/// 下重排。无到期日（读不到 mobileprovision）的不进表，排序时按
+/// “未知”沉底。plain 类 + NSLock，不碰 @MainActor。
+final class CZFAppExpiryCache {
+    static let shared = CZFAppExpiryCache()
+    private let lock = NSLock()
+    private var days: [String: Int] = [:]
+    /// 天数就绪时调（主线程）。
+    var onChange: (() -> Void)?
+
+    func daysLeft(for app: LCAppModel) -> Int? {
+        guard let path = app.appInfo.bundlePath() else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return days[path]
+    }
+
+    /// 列表页刷新后批量喂数（一次只触发一次重排；全量替换，
+    /// 重签后续期、删掉的 App 掉出表）。
+    func setDays(_ newDays: [String: Int]) {
+        lock.lock()
+        days = newDays
+        lock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.onChange?() }
     }
 }
 
@@ -375,6 +412,17 @@ class LCAppSortManager: ObservableObject {
                 self.sortedHiddenApps = self.getSortedApps(DataManager.shared.model.hiddenApps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
             }
         }
+        // 3.8.651（F1）：到期天数就绪（列表页刷新喂进来）时，
+        // 正在用“按到期日”就重排；别的排序不动。
+        // onChange 在主线程上调（见 CZFAppExpiryCache），这里读
+        // @Published 数组与重排都在主线程上。
+        CZFAppExpiryCache.shared.onChange = { [weak self] in
+            guard let self, self.appSortType == .byExpiry else { return }
+            self.sortedApps = self.getSortedApps(DataManager.shared.model.apps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+            if DataManager.shared.model.isHiddenAppUnlocked {
+                self.sortedHiddenApps = self.getSortedApps(DataManager.shared.model.hiddenApps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+            }
+        }
     }
     
     // MARK: - Internal Logic
@@ -439,7 +487,7 @@ class LCAppSortManager: ObservableObject {
 
     func getSortedApps(_ appList: [LCAppModel], sortType: AppSortType, customSortOrder: [String]) -> [LCAppModel] {
         // 3.8.641（F1）：置顶组固定在前——先按置顶键分区，两组各按当前
-        // 排序排，再拼起来；七种排序（含默认顺序与自定义）全走同一条路，
+        // 排序排，再拼起来；八种排序（含默认顺序与自定义）全走同一条路，
         // 置顶组内仍按当前排序排。无置顶时一字不动（直接走老路）。
         let pinnedIds = Set(CZFListPinnedStore.shared.pinnedIds)
         guard appList.contains(where: { pinnedIds.contains(CZFListPinnedStore.pinKey(for: $0)) }) else {
@@ -505,6 +553,22 @@ class LCAppSortManager: ObservableObject {
             }
 
             return appsWithSize + appsWithoutSize
+        case .byExpiry:
+            // 3.8.651（F1）：按签名到期日升序（最早到期在前）；
+            // 天数未知（读不到 mobileprovision）的排最后（bySize
+            // 无大小放末尾同款）。
+            let appsWithExpiry = appList.compactMap { app -> (LCAppModel, Int)? in
+                guard let d = CZFAppExpiryCache.shared.daysLeft(for: app) else { return nil }
+                return (app, d)
+            }
+            .sorted { $0.1 < $1.1 }
+            .map { $0.0 }
+
+            let appsWithoutExpiry = appList.filter { app in
+                return CZFAppExpiryCache.shared.daysLeft(for: app) == nil
+            }
+
+            return appsWithExpiry + appsWithoutExpiry
         }
     }
     
