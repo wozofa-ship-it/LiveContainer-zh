@@ -41,6 +41,10 @@ enum CZFUpdateCheck {
     /// 资产里找独立版 LiveContainer.ipa（不是 +SideStore 那个二合一版）。
     static func check(completion: @escaping (Result<CZFUpdateInfo, Error>) -> Void) {
         var request = URLRequest(url: apiURL)
+        // 3.8.645（B1）：更新检查请求无超时，弱网下“检查中…”可卡
+        // URLSession 默认 60 秒；15 秒超时走现有失败分支
+        //（“检查失败，点一下重试”），期间设置行不再一直转。
+        request.timeoutInterval = 15
         request.setValue("LiveContainer", forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: request) { data, _, error in
             if let error {

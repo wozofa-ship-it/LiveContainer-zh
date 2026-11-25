@@ -22,6 +22,12 @@ struct LCAppStorageContainerItem: Identifiable {
     let name: String
     let size: Int64
     let isExternalContainer: Bool
+    // 3.8.645（B3）：去重键——标准化后的容器 URL 路径。按 URL
+    // 去重、不是按 folderName：私人树与共享树同名夹是两个容器
+    //（LCAppSettingsView:1633 同款教训），只比 folderName 会把
+    // 共享夹当成已有的私人夹。明细行不带它去重（每 App 各自仍
+    // 显示自己用的容器大小），只在“容器”分类累加时用。
+    let containerURL: URL
 }
 
 struct LCStorageBreakdown {
@@ -69,6 +75,18 @@ final class LCStorageManagementModel: ObservableObject {
         let snapshots = Self.czfSnapshots(apps: apps, hiddenApps: hiddenApps)
         do {
             breakdown = try await Self.calculateBreakdown(snapshots: snapshots)
+            // 3.8.645（F2）：存储页刷新时顺带填大小缓存（同一套快照
+            // + 算法，不另算一遍）：下次选“按占用大小”直接按这次
+            // 的数排，不用再后台逐个算。批量一次写，只触发一次重排。
+            if let breakdown {
+                var czfSizes: [String: Int64] = [:]
+                for item in breakdown.appItems {
+                    if let path = item.appModel.appInfo.bundlePath() {
+                        czfSizes[path] = item.totalSize
+                    }
+                }
+                CZFAppSizeCache.shared.setSizes(czfSizes)
+            }
         } catch {
             errorInfo = error.localizedDescription
         }
@@ -151,17 +169,26 @@ final class LCStorageManagementModel: ObservableObject {
         sizesByCategory[.containers] = 0
         
         var sideStoreContainerSize: Int64 = 0
+        // 3.8.645（B3）：共用容器在“容器”分类里只算一次——两个
+        // App 条目共用同一数据文件夹时（克隆条目未启动拆分前、
+        // “选择已有容器”跨 App 挂同一个夹），同一文件夹在两个
+        // appItem 里各算一次，分类虚高一份、“其他”被同等压低、
+        // 为负时整行直接消失。按标准化后的容器 URL 去重（本文件
+        // uniquePaths 同款键）；逐 App 明细行不动。
+        var czfSeenContainerURLs = Set<String>()
         for appItem in appItems {
             if !(appItem.appModel.appInfo is BuiltInSideStoreAppInfo) {
                 sizesByCategory[.appBundle]! += appItem.bundleSize ?? 0
             } else {
                 sideStoreContainerSize = appItem.containersSize
             }
-            
+
             for containerDetail in appItem.containerDetails {
                 if containerDetail.isExternalContainer {
                     continue
                 }
+                let czfContainerKey = containerDetail.containerURL.standardizedFileURL.path
+                guard czfSeenContainerURLs.insert(czfContainerKey).inserted else { continue }
                 sizesByCategory[.containers]! += containerDetail.size
             }
         }
@@ -239,7 +266,8 @@ final class LCStorageManagementModel: ObservableObject {
                     id: UUID(),
                     name: container.name,
                     size: size,
-                    isExternalContainer: container.storageBookMark != nil
+                    isExternalContainer: container.storageBookMark != nil,
+                    containerURL: container.containerURL
                 )
             )
         }

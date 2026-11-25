@@ -28,6 +28,13 @@ uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 
 + (void)validateJITLessSetupWithCompletionHandler:(void (^)(BOOL success, NSError *error))completionHandler;
 + (NSURL *)archiveIPAWithBundleName:(NSString*)newBundleName includingExtraInfoDict:(NSDictionary *)extraInfoDict error:(NSError **)error;
+// 3.8.645（F1）：导出已装 App 的 IPA——只复制、不改名、不重签：
+// 把 bundlePath 指到的 .app 原样拷到 tmp 唯一子目录 Payload/<名>.app，
+// 与 archiveIPAWithBundleName 同款 PKZipArchiver 打成标准 Payload/*.app
+// 的 .ipa（插件是启动时由 TweakLoader 从独立插件目录运行时注入的，
+// 不在 .app 包内，导出的就是原样已签名包）。返回 tmp 里的 .ipa 路径，
+// 调用方分享完自行清理；失败返回 nil 并填 error。
++ (NSURL *)czfExportIPAForBundlePath:(NSString *)bundlePath error:(NSError **)error;
 + (NSData *)certificateData;
 + (void)launchMultitaskGuestApp:(NSString *)displayName completionHandler:(void (^)(NSNumber *pid, NSError *error))completionHandler API_AVAILABLE(ios(16.0));
 

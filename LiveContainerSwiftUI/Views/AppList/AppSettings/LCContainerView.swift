@@ -20,6 +20,11 @@ protocol LCContainerViewDelegate {
 struct LCContainerView : View {
     @ObservedObject var container : LCContainer
     let delegate : LCContainerViewDelegate
+    // 3.8.645（F3）：复制容器要往所属 App 的 uiContainers 里 append——
+    // 所属 App 不能靠 folderName 反查 sharedModel（三表里可能有
+    // 两个 App 条目共用同一文件夹，反查会挂错 App）；设置页建本页
+    // 时就把 model 传进来，唯一调用点 LCAppSettingsView:508。
+    let owningApp: LCAppModel
     @Binding var uiDefaultDataFolder : String?
     @State var settingsBundle : Bundle? = nil
     
@@ -39,10 +44,14 @@ struct LCContainerView : View {
     @State private var errorInfo = ""
     @State private var successShow = false
     @State private var successInfo = ""
-    
-    init(container: LCContainer, uiDefaultDataFolder : Binding<String?>, delegate: LCContainerViewDelegate) {
+    // 3.8.645（F3）：复制进行中（后台整拷文件夹，耗时不定）——
+    // 按钮置灰 + 文案变“正在复制…”防重入。
+    @State private var czfDuplicating = false
+
+    init(container: LCContainer, uiDefaultDataFolder : Binding<String?>, delegate: LCContainerViewDelegate, owningApp: LCAppModel) {
         self._container = ObservedObject(initialValue: container)
         self.delegate = delegate
+        self.owningApp = owningApp
         self._typingContainerName = State(initialValue: container.name)
         self._uiDefaultDataFolder = Binding(projectedValue: uiDefaultDataFolder)
     }
@@ -241,6 +250,20 @@ struct LCContainerView : View {
                                 Text("lc.container.unbind".loc)
                             }
                         }
+                        // 3.8.645（F3）：复制容器——与“打开数据文件夹”并列，
+                        // 非 destructive；仅本地容器（storageBookMark == nil，
+                        // 与下面“移除容器”同款条件）时显示，在用时整个
+                        // else 分支都不进（上面 inUse 分支只显示一行提示）。
+                        // 标题硬编码中文，沿用长按菜单“复制 Bundle ID”/
+                        // “置顶”先例。0 新 key。
+                        if container.storageBookMark == nil {
+                            Button {
+                                Task { await duplicateContainer() }
+                            } label: {
+                                Text(czfDuplicating ? "正在复制…" : "复制容器")
+                            }
+                            .disabled(czfDuplicating)
+                        }
                         Button(role:.destructive) {
                             Task { await deleteData() }
                         } label: {
@@ -260,7 +283,14 @@ struct LCContainerView : View {
                                 Text("lc.container.removeContainer".loc)
                             }
                         }
-                        
+
+                    }
+                } footer: {
+                    // 3.8.645（F3）：复制只复制文件数据，登录需重新登录——
+                    // 写在按钮旁（与成功提示同款文案），在用/外置时不显示
+                    //（那时复制按钮本身也不显示）。
+                    if !inUse, container.storageBookMark == nil {
+                        Text("复制容器只复制文件数据，登录需重新登录。")
                     }
                 }
             } else {
@@ -638,6 +668,156 @@ struct LCContainerView : View {
         }
     }
     
+    /// 3.8.645（F3）：复制源快照——主线程上一次取齐，取后只用本地量，
+    /// 中间挂起点不影响（createFolder 同款）。
+    private struct CZFDuplicateSource {
+        let url: URL
+        let name: String
+        let isShared: Bool
+        let isolateAppGroup: Bool
+        let spoofIdentifierForVendor: Bool
+        let spoofDeviceFingerprint: Bool
+        let spoofedIdentifier: String?
+        let spoofedAdvertisingIdentifier: String?
+        let spoofedDeviceName: String?
+        let spoofedSystemVersion: String?
+        let spoofedMachine: String?
+        let spoofedRegion: String?
+        let spoofedScreenWidth: Double?
+        let spoofedScreenHeight: Double?
+        let spoofedScreenScale: Double?
+        let spoofedLocaleIdentifier: String?
+        let spoofedLanguage: String?
+        let spoofedTimeZoneName: String?
+        let spoofedProxyHost: String?
+        let spoofedProxyPort: Int
+    }
+
+    func duplicateContainer() async {
+        // 3.8.645（F3）：复制容器——把当前数据文件夹完整复制成一个
+        // 新容器（新 UUID 夹名），文件数据跟过去，登录需重新登录。
+        // 双守卫照抄 removeContainer/deleteData：客在用、宿主正在
+        // 启动/签名时直接弹错，不拷。
+        let czfAlreadyDuplicating = await MainActor.run { czfDuplicating }
+        guard !czfAlreadyDuplicating else { return }
+        await MainActor.run { czfDuplicating = true }
+        defer { Task { @MainActor in czfDuplicating = false } }
+        if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {
+            await MainActor.run {
+                errorInfo = "lc.container.inUseBy %@".localizeWithFormat(usingLC)
+                errorShow = true
+            }
+            return
+        }
+        if await MainActor.run(body: { isOwningAppLaunching() }) {
+            await MainActor.run {
+                errorInfo = "App 正在启动或签名中，稍后再操作。"
+                errorShow = true
+            }
+            return
+        }
+        // 组数上限：addContainers 同款判（容器数 +1 超 128 拦）。
+        let czfTooMany = await MainActor.run { owningApp.uiContainers.count + 1 > SharedModel.keychainAccessGroupCount }
+        if czfTooMany {
+            await MainActor.run {
+                errorInfo = "lc.container.tooMuchContainers".loc
+                errorShow = true
+            }
+            return
+        }
+        // 主线程取一次源容器快照（createFolder 同款）：URL、名字、
+        // 共享旗、隔离/伪装全套字段；取后只用本地量。
+        let src = await MainActor.run {
+            CZFDuplicateSource(
+                url: container.containerURL,
+                name: container.name,
+                isShared: container.isShared,
+                isolateAppGroup: container.isolateAppGroup,
+                spoofIdentifierForVendor: container.spoofIdentifierForVendor,
+                spoofDeviceFingerprint: container.spoofDeviceFingerprint,
+                spoofedIdentifier: container.spoofedIdentifier,
+                spoofedAdvertisingIdentifier: container.spoofedAdvertisingIdentifier,
+                spoofedDeviceName: container.spoofedDeviceName,
+                spoofedSystemVersion: container.spoofedSystemVersion,
+                spoofedMachine: container.spoofedMachine,
+                spoofedRegion: container.spoofedRegion,
+                spoofedScreenWidth: container.spoofedScreenWidth,
+                spoofedScreenHeight: container.spoofedScreenHeight,
+                spoofedScreenScale: container.spoofedScreenScale,
+                spoofedLocaleIdentifier: container.spoofedLocaleIdentifier,
+                spoofedLanguage: container.spoofedLanguage,
+                spoofedTimeZoneName: container.spoofedTimeZoneName,
+                spoofedProxyHost: container.spoofedProxyHost,
+                spoofedProxyPort: container.spoofedProxyPort
+            )
+        }
+        // 后台整拷文件夹到同根新 UUID 夹（FileManager.copyItem）；
+        // 拷失败删残留目标、弹错。
+        let newFolderName = NSUUID().uuidString
+        let dstURL = src.url.deletingLastPathComponent().appendingPathComponent(newFolderName)
+        do {
+            try FileManager.default.copyItem(at: src.url, to: dstURL)
+        } catch {
+            try? FileManager.default.removeItem(at: dstURL)
+            await MainActor.run {
+                errorInfo = error.localizedDescription
+                errorShow = true
+            }
+            return
+        }
+        // 拷后删桥文件三件套（LCDataManagementView:6725 同款集合）：
+        // 新组钥匙串是空的，旧排队文件留着会在下次启动时把旧登录态
+        // 导进新组。
+        let czfBridgeFiles = ["CZFKeychainImport.plist", "CZFKeychainDump.plist", "CZFKeychainBridgeStatus.txt"]
+        for czfBridgeFile in czfBridgeFiles {
+            try? FileManager.default.removeItem(at: dstURL.appendingPathComponent(czfBridgeFile))
+        }
+        // 建新容器：先抄伪装值、再开旗（applyPlistInfo 同款顺序：
+        // didSet 只在 nil 时补生成，旗开着、值却是源容器的旧值，
+        // 不会生成新值）；名字是“<原名> 副本”。
+        let newName = "\(src.name) 副本"
+        let newContainer = await MainActor.run {
+            let c = LCContainer(folderName: newFolderName, name: newName, isShared: src.isShared)
+            c.spoofedIdentifier = src.spoofedIdentifier
+            c.spoofedAdvertisingIdentifier = src.spoofedAdvertisingIdentifier
+            c.spoofedDeviceName = src.spoofedDeviceName
+            c.spoofedSystemVersion = src.spoofedSystemVersion
+            c.spoofedMachine = src.spoofedMachine
+            c.spoofedRegion = src.spoofedRegion
+            c.spoofedScreenWidth = src.spoofedScreenWidth
+            c.spoofedScreenHeight = src.spoofedScreenHeight
+            c.spoofedScreenScale = src.spoofedScreenScale
+            c.spoofedLocaleIdentifier = src.spoofedLocaleIdentifier
+            c.spoofedLanguage = src.spoofedLanguage
+            c.spoofedTimeZoneName = src.spoofedTimeZoneName
+            c.spoofedProxyHost = src.spoofedProxyHost
+            c.spoofedProxyPort = src.spoofedProxyPort
+            c.isolateAppGroup = src.isolateAppGroup
+            c.spoofIdentifierForVendor = src.spoofIdentifierForVendor
+            c.spoofDeviceFingerprint = src.spoofDeviceFingerprint
+            return c
+        }
+        // 钥匙串组走全局分配器（createFolder 同款，三表全扫）：
+        // 拷过来的 plist 里是源容器的旧组号，不重分+重写两容器
+        // 共用一组会串登录态。
+        let freeGroup = await MainActor.run { owningApp.czfFreeKeychainGroup(excluding: newContainer) }
+        await MainActor.run {
+            owningApp.uiContainers.append(newContainer)
+            owningApp.appInfo.containers = owningApp.uiContainers
+            sharedModel.appDataFolderNames.append(newFolderName)
+        }
+        // bundleIdentifier() 读 _info，主线程取（createFolder 同款）；
+        // 写盘（makeLCContainerInfoPlist，原子写）仍在外面。
+        let czfBid = await MainActor.run { owningApp.appInfo.bundleIdentifier()! }
+        newContainer.makeLCContainerInfoPlist(appIdentifier: czfBid, keychainGroupId: freeGroup)
+        // 不自动设选中/默认（createFolder 同款：只在 selected == nil
+        // 时才设），避免正在用的 App 下次启动切走。
+        await MainActor.run {
+            successInfo = "已复制为“\(newName)”，只复制文件数据，登录需重新登录。"
+            successShow = true
+        }
+    }
+
     func deleteData() async {
         // 3.8.579（L399-1）：同 removeContainer，裸 Task 调来（:217）、@State 写与 isOwningAppLaunching() 的数组读回主线程；删文件本身留外面。
         if let usingLC = LCSharedUtils.getContainerUsingLCScheme(withFolderName: container.folderName) {

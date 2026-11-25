@@ -256,7 +256,11 @@ final class LCAppBannerRootView: UIView {
         if cachedIcon == nil {
             CZFAppIconLoader.loadIconAsync(for: appInfo, darkModeIcon: darkModeIcon) { [weak self] _ in
                 guard let self, self.czfIconKey == iconKey else { return }
-                self.update(model: model, appInfo: appInfo, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon, traitCollection: traitCollection)
+                // 3.8.645（B2）：图标异步回填的重跑必须带上天数——
+                // 原来没传 expiryDaysLeft（参数默认 nil），重跑后
+                // 走 expiryLabel.isHidden = true，列表模式里图标
+                // 一加载完“剩 X 天”角标就消失，直到下拉刷新才回来。
+                self.update(model: model, appInfo: appInfo, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon, traitCollection: traitCollection, expiryDaysLeft: expiryDaysLeft)
             }
         }
         // 无用计算：动态取色关着时 mainColor 根本不用（下面两处都走

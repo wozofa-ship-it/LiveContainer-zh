@@ -565,6 +565,10 @@ struct CZFAppGridCell: View {
     var actions: CZFAppGridActions
 
     @State private var czfCellError: String?
+    // 3.8.645（F1）：导出 IPA——分享表要分享的 tmp .ipa（nil = 未导出/已分享完）
+    // 与导出进行中标志（导出放后台线程，别卡主线程；导出中按钮置灰防重入）。
+    @State private var czfExportIPAURL: URL?
+    @State private var czfExporting = false
     // O-13：后台生成的图标 + 它属于哪个 App/明暗；cell 复用
     // （滚动/明暗切换）后 key 对不上就不用，避免刷到别的 cell。
     @State private var czfLoadedIcon: UIImage?
@@ -728,6 +732,22 @@ struct CZFAppGridCell: View {
         } message: {
             Text(czfCellError ?? "")
         }
+        // 3.8.645（F1）：导出完弹系统分享表。分享的 URL 在内容闭包
+        // 里当场抓住（LCWebView:147 同款）：state 在 sheet 已开时
+        // 再变也不会换掉已建好的活动控制器。清理走 onComplete
+        //（ViewExtensions:515 注释）：completion 是活动真正结束
+        // 的点，“存储到‘文件’”的 picker 在用户选好目的地后才拷
+        // 源文件、第三方分享扩展在扩展进程启动后才读文件，都是
+        // sheet 关掉之后；onDismiss 删就分享失败。取消也删——
+        // tmp 里的 .ipa 只是导出中转，不留残留。
+        .sheet(isPresented: Binding(get: { czfExportIPAURL != nil }, set: { if !$0 { czfExportIPAURL = nil } })) {
+            if let exportURL = czfExportIPAURL {
+                ActivityViewController(activityItems: [exportURL]) { _, _, _, _ in
+                    try? FileManager.default.removeItem(at: exportURL.deletingLastPathComponent())
+                    czfExportIPAURL = nil
+                }
+            }
+        }
         // O-13：图标首次生成放后台——快路径已有图标直接返回，
         // 未命中才后台生成，生成完回主线程刷 state；task 的 id
         // 是 App+明暗，cell 复用/滚动走后旧 task 即取消，
@@ -803,8 +823,17 @@ struct CZFAppGridCell: View {
         Button("复制 Bundle ID", systemImage: "doc.on.doc") {
             UIPasteboard.general.string = app.appInfo.bundleIdentifier() ?? ""
         }
+        // 3.8.645（F1）：导出 IPA——把已装 App 的 .app 原样打成标准
+        // Payload/*.app 的 .ipa 走系统分享表（存文件/发给别人/导入
+        // SideInstaller）。链接装的 App 不进文件库、续签也要先把 IPA
+        // 导入文件库，导出即备份。标题硬编码中文，沿用本菜单“复制
+        // Bundle ID”硬编码先例。
+        Button(czfExporting ? "正在导出…" : "导出 IPA", systemImage: "square.and.arrow.up") {
+            czfExportIPA()
+        }
+        .disabled(czfExporting)
         // 3.8.641（F1）：置顶/取消置顶——列表置顶（CZFListPinnedApps 键，
-        // 与坞固定区无关）；切换后重排，六种排序下置顶组都固定在前。
+        // 与坞固定区无关）；切换后重排，七种排序下置顶组都固定在前。
         // 标题硬编码中文，沿用本菜单“复制 Bundle ID”硬编码先例。
         Button(CZFListPinnedStore.shared.isPinned(app) ? "取消置顶" : "置顶", systemImage: CZFListPinnedStore.shared.isPinned(app) ? "pin.fill" : "pin") {
             CZFListPinnedStore.shared.toggle(app)
@@ -844,8 +873,38 @@ struct CZFAppGridCell: View {
             Task { @MainActor in await app.setLocked(newLockState: !app.appInfo.isLocked) }
         }
         if !app.uiIsShared {
+            // 3.8.645（UI 打磨）：卸载是唯一的 destructive 项，与上面
+            // 一组普通项之间加一条分隔线，误删少一点。
+            Divider()
             Button("lc.appBanner.uninstall".loc, systemImage: "trash", role: .destructive) {
                 actions.onDeleteRequest(app)
+            }
+        }
+    }
+
+    // 3.8.645（F1）：导出 IPA——后台线程拷包 + 打包（大包压缩别卡
+    // 主线程），完事回主线程弹分享表/报错。bundlePath 与导出中标志
+    // 都在主线程上取/置（按钮回调在主 actor 上）；Task.detached
+    // 里只用已取出的本地字符串，不碰 @State 与 _info。
+    private func czfExportIPA() {
+        guard !czfExporting else { return }
+        guard let bundlePath = app.appInfo.bundlePath() else {
+            czfCellError = "找不到 App 包路径"
+            return
+        }
+        czfExporting = true
+        Task.detached(priority: .userInitiated) {
+            do {
+                let url = try LCUtils.czfExportIPA(bundlePath: bundlePath)
+                await MainActor.run {
+                    czfExporting = false
+                    czfExportIPAURL = url
+                }
+            } catch {
+                await MainActor.run {
+                    czfExporting = false
+                    czfCellError = error.localizedDescription
+                }
             }
         }
     }

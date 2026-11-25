@@ -520,6 +520,52 @@
     return tmpIPAPath;
 }
 
++ (NSURL *)czfExportIPAForBundlePath:(NSString *)bundlePath error:(NSError **)error {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSURL *bundleURL = [NSURL fileURLWithPath:bundlePath];
+    NSString *appFolderName = bundleURL.lastPathComponent;
+    if (![appFolderName hasSuffix:@".app"]) {
+        if (error) *error = [NSError errorWithDomain:@"CZFExportIPA" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"不是有效的 .app 包"}];
+        return nil;
+    }
+    // tmp 唯一子目录：两个 cell 同时导出也不撞目录（archiveIPA
+    // 的 LiveContainer2 是固定名，导出路不用它）。
+    NSURL *tmpRoot = [[manager.temporaryDirectory URLByAppendingPathComponent:@"CZFExportIPA"] URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    NSURL *tmpPayloadPath = [tmpRoot URLByAppendingPathComponent:@"Payload"];
+    NSError *localError = nil;
+    [manager createDirectoryAtURL:tmpPayloadPath withIntermediateDirectories:YES attributes:nil error:&localError];
+    if (localError) {
+        if (error) *error = localError;
+        return nil;
+    }
+    // 只复制：不改名、不改 Info.plist、不重签，导出的就是原样
+    // 已签名包（archiveIPAWithBundleName 那条是改名/改可执行
+    // 文件的多开克隆路，不可复用）。
+    [manager copyItemAtURL:bundleURL toURL:[tmpPayloadPath URLByAppendingPathComponent:appFolderName] error:&localError];
+    if (localError) {
+        if (error) *error = localError;
+        [manager removeItemAtURL:tmpRoot error:nil];
+        return nil;
+    }
+    // 与 archiveIPA 同款打包路：zip 根目录内容，顶层即 Payload/。
+    dlopen("/System/Library/PrivateFrameworks/PassKitCore.framework/PassKitCore", RTLD_GLOBAL);
+    NSData *zipData = [[NSClassFromString(@"PKZipArchiver") new] zippedDataForURL:tmpRoot];
+    if (!zipData) {
+        if (error) *error = [NSError errorWithDomain:@"CZFExportIPA" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"打包失败"}];
+        [manager removeItemAtURL:tmpRoot error:nil];
+        return nil;
+    }
+    [manager removeItemAtURL:tmpPayloadPath error:nil];
+    NSString *ipaName = [[appFolderName stringByDeletingPathExtension] stringByAppendingPathExtension:@"ipa"];
+    NSURL *tmpIPAPath = [tmpRoot URLByAppendingPathComponent:ipaName];
+    if (![zipData writeToURL:tmpIPAPath options:0 error:&localError]) {
+        if (error) *error = localError;
+        [manager removeItemAtURL:tmpRoot error:nil];
+        return nil;
+    }
+    return tmpIPAPath;
+}
+
 + (NSString *)getVersionInfo {
     // 3.8.336：页脚改成“解剖自我 🅥 LiveContainer 版本号”
     // （用户 13:16 截图圈定）；只用短版本号，不再拼

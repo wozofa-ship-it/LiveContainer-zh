@@ -505,7 +505,7 @@ struct LCAppSettingsView: View {
                     }
                     ForEach(model.uiContainers.indices, id:\.self) { i in
                         NavigationLink {
-                            LCContainerView(container: model.uiContainers[i], uiDefaultDataFolder: $model.uiDefaultDataFolder, delegate: self)
+                            LCContainerView(container: model.uiContainers[i], uiDefaultDataFolder: $model.uiDefaultDataFolder, delegate: self, owningApp: model)
                         } label: {
                             HStack {
                                 Text(model.uiContainers[i].name)

@@ -16,6 +16,8 @@ enum AppSortType: String, CaseIterable {
     case lastLaunched = "last_launched"
     case installationDate = "installationDate"
     case custom = "custom"
+    // 3.8.645（F2）：按占用大小（从大到小）。
+    case bySize = "by_size"
     
     var displayName: String {
         switch self {
@@ -31,6 +33,8 @@ enum AppSortType: String, CaseIterable {
             return "lc.appList.sort.installationDate".loc
         case .custom:
             return "lc.appList.sort.custom".loc
+        case .bySize:
+            return "lc.appList.sort.bySize".loc
         }
     }
     
@@ -52,6 +56,78 @@ enum AppSortType: String, CaseIterable {
             }
         case .custom:
             return "list.bullet"
+        case .bySize:
+            // iOS 15 已有（SF Symbols 1 时代的符号），无门控问题。
+            return "arrow.up.arrow.down"
+        }
+    }
+}
+
+/// 3.8.645（F2）：App 总占用缓存（包 + 容器），键是 bundlePath。
+/// 排序是同步的、大小是全目录遍历——不能现算现排：缓存由存储
+/// 管理页刷新时顺带填（同一套快照 + 算法），选“按占用大小”时
+/// 缺失的后台逐个补；大小就绪就调 onChange（主线程），排序
+/// 管理器订阅它、bySize 下重排。plain 类 + NSLock，不碰
+/// @MainActor：排序与存储统计都不在主 actor 上。
+final class CZFAppSizeCache {
+    static let shared = CZFAppSizeCache()
+    private let lock = NSLock()
+    private var sizes: [String: Int64] = [:]
+    private var inFlight: Set<String> = []
+    /// 大小就绪时调（主线程）。
+    var onChange: (() -> Void)?
+
+    func size(for app: LCAppModel) -> Int64? {
+        guard let path = app.appInfo.bundlePath() else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return sizes[path]
+    }
+
+    func setSize(_ size: Int64, forBundlePath path: String) {
+        lock.lock()
+        sizes[path] = size
+        lock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.onChange?() }
+    }
+
+    /// 存储页刷新时批量填（一次只触发一次重排）。
+    func setSizes(_ newSizes: [String: Int64]) {
+        guard !newSizes.isEmpty else { return }
+        lock.lock()
+        for (path, size) in newSizes { sizes[path] = size }
+        lock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.onChange?() }
+    }
+
+    /// 缺失的后台逐个算（czfTotalSize：快照主线程取、算大小放
+    /// 后台）；在途的只算一次，算完写缓存、触发重排。调用方在
+    /// 主线程上调（appSortType 的 didSet / reloadSortSettings），
+    /// Task 的执行器与被调函数本体见下面注释。
+    func czfEnsureSizes(for apps: [LCAppModel]) {
+        var todo: [(LCAppModel, String)] = []
+        lock.lock()
+        for app in apps {
+            guard let path = app.appInfo.bundlePath(), sizes[path] == nil, !inFlight.contains(path) else { continue }
+            inFlight.insert(path)
+            todo.append((app, path))
+        }
+        lock.unlock()
+        guard !todo.isEmpty else { return }
+        // Task { @MainActor in }（CZFAppGridView 锁按钮同款）：
+        // 循环体在主 actor 上跑、每次 await czfTotalSize（@MainActor
+        // 类上的 static func，主线程取快照、算大小走 nonisolated
+        // 的 calculateAppItem 放后台），不卡主线程；LCAppModel
+        // 不是 Sendable，裸 Task 抓它会报 warning，@MainActor
+        // 闭包不走那条路。
+        Task { @MainActor in
+            for (app, path) in todo {
+                let size = await LCStorageManagementModel.czfTotalSize(for: app)
+                self.lock.lock()
+                self.inFlight.remove(path)
+                self.lock.unlock()
+                self.setSize(size, forBundlePath: path)
+            }
         }
     }
 }
@@ -93,6 +169,12 @@ class LCAppSortManager: ObservableObject {
             self.sortedApps = self.getSortedApps(DataManager.shared.model.apps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
             if DataManager.shared.model.isHiddenAppUnlocked {
                 self.sortedHiddenApps = self.getSortedApps(DataManager.shared.model.hiddenApps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+            }
+            // 3.8.645（F2）：刚切到“按占用大小”时缓存里还没有的
+            // 后台逐个算（算完 onChange 回来重排）；已有大小的
+            // 直接按上面这次重排走，不用等。
+            if self.appSortType == .bySize {
+                CZFAppSizeCache.shared.czfEnsureSizes(for: DataManager.shared.model.apps + DataManager.shared.model.hiddenApps)
             }
             // 排序方式变了就刷新设置备份：导出文件里的
             // LCAppSortType 别滞后，恢复直接拿最新值。
@@ -257,6 +339,17 @@ class LCAppSortManager: ObservableObject {
                 self.sortedHiddenApps = self.getSortedApps(DataManager.shared.model.hiddenApps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
             }
             .store(in: &cancellables)
+        // 3.8.645（F2）：大小缓存就绪（存储页刷新填上 / 后台逐个
+        // 算完）时，正在用“按占用大小”就重排；别的排序不动。
+        // onChange 在主线程上调（见 CZFAppSizeCache），这里读
+        // @Published 数组与重排都在主线程上。
+        CZFAppSizeCache.shared.onChange = { [weak self] in
+            guard let self, self.appSortType == .bySize else { return }
+            self.sortedApps = self.getSortedApps(DataManager.shared.model.apps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+            if DataManager.shared.model.isHiddenAppUnlocked {
+                self.sortedHiddenApps = self.getSortedApps(DataManager.shared.model.hiddenApps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
+            }
+        }
     }
     
     // MARK: - Internal Logic
@@ -287,6 +380,11 @@ class LCAppSortManager: ObservableObject {
         if DataManager.shared.model.isHiddenAppUnlocked {
             self.sortedHiddenApps = self.getSortedApps(DataManager.shared.model.hiddenApps, sortType: self.appSortType, customSortOrder: self.customSortOrder)
         }
+        // 3.8.645（F2）：恢复回来就是 bySize 时也补算（didSet
+        // 在这里不触发，上面直接赋值的重排只用了缓存里已有的）。
+        if self.appSortType == .bySize {
+            CZFAppSizeCache.shared.czfEnsureSizes(for: DataManager.shared.model.apps + DataManager.shared.model.hiddenApps)
+        }
     }
 
     func getUniqueIdentifier(for app: LCAppModel) -> String? {
@@ -316,7 +414,7 @@ class LCAppSortManager: ObservableObject {
 
     func getSortedApps(_ appList: [LCAppModel], sortType: AppSortType, customSortOrder: [String]) -> [LCAppModel] {
         // 3.8.641（F1）：置顶组固定在前——先按置顶键分区，两组各按当前
-        // 排序排，再拼起来；六种排序（含默认顺序与自定义）全走同一条路，
+        // 排序排，再拼起来；七种排序（含默认顺序与自定义）全走同一条路，
         // 置顶组内仍按当前排序排。无置顶时一字不动（直接走老路）。
         let pinnedIds = Set(CZFListPinnedStore.shared.pinnedIds)
         guard appList.contains(where: { pinnedIds.contains(CZFListPinnedStore.pinKey(for: $0)) }) else {
@@ -367,6 +465,21 @@ class LCAppSortManager: ObservableObject {
             return appsWithinstallationDate + appsWithoutInstallationDate
         case .custom:
             return sortByCustomOrder(appList, customSortOrder: customSortOrder)
+        case .bySize:
+            // 3.8.645（F2）：按占用大小从大到小；大小未知（还没算
+            // 出来）的排最后（lastLaunched 无日期放末尾同款）。
+            let appsWithSize = appList.compactMap { app -> (LCAppModel, Int64)? in
+                guard let size = CZFAppSizeCache.shared.size(for: app) else { return nil }
+                return (app, size)
+            }
+            .sorted { $0.1 > $1.1 }
+            .map { $0.0 }
+
+            let appsWithoutSize = appList.filter { app in
+                return CZFAppSizeCache.shared.size(for: app) == nil
+            }
+
+            return appsWithSize + appsWithoutSize
         }
     }
     
