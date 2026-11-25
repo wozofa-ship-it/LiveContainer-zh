@@ -291,6 +291,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // F1（3.8.635）：签名剩余天数——bundlePath → daysLeft，
     // 后台读盘后进这里，列表/网格两路渲染都读它。
     @State private var czfExpiryDays: [String: Int] = [:]
+    // 3.8.647（B2）：签名天数刷新的代次——进页 onAppear、列表变
+    // onChange、回前台 scenePhase 三路可并发两路 Task.detached；
+    // 只有最新一代才排期、才写回（CZFLocalIpaFolderView.czfScanEpoch 同款）。
+    @State private var czfExpiryRefreshEpoch = 0
     @State private var batchSelectedIDs: Set<String> = []
     @State private var batchDeleteConfirm = false
     // 3.8.302：批量备份范围单开关——App 页多选备份原来点“备份”
@@ -1076,15 +1080,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 读模型），读盘放后台（loadAll 自带 mtime+size 缓存，重签
     // 才重读），结果回主线程进 @State。进页/回前台/列表变时调。
     private func czfRefreshSignatureExpiry() {
+        // 3.8.647（B2）：代次 +1、取本次代次——旧任务后完成时
+        // 代次已过期，排期与写回都跳过：不盖掉新任务的天数，掉队
+        // App 的提醒也不会在重排里只删不加（上一轮刚排好的提醒
+        // 被静默删掉）；调用方都在主线程（onAppear/onChange/
+        // scenePhase/czfRefreshAppList 的 MainActor.run），代次
+        // 自增无竞态。
+        czfExpiryRefreshEpoch += 1
+        let czfEpoch = czfExpiryRefreshEpoch
         let entries = CZFSignatureExpiryReader.snapshotEntries(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps)
         Task.detached(priority: .utility) {
             let loaded = CZFSignatureExpiryReader.loadAll(entries: entries)
             // 3.8.639（F1）：到期提醒排期——每次刷新重排（重签后续期、
             // 旧提醒在排期里按前缀清掉重排，不会误报旧日期）。
-            CZFExpiryReminder.schedule(for: loaded)
             var days: [String: Int] = [:]
             for item in loaded { days[item.bundlePath] = item.daysLeft }
-            await MainActor.run { czfExpiryDays = days }
+            await MainActor.run {
+                guard czfEpoch == czfExpiryRefreshEpoch else { return }
+                CZFExpiryReminder.schedule(for: loaded)
+                czfExpiryDays = days
+            }
         }
     }
 
@@ -3459,16 +3474,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         DispatchQueue.main.async {
             if let appToReplace {
                 let newAppModel = LCAppModel(appInfo: finalNewApp, delegate: self)
-                
+                // 3.8.647（B1）：按 bundlePath 摘旧行，不按实例 ==——
+                // 下拉刷新/冷启动扫描会整表换实例（model.apps = scanned.apps），
+                // 刷新后 appToReplace 已不在表里，removeAll 摘空、新旧两行
+                // 并存；bundlePath 是扫描与安装共用的稳定键。路径读不到
+                // 时才回落到实例 ==（旧行为）。
+                let replacedBundlePath: String? = appToReplace.appInfo.bundlePath()
+                let isReplaced: (LCAppModel) -> Bool = { model in
+                    if let replacedBundlePath {
+                        let modelPath: String? = model.appInfo.bundlePath()
+                        return modelPath == replacedBundlePath
+                    }
+                    return model == appToReplace
+                }
+
                 if appToReplace.uiIsHidden {
-                    sharedModel.hiddenApps.removeAll { $0 == appToReplace }
+                    sharedModel.hiddenApps.removeAll(where: isReplaced)
                     sharedModel.hiddenApps.append(newAppModel)
                 } else {
-                    sharedModel.apps.removeAll { $0 == appToReplace }
+                    sharedModel.apps.removeAll(where: isReplaced)
                     sharedModel.apps.append(newAppModel)
                 }
                 // 3.8.561（L265-1）：32 位表同款维护——旧实例摘掉、新实例是 32 位就补进来，否则覆盖重装后表里留的是旧实例（路径 tag 相同、看着一样），新装 32 位 App 则要等下次冷启动才进模拟器选择器。
-                sharedModel.arm32EmuApps.removeAll { $0 == appToReplace }
+                sharedModel.arm32EmuApps.removeAll(where: isReplaced)
                 if finalNewApp.is32bitEmulator {
                     sharedModel.arm32EmuApps.append(newAppModel)
                 }

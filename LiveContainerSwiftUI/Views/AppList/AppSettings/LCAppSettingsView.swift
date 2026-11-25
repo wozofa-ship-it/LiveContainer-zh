@@ -42,11 +42,63 @@ struct LCAppSettingsView: View {
     // 在）抛错、弹一条假报错（转换其实成功了）。两位共用（同一
     // 时刻只显示其中一个按钮），进函数先判位、置位，结束清位。
     @State private var czfConvertingShared = false
-    // 3.8.900（L573-7）：已为偏好设置持有外置容器访问权的夹名
-    // （只起一次、进程内保持，外部备份根同款：偏好读写经
-    // UserDefaults 贯穿整个偏好页访问，无法像单次文件操作
-    // 那样起用即停）。
+    // 3.8.647（B3）：已为偏好设置持有外置容器访问权的容器 URL
+    //（键见 czfPreferenceAccessKey）。原来键是裸 folderName，
+    // 两个 App 各导一个同名外置夹（如都叫 MyData）时第二家因
+    // contains 为真跳过 startAccessing，却在无 scope 的 URL 上
+    // 建目录而失败；同名还分私人/共享两棵树，(isShared,
+    // folderName) 仍撞（两家都私人树同名外置夹）。containerURL
+    //（外置夹是解析出的真实路径）天然区分。持有只在偏好页访问
+    // 期间：AppPreferenceView 离开时放（见 LCAppPreferenceView，
+    // 子页在访时有可见计数挡着不放）；L573-7 的“进程内保持”
+    // 是旧形——每开一次偏好页就永久多一份访问权。
     private static var czfHeldPreferenceAccess: Set<String> = []
+    // 3.8.647（B3）：当前正显示的偏好页（根页与子页）按容器 URL
+    // 计的可见数——进子页时父页消失也会调释放，这里的计数挡住
+    // 那次释放（子页还在读写同一容器的偏好，L573-7：偏好读写
+    // 贯穿整页访问）；计数归零才是偏好访问真正结束。
+    private static var czfVisiblePreferencePageCounts: [String: Int] = [:]
+
+    // 3.8.647（B3）：偏好访问的键——containerURL 标准化后的路径。
+    static func czfPreferenceAccessKey(for containerURL: URL) -> String {
+        containerURL.standardizedFileURL.path
+    }
+
+    // 3.8.647（B3）：为偏好访问拿一次 scope——已持有是空操作
+    //（Set 语义：同一容器反复进页不重复起）；拿不到（本地容器
+    // 或死书签）不记，释放时就是空操作。
+    static func czfAcquirePreferenceAccess(for containerURL: URL) {
+        let key = czfPreferenceAccessKey(for: containerURL)
+        guard !czfHeldPreferenceAccess.contains(key) else { return }
+        if containerURL.startAccessingSecurityScopedResource() {
+            czfHeldPreferenceAccess.insert(key)
+        }
+    }
+
+    // 3.8.647（B3）：偏好页离开时放一次 scope——有偏好页还在
+    // 显示该容器（进子页）时不放；计数归零才算访问真正结束。
+    static func czfReleasePreferenceAccess(for containerURL: URL) {
+        let key = czfPreferenceAccessKey(for: containerURL)
+        guard czfVisiblePreferencePageCounts[key] == nil else { return }
+        guard czfHeldPreferenceAccess.remove(key) != nil else { return }
+        containerURL.stopAccessingSecurityScopedResource()
+    }
+
+    // 3.8.647（B3）：偏好页出现/消失时登记/注销可见计数（与
+    // czfReleasePreferenceAccess 配对，同一容器多页叠加时计数叠加）。
+    static func czfPreferencePageAppeared(for containerURL: URL) {
+        let key = czfPreferenceAccessKey(for: containerURL)
+        czfVisiblePreferencePageCounts[key, default: 0] += 1
+    }
+
+    static func czfPreferencePageDisappeared(for containerURL: URL) {
+        let key = czfPreferenceAccessKey(for: containerURL)
+        if let count = czfVisiblePreferencePageCounts[key], count > 1 {
+            czfVisiblePreferencePageCounts[key] = count - 1
+        } else {
+            czfVisiblePreferencePageCounts.removeValue(forKey: key)
+        }
+    }
     // #13：隐藏确认框；#18：语言列表加载失败态
     @State private var hideConfirmShow = false
     @State private var languageLoadFailed = false
@@ -56,6 +108,9 @@ struct LCAppSettingsView: View {
     // 3.8.637（A2）：本 App 总占用（包 + 容器），nil = 还在算；
     // 只读显示，算在后台（LCStorageManagementModel.czfTotalSize）。
     @State private var czfTotalSize: Int64?
+    // 3.8.647（F1）：各容器占用大小（键见 czfContainerSizeKey），
+    // 后台算、回主线程写（总占用行同款 .task 模式）；缺失 = 还在算。
+    @State private var czfContainerSizes: [String: Int64] = [:]
     @State private var schedMinEnabled = false
     @State private var schedMinTime = Date()
     /// 单 App VPN 指定节点改动后自增，逼设置页重读一遍节点行。
@@ -510,6 +565,17 @@ struct LCAppSettingsView: View {
                             HStack {
                                 Text(model.uiContainers[i].name)
                                 Spacer()
+                                // 3.8.647（F1）：容器占用大小——哪个分身最占地方在
+                                // 这里一眼看到，不用再去存储页；算好前显示“计算中…”。
+                                if let containerSize = czfContainerSizes[czfContainerSizeKey(for: model.uiContainers[i])] {
+                                    Text(ByteCountFormatter.string(fromByteCount: containerSize, countStyle: .file))
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("lc.storage.calculating".loc)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
                                 if model.uiContainers[i].folderName == model.uiDefaultDataFolder {
                                     Text("默认")
                                         .font(.footnote)
@@ -521,6 +587,19 @@ struct LCAppSettingsView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
+                        }
+                        .task {
+                            // 3.8.647（F1）：后台算、回主线程写（总占用行
+                            // 同款 .task 模式，LCDataManagementView.folderSize
+                            // 是同步枚举、必须放 Task.detached 里）；只算
+                            // 未缓存的，行重现时不重复枚举。
+                            guard model.uiContainers.indices.contains(i) else { return }
+                            let container = model.uiContainers[i]
+                            let key = czfContainerSizeKey(for: container)
+                            guard czfContainerSizes[key] == nil else { return }
+                            let containerURL = container.containerURL
+                            let size = await Task.detached(priority: .utility) { LCDataManagementView.folderSize(containerURL) }.value
+                            await MainActor.run { czfContainerSizes[key] = size }
                         }
                     }
                 }
@@ -1039,6 +1118,13 @@ struct LCAppSettingsView: View {
                 let size = await LCStorageManagementModel.czfTotalSize(for: model)
                 await MainActor.run { czfTotalSize = size }
             }
+    }
+
+    // 3.8.647（F1）：容器行大小缓存键——(isShared, folderName)，
+    // 与 LCSelectContainerView.czfContainerKey 同形；私人/共享
+    // 同名夹是两个容器，只比 folderName 会串。
+    private func czfContainerSizeKey(for container: LCContainer) -> String {
+        "\(container.isShared ? "shared" : "private")\0\(container.folderName)"
     }
 
     func createFolder() async {
@@ -1583,12 +1669,13 @@ extension LCAppSettingsView : LCContainerViewDelegate {
         // 裸调 createDirectory，外置容器点“偏好设置”就弹
         // “Cannot create Library/Preferences folder!”、偏好
         // 目录也建不出来；本地容器与死书签不动。
-        if container.storageBookMark != nil, container.bookmarkResolved,
-           !Self.czfHeldPreferenceAccess.contains(container.folderName),
-           container.containerURL.startAccessingSecurityScopedResource() {
-            Self.czfHeldPreferenceAccess.insert(container.folderName)
+        // 3.8.647（B3）：键改用 containerURL（见 czfPreferenceAccessKey），
+        // 拿 scope 走共用助手；持有在偏好页离开时放，不再永久持有。
+        let containerURL = container.containerURL
+        if container.storageBookMark != nil, container.bookmarkResolved {
+            Self.czfAcquirePreferenceAccess(for: containerURL)
         }
-        let preferencesFolderUrl = container.containerURL.appendingPathComponent("Library/Preferences")
+        let preferencesFolderUrl = containerURL.appendingPathComponent("Library/Preferences")
         let fm = FileManager.default
         do {
             let doExist = fm.fileExists(atPath: preferencesFolderUrl.path)

@@ -249,6 +249,10 @@ struct AppPreferencePageView : View {
     @State var errorInfo : String?
 
     init(preferencePlistURL : URL, bundleId : String, containerURL : URL, settingsBundle: Bundle) {
+        // 3.8.647（B3）：进页即拿 scope——子页不走 getContainerURL，
+        // 这里的拿覆盖子页首读（读在 body 求值时、onAppear 之前）；
+        // 重复拿是空操作，离开时由 AppPreferenceView.onDisappear 放。
+        LCAppSettingsView.czfAcquirePreferenceAccess(for: containerURL)
         var children : [AnyView] = []
         self.preferencePlistURL = preferencePlistURL
         guard let dict = NSMutableDictionary(contentsOf: preferencePlistURL) else {
@@ -341,6 +345,17 @@ struct AppPreferencePageView : View {
                     children[i]
                 }
             }
+            // 3.8.647（B3）：偏好页出现/消失记可见数——进子页时父页
+            // 消失，计数挡住 AppPreferenceView.onDisappear 那次
+            // 释放（子页还在读写同一容器的偏好）；出现时再拿一次
+            // scope（返回时若已放掉就地续上，重复拿是空操作）。
+            .onAppear {
+                LCAppSettingsView.czfAcquirePreferenceAccess(for: containerURL)
+                LCAppSettingsView.czfPreferencePageAppeared(for: containerURL)
+            }
+            .onDisappear {
+                LCAppSettingsView.czfPreferencePageDisappeared(for: containerURL)
+            }
 
     }
 }
@@ -413,5 +428,11 @@ struct AppPreferenceView: View {
 
     var body: some View {
         AppPreferencePageView(preferencePlistURL: rootPlistUrl, bundleId: bundleId, containerURL : containerURL, settingsBundle: settingsBundle)
+            // 3.8.647（B3）：偏好页真正离开时放 scope——进子页时本页
+            // 也消失，子页的可见计数挡住那次释放（见 LCAppSettingsView
+            // czfReleasePreferenceAccess）；计数归零才放，不再永久持有。
+            .onDisappear {
+                LCAppSettingsView.czfReleasePreferenceAccess(for: containerURL)
+            }
     }
 }

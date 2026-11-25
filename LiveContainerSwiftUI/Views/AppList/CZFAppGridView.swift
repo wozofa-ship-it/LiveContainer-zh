@@ -823,6 +823,13 @@ struct CZFAppGridCell: View {
         Button("复制 Bundle ID", systemImage: "doc.on.doc") {
             UIPasteboard.general.string = app.appInfo.bundleIdentifier() ?? ""
         }
+        // 3.8.647（F2）：复制版本号——与“复制 Bundle ID”同款硬编码中文；
+        // version 是 "?"（读不到）时不显示，照抄版本行 app.version == "?" 的判法。
+        if app.version != "?" {
+            Button("复制版本号", systemImage: "doc.on.doc") {
+                UIPasteboard.general.string = app.version
+            }
+        }
         // 3.8.645（F1）：导出 IPA——把已装 App 的 .app 原样打成标准
         // Payload/*.app 的 .ipa 走系统分享表（存文件/发给别人/导入
         // SideInstaller）。链接装的 App 不进文件库、续签也要先把 IPA

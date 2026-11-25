@@ -23,6 +23,8 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     private let bannerView = LCAppBannerRootView()
     private var configuration: LCAppBannerConfiguration
     private var exportTemporaryDirectory: URL?
+    // 3.8.647（F3）：导出 IPA 进行中标志——防重入（菜单标题同步显示“正在导出…”）。
+    private var czfExporting = false
     // dock 条目变化时重绘画片（卡片状态读 dock 存活态，不订阅
     // 的话只在模型变化时重绘、窗口开关后仍是旧态）。
     private var dockAppsCancellable: AnyCancellable?
@@ -444,6 +446,27 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             UIPasteboard.general.string = appInfo.bundleIdentifier() ?? ""
         })
 
+        // 3.8.647（F2）：复制版本号——与“复制 Bundle ID”同款硬编码中文；
+        // version 是 "?"（读不到）时不显示，照抄版本行 app.version == "?" 的判法。
+        if model.version != "?" {
+            sectionChildren.append(UIAction(
+                title: "复制版本号",
+                image: UIImage(systemName: "doc.on.doc")
+            ) { _ in
+                UIPasteboard.general.string = model.version
+            })
+        }
+
+        // 3.8.647（F3）：导出 IPA——3.8.645 只进了网格菜单，列表模式
+        // 长按没有导出；与网格菜单对齐，标题硬编码中文，同“复制
+        // Bundle ID”先例；导出中显示“正在导出…”、防重入。
+        sectionChildren.append(UIAction(
+            title: czfExporting ? "正在导出…" : "导出 IPA",
+            image: UIImage(systemName: "square.and.arrow.up")
+        ) { [weak self] _ in
+            self?.czfExportIPA()
+        })
+
         // 3.8.641（F1）：置顶/取消置顶——与网格菜单同款（列表置顶键，
         // 与坞固定区无关）；标题硬编码中文，同“复制 Bundle ID”先例。
         sectionChildren.append(UIAction(
@@ -514,23 +537,28 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             children: tweakMenuActions
         ))
 
-        if !model.uiIsShared {
-            sectionChildren.append(UIAction(
-                title: "lc.appBanner.uninstall".loc,
-                image: UIImage(systemName: "trash"),
-                attributes: .destructive
-            ) { [weak self] _ in
-                Task { [weak self] in
-                    await self?.uninstall()
-                }
-            })
-        }
-
         menuChildren.append(UIMenu(
             title: appInfo.relativeBundlePath ?? "",
             options: .displayInline,
             children: sectionChildren
         ))
+
+        // 3.8.647（UI 打磨）：卸载是唯一的 destructive 项，单独成组
+        //（网格菜单 3.8.645 同款分隔线），与普通项之间隔一条分隔线，误删少一点。
+        if !model.uiIsShared {
+            menuChildren.append(UIMenu(title: "", options: .displayInline, children: [
+                UIAction(
+                    title: "lc.appBanner.uninstall".loc,
+                    image: UIImage(systemName: "trash"),
+                    attributes: .destructive
+                ) { [weak self] _ in
+                    Task { [weak self] in
+                        await self?.uninstall()
+                    }
+                }
+            ]))
+        }
+
         return UIMenu(title: "", children: menuChildren)
     }
 
@@ -882,5 +910,50 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         }
         try? FileManager.default.removeItem(at: exportTemporaryDirectory)
         self.exportTemporaryDirectory = nil
+    }
+
+    // 3.8.647（F3）：列表模式导出 IPA——网格菜单 czfExportIPA() 同款：
+    // 后台线程拷包 + 打包（大包压缩别卡主线程），完事回主线程用 UIKit
+    // UIActivityViewController 直接 present（横幅卡是 UIKit VC，不走
+    // SwiftUI 的 ActivityViewController）；completionWithItemsHandler
+    // 里删 tmp 目录（网格同款清理语义：onComplete 才删，取消也删）；
+    // czfExporting 防重入；失败走现有 showError。bundlePath 与导出中
+    // 标志都在主线程上取/置（菜单回调在主线程上）；Task.detached 里
+    // 只用已取出的本地字符串，不碰 VC 状态。
+    private func czfExportIPA() {
+        guard !czfExporting else { return }
+        guard let bundlePath = configuration.model.appInfo.bundlePath() else {
+            showError("找不到 App 包路径")
+            return
+        }
+        czfExporting = true
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let url = try LCUtils.czfExportIPA(forBundlePath: bundlePath)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.czfExporting = false
+                    guard self.viewIfLoaded?.window != nil, self.presentedViewController == nil else {
+                        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                        return
+                    }
+                    let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+                    activity.completionWithItemsHandler = { _, _, _, _ in
+                        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                    }
+                    if let popover = activity.popoverPresentationController {
+                        popover.sourceView = self.view
+                        popover.sourceRect = self.view.bounds
+                    }
+                    self.present(activity, animated: true)
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.czfExporting = false
+                    self.showError(error.localizedDescription)
+                }
+            }
+        }
     }
 }
