@@ -895,7 +895,7 @@ struct CZFAppGridCell: View {
         czfExporting = true
         Task.detached(priority: .userInitiated) {
             do {
-                let url = try LCUtils.czfExportIPA(bundlePath: bundlePath)
+                let url = try LCUtils.czfExportIPA(forBundlePath: bundlePath)
                 await MainActor.run {
                     czfExporting = false
                     czfExportIPAURL = url
