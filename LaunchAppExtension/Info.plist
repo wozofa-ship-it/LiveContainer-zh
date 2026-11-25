@@ -4,9 +4,9 @@
 <dict>
 	<!-- 3.8.900（L567-4）：390 同款——版本写死在这里，不走 $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION)：本 target 构建设置里那俩值是陈旧的 1.0/1，解析出来就是 1，390 就是这么红的；缺这两键时每 Archive 都报扩展版本 '1' 与主 App 不符（608/609 日志各 1 条）。CI bump（.github/workflows/build.yml）已把本文件纳入升版范围，下次升版自动改，不会留旧版。 -->
 	<key>CFBundleShortVersionString</key>
-	<string>3.8.645</string>
+	<string>3.8.646</string>
 	<key>CFBundleVersion</key>
-	<string>3.8.645</string>
+	<string>3.8.646</string>
 	<key>EXAppExtensionAttributes</key>
 	<dict>
 		<key>EXExtensionPointIdentifier</key>
