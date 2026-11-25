@@ -4945,6 +4945,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     func handleURL(url : URL) {
         if url.isFileURL {
+            // TwoYi 安卓系统（3.8.628）：.apk 不进 IPA 安装——
+            // 未启用提示去开开关，已启用拷到 tmp 再递给 TwoYi
+            // guest 装（见 czfHandleApk）；其余文件行为一字不动。
+            if url.pathExtension.lowercased() == "apk" {
+                Task { await czfHandleApk(url) }
+                return
+            }
             Task { await installFromUrl(urlStr: url.absoluteString) }
             return
         }
@@ -5036,6 +5043,46 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     errorInfo = "安装失败：链接里没有 url 参数"
                     errorShow = true
                 }
+            }
+        }
+    }
+
+    // TwoYi 安卓系统（3.8.628）：.apk 交接。
+    // 未装 TwoYi → 提示去源页开开关，并切到源页让用户一眼
+    // 看到开关在哪；已装 → 把 .apk 递给 TwoYi guest 装。
+    // 必须先拷到 tmp 再递 URL：从“文件”/分享进来的 .apk 是
+    // security-scoped URL，guest 跑在另一个进程（LiveProcess
+    // 扩展），安全域传不过去；拷完的 tmp 路径 guest 可读。
+    // 递送走 LCAppModel.runApp(urlStr:)（多任务路拼 open-url +
+    // base64 query、交接路写 App Group 的 LCLaunchExtensionLaunchURL，
+    // guest 按自己的 open-URL 处理；TwoYi 内有 NEO_GUEST_INSTALL
+    // 的安装入口且注册了 .apk 文档类型）。真机上 TwoYi 是否真
+    // 装上，由设备验定——这里不假装已验。
+    private func czfHandleApk(_ url: URL) async {
+        let twoYi = await MainActor.run { CZFTwoYi.installedApp(in: sharedModel) }
+        guard let twoYi else {
+            await MainActor.run {
+                errorInfo = "lc.twoyi.apkNotEnabled".loc
+                errorShow = true
+                sharedModel.selectedTab = .sources
+            }
+            return
+        }
+        do {
+            let fm = FileManager.default
+            let didStartAccessing = url.startAccessingSecurityScopedResource()
+            defer {
+                if didStartAccessing {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            let destURL = fm.temporaryDirectory.appendingPathComponent("LCApk-\(UUID().uuidString).apk")
+            try fm.copyItem(at: url, to: destURL)
+            try await twoYi.runApp(urlStr: destURL.absoluteString)
+        } catch {
+            await MainActor.run {
+                errorInfo = LCUtils.czfFriendlyError(error)
+                errorShow = true
             }
         }
     }

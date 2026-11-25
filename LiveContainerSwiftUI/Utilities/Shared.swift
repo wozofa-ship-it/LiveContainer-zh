@@ -65,6 +65,25 @@ extension CharacterSet {
     }()
 }
 
+// TwoYi 安卓系统（3.8.628，按需下载，不编进包）：
+// 固定下载地址是 GitHub Release 直链（已验：最终 200、
+// application/octet-stream、609740351 字节）；Bundle ID 与
+// 显示名是已从 IPA 的 Info.plist 现读的值，不许凭空改。
+// 安装状态不另存 key，从 sharedModel.apps/hiddenApps 派生
+// （删 guest 的路有三条，Bool 会漂移）；源页与 App 页共用。
+enum CZFTwoYi {
+    static let downloadURL = URL(string: "https://github.com/wozofa-ship-it/twoyi-ipa/releases/download/v1.1.0-932-zh-CN/twoyi_1.1.0_932_zh-CN.ipa")!
+    static let bundleID = "app.twoyi"
+    static let displayName = "twoyi"
+    /// 下载包体积（字节，下载链接的 content-length 现读值），
+    /// 供下载前空间预检（installIpaFile 同款 3 倍口径）。
+    static let downloadSize: Int64 = 609_740_351
+    /// 已装的 TwoYi guest（主线程读：apps/hiddenApps 是 @Published）。
+    static func installedApp(in model: SharedModel) -> LCAppModel? {
+        (model.apps + model.hiddenApps).first { $0.appInfo.bundleIdentifier() == bundleID }
+    }
+}
+
 class SharedModel: ObservableObject {
     @Published var selectedTab: LCTabIdentifier = .apps
     // 最小化的网页：WKWebView 存在这里，弹窗关了页面也不销毁，

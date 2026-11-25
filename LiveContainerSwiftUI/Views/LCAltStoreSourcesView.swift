@@ -941,6 +941,11 @@ struct LCSourcesView: View {
     // S-7：存文件下载同名覆盖确认——目标已存在时先问用户，
     // 确认才下载覆盖；取消则不下载。
     @State private var czfDownloadOverwritePending: (url: URL, destURL: URL)?
+    // TwoYi 安卓系统（3.8.628，按需下载，不编进包）：
+    // 安装状态派生（见 Shared.swift 的 CZFTwoYi），不另存 key。
+    @State private var czfTwoYiDownloading = false
+    @State private var czfTwoYiDeleteConfirm = false
+    private var czfTwoYiApp: LCAppModel? { CZFTwoYi.installedApp(in: sharedModel) }
     
     @State private var isViewAppeared = false
 
@@ -1023,6 +1028,18 @@ struct LCSourcesView: View {
                     // 列表路（AltStoreSourceSectionView）同样走
                     // VStack，不受影响。
                     VStack(spacing: 16) {
+                        // TwoYi 安卓系统（3.8.628）：只在“源”分段出现
+                        // （不在“文件夹”分段）、网格与列表两模式都可见、
+                        // 与每源一组平级；源为空的空态分支里不出现。
+                        CZFTwoYiSection(
+                            installed: czfTwoYiApp != nil,
+                            isDownloading: czfTwoYiDownloading,
+                            downloadProgress: downloadHelper.downloadProgress,
+                            installDisabled: czfTwoYiDownloading || downloadHelper.isDownloading,
+                            onInstall: { czfInstallTwoYi() },
+                            onRemove: { czfTwoYiDeleteConfirm = true }
+                        )
+                        .padding(.horizontal)
                         if czfSourceGridMode {
                             CZFSourceGridView(
                                 items: viewModel.sources,
@@ -1270,6 +1287,26 @@ struct LCSourcesView: View {
                     }
                 } message: { pending in
                     Text("\(pending.destURL.lastPathComponent) 已存在，是否覆盖？")
+                }
+        )
+        // TwoYi 安卓系统（3.8.628）：删 guest 前问一次——
+        // 3.8.589（L121）：同款——也挪 background 叶子。
+        // 单个确认框、两 destructive 按钮（CZFAppGridView 同款），
+        // 不做两步链式弹窗（第二步可能被第一步的收起静默顶掉）。
+        // 标题/正文复用 lc.appBanner.*；“保留数据重装会恢复旧
+        // 安卓数据”写进正文第二行（lc.twoyi.deleteKeepDataNote）。
+        .background(
+            EmptyView()
+                .confirmationDialog("lc.appBanner.confirmUninstallTitle".loc, isPresented: $czfTwoYiDeleteConfirm, titleVisibility: .visible) {
+                    Button("lc.twoyi.deleteKeepData".loc, role: .destructive) {
+                        Task { await czfDeleteTwoYi(removeDataFolders: false) }
+                    }
+                    Button("lc.twoyi.deleteAllData".loc, role: .destructive) {
+                        Task { await czfDeleteTwoYi(removeDataFolders: true) }
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {}
+                } message: {
+                    Text("lc.appBanner.confirmUninstallMsg %@".localizeWithFormat(czfTwoYiApp?.displayName ?? CZFTwoYi.displayName) + "\n" + "lc.twoyi.deleteKeepDataNote".loc)
                 }
         )
         .sheet(isPresented: $czfSourceGridSettingsShow) {
@@ -1740,6 +1777,117 @@ struct LCSourcesView: View {
             DataManager.shared.model.selectedTab = .apps
         }
         CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: url, autoReplace: false, preview: false, forceAsNew: false))
+    }
+
+    // TwoYi 安卓系统（3.8.628）：开 = 下载 IPA 装成 guest。
+    // 走共享 DownloadHelper（全局弹窗、单飞锁；下载中文案明示、
+    // 按钮禁用防重复点按）。下载前先做 installIpaFile 同款
+    // 3 倍空间预检（609MB×3），别让用户下完才知空间不够。
+    // 落盘 tmp/LCWebDownload-<UUID>/TwoYi.ipa：installFromUrl
+    // 本地分支成功后整目录删（只认父目录名前缀 LCWebDownload-
+    // 且父目录是 tmp 的直接子目录，见 LCAppListView 本地分支；
+    // 直接放 tmp/LCWebDownload-<UUID>.ipa 不行——父目录是 tmp，
+    // 前缀对不上，不会被清）。装完走源页待装队列 + preview，
+    // 与源页单装同款（App 页排空进安装队列）。
+    @MainActor
+    private func czfInstallTwoYi() {
+        guard !downloadHelper.isDownloading else {
+            errorMessage = "正在下载中，请稍候"
+            return
+        }
+        let need = CZFTwoYi.downloadSize * 3
+        if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let freeSize = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
+           freeSize < need {
+            let fmt = ByteCountFormatter()
+            fmt.countStyle = .file
+            errorMessage = "存储空间不足：安装这个应用约需 \(fmt.string(fromByteCount: need)) 空闲空间，当前只剩 \(fmt.string(fromByteCount: freeSize))"
+            return
+        }
+        czfTwoYiDownloading = true
+        Task {
+            let fm = FileManager.default
+            let dirURL = fm.temporaryDirectory.appendingPathComponent("LCWebDownload-\(UUID().uuidString)")
+            let tmpURL = dirURL.appendingPathComponent("TwoYi.ipa")
+            do {
+                try fm.createDirectory(at: dirURL, withIntermediateDirectories: true)
+                try await downloadHelper.download(url: CZFTwoYi.downloadURL, to: tmpURL)
+                guard LCUtils.czfFileHasPrefix(tmpURL, prefixes: LCUtils.czfExpectedPrefixes(for: tmpURL)) else {
+                    throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
+                }
+                await MainActor.run {
+                    czfTwoYiDownloading = false
+                    withAnimation {
+                        DataManager.shared.model.selectedTab = .apps
+                    }
+                    CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: tmpURL, autoReplace: false, preview: true, forceAsNew: false))
+                }
+            } catch {
+                // 下载失败/取消/魔数不对：本次落盘的临时目录没用了
+                // （重试会换新 UUID 目录），删掉，别留 609MB 残包；
+                // 取消不弹错（与 czfDownloadVersionTo 同款）。
+                try? fm.removeItem(at: dirURL)
+                await MainActor.run {
+                    czfTwoYiDownloading = false
+                    if !downloadHelper.cancelled {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            }
+        }
+    }
+
+    // TwoYi 安卓系统（3.8.628）：关 = 删掉 TwoYi guest。
+    // 文件删除走横幅卡共用 deleteAppFiles（删包、删容器、
+    // 钥匙串、未锁定备份；正在运行先拦）；列表摘除内联抄
+    // LCAppListView.removeApp（摘三表 + VPN 取消/清键 +
+    // dock 刷新，源页没有 LCAppListView 实例）。
+    // 删前先清待装队列里躺着的 TwoYi 项（下载完已入队、还没
+    // 排空的），不然删完它又自己装回来；同 URL 的临时目录
+    // 一并删（只认 LCWebDownload- 前缀的父目录，与
+    // installFromUrl 的清理同款口径）。
+    private func czfDeleteTwoYi(removeDataFolders: Bool) async {
+        // 3.8.900（L566-5）同款：本函数从确认框按钮的 Task 调来、
+        // 不在主线程；取目标与清待装队列回主线程做。
+        let app: LCAppModel? = await MainActor.run {
+            let target = czfTwoYiApp
+            CZFSourcePendingInstall.items.removeAll { item in
+                guard item.url.lastPathComponent == "TwoYi.ipa",
+                      item.url.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") else { return false }
+                try? FileManager.default.removeItem(at: item.url.deletingLastPathComponent())
+                return true
+            }
+            return target
+        }
+        guard let app else { return }
+        do {
+            let (failedContainers, keptBackupName) = try await LCAppBannerViewController.deleteAppFiles(
+                app,
+                removeDataFolders: removeDataFolders,
+                removeFromList: { model in
+                    sharedModel.apps.removeAll { $0 == model }
+                    sharedModel.hiddenApps.removeAll { $0 == model }
+                    sharedModel.arm32EmuApps.removeAll { $0 == model }
+                    CZFVPNManager.shared.cancelDeferredEnsure(for: model.appInfo)
+                    CZFVPNManager.clearVPNSettings(for: model.appInfo)
+                    if #available(iOS 16.0, *) {
+                        MultitaskDockManager.refreshAfterAppChanged()
+                    }
+                }
+            )
+            var messages: [String] = []
+            if !failedContainers.isEmpty {
+                messages.append("以下容器删除失败，已保留：\(failedContainers.joined(separator: "、"))")
+            }
+            if let kept = keptBackupName {
+                messages.append("备份「\(kept)」已锁定，已保留")
+            }
+            if !messages.isEmpty {
+                await MainActor.run { errorMessage = messages.joined(separator: "\n") }
+            }
+        } catch {
+            await MainActor.run { errorMessage = error.localizedDescription }
+        }
     }
 
     // 源页已装 App 的「新建」：不弹替换/新建选择框，直接按
@@ -2215,6 +2363,63 @@ struct CZFSourceAppListView: View {
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+    }
+}
+
+// TwoYi 安卓系统（3.8.628，按需下载，不编进包）：
+// 组头行 + 说明卡 + 安装/删除按钮；安装状态派生自已装
+// guest 列表，不另存开关 key（删 guest 的路有三条，
+// Bool 会漂移）。照 CZFInlineIpaFolderSection 的骨架，
+// 不用 Toggle——开是 609MB 下载 + 安装的长异步过程，
+// Toggle 瞬间翻转、失败要再翻回来，状态机比按钮复杂。
+private struct CZFTwoYiSection: View {
+    var installed: Bool
+    var isDownloading: Bool
+    var downloadProgress: Float
+    var installDisabled: Bool
+    var onInstall: () -> Void
+    var onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "apps.iphone")
+                    .foregroundStyle(.secondary)
+                Text("lc.twoyi.title".loc)
+                    .font(.headline)
+                Spacer()
+                if isDownloading {
+                    Text("\("lc.download.downloading".loc) \(Int(downloadProgress * 100))%")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if installed {
+                    Text("lc.common.installed".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("lc.twoyi.notInstalled".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("lc.twoyi.desc".loc)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    if installed {
+                        Button("lc.common.remove".loc, role: .destructive, action: onRemove)
+                    } else {
+                        Button("lc.common.install".loc, action: onInstall)
+                            .disabled(installDisabled)
+                    }
+                }
+            }
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
     }
 }
