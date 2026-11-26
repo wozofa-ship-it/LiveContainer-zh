@@ -202,8 +202,9 @@ public final class DownloadHelper : ObservableObject {
         // 触发口子是现成的：重试 2 秒间隙里 isDownloading 已是 false（completeCallback 清的）、标志仍占着，源页守门 S:1834 只认 isDownloading、覆盖确认 S:1262 根本没门，两路都能进轮询等；安装队尾那路同款。查与置必须同一次 MainActor.run 内原子完成；defer 里不能 await，清标志仍放主线程 Task。
         // 3.8.672（F-1）：拿不到锁的请求记进排队名册再等，不再
         // 被调用方顶回去；拿到锁即摘掉（只摘首个同名项，同名
-        // 两路排队时另一路还在册上）。等锁循环里不抛错，摘名
-        // 一定发生在拿到锁之后，不漏记。
+        // 两路排队时另一路还在册上）。3.8.692（B1）：等锁循环里
+        // 取消时抛错——命中取消先摘名再抛，正常拿到锁仍在锁后
+        // 摘名；两路都不漏记。
         var czfQueuedName: String? = nil
         while true {
             let acquired = await MainActor.run {
@@ -217,7 +218,35 @@ public final class DownloadHelper : ObservableObject {
                 czfQueuedName = name
                 await MainActor.run { czfQueuedDownloads.append(name) }
             }
+            // 3.8.692（B1）：等锁期间每轮查取消信号——原来循环里不读
+            // cancelled，try? 还把 sleep 的取消吞了，点了取消、排队
+            // 的下一路拿到锁照样开下。只查 cancelled（cancel() 置的
+            // 标志）：Task.isCancelled 不查（3.8.900 L565-1 同款口径，
+            // 预取路只 cancel Task 不够、要调 helper.cancel() 才停，
+            // 查了会改那条路的约定）。命中时把自己的名字从名册摘掉
+            // 再抛 CancellationError；cancelled 为真时三处调用方
+            // （installFromUrl、czfDownloadVersionTo、TwoYi）已按
+            // cancelled 静默分流，不弹错。
+            if await MainActor.run(body: { cancelled }) {
+                if let name = czfQueuedName {
+                    await MainActor.run {
+                        if let idx = czfQueuedDownloads.firstIndex(of: name) {
+                            czfQueuedDownloads.remove(at: idx)
+                        }
+                    }
+                }
+                throw CancellationError()
+            }
             try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        // 3.8.692（B1）：defer 挪到摘名之前——拿到锁后、复位 cancelled
+        // 之前再查一次，命中要抛错；defer 仍在摘名之后时，抛错路
+        // 抢到的锁永远不清，后面全部下载都排不上队。
+        defer {
+            Task { @MainActor in
+                czfDownloadInFlight = false
+                czfCurrentDownloadName = nil
+            }
         }
         if let name = czfQueuedName {
             await MainActor.run {
@@ -225,11 +254,13 @@ public final class DownloadHelper : ObservableObject {
                     czfQueuedDownloads.remove(at: idx)
                 }
             }
-        }
-        defer {
-            Task { @MainActor in
-                czfDownloadInFlight = false
-                czfCurrentDownloadName = nil
+            // 3.8.692（B1）：拿到锁后、复位 cancelled 之前再查一次——
+            // 抢锁与取消同一轮竞态时复位会把取消吞掉。只查等过锁的
+            // 这路（czfQueuedName 非空）：没等过锁、首轮即拿到锁的
+            // 是取消后新发起的下载，直接复位照常开下，不被旧取消
+            // 标志误杀。
+            if await MainActor.run(body: { cancelled }) {
+                throw CancellationError()
             }
         }
         await MainActor.run { czfCurrentDownloadName = czfDisplayDownloadName(url) }
@@ -705,6 +736,11 @@ public final class DownloadHelper : ObservableObject {
         }
         cancelled = true
         continuation = nil
+        // 3.8.692（B1）：取消 = 停当前 + 清空排队——原来只停在途
+        // 任务（下面 downloadTask?.cancel），排队名册里的下一路
+        // 拿到锁照样开下。名册清掉后，等锁的那路下一轮读到
+        // cancelled 照样抛错（见 download() 等锁检查点），两路都停。
+        czfQueuedDownloads.removeAll()
         // 带续传数据的取消：系统把下好的部分留成续传数据，
         // 下次下同一个地址接着下，不用从 0 开始
         // 3.8.666（B-1）：续传数据也落盘（只靠内存的话进程一死
@@ -1028,6 +1064,18 @@ public struct DownloadAlertModifier: ViewModifier {
                                 } label: {
                                     Text(helper.paused ? "lc.download.resume".loc : "lc.download.pause".loc)
                                         .font(.caption.bold())
+                                }
+                                // 3.8.692（F1）：收起胶囊加“取消”——与弹窗内
+                                // 取消钮调同一个 helper.cancel()，语义完全
+                                // 一致（停当前 + 清空排队，B1）；收起后想
+                                // 取消不用先点胶囊把弹窗调回来。0 新 key，
+                                // 复用 lc.common.cancel。
+                                Button {
+                                    helper.cancel()
+                                } label: {
+                                    Text("lc.common.cancel".loc)
+                                        .font(.caption.bold())
+                                        .foregroundColor(.red)
                                 }
                             }
                             .padding(.horizontal, 12)

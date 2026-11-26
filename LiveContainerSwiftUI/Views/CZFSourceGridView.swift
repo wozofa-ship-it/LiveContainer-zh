@@ -572,7 +572,7 @@ struct CZFSourceAppGridCell: View {
         guard let latest = app.latestVersion,
               let installed = installedLookup.installedModel(bundleIdentifier: app.bundleIdentifier) else { return false }
         let sourceVersion = latest.version
-        if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
+        if CZFUpdateIgnore.isIgnoredStored(CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier), version: sourceVersion, build: latest.buildVersion) { return false }
         return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
     }
 
@@ -713,7 +713,7 @@ struct CZFSourceAppGridCell: View {
             }
         }
         .sheet(isPresented: $showDetail) {
-            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: onDownloadVersion, onInstall: onInstall, onInstallAsNew: onInstallAsNew)
+            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: onDownloadVersion, onInstall: onInstall, onInstallAsNew: onInstallAsNew, installedLookup: installedLookup)
         }
     }
 }

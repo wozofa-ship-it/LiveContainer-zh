@@ -280,6 +280,9 @@ struct LCSettingsView: View {
             // 3.8.690（F3）：设置搜索——挂 Form 链上（插件页同款挂法，
             // LCTweaksView.swift:288）；prompt 硬编码中文，0 新 key。
             .searchable(text: $czfSearchText, prompt: "搜索设置")
+            // 3.8.692（B2）：搜索后滚列表收键盘——源页/App 页 3.8.688
+            // 已覆盖，设置页漏了；现成助手一行，iOS 15 下是 no-op。
+            .czfScrollDismissesKeyboard()
             // B-12：32 位 App 全删光、段隐藏时，残留的
             // selected32BitEmulator 选值在 UI 上没处清。
             // arm32EmuApps 变空就清掉，日后装回 32 位 App

@@ -5969,7 +5969,7 @@ private struct SourcePanelRow: View {
         guard let latest = app.latestVersion,
               let installed = installedAppModel else { return false }
         let sourceVersion = latest.version
-        if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
+        if CZFUpdateIgnore.isIgnoredStored(CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier), version: sourceVersion, build: latest.buildVersion) { return false }
         return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
     }
 

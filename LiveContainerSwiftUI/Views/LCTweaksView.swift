@@ -286,6 +286,9 @@ struct LCTweakFolderView : View {
         // 3.8.688（F1）：插件搜索——挂 List 链上（NavigationView 内，
         // 与 App/源页同款挂法）；prompt 硬编码中文，0 新 key。
         .searchable(text: $czfSearchText, prompt: "搜索插件")
+        // 3.8.692（B2）：搜索后滚列表收键盘——源页/App 页 3.8.688
+        // 已覆盖，插件页漏了；现成助手一行，iOS 15 下是 no-op。
+        .czfScrollDismissesKeyboard()
         .navigationTitle(isRoot ? "lc.tabView.tweaks".loc : baseUrl.lastPathComponent)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

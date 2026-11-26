@@ -749,9 +749,29 @@ enum CZFUpdateIgnore {
             UserDefaults.standard.removeObject(forKey: "CZFIgnoredUpdate-\(bundleId)")
         }
     }
+    // 3.8.692（B3）：忽略键改为“版本|build”——只升 build 的更新
+    // （2.0/b50 → 2.0/b100）原来只记短版本号，忽略后新 build
+    // 永不再提醒。build 为空时只记短版本；分隔符 `|` 不会出
+    // 现在版本号/build 里。
+    static func ignoredKey(version: String, build: String?) -> String {
+        if let build, !build.isEmpty {
+            return "\(version)|\(build)"
+        }
+        return version
+    }
+    // 3.8.692（B3）：存的值与当前最新版比对——新条目（带 `|`）
+    // 版本与 build 都对上才算忽略；老条目（只有短版本号）按
+    // “忽略该短版本全部 build”通配保留，不打扰已忽略的用户。
+    static func isIgnoredStored(_ stored: String?, version: String, build: String?) -> Bool {
+        guard let stored else { return false }
+        if stored.contains("|") {
+            return stored == ignoredKey(version: version, build: build)
+        }
+        return stored == version
+    }
     static func isIgnored(_ app: AltStoreSourceApp) -> Bool {
-        guard let latest = app.latestVersion?.version else { return false }
-        return ignoredVersion(for: app.bundleIdentifier) == latest
+        guard let latest = app.latestVersion else { return false }
+        return isIgnoredStored(ignoredVersion(for: app.bundleIdentifier), version: latest.version, build: latest.buildVersion)
     }
 }
 
@@ -1312,7 +1332,22 @@ struct LCSourcesView: View {
                             // 重复点按仍由 czfTwoYiDownloading 拦。
                             installDisabled: czfTwoYiDownloading,
                             onInstall: { czfInstallTwoYi() },
-                            onRemove: { czfTwoYiDeleteConfirm = true }
+                            onRemove: { czfTwoYiDeleteConfirm = true },
+                            // 3.8.692（F3）：打开 TwoYi——照抄行上打开块的
+                            // 骨架（锁守卫 + runApp + 失败写父级
+                            // errorMessage，裸 Task、回主线程写）；
+                            // 只有一个 guest 实例，无多实例选择器。
+                            onOpen: {
+                                guard let app = czfTwoYiApp else { return }
+                                Task {
+                                    guard await app.czfAuthenticateIfLocked() else { return }
+                                    do {
+                                        try await app.runApp()
+                                    } catch {
+                                        await MainActor.run { errorMessage = error.localizedDescription }
+                                    }
+                                }
+                            }
                         )
                         .padding(.horizontal)
                         if czfSourceGridMode {
@@ -2278,7 +2313,7 @@ struct LCSourcesView: View {
                 guard let latest = app.latestVersion,
                       let installedVersion = installed[czfNormalizedBundleID(app.bundleIdentifier)],
                       czfIsNewerVersion(latest.version, build: latest.buildVersion, newerThan: installedVersion, installedBuild: installedBuilds[czfNormalizedBundleID(app.bundleIdentifier)]),
-                      CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) != latest.version else {
+                      !CZFUpdateIgnore.isIgnoredStored(CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier), version: latest.version, build: latest.buildVersion) else {
                     continue
                 }
                 if let existing = bestByBundle[app.bundleIdentifier] {
@@ -3069,6 +3104,11 @@ private struct CZFTwoYiSection: View {
     var installDisabled: Bool
     var onInstall: () -> Void
     var onRemove: () -> Void
+    // 3.8.692（F3）：已装时“打开”——源页列表行对已装 App 都有绿色
+    // “打开”钮，TwoYi 是唯一的例外；打开逻辑由父级传入（行上
+    // 打开块的骨架，见调用点），TwoYi 只有一个 guest 实例，无
+    // 多实例选择器问题。
+    var onOpen: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3110,6 +3150,8 @@ private struct CZFTwoYiSection: View {
                 HStack {
                     Spacer()
                     if installed {
+                        // 3.8.692（F3）：已装时并排“打开 + 删除”。
+                        Button("lc.common.open".loc, action: onOpen)
                         Button("lc.common.remove".loc, role: .destructive, action: onRemove)
                     } else {
                         Button("lc.common.install".loc, action: onInstall)
@@ -3417,7 +3459,7 @@ struct LCSourceAppBanner: View {
         guard let latest = app.latestVersion,
               let installed = installedAppModel else { return false }
         let sourceVersion = latest.version
-        if CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier) == sourceVersion { return false }
+        if CZFUpdateIgnore.isIgnoredStored(CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier), version: sourceVersion, build: latest.buildVersion) { return false }
         return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
     }
     
@@ -3726,9 +3768,10 @@ struct LCSourceAppBanner: View {
             // 设防，长按再改忽略名单会绕过批量流程、重算红点；
             // 复制两项与固定项照常留（只读，不碰批量队列）。
             if !isBatchMode {
-            if hasUpdate, let version = app.latestVersion?.version {
+            if hasUpdate, let latest = app.latestVersion {
                 Button {
-                    CZFUpdateIgnore.setIgnored(version, for: app.bundleIdentifier)
+                    // 3.8.692（B3）：忽略记“版本|build”，不是只记短版本。
+                    CZFUpdateIgnore.setIgnored(CZFUpdateIgnore.ignoredKey(version: latest.version, build: latest.buildVersion), for: app.bundleIdentifier)
                     ignoreRefresh.toggle()
                     // S-12：只重算红点和「全部更新」名单，不用
                     // 联网刷新源——发 CZFRecomputeUpdatableCache，
@@ -3767,7 +3810,7 @@ struct LCSourceAppBanner: View {
             }
         }
         .sheet(isPresented: $showDetail) {
-            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: downloadVersionAction, onInstall: installAction, onInstallAsNew: installAsNewAction)
+            LCSourceAppDetailView(app: app, source: source, onDownloadVersion: downloadVersionAction, onInstall: installAction, onInstallAsNew: installAsNewAction, installedLookup: installedLookup)
         }
         .sheet(isPresented: $showInstancePicker) {
             NavigationView {
@@ -3825,11 +3868,26 @@ struct LCSourceAppDetailView: View {
     // 复制”）：详情页顶部加安装/新建/复制三个按钮。
     let onInstall: (AltStoreSourceApp) -> Void
     let onInstallAsNew: (AltStoreSourceApp) -> Void
+    // 3.8.692（F2）：已装查找表——两个调用点（列表行、网格格子）
+    // 各自手里都有，详情页拿它算“已装最新版”判据 + 取实例列表；
+    // 不传（nil）时一律显示“安装”，老行为。行上的打开逻辑不直
+    // 接复用：打开块里 showInstancePicker/launchError 是行私有
+    // 的 state，详情页是另一个 struct，根本够不着；实例选择器
+    // 与启动失败弹都挂在详情页自己身上（行上的那份在详情 sheet
+    // 盖着时弹不出来，也不走父级 errorMessage），打开逻辑照抄
+    // 行上骨架放详情页内（见 czfOpenInstalled）。
+    let installedLookup: CZFInstalledLookup? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var copiedDownloadURL = false
     // S-10②：无下载链接时安装/新建不在父级写错（详情单还在
     // dismiss 动画里，父级 alert 会被吞）；在详情页内就地弹。
     @State private var detailError: String?
+    // 3.8.692（F2）：详情页内“打开”的实例选择器与启动失败弹——
+    // 行上的那份挂在行上，详情 sheet 盖着时弹不出来，故详情页
+    // 自己挂一份；与 detailError 的 alert 不在同一条链上
+    // （L121 同款：同一视图多个 alert 只认最后一个）。
+    @State private var czfShowInstancePicker = false
+    @State private var czfLaunchError: String?
 
     // 从描述或下载链接里找 GitHub 地址
     private var githubURL: URL? {
@@ -3854,6 +3912,86 @@ struct LCSourceAppDetailView: View {
             return URL(string: raw)
         }
         return nil
+    }
+
+    // 3.8.692（F2）：详情页“打开”判据——与行上同款（非 dylib、
+    // 已装、无更新）；hasUpdate 的忽略比对走 B3 的“版本|build”
+    // 口径（isIgnoredStored），行/格子/坞同款。
+    private var czfDetailIsDylib: Bool {
+        app.latestVersion?.downloadURL.pathExtension.lowercased() == "dylib"
+    }
+    private var czfDetailIsInstalled: Bool {
+        guard let lookup = installedLookup else { return false }
+        return lookup.isInstalled(bundleIdentifier: app.bundleIdentifier)
+    }
+    private var czfDetailHasUpdate: Bool {
+        guard let lookup = installedLookup,
+              let latest = app.latestVersion,
+              let installed = lookup.installedModel(bundleIdentifier: app.bundleIdentifier) else { return false }
+        let sourceVersion = latest.version
+        if CZFUpdateIgnore.isIgnoredStored(CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier), version: sourceVersion, build: latest.buildVersion) { return false }
+        return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
+    }
+    private var czfDetailShowOpen: Bool {
+        !czfDetailIsDylib && czfDetailIsInstalled && !czfDetailHasUpdate
+    }
+
+    // 3.8.692（F2）：详情页内“打开”——照抄行上打开块的骨架
+    // （:3609–3660）：单实例先过锁守卫再 runApp，失败写本页
+    // czfLaunchError 弹；多实例弹本页实例选择器（挂在详情页
+    // 自己身上，见 body 末尾）。
+    private func czfOpenInstalled() {
+        guard let lookup = installedLookup else { return }
+        let matches = lookup.installedModels(bundleIdentifier: app.bundleIdentifier)
+        if matches.count == 1, let only = matches.first {
+            Task {
+                guard await only.czfAuthenticateIfLocked() else { return }
+                do {
+                    try await only.runApp()
+                } catch {
+                    await MainActor.run { czfLaunchError = error.localizedDescription }
+                }
+            }
+        } else if matches.count > 1 {
+            czfShowInstancePicker = true
+        }
+    }
+
+    // 3.8.692（F2）：实例选择器单抽一个 builder——body 已大，
+    // sheet 内容不直接塞进 body 表达式（3.8.688 体检查超时
+    // 教训）。内容照抄行上那份（:3776–3806）：实例行先关单
+    // 再启动，失败写本页 czfLaunchError。
+    @ViewBuilder
+    private var czfInstancePickerSheet: some View {
+        NavigationView {
+            List(installedLookup?.installedModels(bundleIdentifier: app.bundleIdentifier) ?? [], id: \.self) { model in
+                Button {
+                    czfShowInstancePicker = false
+                    Task {
+                        guard await model.czfAuthenticateIfLocked() else { return }
+                        do {
+                            try await model.runApp()
+                        } catch {
+                            await MainActor.run { czfLaunchError = error.localizedDescription }
+                        }
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.appInfo.displayName())
+                            .font(.system(size: 15)).bold()
+                        Text("容器 \(model.uiSelectedContainer?.name ?? model.uiSelectedContainer?.folderName ?? "") • 版本 \(model.appInfo.version())")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("选择要打开的实例")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { czfShowInstancePicker = false }
+                }
+            }
+        }
     }
 
     var body: some View {
@@ -3889,12 +4027,20 @@ struct LCSourceAppDetailView: View {
                 Section {
                     HStack(spacing: 12) {
                         Button {
-                            guard app.latestVersion?.downloadURL != nil else {
-                                detailError = "lc.sources.error.missingDownload".loc
-                                return
+                            // 3.8.692（F2）：已装最新版时顶部“安装”变“打开”——
+                            // 与列表行绿色“打开”同义；打开不关详情单（行上
+                            // 打开也不切页），不验下载链接。有更新/未装/
+                            // dylib 时仍是“安装”，老行为。
+                            if czfDetailShowOpen {
+                                czfOpenInstalled()
+                            } else {
+                                guard app.latestVersion?.downloadURL != nil else {
+                                    detailError = "lc.sources.error.missingDownload".loc
+                                    return
+                                }
+                                dismiss()
+                                onInstall(app)
                             }
-                            dismiss()
-                            onInstall(app)
                         } label: {
                             // 3.8.450（用户 17:47 报“安装按钮不整齐”，
                             // 放大截图实证）：安装用 Label 时图标根本没
@@ -3904,8 +4050,8 @@ struct LCSourceAppDetailView: View {
                             // （Image + Text），图标是独立视图，不走
                             // Label，三处结构完全一致才对齐。
                             HStack(spacing: 6) {
-                                Image(systemName: "square.and.arrow.down")
-                                Text("安装")
+                                Image(systemName: czfDetailShowOpen ? "play.fill" : "square.and.arrow.down")
+                                Text(czfDetailShowOpen ? "lc.common.open".loc : "安装")
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -4077,6 +4223,18 @@ struct LCSourceAppDetailView: View {
             } message: {
                 Text(detailError ?? "")
             }
+        }
+        // 3.8.692（F2）：实例选择器 + 启动失败弹挂在详情页自己身上——
+        // 行上的那份在详情 sheet 盖着时弹不出来；与上面 detailError
+        // 的 alert 不在同一条链上（L121 同款：同一视图多个 alert
+        // 只认最后一个），各占一条分支。
+        .sheet(isPresented: $czfShowInstancePicker) {
+            czfInstancePickerSheet
+        }
+        .alert("lc.common.error".loc, isPresented: Binding(get: { czfLaunchError != nil }, set: { if !$0 { czfLaunchError = nil } })) {
+            Button("lc.common.ok".loc, role: .cancel) { czfLaunchError = nil }
+        } message: {
+            Text(czfLaunchError ?? "")
         }
     }
 }
