@@ -86,7 +86,16 @@ enum CZFLocalIpaFolderStore {
 }
 
 struct CZFLocalIpaItem: Identifiable {
-    let id = UUID()
+    // 3.8.666（B-alt）：id 改相对路径派生稳定键——原来 `let id = UUID()`
+    // 每次重建随机，scan() 全量重建后批量选中集按 id 匹配全丢
+    // （长按单删触发重扫即丢选；同名替换触发全扫也丢选）；
+    // 现在同一文件（相对路径不变）重建出同一 id，勾选跨重扫
+    // 与同名替换都保留。派生用相对路径 SHA256 前 16 字节
+    // （O-16 czfCacheKey 同款思路，相对路径 + 哈希，不含 mtime/
+    // size——文件被替换后 id 不变、勾选才留得住）；文件夹根外
+    // 回落绝对路径。id 仍是 UUID 类型，itemsByID / wantedDetailIDs
+    // 全是 id 键，不用改类型、不动选中集结构。
+    let id: UUID
     let url: URL
     let fileName: String
     var displayName: String
@@ -101,6 +110,34 @@ struct CZFLocalIpaItem: Identifiable {
     // 3.8.444：包名（CFBundleIdentifier），供格子打“已安装”
     // 绿勾——读 Info.plist 得来，读不到时不打勾。
     var bundleIdentifier: String?
+
+    init(url: URL, fileName: String, displayName: String, version: String? = nil, sizeText: String, icon: UIImage? = nil, detailLoaded: Bool = false, fileSize: Int64 = 0, modificationDate: Date? = nil, bundleIdentifier: String? = nil, folderRoot: URL? = nil) {
+        self.id = Self.czfStableID(for: url, relativeTo: folderRoot)
+        self.url = url
+        self.fileName = fileName
+        self.displayName = displayName
+        self.version = version
+        self.sizeText = sizeText
+        self.icon = icon
+        self.detailLoaded = detailLoaded
+        self.fileSize = fileSize
+        self.modificationDate = modificationDate
+        self.bundleIdentifier = bundleIdentifier
+    }
+
+    static func czfStableID(for url: URL, relativeTo folderRoot: URL?) -> UUID {
+        let rel: String
+        if let root = folderRoot, url.path.hasPrefix(root.path) {
+            var r = String(url.path.dropFirst(root.path.count))
+            if r.hasPrefix("/") { r.removeFirst() }
+            rel = r
+        } else {
+            rel = url.path
+        }
+        let digest = SHA256.hash(data: Data(rel.utf8))
+        let b = Array(digest.prefix(16))
+        return UUID(uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]))
+    }
 }
 
 @MainActor
@@ -284,7 +321,10 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                     sizeText: size > 0 ? fmt.string(fromByteCount: size) : "",
                     icon: nil,
                     fileSize: size,
-                    modificationDate: attrs?[.modificationDate] as? Date
+                    modificationDate: attrs?[.modificationDate] as? Date,
+                    // 3.8.666（B-alt）：id 按相对路径派生，根传进来——
+                    // 不传就回落绝对路径，文件夹改名/移动会换 id。
+                    folderRoot: folderURL
                 )
             }
             await MainActor.run {
@@ -654,12 +694,16 @@ struct CZFInlineIpaFolderSection: View {
     // 3.8.658（B2）：“清除文件夹”确认框开关——此前一点即清，
     // 与“换文件夹”并排、误触即丢绑定（重选可恢复，不是丢文件）。
     @State private var czfShowClearFolderConfirm = false
-    // 3.8.662（F2）：文件夹多选批量——状态放标题行（开关在标题行，
-    // 底栏在格子里）；选中集存 CZFLocalIpaItem.id（UUID），与 App 页
-    // batchSelectedIDs 同款不持久化；文件夹重扫会重建 id，旧选中
-    // 自然失效，格子按实际匹配到的项计数、不认 stale id。
-    @State private var czfBatchMode = false
-    @State private var czfSelectedIDs: Set<UUID> = []
+    // 3.8.662（F2）：文件夹多选批量——选中集存 CZFLocalIpaItem.id（UUID），与 App 页
+    // batchSelectedIDs 同款不持久化；id 已改相对路径派生稳定键
+    // （3.8.666 B-alt），文件夹重扫不再重建 id，旧选中不再自然失效，
+    // 格子按实际匹配到的项计数、不认 stale id（只剩已删文件的旧 id 不匹配）。
+    // 3.8.666（B-alt）：批量态与选中集由源页持有（见 LCAltStoreSourcesView
+    // czfFolderBatchMode / czfFolderSelectedIDs），本节只读/改、不再自己
+    // @State——源/文件夹分段一切换，if 分支销毁重建，本节的 @State 全丢；
+    // 上移后分段切换不丢勾选。
+    @Binding var czfBatchMode: Bool
+    @Binding var czfSelectedIDs: Set<UUID>
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -824,8 +868,9 @@ struct CZFInlineIpaFolderGrid: View {
     }
 
     // 3.8.662（F2）：实际选中的项——按 id 在当前列表里匹配；
-    // 重扫会重建 id，stale id 不进这里，底栏计数/禁用/分享/
-    // 删除都认它，不认原始 Set 的 count。
+    // id 是相对路径派生的稳定键（3.8.666 B-alt），重扫不再换 id，
+    // stale id 只剩已删文件那部分，不进这里；底栏计数/禁用/分享/
+    // 删除/安装都认它，不认原始 Set 的 count。
     private var czfSelectedItems: [CZFLocalIpaItem] {
         let ids = czfSelectedIDs
         return model.items.filter { ids.contains($0.id) }
@@ -947,10 +992,12 @@ struct CZFInlineIpaFolderGrid: View {
                             }
                         }
                     }
-                    // 3.8.662（F2）：批量底栏——分享 / 删除（计数是
+                    // 3.8.662（F2）：批量底栏——分享 / 安装 / 删除（计数是
                     // 实际匹配到的选中项，未选时禁用）+ 取消（退出
                     // 批量态并清选中）；只在批量态显示，搜索筛空时
                     // 也在（选中项可能在筛掉的那部分里）。
+                    // 3.8.666（UI 打磨）：底栏按钮统一样式——bordered +
+                    // small，纯样式，不动布局与逻辑。
                     if czfBatchMode {
                         HStack(spacing: 12) {
                             Button("分享 (\(czfSelectedItems.count))") {
@@ -959,6 +1006,21 @@ struct CZFInlineIpaFolderGrid: View {
                             .disabled(czfSelectedItems.isEmpty)
                             Button("删除 (\(czfSelectedItems.count))", role: .destructive) {
                                 czfShowBatchDeleteConfirm = true
+                            }
+                            .disabled(czfSelectedItems.isEmpty)
+                            // 3.8.666（F-1）：批量安装——当场快照 URL 组再逐个
+                            // 调 onInstall（单点格子同款：切 App 页 + 写共享
+                            // 待装队列），排空、串行安装、失败汇总、完成通知
+                            // 全复用现有安装队列，不新造队列；装完退出批量态
+                            // 并清选中。快照当场取，别事后按 id 回查——安装
+                            // 前一次 scan() 就能丢项。
+                            Button("安装 (\(czfSelectedItems.count))") {
+                                let urls = czfSelectedItems.map(\.url)
+                                czfBatchMode = false
+                                czfSelectedIDs.removeAll()
+                                for url in urls {
+                                    onInstall(url)
+                                }
                             }
                             .disabled(czfSelectedItems.isEmpty)
                             // 3.8.664（F3）：全选/取消全选——文案沿用 App 页
@@ -973,6 +1035,8 @@ struct CZFInlineIpaFolderGrid: View {
                             }
                         }
                         .font(.footnote)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                         .padding(.top, 4)
                     }
                 }
@@ -1183,10 +1247,16 @@ struct CZFLocalIpaGridCell: View {
         // 3.8.649（F1）：长按菜单——分享 IPA / 复制文件名 / 删除。
         // 标题硬编码中文，沿用“复制 Bundle ID”同款先例；删除是
         // 真实文件，确认框在父级格子弹，这里只回调。
+        // 3.8.666（B-alt 补门）：批量态下不给「删除」——批量勾选
+        // 中长按删一个会触发 scan() 全量重建；id 已改稳定键
+        // （主修法），这里再加一道门，批量态下的删除走底栏
+        // 「删除 (n)」，不从单项菜单进。
         .contextMenu {
             Button("分享 IPA", systemImage: "square.and.arrow.up", action: onShare)
             Button("复制文件名", systemImage: "doc.on.doc", action: onCopyFileName)
-            Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
+            if !czfBatchMode {
+                Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
+            }
         }
     }
 }

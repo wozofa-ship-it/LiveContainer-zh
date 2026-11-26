@@ -1037,6 +1037,14 @@ struct LCSourcesView: View {
     @State private var czfSourcesTab = 0
     @State private var czfIpaFolderPickerShow = false
     @State private var czfIpaFolderURL: URL? = nil
+    // 3.8.666（B-alt）：文件夹批量态与选中集上移到源页持有——
+    // 原来是 CZFInlineIpaFolderSection 的 @State，源/文件夹分段
+    // 一切换，`if czfSourcesTab == 1` 分支销毁重建，批量态与勾选
+    // 全丢；放源页后分段切换不丢（选中集存稳定 id，见
+    // CZFLocalIpaItem）。文件夹换了（.id(url) 重建）时选中集
+    // 仍按 id 匹配，旧文件夹的 id 在新列表里对不上，自然不显示。
+    @State private var czfFolderBatchMode = false
+    @State private var czfFolderSelectedIDs: Set<UUID> = []
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
     // 3.8.653（F2）：上次检查更新时间——ViewModel 在刷新成功处写
@@ -1153,7 +1161,11 @@ struct LCSourcesView: View {
                         onClearFolder: {
                             CZFLocalIpaFolderStore.clear()
                             czfIpaFolderURL = nil
-                        }
+                        },
+                        // 3.8.666（B-alt）：批量态与选中集由源页持有
+                        // （见上），分段切换不丢勾选。
+                        czfBatchMode: $czfFolderBatchMode,
+                        czfSelectedIDs: $czfFolderSelectedIDs
                     )
                     .padding()
                 }
@@ -3461,7 +3473,17 @@ struct LCSourceAppDetailView: View {
                     // 3.8.546（L175）：版本行身份走 czfStableID——AltStoreSourceAppVersion.id 是每次解码都换的 UUID，源刷新落地换掉整组 App 对象时全部版本行重建，已点进的旧版详情页被顶回详情根（L174-1 同款，面板行是 B-9 修过的 czfStableID）。版本身份只用版本号 + build，不进下载地址。
                     ForEach(app.versions, id: \.czfStableID) { version in
                         NavigationLink {
-                            LCSourceAppVersionDetailView(app: app, version: version, onDownloadVersion: onDownloadVersion)
+                            // 3.8.666（F-2）：安装此版本——与最新版横幅的
+                            // onInstall（:2061）同款：切 App 页 + 写共享待装
+                            // 队列，autoReplace:false（已装同款时走安装队列
+                            // 的覆盖确认，不静默覆盖），preview:true（安装前
+                            // 预览卡上确认版本号）。
+                            LCSourceAppVersionDetailView(app: app, version: version, onDownloadVersion: onDownloadVersion, onInstallVersion: { url in
+                                withAnimation {
+                                    DataManager.shared.model.selectedTab = .apps
+                                }
+                                CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: url, autoReplace: false, preview: true, forceAsNew: false))
+                            })
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(version.czfVersionWithBuild)
@@ -3542,10 +3564,12 @@ struct LCSourceAppDetailView: View {
 // 只下这一个旧版的包（downloadURL 是该版自己的，不是最新版）。
 // 下载按钮走“下载地址”栏同款：先关详情单再下载，分享框从
 // rootVC 弹出，不与详情单叠在一起。
+// 3.8.666（F-2）：加「安装此版本」——指定旧版直接装，不只下载文件。
 private struct LCSourceAppVersionDetailView: View {
     let app: AltStoreSourceApp
     let version: AltStoreSourceAppVersion
     let onDownloadVersion: (URL) -> Void
+    let onInstallVersion: (URL) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -3588,6 +3612,20 @@ private struct LCSourceAppVersionDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.blue)
+                // 3.8.666（F-2）：安装此版本——先关详情单再写待装队列，
+                // 与下载按钮同款顺序；下载按钮保留不动（仍有人只要文件）。
+                // UI 打磨：borderedProminent，与详情页「安装」主按钮同款。
+                Button {
+                    dismiss()
+                    onInstallVersion(version.downloadURL)
+                } label: {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down")
+                        Text("安装此版本")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
         .navigationTitle(version.version)

@@ -5,7 +5,118 @@
 //  Created by s s on 2025/1/22.
 //
 
+import CryptoKit
 import SwiftUI
+
+// 3.8.666（B-1）：后台下载断点记录——进程被杀时内存里的
+// savedResumeData 一起死，续传数据只活在后台会话守护进程里；
+// 把（会话 identifier、下载地址、落盘目标、是否可自动续）记到
+// Caches/CZFDownloadResume/<sha256(identifier)>.json，续传数据
+// 另存同名 .resume；重开后按地址找回记录、按 identifier 重建
+// 会话接管在途任务，或拿续传数据重下。记录在下载开始时建、
+// 成功时清；用户主动取消的记 autoResume=false（只手动重下时用，
+// 启动不自动续）；失败/被杀的记 autoResume=true（启动自动续）。
+// 注意：代理开着时 hostDownloadConfiguration 返回 .default
+// 前台配置（identifier 不生效），那路不受后台会话保护——记录
+// 照记（续传数据仍可用），接管时找不到在途任务就走续传重下。
+private struct CZFDownloadResumeRecord: Codable {
+    var identifier: String
+    var urlString: String
+    var destPath: String
+    var autoResume: Bool
+}
+
+private enum CZFDownloadResumeStore {
+    private static let directoryName = "CZFDownloadResume"
+
+    static func directory() -> URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent(directoryName, isDirectory: true)
+    }
+
+    private static func key(for identifier: String) -> String {
+        let digest = SHA256.hash(data: Data(identifier.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func jsonURL(for identifier: String) -> URL? {
+        directory()?.appendingPathComponent(key(for: identifier) + ".json")
+    }
+
+    private static func resumeURL(for identifier: String) -> URL? {
+        directory()?.appendingPathComponent(key(for: identifier) + ".resume")
+    }
+
+    private static func allRecords() -> [(identifier: String, record: CZFDownloadResumeRecord)] {
+        guard let dir = directory(),
+              let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [] }
+        var out: [(identifier: String, record: CZFDownloadResumeRecord)] = []
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  let record = try? JSONDecoder().decode(CZFDownloadResumeRecord.self, from: data) else { continue }
+            out.append((identifier: record.identifier, record: record))
+        }
+        return out
+    }
+
+    static func saveRecord(identifier: String, url: URL, dest: URL, autoResume: Bool) {
+        guard let dir = directory(), let jsonURL = jsonURL(for: identifier) else { return }
+        // 同一地址只留一份记录：新一轮下载（重试换 identifier）先清
+        // 旧轮的，不然启动自动续会找回已失效的旧 identifier。
+        for old in allRecords() where old.record.urlString == url.absoluteString && old.identifier != identifier {
+            clearRecord(identifier: old.identifier)
+        }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let record = CZFDownloadResumeRecord(identifier: identifier, urlString: url.absoluteString, destPath: dest.path, autoResume: autoResume)
+        if let data = try? JSONEncoder().encode(record) {
+            try? data.write(to: jsonURL, options: [.atomic])
+        }
+    }
+
+    static func updateAutoResume(identifier: String, autoResume: Bool) {
+        guard let jsonURL = jsonURL(for: identifier),
+              var record = loadRecord(identifier: identifier) else { return }
+        record.autoResume = autoResume
+        if let data = try? JSONEncoder().encode(record) {
+            try? data.write(to: jsonURL, options: [.atomic])
+        }
+    }
+
+    static func loadRecord(identifier: String) -> CZFDownloadResumeRecord? {
+        guard let jsonURL = jsonURL(for: identifier),
+              let data = try? Data(contentsOf: jsonURL),
+              let record = try? JSONDecoder().decode(CZFDownloadResumeRecord.self, from: data) else { return nil }
+        return record
+    }
+
+    static func loadRecord(forURL url: URL) -> CZFDownloadResumeRecord? {
+        allRecords().first { $0.record.urlString == url.absoluteString }?.record
+    }
+
+    static func pendingAutoResumeRecords() -> [CZFDownloadResumeRecord] {
+        allRecords().map { $0.record }.filter { $0.autoResume }
+    }
+
+    static func saveResumeData(identifier: String, data: Data) {
+        guard let dir = directory(), let resumeURL = resumeURL(for: identifier) else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: resumeURL, options: [.atomic])
+    }
+
+    static func loadResumeData(identifier: String) -> Data? {
+        guard let resumeURL = resumeURL(for: identifier) else { return nil }
+        return try? Data(contentsOf: resumeURL)
+    }
+
+    static func clearRecord(identifier: String) {
+        if let jsonURL = jsonURL(for: identifier) {
+            try? FileManager.default.removeItem(at: jsonURL)
+        }
+        if let resumeURL = resumeURL(for: identifier) {
+            try? FileManager.default.removeItem(at: resumeURL)
+        }
+    }
+}
 
 public final class DownloadHelper : ObservableObject {
     @Published var downloadProgress : Float = 0.0
@@ -46,6 +157,13 @@ public final class DownloadHelper : ObservableObject {
     // 是 false，不能拿它当判据），后到的等在途的走完再下
     // 自己的。
     private var czfDownloadInFlight = false
+    // 3.8.666（B-1）：本次下载的后台会话 identifier（落盘记录用，
+    // cancel() 写续传数据时也要它）与启动自动续找回的旧 identifier
+    //（只给 download() 第 0 轮用，重试换新 identifier）；启动自动续
+    // 每冷启动只试一次（LCTabView .task 调，见 czfAutoResumeInterruptedIfNeeded）。
+    private var czfCurrentSessionIdentifier: String?
+    private var czfResumeSessionIdentifier: String?
+    private static var czfAutoResumeAttempted = false
 
     // 3.8.900（L564-3）czfCancelRequested：调用方传的取消检查闭包——下载在途期间
     // 每 0.5 秒读一次，读到真就停掉本次下载；不传（nil）时不轮询，原样。
@@ -65,6 +183,23 @@ public final class DownloadHelper : ObservableObject {
             Task { @MainActor in czfDownloadInFlight = false }
         }
         currentURL = url
+        // 3.8.666（B-1）：内存里没有同一地址的续传数据时，去盘上找——
+        // 上次下载被杀/失败后留下的记录（Caches/CZFDownloadResume），
+        // 续传数据与旧会话 identifier 一起捡起来；第 0 轮 downloadOnce
+        // 用旧 identifier 重建会话，先看在途任务还在不在（系统回收
+        // 时任务常在守护进程里继续跑），在就接管、不新建任务。
+        if savedResumeData == nil || savedResumeURL != url {
+            if let record = CZFDownloadResumeStore.loadRecord(forURL: url),
+               let data = CZFDownloadResumeStore.loadResumeData(identifier: record.identifier) {
+                savedResumeData = data
+                savedResumeURL = url
+                czfResumeSessionIdentifier = record.identifier
+            } else if let record = CZFDownloadResumeStore.loadRecord(forURL: url) {
+                // 只有记录、没有续传数据文件（任务可能还在守护进程里
+                // 跑）：identifier 照样带上，第 0 轮先试接管。
+                czfResumeSessionIdentifier = record.identifier
+            }
+        }
         // 3.8.603（O-15）：cancelled 只在用户主动发起新下载时复位——
         // 原来 downloadOnce 入口无条件清掉，重试间隙点的取消在
         // 下一轮开始时被擦除（重试循环的查取消跑在它前面，窗口虽小
@@ -115,12 +250,18 @@ public final class DownloadHelper : ObservableObject {
                 if cancelled { throw lastError ?? CancellationError() }
             }
             do {
+                // 3.8.666（B-1）：第 0 轮带上启动/重下找回的旧 identifier
+                //（接管在途任务用），用完即清，重试换新 identifier；
+                // czfIsFirstAttempt 供 downloadOnce 决定清不清理进度
+                //（见 B-2：重试不归零）。
+                let czfSessionID = attempt == 0 ? czfResumeSessionIdentifier : nil
+                if attempt == 0 { czfResumeSessionIdentifier = nil }
                 if let data = savedResumeData, savedResumeURL == url {
                     savedResumeData = nil
                     savedResumeURL = nil
-                    try await downloadOnce(url: url, to: to, resumeData: data)
+                    try await downloadOnce(url: url, to: to, resumeData: data, czfSessionIdentifier: czfSessionID, czfIsFirstAttempt: attempt == 0)
                 } else {
-                    try await downloadOnce(url: url, to: to, resumeData: nil)
+                    try await downloadOnce(url: url, to: to, resumeData: nil, czfSessionIdentifier: czfSessionID, czfIsFirstAttempt: attempt == 0)
                 }
                 // 3.8.570（L327-1）：取消后 download() 不能正常返回——cancel() 只 resume 了 continuation、不置错，downloadOnce 的 ansError 仍是 nil，直接 return 会让调用方当成下载成功；installFromUrl 有 cancelled 兜底、installTweak/预取走独立实例无取消路，唯独源页 czfDownloadVersionTo 覆盖确认路：旧文件仍在 destURL，魔数校验放过旧包，取消后仍弹分享表（分享的是旧版）。下完先查取消（读走 MainActor.run，L50-1 同款），取消就抛 CancellationError——四处调用方已按 cancelled 分流，不弹错。
                 if await MainActor.run(body: { cancelled }) { throw CancellationError() }
@@ -135,10 +276,43 @@ public final class DownloadHelper : ObservableObject {
         throw lastError ?? NSError(domain: "DownloadHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败"])
     }
 
-    private func downloadOnce(url: URL, to: URL, resumeData: Data?) async throws {
+    // 3.8.666（B-1）：取后台会话里全部在途下载任务——接管时用；
+    // getTasksWithCompletionHandler 包一层 checked continuation。
+    private func czfDownloadTasks(of session: URLSession) async -> [URLSessionDownloadTask] {
+        await withCheckedContinuation { (cont: CheckedContinuation<[URLSessionDownloadTask], Never>) in
+            session.getTasksWithCompletionHandler { _, _, downloadTasks in
+                cont.resume(returning: downloadTasks)
+            }
+        }
+    }
+
+    // 3.8.666（B-1）：后台会话里指定地址的在途下载任务——有就接管，
+    // 没有就新建；按 originalRequest.url 认（重定向后仍是原地址）。
+    private func czfExistingDownloadTask(for url: URL, in session: URLSession) async -> URLSessionDownloadTask? {
+        let tasks = await czfDownloadTasks(of: session)
+        return tasks.first { $0.originalRequest?.url == url }
+    }
+
+    private func downloadOnce(url: URL, to: URL, resumeData: Data?, czfSessionIdentifier: String? = nil, czfIsFirstAttempt: Bool = true) async throws {
         var ansError: Error? = nil
+        // 3.8.666（B-1）：旧会话的完成事件落地后可能刷新续传数据
+        //（见下面半秒等待），入参 resumeData 不能直接改，另存一份可变的。
+        var czfResumeData = resumeData
         // 本次下载建的会话，结束时要释放（见方法末尾）
         var createdSession: URLSession? = nil
+        // 3.8.666（B-1）：会话 identifier 不再每 call 一新 UUID——
+        // 旧 identifier（启动/重下找回的记录）复用以便接管在途任务；
+        // 全新下载才生成新的，并连同地址/落盘目标记盘（进程被杀后
+        // 重开靠它找回）。不敢用全 helper 共用的固定单 identifier：
+        // 主 helper 与源页/预取两个一次性 helper 可能同时下载，同
+        // identifier 的多会话对象会抢事件（L50-1 同类挂起），每下载
+        // 一个 identifier 才隔离；AppDelegate 接管时系统直接给
+        // identifier，不用猜。代理开着时 hostDownloadConfiguration
+        // 返回 .default 前台配置（identifier 不生效），那路不受后台
+        // 会话保护，记录照记、接管时找不到在途任务就走续传重下。
+        let czfIdentifier = czfSessionIdentifier ?? "com.livecontainer.download.\(UUID().uuidString)"
+        czfCurrentSessionIdentifier = czfIdentifier
+        CZFDownloadResumeStore.saveRecord(identifier: czfIdentifier, url: url, dest: to, autoResume: true)
 
         await MainActor.run {
             // 3.8.603（O-15）：复位移到 download() 入口，这里不再清——
@@ -147,9 +321,15 @@ public final class DownloadHelper : ObservableObject {
                 minimized = false
             }
 
-            downloadProgress = 0.0
-            downloadedSize = 0
-            totalSize = 0
+            // 3.8.666（B-2）：清零只在首轮全新下载做——resumeData 或
+            // 旧 identifier 任一在就是续传，重试（attempt>0）也不清；
+            // 新任务首个进度回调到达前保留上轮 downloadedSize/totalSize。
+            // 速度窗口首轮照样重开（续传也重开，只是不动进度/已下量）。
+            if czfIsFirstAttempt && resumeData == nil && czfSessionIdentifier == nil {
+                downloadProgress = 0.0
+                downloadedSize = 0
+                totalSize = 0
+            }
             // 3.8.664（F2）：新一轮尝试重开速度窗口——样本/速度/ETA
             // 都清掉；paused 不在这里复位（见 download() 入口）。
             downloadSpeed = 0
@@ -159,11 +339,11 @@ public final class DownloadHelper : ObservableObject {
             isDownloading = true
         }
         
-        await withUnsafeContinuation { c in
-            continuation = c
-            
-            let bgConfig = CZFVPNManager.hostDownloadConfiguration(identifier: "com.livecontainer.download.\(UUID().uuidString)")
-            let session = URLSession(configuration: bgConfig, delegate: DownloadDelegate(progressCallback: { progress, downloaded, total in
+        // 3.8.666（B-1）：会话与 delegate 先建好（delegate 的完成回调
+        // 只认 self.continuation，不再捕获 withUnsafeContinuation 的 c，
+        // 见下面 completeCallback），再看有没有在途任务要接管。
+        let bgConfig = CZFVPNManager.hostDownloadConfiguration(identifier: czfIdentifier)
+        let session = URLSession(configuration: bgConfig, delegate: DownloadDelegate(progressCallback: { progress, downloaded, total in
                 // 2026-11-24（发热 H-2 宿主代理闲置上限）：下载还在走字节
                 // 就是宿主在用核心，刷新闲置计时——长下载超过自动停档位
                 // 也不被到点停核打断。回调代理关时也会来，直连下载由
@@ -206,6 +386,9 @@ public final class DownloadHelper : ObservableObject {
                     if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
                         self.savedResumeData = data
                         self.savedResumeURL = url
+                        // 3.8.666（B-1）：续传数据落盘——只靠内存的话
+                        // 进程一死即失；重开后 download() 入口按地址捡。
+                        CZFDownloadResumeStore.saveResumeData(identifier: czfIdentifier, data: data)
                     }
                     // 3.8.603（O-15）：有错不搬文件——404/403 时 tempFileURL 是
                     // 服务器错误页，搬过去就是错误页冒充的 .ipa；直接删掉临时文件。
@@ -215,6 +398,9 @@ public final class DownloadHelper : ObservableObject {
                 } else {
                     self.savedResumeData = nil
                     self.savedResumeURL = nil
+                    // 3.8.666（B-1）：下完了，落盘记录清掉——启动自动续
+                    // 不再找回它；接管路的验收也靠记录在不在（见下）。
+                    CZFDownloadResumeStore.clearRecord(identifier: czfIdentifier)
                 }
                 // 3.8.603（O-15）：只有没错时才搬临时文件到目标——
                 // 有错时上面已删临时文件，这里不再搬错误页冒充 .ipa。
@@ -258,30 +444,109 @@ public final class DownloadHelper : ObservableObject {
                 // 前取消按钮仍可点，两路各 resume 一次会双 resume 崩溃。
                 // 先置 nil，cancel() 看到 nil 就跳过；反过来 cancel()
                 // 先跑时这里看到 nil 同样跳过。
-                if self.continuation != nil {
+                // 3.8.666（B-1）：不捕获 withUnsafeContinuation 的 c——
+                // 会话在 withUnsafeContinuation 之前就建好了（接管路要
+                // 先拿会话查在途任务），完成时直接认 self.continuation；
+                // 接管路里 continuation 是 nil，这里只搬文件、不 resume。
+                if let cont = self.continuation {
                     self.continuation = nil
-                    c.resume()
+                    cont.resume()
                 }
 
             }), delegateQueue: .main)
             createdSession = session
 
-            if let resumeData {
-                downloadTask = session.downloadTask(withResumeData: resumeData)
-            } else {
-                downloadTask = session.downloadTask(with: url)
+            // 3.8.666（B-1）：旧会话重建时，守护进程里已跑完的任务的
+            // 完成事件会异步吐给新 delegate（搬文件、清记录）；等半秒
+            // 让它落地——落地了（记录已清 + 目标已出现）就不用再建任务。
+            // 失败事件也可能刚落了新的续传数据，重读盘上的替掉入参，
+            // 别拿旧的（或空的）续传数据重下。全新下载（identifier 为
+            // nil）不走这段，不加半秒延迟。
+            if czfSessionIdentifier != nil {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if CZFDownloadResumeStore.loadRecord(identifier: czfIdentifier) == nil,
+                   FileManager.default.fileExists(atPath: to.path) {
+                    await MainActor.run { isDownloading = false }
+                    createdSession?.finishTasksAndInvalidate()
+                    savedResumeData = nil
+                    savedResumeURL = nil
+                    return
+                }
+                if let fresh = CZFDownloadResumeStore.loadResumeData(identifier: czfIdentifier) {
+                    czfResumeData = fresh
+                }
             }
-            downloadTask?.resume()
-            // 3.8.664（F2）：重试间隙里用户按了暂停时没有在途任务、
-            // pause() 只置了标志；新任务建好按标志立即挂起，不让
-            // 重试悄悄跑起来（paused 在 download() 入口才复位）。
-            if paused { downloadTask?.suspend() }
-            // 2026-11-24（发热 H-2 宿主代理闲置上限）：下载会话建好、
-            // 任务开始跑就是一次宿主活动（首字节未到也算一次）；
-            // 进行中由上面进度回调续记，停在 0 字节的下载也至少
-            // 得一个档位的宽限，不会被待停在起步一分钟内打断。
-            CZFVPNManager.shared.noteHostActivity()
-        }
+
+            // 3.8.666（B-1）：接管路——进程被杀/被系统回收后，后台任务
+            // 常在守护进程里继续跑；用旧 identifier 重建会话就能在
+            // getTasks 里看见它，直接等它跑完，不新建任务、不从 0 重下。
+            // 进度从任务计数里刷（也靠上面 delegate 的进度回调），不依赖
+            // delegate 回调落到哪个会话对象上（接管会话与本会话同
+            // identifier 时事件只给其中一个对象，轮询不怕抢）。
+            // 验收：任务走后等一拍（让 delegate 的搬文件/清记录跑完），
+            // 落盘目标出现且 mtime/size 变了（或事先不存在）才算成功——
+            // 目标事先已存在时只看“存在”会拿旧文件冒充本次成功；
+            // 没落盘就抛错，download() 重试走续传数据。
+            if let existing = await czfExistingDownloadTask(for: url, in: session) {
+                downloadTask = existing
+                // 落盘目标的事先快照——先取再 resume：任务跑得快时
+                // delegate 可能在快照前就搬完文件，快照会把新文件
+                // 当成“事先已存在”，验收认不出成功、白白重下一遍。
+                let czfDestAttrsBefore = try? FileManager.default.attributesOfItem(atPath: to.path)
+                let czfDestExistedBefore = czfDestAttrsBefore != nil
+                let czfDestMtimeBefore = (czfDestAttrsBefore?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                let czfDestSizeBefore = (czfDestAttrsBefore?[.size] as? NSNumber)?.int64Value ?? 0
+                existing.resume()
+                while true {
+                    if await MainActor.run(body: { cancelled }) { break }
+                    let tasks = await czfDownloadTasks(of: session)
+                    guard let task = tasks.first(where: { $0.originalRequest?.url == url }) else { break }
+                    await MainActor.run {
+                        downloadedSize = task.countOfBytesReceived
+                        if task.countOfBytesExpectedToReceive > 0 {
+                            totalSize = task.countOfBytesExpectedToReceive
+                            downloadProgress = Float(task.countOfBytesReceived) / Float(task.countOfBytesExpectedToReceive)
+                        }
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let czfDestAttrsAfter = try? FileManager.default.attributesOfItem(atPath: to.path)
+                var czfAdoptSucceeded = false
+                if let after = czfDestAttrsAfter {
+                    let mtime = (after[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                    let size = (after[.size] as? NSNumber)?.int64Value ?? 0
+                    czfAdoptSucceeded = !czfDestExistedBefore || mtime != czfDestMtimeBefore || size != czfDestSizeBefore
+                }
+                await MainActor.run { isDownloading = false }
+                createdSession?.finishTasksAndInvalidate()
+                if czfAdoptSucceeded {
+                    savedResumeData = nil
+                    savedResumeURL = nil
+                    CZFDownloadResumeStore.clearRecord(identifier: czfIdentifier)
+                    return
+                }
+                throw ansError ?? NSError(domain: "DownloadHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载中断，正在断点续传"])
+            }
+
+            await withUnsafeContinuation { c in
+                continuation = c
+                if let czfData = czfResumeData {
+                    downloadTask = session.downloadTask(withResumeData: czfData)
+                } else {
+                    downloadTask = session.downloadTask(with: url)
+                }
+                downloadTask?.resume()
+                // 3.8.664（F2）：重试间隙里用户按了暂停时没有在途任务、
+                // pause() 只置了标志；新任务建好按标志立即挂起，不让
+                // 重试悄悄跑起来（paused 在 download() 入口才复位）。
+                if paused { downloadTask?.suspend() }
+                // 2026-11-24（发热 H-2 宿主代理闲置上限）：下载会话建好、
+                // 任务开始跑就是一次宿主活动（首字节未到也算一次）；
+                // 进行中由上面进度回调续记，停在 0 字节的下载也至少
+                // 得一个档位的宽限，不会被待停在起步一分钟内打断。
+                CZFVPNManager.shared.noteHostActivity()
+            }
         // 会话用完释放：以前每次下载（重试、预取都会叠加）都新
         // 建一个后台会话且从不 invalidate，只增不减地挂在系统
         // 里。任务已结束/失败/取消走到这里，收尾释放正合适
@@ -333,14 +598,94 @@ public final class DownloadHelper : ObservableObject {
         continuation = nil
         // 带续传数据的取消：系统把下好的部分留成续传数据，
         // 下次下同一个地址接着下，不用从 0 开始
+        // 3.8.666（B-1）：续传数据也落盘（只靠内存的话进程一死
+        // 即失）；取消的记 autoResume=false——启动不自动续，
+        // 只在用户手动重下同一地址时由 download() 捡起来。
+        let czfCancelIdentifier = czfCurrentSessionIdentifier
         downloadTask?.cancel(byProducingResumeData: { [weak self] data in
             guard let self, let data else {
                 return
             }
             self.savedResumeData = data
             self.savedResumeURL = self.currentURL
+            if let id = czfCancelIdentifier {
+                CZFDownloadResumeStore.saveResumeData(identifier: id, data: data)
+                CZFDownloadResumeStore.updateAutoResume(identifier: id, autoResume: false)
+            }
         })
         isDownloading = false
+    }
+
+    // 3.8.666（B-1）：启动自动续——冷启动时 LCTabView .task 调一次，
+    // 把上次被杀/失败后留下的可自动续记录（autoResume=true，用户
+    // 主动取消的不在内）逐个续上下去；记录里的落盘目标父目录
+    // 可能已被系统清掉（tmp），先建出来；正在下载时不插队。
+    // 每冷启动只试一次（静态旗），失败/抛错就跳过本条、续下一条，
+    // 不拦启动。
+    func czfAutoResumeInterruptedIfNeeded() async {
+        guard !Self.czfAutoResumeAttempted else { return }
+        Self.czfAutoResumeAttempted = true
+        // 后台唤起接管中的记录不碰——接管会话正跑着它，跑完由
+        // 接管 delegate 搬文件；这里再建同 identifier 会话会
+        // 抢事件（见 AppDelegate czfBackgroundTakeoverIdentifiers）。
+        let czfTakeoverIDs = AppDelegate.czfBackgroundTakeoverIdentifiers
+        for record in CZFDownloadResumeStore.pendingAutoResumeRecords() {
+            guard !czfTakeoverIDs.contains(record.identifier) else { continue }
+            guard let url = URL(string: record.urlString) else { continue }
+            let dest = URL(fileURLWithPath: record.destPath)
+            try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if await MainActor.run(body: { isDownloading }) { return }
+            try? await download(url: url, to: dest)
+        }
+    }
+}
+
+// 3.8.666（B-1）：后台唤起时的会话接管 delegate——进程被杀后
+// 系统以后台事件唤起 App，AppDelegate 用事件给的 identifier
+// 重建会话；本 delegate 只做收尾：下完把临时文件搬到记录里的
+// 落盘目标、失败留续传数据、事件交完调 completionHandler。
+// 与 DownloadDelegate 分开：接管时没有在途的 download() 调用
+// 可回调，收尾只走磁盘记录。session 与本对象由 AppDelegate
+// 强持有，事件交完（urlSessionDidFinishEvents）后由
+// czfOnFinished 回调释放。
+final class CZFBackgroundDownloadDelegate: NSObject, URLSessionDownloadDelegate {
+    private let identifier: String
+    private let completionHandler: () -> Void
+    var czfOnFinished: ((String) -> Void)?
+
+    init(identifier: String, completionHandler: @escaping () -> Void) {
+        self.identifier = identifier
+        self.completionHandler = completionHandler
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        guard let response = downloadTask.response as? HTTPURLResponse,
+              (200...299).contains(response.statusCode),
+              let record = CZFDownloadResumeStore.loadRecord(identifier: identifier) else { return }
+        let dest = URL(fileURLWithPath: record.destPath)
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: dest.path) {
+                _ = try fm.replaceItemAt(dest, withItemAt: location)
+            } else {
+                try fm.moveItem(at: location, to: dest)
+            }
+            CZFDownloadResumeStore.clearRecord(identifier: identifier)
+        } catch {
+            print("CZFBackgroundDownloadDelegate move failed: \(error)")
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error,
+           let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
+            CZFDownloadResumeStore.saveResumeData(identifier: identifier, data: data)
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        completionHandler()
+        czfOnFinished?(identifier)
     }
 }
 

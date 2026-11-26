@@ -19,6 +19,9 @@ final class CZFNotificationDelegate: NSObject, UNUserNotificationCenterDelegate 
         if notification.request.identifier.hasPrefix("CZFBatchInstall") {
             completionHandler([])
         } else {
+            // 3.8.666（F-3）：CZFBackupDone（备份完成）故意走这条默认
+            // 分支——前台也弹横幅 + 响铃；备份是用户切走后才关心的
+            // 完成信号，与批量安装的静默策略不同。
             completionHandler([.banner, .list, .sound])
         }
     }
@@ -27,6 +30,37 @@ final class CZFNotificationDelegate: NSObject, UNUserNotificationCenterDelegate 
 @objc class AppDelegate: UIResponder, UIApplicationDelegate {
 
     private var willTerminateObserver: NSObjectProtocol?
+
+    // 3.8.666（B-1）：后台下载会话接管——进程被杀后系统以后台事件
+    // 唤起 App 时，handleEventsForBackgroundURLSession 用事件给的
+    // identifier 重建会话；session 与 delegate 由本字典强持有，
+    // 事件交完（urlSessionDidFinishEvents）后释放。identifier 集合
+    // 对外可见：LCTabView 启动自动续跳过接管中的记录，不再建同
+    // identifier 会话抢事件。读写都在主线程（接管回调里那处用
+    // DispatchQueue.main.async 回主线程再清）。
+    static var czfBackgroundTakeoverIdentifiers: Set<String> = []
+    private var czfBackgroundSessions: [String: (session: URLSession, delegate: CZFBackgroundDownloadDelegate)] = [:]
+
+    // 3.8.666（B-1）：后台下载会话接管——进程被杀/被系统回收后，
+    // 后台下载任务在守护进程里继续跑，跑完/失败时系统唤起 App
+    // 交付事件；用事件给的 identifier 重建会话（必须是 background
+    // 配置——hostDownloadConfiguration 在代理开着时返回 .default
+    // 前台配置，identifier 不生效，接管不到任务），事件交付完
+    // delegate 调 completionHandler。delegate 的收尾（搬文件/
+    // 留续传数据）只走磁盘记录，见 CZFBackgroundDownloadDelegate。
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        let delegate = CZFBackgroundDownloadDelegate(identifier: identifier, completionHandler: completionHandler)
+        delegate.czfOnFinished = { [weak self] id in
+            DispatchQueue.main.async {
+                self?.czfBackgroundSessions.removeValue(forKey: id)
+                Self.czfBackgroundTakeoverIdentifiers.remove(id)
+            }
+        }
+        let config = URLSessionConfiguration.background(withIdentifier: identifier)
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        czfBackgroundSessions[identifier] = (session, delegate)
+        Self.czfBackgroundTakeoverIdentifiers.insert(identifier)
+    }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? ) -> Bool {
         application.shortcutItems = nil

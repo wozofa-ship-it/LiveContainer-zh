@@ -10,6 +10,7 @@ import SQLite3
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct LCFolderPath {
     var path : URL
@@ -4087,6 +4088,41 @@ struct LCDataManagementView : View {
                 backupListVersion += 1
                 refreshBackupSizes()
             }
+            // 3.8.666（F-3）：备份完成发本地通知——切走/锁屏后也能知道
+            // 备完了；正文复用回执的计数（成功/失败/跳过数），失败名单
+            // 前 3 条进正文。只在 count>0 的成功分支发（0 个的两路在
+            // 上面走 errorInfo，不在这里）。
+            czfNotifyBackupDone(successCount: count, failedNames: failedNames, skippedNames: skippedNames)
+        }
+    }
+
+    // 3.8.666（F-3）：备份完成本地通知——与批量安装完成通知
+    // notifyBatchDone（LCAppListView）同款写法：标题「备份完成」，
+    // 正文成功/失败/跳过数 + 失败名单；identifier 前缀 CZFBackupDone；
+    // 授权复用同款 requestAuthorization，不另加设置开关。
+    // AppDelegate 的 CZFNotificationDelegate 只静默 CZFBatchInstall
+    // 前缀，本前缀走默认分支、前台也弹横幅（备份是用户切走后才
+    // 关心的完成信号，与批量安装的静默策略不同）。文案硬编码中文，
+    // 沿用批量安装完成通知先例，0 新 key。
+    private func czfNotifyBackupDone(successCount: Int, failedNames: [String], skippedNames: [String]) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "备份完成"
+            var body = "成功 \(successCount) 个"
+            if !failedNames.isEmpty {
+                body += "，失败 \(failedNames.count) 个"
+            }
+            if !skippedNames.isEmpty {
+                body += "，跳过 \(skippedNames.count) 个"
+            }
+            if !failedNames.isEmpty {
+                body += "：\(failedNames.prefix(3).joined(separator: "、"))"
+            }
+            content.body = body
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "CZFBackupDone-\(UUID().uuidString)", content: content, trigger: nil))
         }
     }
 

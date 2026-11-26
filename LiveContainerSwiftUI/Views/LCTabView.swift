@@ -212,6 +212,13 @@ struct LCTabView: View {
             checkGetTaskAllow()
             checkPrivateContainerBookmark()
         }
+        .task {
+            // 3.8.666（B-1）：启动自动续——上次下载被杀/失败后留下的
+            // 可自动续记录（用户主动取消的不在内），冷启动时续上下去；
+            // 每冷启动只试一次（DownloadHelper 内静态旗），正在下载
+            // 时不插队。下载弹窗照常弹，进度从断点续爬。
+            await downloadHelper.czfAutoResumeInterruptedIfNeeded()
+        }
         .onReceive(pub) { out in
             if let scene1 = sceneDelegate.window?.windowScene, let scene2 = out.object as? UIWindowScene, scene1 == scene2 {
                 if shouldToggleMainWindowOpen {

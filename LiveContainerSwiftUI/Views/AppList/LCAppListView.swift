@@ -3682,7 +3682,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         throw "这个 IPA 还没下载完（iCloud 文件），请先在“文件”里点一下它、等下载完成再安装"
     }
 
-    func installIpaFile(_ url:URL, autoReplace: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil) async throws {
+    // 3.8.666（B-2）：czfProgressBase——进度基准偏移。远程下载段已占
+    // 前 20%（installFromUrl 里 downloadProgress * 0.2），解包/签名
+    // 从基准续爬到 100%，不再从 0 重走；本地安装（文件选择器/
+    // installFromUrl 本地分支）不走下载段，默认 0 不变。
+    func installIpaFile(_ url:URL, autoReplace: Bool = false, forceAsNew: Bool = false, customDisplayName: String? = nil, czfProgressBase: Float = 0) async throws {
         let fm = FileManager()
 
         // iCloud 占位先确保下完（见 czfEnsureFileDownloaded），
@@ -3707,7 +3711,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
         let installProgress = Progress.discreteProgress(totalUnitCount: 100)
         // 3.8.560（L311-1）：installProgressPercentage 是 @State，回主线程置（KVO 回调里那处早已用 main.async 包过，只剩这里直写）。
-        await MainActor.run { self.installProgressPercentage = 0.0 }
+        // 3.8.666（B-2）：入口不清零、从基准续爬（远程下载段已占 20%）。
+        await MainActor.run { self.installProgressPercentage = czfProgressBase }
         // 第 2 条：解包每读一块就推一次 KVO，原来每次都 main.async 写
         // @State，全程无节流。只在变化 ≥0.5% 或距上次发布 ≥100ms
         // 时才发布；到 100% 时一定发布一次，不让进度条卡在 99.x%。
@@ -3722,7 +3727,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 czfLastPublishedInstallFraction = fraction
                 czfLastInstallPublishAt = now
                 DispatchQueue.main.async {
-                    self.installProgressPercentage = Float(fraction)
+                    // 3.8.666（B-2）：解包进度映射到基准→100%，不是 0→100%。
+                    self.installProgressPercentage = czfProgressBase + Float(fraction) * (1 - czfProgressBase)
                 }
             }
         }
@@ -5442,7 +5448,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // installProgressPercentage 只在 installIpaFile 内
             // 更新。下载时把下载进度同步过来（占前 20%，与
             // installIpaFile 里解包 80 + 签名 20 的配比一致）；
-            // 下载完停掉，解包开始时 installIpaFile 从 0 重走。
+            // 下载完停掉，解包从 20% 续爬（3.8.666 B-2：
+            // installIpaFile 接 czfProgressBase，不再从 0 重走）。
             // H-7：原来 0.1 秒轮询读 downloadHelper.downloadProgress；
             // 进度本来就是 @Published（LCDownloadView 节流回调里发布，
             // 1%/0.25s 口径不动），直接订阅它，变化才写进度条，
@@ -5516,7 +5523,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 本地分支 :3665 完整传入——恢复缺失分身的远程路
             // （带 forceAsNew + 预设名）会走到这里弹输名框、
             // 等待循环等满 5 分钟报失败；补传，与本地同款。
-            try await installIpaFile(destinationURL, autoReplace: autoReplace, forceAsNew: forceAsNew, customDisplayName: customDisplayName)
+            // 3.8.666（B-2）：下载段已占前 20%，解包从 0.2 续爬到 100%，
+            // 不从 0 重走。
+            try await installIpaFile(destinationURL, autoReplace: autoReplace, forceAsNew: forceAsNew, customDisplayName: customDisplayName, czfProgressBase: 0.2)
             czfRemoteInstallOK = true
         } catch is CZFInstallCancelled {
             // 3.8.428 安装#2：安装中途取消（替换选择/输名/运行中
