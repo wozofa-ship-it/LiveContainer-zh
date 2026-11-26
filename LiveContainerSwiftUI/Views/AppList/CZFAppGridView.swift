@@ -104,6 +104,10 @@ struct CZFAppGridActions {
     var onToggleVPN: (LCAppModel) -> Void = { _ in }
     var onCreateAppClip: (LCAppModel) async -> Void = { _ in }
     var onSaveIcon: (LCAppModel) async -> Void = { _ in }
+    // 3.8.682（F1）：备份这个 App——列表页接线（置 batchSelectedIDs
+    // 单项 + 弹批量备份范围单，复用 batchBackup）；默认空实现，
+    // 老调用点不传也能编。
+    var onBackupRequest: (LCAppModel) -> Void = { _ in }
 }
 
 struct CZFAppGridView: View {
@@ -200,7 +204,8 @@ struct CZFAppGridView: View {
             },
             onToggleVPN: { app in czfToggleVPN(for: app) },
             onCreateAppClip: { app in await czfCreateAppClip(for: app) },
-            onSaveIcon: { app in await czfSaveIcon(for: app) }
+            onSaveIcon: { app in await czfSaveIcon(for: app) },
+            onBackupRequest: actions.onBackupRequest
         )
     }
 
@@ -845,6 +850,12 @@ struct CZFAppGridCell: View {
             czfExportIPA()
         }
         .disabled(czfExporting)
+        // 3.8.682（F1）：备份这个 App——单项进批量备份范围单（复用
+        // batchBackup：人脸门、busy 标志与回执全在那路）；标题硬编码
+        // 中文，沿用本菜单“复制 Bundle ID”硬编码先例。
+        Button("备份这个 App", systemImage: "square.and.arrow.down") {
+            actions.onBackupRequest(app)
+        }
         // 3.8.641（F1）：置顶/取消置顶——列表置顶（CZFListPinnedApps 键，
         // 与坞固定区无关）；切换后重排，八种排序下置顶组都固定在前。
         // 标题硬编码中文，沿用本菜单“复制 Bundle ID”硬编码先例。

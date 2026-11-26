@@ -2543,6 +2543,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         self.czfGridLaunch(app: app)
                     },
                     onLaunchMultitask: { app in self.czfGridLaunchMultitask(app: app) },
+                    // 3.8.682（F1）：备份这个 App——单项写入批量选中
+                    // 后弹批量备份范围单，复用 batchBackup(loginOnly:)。
+                    onBackupRequest: { app in
+                        self.batchSelectedIDs = [self.czfBatchKey(for: app)]
+                        self.batchBackupScopeConfirm = true
+                    },
                     onOpenSettings: { app in
                         // F-9：锁定 App 的设置页进前先认证（与启动同款守卫）；
                         // 网格双击与菜单设置按钮都走这里，一处守住两路。
@@ -5697,6 +5703,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 MultitaskDockManager.refreshAfterAppChanged()
             }
         }
+    }
+
+    // 3.8.682（F1）：备份这个 App（LCAppBannerDelegate）——列表模式
+    // 长按菜单入口；单项写入批量选中后弹批量备份范围单，复用
+    // batchBackup(loginOnly:)（人脸门、busy 标志与回执全在那路）。
+    // 菜单回调在主线程，@State 直写。
+    func backupApp(app: LCAppModel) {
+        batchSelectedIDs = [czfBatchKey(for: app)]
+        batchBackupScopeConfirm = true
     }
     
     func changeAppVisibility(app: LCAppModel) {

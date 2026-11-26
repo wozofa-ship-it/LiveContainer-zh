@@ -14,6 +14,9 @@ protocol LCAppBannerDelegate {
     func installMdm(data: Data)
     func openNavigationView(view: AnyView)
     func promptForGeneratedIconStyle() async -> GeneratedIconStyle?
+    // 3.8.682（F1）：备份这个 App——列表模式长按菜单入口，唯一实现
+    // 方 LCAppListView（单项写入批量选中 + 弹批量备份范围单）。
+    func backupApp(app: LCAppModel)
 }
 
 struct LCAppBanner: UIViewControllerRepresentable {

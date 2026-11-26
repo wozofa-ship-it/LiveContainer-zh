@@ -1045,6 +1045,13 @@ struct LCSourcesView: View {
     // 仍按 id 匹配，旧文件夹的 id 在新列表里对不上，自然不显示。
     @State private var czfFolderBatchMode = false
     @State private var czfFolderSelectedIDs: Set<UUID> = []
+    // 3.8.682（B3）：文件夹搜索字与“只看有新版”上移到源页持有——
+    // 原来是 Section/Grid 的 @State，源/文件夹分段一切换，`if
+    // czfSourcesTab == 1` 分支销毁重建，全丢；3.8.666 B-alt 同款
+    // （只上移了批量态/选中集，这两处漏了）。不持久化，只保本次
+    // 会话内分段切换；过滤逻辑与搜索节流任务不动。
+    @State private var czfFolderSearchText = ""
+    @State private var czfFolderOnlyUpdatable = false
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
     // 3.8.653（F2）：上次检查更新时间——ViewModel 在刷新成功处写
@@ -1179,10 +1186,17 @@ struct LCSourcesView: View {
                         // 3.8.666（B-alt）：批量态与选中集由源页持有
                         // （见上），分段切换不丢勾选。
                         czfBatchMode: $czfFolderBatchMode,
-                        czfSelectedIDs: $czfFolderSelectedIDs
+                        czfSelectedIDs: $czfFolderSelectedIDs,
+                        // 3.8.682（B3）：搜索字与“只看有新版”由源页持有
+                        // （见上），分段切换不丢。
+                        czfSearchText: $czfFolderSearchText,
+                        czfOnlyUpdatable: $czfFolderOnlyUpdatable
                     )
                     .padding()
                 }
+                // 3.8.682（B1）：iOS 16+ 滚即收键盘——键盘盖着下半屏
+                // 时，滚一下即可收起再点格子安装；不吞格子点按。
+                .czfScrollDismissesKeyboard()
             } else {
                 czfSourcesListContent
             }
@@ -3494,6 +3508,22 @@ struct LCSourceAppBanner: View {
                 } label: {
                     Label("取消忽略更新", systemImage: "bell")
                 }
+            }
+            // 3.8.682（F2）：复制版本号 / 复制 Bundle ID——与 App 页
+            // 长按菜单同款（3.8.639/647），源页原来只有“忽略此版本”；
+            // 版本号取源最新版，读不到或为 "?" 时不显示（网格 :834
+            // 同款判法）；标题硬编码中文。0 新 key。
+            if let version = app.latestVersion?.version, version != "?" {
+                Button {
+                    UIPasteboard.general.string = version
+                } label: {
+                    Label("复制版本号", systemImage: "doc.on.doc")
+                }
+            }
+            Button {
+                UIPasteboard.general.string = app.bundleIdentifier
+            } label: {
+                Label("复制 Bundle ID", systemImage: "doc.on.doc")
             }
         }
         .sheet(isPresented: $showDetail) {

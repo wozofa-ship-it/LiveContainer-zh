@@ -707,10 +707,14 @@ struct CZFInlineIpaFolderSection: View {
     // 3.8.649（F3）：文件夹排序开关——与下面格子读同一把
     // @AppStorage 键（UserDefaults 共享，两处都跟随）。
     @AppStorage("CZFLocalIpaFolderSort") private var czfSort = CZFLocalIpaFolderSort.name
-    // 3.8.672（F-3）：只看有新版——不持久化（App 页“仅无备份”
-    // 筛选同款 @State）；开关在标题行、过滤在下面格子里，
-    // Binding 传下去；切文件夹后状态留在本节（与 App 页同款处理）。
-    @State private var czfOnlyUpdatable = false
+    // 3.8.672（F-3）：只看有新版——3.8.682（B3）上移到源页持有
+    // （见 LCAltStoreSourcesView czfFolderOnlyUpdatable），本节只读/
+    // 改；切分段不再丢。过滤在下面格子里。
+    @Binding var czfOnlyUpdatable: Bool
+    // 3.8.682（B3）：文件夹搜索字——3.8.653（F1）原是本节下格子的
+    // @State，分段切换即丢；上移到源页持有（见 LCAltStoreSourcesView
+    // czfFolderSearchText），本节只透传给格子。不持久化。
+    @Binding var czfSearchText: String
     // 3.8.658（B2）：“清除文件夹”确认框开关——此前一点即清，
     // 与“换文件夹”并排、误触即丢绑定（重选可恢复，不是丢文件）。
     @State private var czfShowClearFolderConfirm = false
@@ -780,7 +784,7 @@ struct CZFInlineIpaFolderSection: View {
             if let url = folderURL {
                 // 文件夹换了就重建模型重扫（StateObject 的
                 // folderURL 是 let，不重建就还是旧文件夹）。
-                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable)
+                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable, searchText: $czfSearchText)
                     .id(url)
             } else {
                 Button(action: onPickFolder) {
@@ -814,10 +818,14 @@ struct CZFInlineIpaFolderGrid: View {
     // 3.8.672（F-3）：只看有新版——标题行持有，格子只读；
     // 过滤见下面 czfDisplayedItems。
     @Binding var czfOnlyUpdatable: Bool
+    // 3.8.682（B3）：文件夹搜索字——3.8.653（F1）原是本格子的 @State，
+    // 分段切换即丢；上移到源页持有（见 LCAltStoreSourcesView
+    // czfFolderSearchText），经 Section 以 Binding 传下来。不持久化。
+    @Binding var czfSearchText: String
 
     @StateObject private var model: CZFLocalIpaFolderModel
 
-    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>) {
+    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>, searchText: Binding<String>) {
         self.folderURL = folderURL
         self.onPickFolder = onPickFolder
         self.onInstall = onInstall
@@ -825,6 +833,7 @@ struct CZFInlineIpaFolderGrid: View {
         _czfBatchMode = batchMode
         _czfSelectedIDs = selectedIDs
         _czfOnlyUpdatable = onlyUpdatable
+        _czfSearchText = searchText
     }
 
     // 3.8.442：列数跟上面已装 App 网格一致——原来写死 4 列，
@@ -857,10 +866,10 @@ struct CZFInlineIpaFolderGrid: View {
     // 未读详情；每敲一字取消上一个，不给每个前缀都全量推队。
     @State private var czfSearchDetailTask: Task<Void, Never>?
 
-    // 3.8.653（F1）：文件夹搜索字——不持久化（App 页 searchContext.query 同款）；
-    // 只在格子内用，不挂 .searchable（源页 body 已有一个绑源 App 搜索的，
+    // 3.8.653（F1）：文件夹搜索字现由源页持有（见上面 @Binding
+    // czfSearchText，3.8.682 B3），此处不再自己 @State；搜索只滤
+    // 本格子，不挂 .searchable（源页 body 已有一个绑源 App 搜索的，
     // 同一 NavigationView 双 .searchable 会抢同一个搜索栏）。
-    @State private var czfSearchText = ""
 
     // 3.8.649（F3）：display 排序只能是渲染层派生数组——items
     // 本身必须保持文件名序，O-5 短路（:180–183）拿
@@ -987,6 +996,18 @@ struct CZFInlineIpaFolderGrid: View {
                         TextField("搜索文件名、显示名、版本号", text: $czfSearchText)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
+                            // 3.8.682（B1）：iOS 15 兜底收键盘——键盘工具条
+                            // Done 按钮（MultitaskDockView 同款 resign
+                            // 写法）；16+ 另有外层 ScrollView 的
+                            // scrollDismissesKeyboard，两路都不吞格子点按。
+                            .toolbar {
+                                ToolbarItemGroup(placement: .keyboard) {
+                                    Spacer()
+                                    Button("完成") {
+                                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                                    }
+                                }
+                            }
                         if !czfSearchText.isEmpty {
                             Button { czfSearchText = "" } label: {
                                 Image(systemName: "xmark.circle.fill")
@@ -1314,6 +1335,21 @@ struct CZFLocalIpaGridCell: View {
             if !czfBatchMode {
                 Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
             }
+        }
+    }
+}
+
+// 3.8.682（B1）：iOS 16+ 滚即收键盘——scrollDismissesKeyboard 是
+// 16+ API，extension 内用 #available 分支，调用方不用写两遍
+// ScrollView；iOS 15 走搜索框键盘工具条 Done 按钮（见格子内
+// TextField 的 .toolbar），两路都不吞格子点按。
+extension View {
+    @ViewBuilder
+    func czfScrollDismissesKeyboard() -> some View {
+        if #available(iOS 16.0, *) {
+            self.scrollDismissesKeyboard(.immediately)
+        } else {
+            self
         }
     }
 }

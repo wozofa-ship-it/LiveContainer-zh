@@ -1021,6 +1021,18 @@ struct LCDataManagementView : View {
                         Text("lc.settings.backupAll".loc)
                     }
                 }
+                // 3.8.682（F3）：长按按上次范围直接备份——上次范围已持久
+                // 化（lastBackupLoginOnly，见 :4314），不用每次先进选页
+                // 再点一次；没选过时不显示该项；进行中禁用同款。
+                .contextMenu {
+                    if let lastLoginOnly = LCDataManagementView.lastBackupLoginOnly {
+                        Button("按上次范围直接备份") {
+                            self.pendingBackupApps = sharedModel.apps + sharedModel.hiddenApps
+                            self.doBackupScope(loginOnly: lastLoginOnly)
+                        }
+                        .disabled(backupRestoreProgress != nil)
+                    }
+                }
                 .disabled(backupRestoreProgress != nil)
                 Button {
                     showBackupSelect = true
@@ -1067,7 +1079,16 @@ struct LCDataManagementView : View {
             
             Section {
                 Button {
-                    Task { await clearIconCache() }
+                    Task {
+                        await clearIconCache()
+                        // 3.8.682（B2）：清完给回执——此前清完即 return，
+                        // 界面纹丝不动；走同页 :824 同款 success alert。
+                        // 按钮 Task 是裸 Task，@State 回主线程再写。
+                        await MainActor.run {
+                            successInfo = "图标缓存已清除"
+                            successShow = true
+                        }
+                    }
                 } label: {
                     HStack {
                         LCSettingsIcon(systemName: "photo.fill", color: .purple)

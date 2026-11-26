@@ -471,6 +471,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             self?.czfExportIPA()
         })
 
+        // 3.8.682（F1）：备份这个 App——单项进批量备份范围单（复用
+        // batchBackup：人脸门、busy 标志与回执全在那路）；标题硬编码
+        // 中文，同“复制 Bundle ID”先例。
+        sectionChildren.append(UIAction(
+            title: "备份这个 App",
+            image: UIImage(systemName: "square.and.arrow.down")
+        ) { [weak self] _ in
+            self?.delegate.backupApp(app: model)
+        })
+
         // 3.8.641（F1）：置顶/取消置顶——与网格菜单同款（列表置顶键，
         // 与坞固定区无关）；标题硬编码中文，同“复制 Bundle ID”先例。
         sectionChildren.append(UIAction(
