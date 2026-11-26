@@ -737,7 +737,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.641（F2）：仅运行中开关——多选按钮旁；16 以下隐藏
         //（MultitaskDockManager 是 16+ 类型，见 CZFRunningDot 注释）。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, #available(iOS 16.0, *) {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2, #available(iOS 16.0, *) {
                 Button {
                     czfRunningOnly.toggle()
                 } label: {
@@ -752,7 +752,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.653（B1）：开关开着时常驻——数归零后按钮消失，页内就
         // 再无办法关掉筛选（只能退出重进等 @State 重建）。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, czfUpdatableCount > 0 || czfUpdatableOnly {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2, czfUpdatableCount > 0 || czfUpdatableOnly {
                 Button {
                     czfUpdatableOnly.toggle()
                 } label: {
@@ -766,7 +766,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         //（backupStatusCaption 同款）；纯数据过滤，iOS 15 也可用，
         // 不需 16+ 门控。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
                 Button {
                     czfNoBackupOnly.toggle()
                 } label: {
@@ -783,7 +783,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 红色是 UI 打磨：与坞里 closeAllStripButton 的红字同款，
         // 标明这是破坏性操作。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, #available(iOS 16.0, *), czfDockRunningCount > 0 {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2, #available(iOS 16.0, *), czfDockRunningCount > 0 {
                 Button {
                     czfShowCloseAllConfirm = true
                 } label: {
@@ -882,7 +882,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 用户 14:17：顶栏全藏、只留展开箭头——文件夹也收进
         // 折叠里（点箭头才出来），默认只剩一个“>”。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
                 NavigationLink {
                     LCDataManagementView(initialSheet: .restore)
                 } label: {
@@ -899,7 +899,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
             // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
             // 这里只留一行调用。
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
                 vpnShieldMenu
             }
         }
@@ -907,7 +907,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
         // 整行点按即勾选；关时清空勾选。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
                 Button {
                     batchMode.toggle()
                     if !batchMode { batchSelectedIDs.removeAll() }
@@ -924,7 +924,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.337：用户 14:17 顶栏全藏只留展开箭头——链接也收进
         // 折叠里，默认不显示，点箭头才出来。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
                 Button("lc.appList.openLink".loc, systemImage: "link", action: {
                     Task { await onOpenWebViewTapped() }
                 })
@@ -933,7 +933,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
         // 3.8.337：同上，排序菜单也收进折叠里。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
             Menu {
                 // 优3（3.8.277）：排序切换那一下不做全量动画——
                 // 列表带 .animation(.easeInOut, value: filteredApps)，
@@ -1001,7 +1001,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 点开只弹设置 sheet，不强制切模式；模式由 sheet 里
         // 的显示模式 Picker 决定。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
                 Button {
                     czfGridSettingsShow = true
                 } label: {
@@ -1013,12 +1013,317 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // “?”帮助收到“>”展开的工具组（用户 21:48 令）：原来常驻
         // 在 leading pill 里占地方，挪到这里，点“>”展开才看到。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
                 Button("Help".loc, systemImage: "questionmark") {
                     helpPresent = true
                 }
             }
         }
+    }
+
+    // P0（3.8.655）：副 LC 行内工具面板——容器见 czfAppScrollContent
+    // 注释。全部是行内 Button / NavigationLink / DisclosureGroup，
+    // 不弹任何系统菜单/浮层：每一行都在 ScrollView 内容里、在窗
+    // bounds 内，点按必中；面板外没有拦截层，窗外点按照常穿到
+    // 下面 App。动作与顶栏工具组一字同款（同一状态、同一函数），
+    // 只换容器；主 LC 不渲染它（门控在 ScrollView 那边）。
+    // 拆三段写，免得单个表达式 type-check 超时（3.8.285 同款）。
+    @ViewBuilder
+    private var czfSecondaryToolsPanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("更多工具".loc)
+                    .font(.headline)
+                Spacer()
+                Button("收起") {
+                    withAnimation { topToolsExpanded = false }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            // 筛选开关（显隐口径与 czfRunningTools 同款）。
+            if #available(iOS 16.0, *) {
+                Button {
+                    czfRunningOnly.toggle()
+                } label: {
+                    HStack {
+                        Label("仅运行中", systemImage: czfRunningOnly ? "play.circle.fill" : "play.circle")
+                        Spacer()
+                        if czfRunningOnly {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.accentColor)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
+            if czfUpdatableCount > 0 || czfUpdatableOnly {
+                Button {
+                    czfUpdatableOnly.toggle()
+                } label: {
+                    HStack {
+                        Label("仅可更新", systemImage: czfUpdatableOnly ? "arrow.down.circle.fill" : "arrow.down.circle")
+                        Spacer()
+                        if czfUpdatableOnly {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.accentColor)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
+            Button {
+                czfNoBackupOnly.toggle()
+            } label: {
+                HStack {
+                    Label("仅无备份", systemImage: "externaldrive.badge.questionmark")
+                    Spacer()
+                    if czfNoBackupOnly {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.accentColor)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            Button {
+                batchMode.toggle()
+                if !batchMode { batchSelectedIDs.removeAll() }
+            } label: {
+                HStack {
+                    Label("多选", systemImage: batchMode ? "checkmark.circle.fill" : "checkmark.circle")
+                    Spacer()
+                    if batchMode {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.accentColor)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            NavigationLink {
+                LCDataManagementView(initialSheet: .restore)
+            } label: {
+                HStack {
+                    Label("数据管理", systemImage: "folder")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            Button {
+                Task { await onOpenWebViewTapped() }
+            } label: {
+                Label("lc.appList.openLink".loc, systemImage: "link")
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            if czfDockRunningCount > 0 {
+                Button {
+                    czfShowCloseAllConfirm = true
+                } label: {
+                    Label("关闭坞内全部窗口", systemImage: "xmark.circle")
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
+            czfSecondaryToolsVPNSection
+            Divider()
+            czfSecondaryToolsSortSection
+            Divider()
+            Button {
+                czfGridSettingsShow = true
+            } label: {
+                Label("网格设置", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            Button {
+                helpPresent = true
+            } label: {
+                Label("Help".loc, systemImage: "questionmark")
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+    }
+
+    // 盾牌菜单的行内版：同一文案、同一函数（toggleVPNCore /
+    // toolbarPingNodes / switchToFastestNode / setActiveNode），
+    // 节点子菜单改行内 DisclosureGroup，不弹系统菜单。
+    @ViewBuilder
+    private var czfSecondaryToolsVPNSection: some View {
+        Text(vpnCurrentNodeLabel)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        Divider()
+        Button(vpnCoreRunning ? "停止核心" : "启动核心") {
+            toggleVPNCore()
+        }
+        .disabled(vpnPinging)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        Divider()
+        Button(vpnPinging ? "测速中…" : "测延迟") {
+            toolbarPingNodes()
+        }
+        .disabled(vpnPinging || CZFVPNManager.shared.nodeLinks.isEmpty)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        Divider()
+        DisclosureGroup {
+            if CZFVPNManager.shared.nodeLinks.isEmpty {
+                Text("暂无节点")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(Array(CZFVPNManager.shared.nodeLinks.enumerated()), id: \.offset) { idx, link in
+                    Button {
+                        CZFVPNManager.shared.setActiveNode(at: idx)
+                    } label: {
+                        Text(vpnNodeMenuLabel(idx: idx, link: link))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+            }
+        } label: {
+            Label("选择节点", systemImage: "list.bullet")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        Divider()
+        Button("切到最快") {
+            switchToFastestNode()
+        }
+        .disabled(CZFVPNManager.shared.nodeLinks.isEmpty)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        Divider()
+        Button("前往 VPN 设置") {
+            sharedModel.selectedTab = .tweaks
+            sharedModel.czfTweakVPNRequest += 1
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // 排序菜单的行内版：Picker 改行内行（同一关动画 transaction，
+    // 切到 .custom 同样 withAnimation 弹自定义排序页），方案
+    // Picker 改行内行（同一 switchScheme），不弹系统菜单。
+    @ViewBuilder
+    private var czfSecondaryToolsSortSection: some View {
+        DisclosureGroup {
+            ForEach(AppSortType.allCases, id: \.self) { sortType in
+                Button {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        sharedAppSortManager.appSortType = sortType
+                    }
+                    if sortType == .custom {
+                        withAnimation { customSortViewPresent = true }
+                    }
+                } label: {
+                    HStack {
+                        Label(sortType.displayName, systemImage: sortType.systemImage)
+                        Spacer()
+                        if sharedAppSortManager.appSortType == sortType {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.accentColor)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            if sharedAppSortManager.appSortType == .custom {
+                Button {
+                    customSortViewPresent = true
+                } label: {
+                    Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            Divider()
+            ForEach(sharedAppSortManager.schemes.keys.sorted(), id: \.self) { name in
+                Button {
+                    sharedAppSortManager.switchScheme(to: name)
+                    // 切方案即置 .custom（switchScheme 内做）：原菜单里
+                    // Sort Picker 的 onChange 会因此弹自定义排序页，
+                    // 这里同款跟上，行为一字不差。
+                    withAnimation { customSortViewPresent = true }
+                } label: {
+                    HStack {
+                        Text(name)
+                        Spacer()
+                        if sharedAppSortManager.currentSchemeName == name {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.accentColor)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            Button {
+                sortSchemesViewPresent = true
+            } label: {
+                Label("管理排序方案…", systemImage: "folder.badge.gearshape")
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        } label: {
+            HStack {
+                Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
+                Spacer()
+                Text(sharedAppSortManager.appSortType.displayName)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
 
@@ -2163,7 +2468,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 抽出来，body 只剩 NavigationView + 修饰符。只拆不改逻辑。
     @ViewBuilder
     private var czfAppScrollContent: some View {
+        ScrollViewReader { proxy in
         ScrollView {
+            // P0（3.8.655）：副 LC（multiLCStatus == 2）的 App 页
+            // 跑在宿主进程的虚拟窗里（Decorated 窗），系统顶栏溢出
+            // 菜单伸出顶栏 bounds——可见但点不到，触摸穿到下面 App。
+            // 副 LC 下不走顶栏溢出：工具收进下面的行内面板（在
+            // ScrollView 内容里，全部可视区都在窗 bounds 内，点按
+            // 必中）；顶栏只留“+”与“>”，不再产生溢出菜单。
+            // 主 LC（status 0）一字不动，顶栏溢出菜单照常。
+            if topToolsExpanded, sharedModel.multiLCStatus == 2 {
+                czfSecondaryToolsPanel
+                    .id("czfSecondaryToolsPanel")
+            }
             if czfGridMode {
                 czfGridContent
             } else {
@@ -2280,6 +2597,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 czfRefreshSignatureExpiry()
             }
         }
+        .onChange(of: topToolsExpanded) { expanded in
+            // 面板插在内容顶部：用户在列表下方滚动时点“>”，面板
+            // 在屏外；展开后滚回顶部，面板立即在眼前。下一轮跑，
+            // 等面板布局落定再滚。
+            if expanded, sharedModel.multiLCStatus == 2 {
+                DispatchQueue.main.async {
+                    withAnimation { proxy.scrollTo("czfSecondaryToolsPanel", anchor: .top) }
+                }
+            }
+        }
+    }
     }
 
     // body 再拆分（3.8.424，423 构建仍红字）：body 420 行、35 个
