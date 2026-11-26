@@ -2748,6 +2748,22 @@ private struct ManageSourcesSheet: View {
     // 带默认值，memberwise init 调用点可省。
     let onRemove: ((AltStoreSourcesViewModel.SourceItem) -> Void)? = nil
 
+    // 3.8.688 修法（构建 run 45876896062 唯一红字原文：
+    // LCAltStoreSourcesView.swift:1553:27: error: extra argument
+    // 'onRemove' in call）——带默认值的 onRemove 在 memberwise init
+    // 下调用点报 extra argument（CZFSourceAppListView :2935、
+    // AltStoreSourceSectionView :3092，3.8.673 同款）；显式声明兜底，
+    // 参数顺序与声明一致，onRemove 仍带默认值，旧调用点可省。
+    // @ObservedObject/@Binding 的写法照仓内现成 init 抄：
+    // ObservedObject(wrappedValue:)（LCAppSettingsView :131）、
+    // self._isPresented = isPresented（ViewExtensions :167）。
+    init(viewModel: AltStoreSourcesViewModel, isPresented: Binding<Bool>, onAdd: @escaping (String) async -> String?, onRemove: ((AltStoreSourcesViewModel.SourceItem) -> Void)? = nil) {
+        self._viewModel = ObservedObject(wrappedValue: viewModel)
+        self._isPresented = isPresented
+        self.onAdd = onAdd
+        self.onRemove = onRemove
+    }
+
     @State private var manualSourceValue = ""
     @State private var isAddingManual = false
     // S-9 回退（3.8.453 核查）：sheet 内删源不能走父级的 .alert——
