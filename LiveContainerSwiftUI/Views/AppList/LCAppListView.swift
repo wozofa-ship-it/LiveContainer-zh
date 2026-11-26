@@ -1054,7 +1054,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         Spacer()
                         if czfRunningOnly {
                             Image(systemName: "checkmark")
-                                .foregroundStyle(.accentColor)
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
                 }
@@ -1072,7 +1072,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         Spacer()
                         if czfUpdatableOnly {
                             Image(systemName: "checkmark")
-                                .foregroundStyle(.accentColor)
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
                 }
@@ -1089,7 +1089,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     Spacer()
                     if czfNoBackupOnly {
                         Image(systemName: "checkmark")
-                            .foregroundStyle(.accentColor)
+                            .foregroundStyle(Color.accentColor)
                     }
                 }
             }
@@ -1106,7 +1106,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     Spacer()
                     if batchMode {
                         Image(systemName: "checkmark")
-                            .foregroundStyle(.accentColor)
+                            .foregroundStyle(Color.accentColor)
                     }
                 }
             }
@@ -1250,7 +1250,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @ViewBuilder
     private var czfSecondaryToolsSortSection: some View {
         DisclosureGroup {
-            ForEach(AppSortType.allCases, id: \.self) { sortType in
+            // 首推红字：不写类型时编译器把这个 ForEach 推成
+            // Binding 重载（sortType 成 Binding<AppSortType>，
+            // 赋值与 .displayName 全挂）；顶栏 :954 同款在 Picker
+            // 里能编过，这里在 DisclosureGroup 里推不出来。显式
+            // 标参类型，只剩值重载一个候选。
+            ForEach(AppSortType.allCases, id: \.self) { (sortType: AppSortType) in
                 Button {
                     var transaction = Transaction()
                     transaction.disablesAnimations = true
@@ -1266,7 +1271,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         Spacer()
                         if sharedAppSortManager.appSortType == sortType {
                             Image(systemName: "checkmark")
-                                .foregroundStyle(.accentColor)
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
                 }
@@ -1298,7 +1303,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         Spacer()
                         if sharedAppSortManager.currentSchemeName == name {
                             Image(systemName: "checkmark")
-                                .foregroundStyle(.accentColor)
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
                 }
