@@ -1183,14 +1183,16 @@ struct LCSourcesView: View {
                             CZFLocalIpaFolderStore.clear()
                             czfIpaFolderURL = nil
                         },
+                        // 3.8.682（B3）：搜索字与“只看有新版”由源页持有
+                        // （见上），分段切换不丢。实参须按 Section 声明顺序：
+                        // czfOnlyUpdatable / czfSearchText 在前，批量态与
+                        // 选中集在后（逐成员 init 按声明顺序）。
+                        czfOnlyUpdatable: $czfFolderOnlyUpdatable,
+                        czfSearchText: $czfFolderSearchText,
                         // 3.8.666（B-alt）：批量态与选中集由源页持有
                         // （见上），分段切换不丢勾选。
                         czfBatchMode: $czfFolderBatchMode,
-                        czfSelectedIDs: $czfFolderSelectedIDs,
-                        // 3.8.682（B3）：搜索字与“只看有新版”由源页持有
-                        // （见上），分段切换不丢。
-                        czfSearchText: $czfFolderSearchText,
-                        czfOnlyUpdatable: $czfFolderOnlyUpdatable
+                        czfSelectedIDs: $czfFolderSelectedIDs
                     )
                     .padding()
                 }

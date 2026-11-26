@@ -2543,12 +2543,6 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         self.czfGridLaunch(app: app)
                     },
                     onLaunchMultitask: { app in self.czfGridLaunchMultitask(app: app) },
-                    // 3.8.682（F1）：备份这个 App——单项写入批量选中
-                    // 后弹批量备份范围单，复用 batchBackup(loginOnly:)。
-                    onBackupRequest: { app in
-                        self.batchSelectedIDs = [self.czfBatchKey(for: app)]
-                        self.batchBackupScopeConfirm = true
-                    },
                     onOpenSettings: { app in
                         // F-9：锁定 App 的设置页进前先认证（与启动同款守卫）；
                         // 网格双击与菜单设置按钮都走这里，一处守住两路。
@@ -2559,6 +2553,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             // isNavigationActive（@State），回主线程再调。
                             await MainActor.run { self.openNavigationView(view: AnyView(LCAppSettingsView(model: app))) }
                         }
+                    },
+                    // 3.8.682（F1）：备份这个 App——单项写入批量选中
+                    // 后弹批量备份范围单，复用 batchBackup(loginOnly:)。
+                    // 位置在最后：CZFAppGridActions 逐成员 init 实参须按
+                    // 声明顺序，onBackupRequest 是末位成员。
+                    onBackupRequest: { app in
+                        self.batchSelectedIDs = [self.czfBatchKey(for: app)]
+                        self.batchBackupScopeConfirm = true
                     }
                 ),
                 onRemoveApp: { app in self.removeApp(app: app) },
