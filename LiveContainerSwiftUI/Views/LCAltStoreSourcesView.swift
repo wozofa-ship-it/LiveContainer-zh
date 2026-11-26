@@ -1220,6 +1220,9 @@ struct LCSourcesView: View {
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             } else {
+                // 3.8.684（F3）：点当前 Tab 回到顶部——ScrollViewReader
+                // 的 proxy 只在闭包内，锚点与 onReceive 都落在这里。
+                ScrollViewReader { czfSourcesProxy in
                 ScrollView {
                     // 3.8.431 源分组仍没好（用户 01:58 报 429“原来
                     // 一模一样”：整页只有一个“解剖自我”组头）：
@@ -1235,6 +1238,8 @@ struct LCSourcesView: View {
                     // 列表路（AltStoreSourceSectionView）同样走
                     // VStack，不受影响。
                     VStack(spacing: 16) {
+                        // 3.8.684（F3）：回到顶部锚点——点当前“源” Tab 即滚到这里。
+                        Color.clear.frame(height: 0).id("czfSourcesListTop")
                         // TwoYi 安卓系统（3.8.628）：只在“源”分段出现
                         // （不在“文件夹”分段）、网格与列表两模式都可见、
                         // 与每源一组平级；源为空的空态分支里不出现。
@@ -1379,11 +1384,19 @@ struct LCSourcesView: View {
                 .onChange(of: czfBackgroundVersion) { _ in
                     czfBackgroundImage = CZFSourceBackground.loadImage()
                 }
+                // 3.8.684（F3）：点当前 Tab 回到顶部——与 App 页同款，
+                // 只在当前就是源页时滚。
+                .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFScrollCurrentTabToTop"))) { output in
+                    guard (output.object as? LCTabIdentifier) == .sources else { return }
+                    guard sharedModel.selectedTab == .sources else { return }
+                    withAnimation { czfSourcesProxy.scrollTo("czfSourcesListTop", anchor: .top) }
+                }
                 // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在
                 // 顶部的“恢复原生 / 网格设置”行删掉，模式开关收到
                 // 网格设置 sheet 里（CZFAppGridSettingsView 的显示
                 // 模式，两页共用），网格设置入口收到顶栏 leading；
                 // 页面多出一行 App。
+                }
             }
         }
     }
@@ -3489,6 +3502,18 @@ struct LCSourceAppBanner: View {
             }
         }
         .contextMenu {
+            // 3.8.684（F2）：固定到面板——坞源面板行菜单同款入口
+            // （MultitaskDockView rowContextMenu），源页不用再绕
+            // 进坞找它；文案按固定态翻，0 新 key。
+            Button {
+                CZFPinnedAppsStore.shared.toggleSourcePin(app)
+            } label: {
+                Label(CZFPinnedAppsStore.shared.isSourcePinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isSourcePinned(app) ? "pin.slash" : "pin")
+            }
+            // 3.8.684（B2）：批量态下不提供忽略/取消忽略——点按已
+            // 设防，长按再改忽略名单会绕过批量流程、重算红点；
+            // 复制两项与固定项照常留（只读，不碰批量队列）。
+            if !isBatchMode {
             if hasUpdate, let version = app.latestVersion?.version {
                 Button {
                     CZFUpdateIgnore.setIgnored(version, for: app.bundleIdentifier)
@@ -3510,6 +3535,7 @@ struct LCSourceAppBanner: View {
                 } label: {
                     Label("取消忽略更新", systemImage: "bell")
                 }
+            }
             }
             // 3.8.682（F2）：复制版本号 / 复制 Bundle ID——与 App 页
             // 长按菜单同款（3.8.639/647），源页原来只有“忽略此版本”；

@@ -7,6 +7,7 @@
 
 import Foundation
 import SwiftUI
+import UIKit
 
 struct LCTabView: View {
     @State var errorShow = false
@@ -64,7 +65,19 @@ struct LCTabView: View {
                 Spacer()
             }
         )
+        // 3.8.684（F3）：Tab 栏重点击感知桥——TabView 的 selection
+        // 重选不触发 onChange，桥挂在 Tab 栏上观察点按（见文件尾
+        // CZFTabBarTapObserver），重选当前 Tab 即发回顶通知。
+        .background {
+            CZFTabBarTapBridgeView(
+                currentTab: { self.sharedModel.selectedTab },
+                tabOrder: { DataManager.shared.model.multiLCStatus != 2 ? [.sources, .apps, .tweaks, .settings] : [.apps, .settings] }
+            )
+        }
         .onAppear {
+            // 3.8.684（F3）：进页即挂一次 Tab 栏观察（桥的 makeUIView
+            // 时 Tab 栏可能还没进窗口，onAppear 时再补挂一次）。
+            CZFTabBarTapObserver.shared.attachIfNeeded()
             // 提前把多任务管理器建起来：全局手势识别器和 Darwin
             // 监听都在它的 init 里装配，懒到第一个 App 打开才建，
             // 刚进 LiveContainer 在主界面就滑不出面板（用户实测）。
@@ -104,6 +117,9 @@ struct LCTabView: View {
             // 从后台切回前台时也预热一次（核心可能已被自动停）；
             // 同上，不过测速后的抑制。
             if newPhase == .active {
+                // 3.8.684（F3）：回前台也补挂一次 Tab 栏观察（Tab 栏
+                // 重建后旧手势跟着旧栏走，新栏要重新挂）。
+                CZFTabBarTapObserver.shared.attachIfNeeded()
                 // 起核心是同步阻塞的 CGoInvoke，放 detached 跑，别卡主线程。
                 Task.detached {
                     CZFVPNManager.shared.prewarmIfNeeded(ignoringSuppression: true)
@@ -445,5 +461,96 @@ private struct CZFRunningCountWatcher: View {
     var body: some View {
         Color.clear
             .onChange(of: dockManager.apps.map { $0.appUUID }) { _ in onRunningChanged() }
+    }
+}
+
+// 3.8.684（F3）：Tab 栏重点击感知——TabView 的 selection 值重选
+// 不触发 onChange，SwiftUI 没有重点击回调；也不替换
+// UITabBarController 的 delegate（SwiftUI 自己用它同步 selection，
+// 替换会断掉选中同步）。只在 UITabBar 上挂一个观察用的
+// UITapGestureRecognizer（cancelsTouchesInView = false，不拦点按、
+// 不改选中），按落点算出第几个 Tab，与当前选中比对，一致即发
+// CZFScrollCurrentTabToTop 通知（object = 被点的 Tab）；各页收到
+// 后自己滚到顶。按钮按 x 排序认位置，认不到按钮时按 items 数等分算。
+// iOS 15 可用，无新 API；只读视图层级，不调私有 API。
+private final class CZFTabBarTapObserver: NSObject, UIGestureRecognizerDelegate {
+    static let shared = CZFTabBarTapObserver()
+    var currentTab: () -> LCTabIdentifier = { .apps }
+    var tabOrder: () -> [LCTabIdentifier] = { [.sources, .apps, .tweaks, .settings] }
+    private var attachedTabBars: [ObjectIdentifier] = []
+
+    func attachIfNeeded() {
+        guard let tabBar = Self.findTabBar() else { return }
+        let id = ObjectIdentifier(tabBar)
+        guard !attachedTabBars.contains(id) else { return }
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tabBarTapped(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        tabBar.addGestureRecognizer(tap)
+        attachedTabBars.append(id)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        true
+    }
+
+    @objc private func tabBarTapped(_ gesture: UITapGestureRecognizer) {
+        guard let tabBar = gesture.view as? UITabBar else { return }
+        let point = gesture.location(in: tabBar)
+        let order = tabOrder()
+        guard !order.isEmpty else { return }
+        let buttons = tabBar.subviews
+            .filter { String(describing: type(of: $0)).contains("UITabBarButton") }
+            .sorted { $0.frame.minX < $1.frame.minX }
+        let index: Int
+        if buttons.count == order.count {
+            guard let hit = buttons.firstIndex(where: { $0.frame.contains(point) }) else { return }
+            index = hit
+        } else if let count = tabBar.items?.count, count > 0 {
+            index = min(max(Int(point.x / (tabBar.bounds.width / CGFloat(count))), 0), count - 1)
+        } else {
+            return
+        }
+        guard order.indices.contains(index), order[index] == currentTab() else { return }
+        NotificationCenter.default.post(name: Notification.Name("CZFScrollCurrentTabToTop"), object: order[index])
+    }
+
+    private static func findTabBar() -> UITabBar? {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows {
+                if let bar = findTabBar(in: window) { return bar }
+            }
+        }
+        return nil
+    }
+
+    private static func findTabBar(in view: UIView) -> UITabBar? {
+        if let bar = view as? UITabBar { return bar }
+        for subview in view.subviews {
+            if let bar = findTabBar(in: subview) { return bar }
+        }
+        return nil
+    }
+}
+
+// 3.8.684（F3）：Tab 栏观察桥——无界面，只在创建/更新时把
+// 当前 Tab 与 Tab 顺序交给观察器、补挂手势；Tab 栏重建后由
+// LCTabView 的 onAppear / 回前台再补挂。
+private struct CZFTabBarTapBridgeView: UIViewRepresentable {
+    var currentTab: () -> LCTabIdentifier
+    var tabOrder: () -> [LCTabIdentifier]
+
+    func makeUIView(context: Context) -> UIView {
+        CZFTabBarTapObserver.shared.currentTab = currentTab
+        CZFTabBarTapObserver.shared.tabOrder = tabOrder
+        CZFTabBarTapObserver.shared.attachIfNeeded()
+        return UIView()
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        CZFTabBarTapObserver.shared.currentTab = currentTab
+        CZFTabBarTapObserver.shared.tabOrder = tabOrder
+        CZFTabBarTapObserver.shared.attachIfNeeded()
     }
 }

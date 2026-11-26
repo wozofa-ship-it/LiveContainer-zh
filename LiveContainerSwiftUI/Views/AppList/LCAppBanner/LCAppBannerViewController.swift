@@ -23,6 +23,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     private let bannerView = LCAppBannerRootView()
     private var configuration: LCAppBannerConfiguration
     private var exportTemporaryDirectory: URL?
+    // 3.8.684（B1）：批量模式——批量态下长按菜单与长按启动双双
+    // 设防；由 LCAppBanner 下行，控制器不自己猜。
+    var czfBatchMode = false
     // 3.8.647（F3）：导出 IPA 进行中标志——防重入（菜单标题同步显示“正在导出…”）。
     private var czfExporting = false
     // dock 条目变化时重绘画片（卡片状态读 dock 存活态，不订阅
@@ -173,6 +176,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // 的 touchUpInside 由 runButtonTapped 里的时间戳吞掉。
     @objc private func runControlLongPressed(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
+        // 3.8.684（B1）：批量态下长按启动不开多任务面板——点按已
+        // 改勾选，长按再开面板与批量语义冲突。
+        guard !czfBatchMode else { return }
         if #available(iOS 16.0, *) {
             runControlLongPressAt = Date()
             MultitaskDockManager.shared.czfOpenAppPanel()
@@ -580,6 +586,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         _ interaction: UIContextMenuInteraction,
         configurationForMenuAtLocation location: CGPoint
     ) -> UIContextMenuConfiguration? {
+        // 3.8.684（B1）：批量态下不弹长按菜单——与网格模式同款
+        // （CZFAppGridView 低 #9：批量态下不挂 contextMenu）；
+        // 否则卸载/隐藏/锁定/“备份这个 App”全能点，“备份这个
+        // App”还会把已选多项无声替换成 1 项。
+        guard !czfBatchMode else { return nil }
         UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             self?.makeContextMenu()
         }

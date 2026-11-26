@@ -23,6 +23,9 @@ struct LCAppBanner: UIViewControllerRepresentable {
     var delegate: LCAppBannerDelegate
     // F1（3.8.635）：签名剩余天数（nil = 没读到，不显示）。
     var expiryDaysLeft: Int? = nil
+    // 3.8.684（B1）：批量模式——批量态下横幅不弹长按菜单、不开
+    // 多任务面板；默认 false，其余调用点（网格等）不用改。
+    var batchMode: Bool = false
 
     @ObservedObject var model: LCAppModel
 
@@ -30,14 +33,17 @@ struct LCAppBanner: UIViewControllerRepresentable {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     private let sharedModel = DataManager.shared.model
 
-    init(appModel: LCAppModel, delegate: LCAppBannerDelegate, expiryDaysLeft: Int? = nil) {
+    init(appModel: LCAppModel, delegate: LCAppBannerDelegate, expiryDaysLeft: Int? = nil, batchMode: Bool = false) {
         _model = ObservedObject(wrappedValue: appModel)
         self.delegate = delegate
         self.expiryDaysLeft = expiryDaysLeft
+        self.batchMode = batchMode
     }
 
     func makeUIViewController(context: Context) -> UIViewController {
         let viewController = LCAppBannerViewController(delegate: delegate, config: LCAppBannerConfiguration(model: model, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon, expiryDaysLeft: expiryDaysLeft))
+        // 3.8.684（B1）：批量态下行到控制器（门只加在这里）。
+        viewController.czfBatchMode = batchMode
         return viewController
     }
 
@@ -45,6 +51,8 @@ struct LCAppBanner: UIViewControllerRepresentable {
         guard let viewController = uiViewController as? LCAppBannerViewController else {
             return
         }
+        // 3.8.684（B1）：进出批量态即同步，控制器不自己猜。
+        viewController.czfBatchMode = batchMode
         viewController.update(
             model: model,
             dynamicColors: dynamicColors,

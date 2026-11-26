@@ -659,17 +659,34 @@ struct CZFSourceAppGridCell: View {
             }
         }
         .contextMenu {
-            Button("lc.common.install".loc, systemImage: "square.and.arrow.down") {
-                onInstall(app)
-            }
-            Button("新建", systemImage: "plus.square.on.square") {
-                onInstallAsNew(app)
-            }
-            Button("lc.common.download".loc, systemImage: "arrow.down.circle") {
-                onDownload(app)
-            }
-            Button("应用详情", systemImage: "info.circle") {
-                showDetail = true
+            // 3.8.684（B3）：批量态下只留“应用详情”（只读开单）——
+            // 点按/双击已设防，长按再点“安装”会绕过批量队列当场
+            // 单装，底栏已选数与实际安装脱节；App 页网格同款
+            // （低 #9：批量态下不挂菜单，这里留详情不断路）。
+            if isBatchMode {
+                Button("应用详情", systemImage: "info.circle") {
+                    showDetail = true
+                }
+            } else {
+                // 3.8.684（F2）：固定到面板——与列表行菜单同款
+                // （LCSourceAppBanner），文案按固定态翻，0 新 key。
+                Button {
+                    CZFPinnedAppsStore.shared.toggleSourcePin(app)
+                } label: {
+                    Label(CZFPinnedAppsStore.shared.isSourcePinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isSourcePinned(app) ? "pin.slash" : "pin")
+                }
+                Button("lc.common.install".loc, systemImage: "square.and.arrow.down") {
+                    onInstall(app)
+                }
+                Button("新建", systemImage: "plus.square.on.square") {
+                    onInstallAsNew(app)
+                }
+                Button("lc.common.download".loc, systemImage: "arrow.down.circle") {
+                    onDownload(app)
+                }
+                Button("应用详情", systemImage: "info.circle") {
+                    showDetail = true
+                }
             }
         }
         .sheet(isPresented: $showDetail) {

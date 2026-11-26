@@ -351,6 +351,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         !selectedBatchApps.isEmpty && selectedBatchApps.allSatisfy { $0.appInfo.isHidden }
     }
 
+    // 3.8.684（F1）：勾中的 App 是不是全已置顶（底栏“置顶/取消置顶”
+    // 按钮换 label 用；空选时 false，按钮反正禁用；与
+    // batchSelectionAllHidden 同款判法）。
+    private var batchSelectionAllPinned: Bool {
+        !selectedBatchApps.isEmpty && selectedBatchApps.allSatisfy { CZFListPinnedStore.shared.isPinned($0) }
+    }
+
     // 3.8.428 设置#31：批量勾选键——getUniqueIdentifier 在
     // bundleIdentifier 或 relativeBundlePath 为 nil 时返回 nil，
     // 原来 isBatchSelected/toggle 直接 guard-return，格子仍显示
@@ -1746,7 +1753,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             .foregroundColor(isBatchSelected(app) ? .accentColor : .secondary)
                     }
                     .buttonStyle(.plain)
-                    LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
+                    // 3.8.684（B1）：批量态下行到横幅——长按菜单与长按
+                    // 启动双双设防（LCAppBanner.batchMode）。
+                    LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()], batchMode: true)
                         .frame(maxWidth: .infinity)
                         .overlay {
                             Color.clear
@@ -2668,6 +2677,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private var czfAppScrollContent: some View {
         ScrollViewReader { proxy in
         ScrollView {
+            // 3.8.684（F3）：回到顶部锚点——点当前“App” Tab 即滚到这里。
+            Color.clear.frame(height: 0).id("czfAppListTop")
             // P0（3.8.655）/ 回归（3.8.665）：客场景 LC 分身
             //（LiveProcess 客进程，czfIsGuestScene）的 App 页跑在
             // 客进程的虚拟窗里（Decorated 窗），系统顶栏溢出菜单
@@ -2833,6 +2844,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
             }
         }
+        // 3.8.684（F3）：点当前 Tab 回到顶部——TabView 重选不触发
+        // onChange，重点击信号由 LCTabView 的 Tab 栏观察器发通知；
+        // 只在当前就是 App 页时滚（源页同款各守自己的 Tab）。
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFScrollCurrentTabToTop"))) { output in
+            guard (output.object as? LCTabIdentifier) == .apps else { return }
+            guard sharedModel.selectedTab == .apps else { return }
+            withAnimation { proxy.scrollTo("czfAppListTop", anchor: .top) }
+        }
     }
     }
 
@@ -2909,6 +2928,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                 await batchHide()
                             }
                         }
+                    }
+                    .disabled(batchSelectedIDs.isEmpty || batchBusy)
+                    // 3.8.684（F1）：批量置顶/取消置顶——逐个调单项菜单
+                    // 同款 toggle（CZFListPinnedStore），最后一次调
+                    // czfResortAfterPinChange() 重排；同步写、无 await，
+                    // 不用 Task；禁用条件与“隐藏”钮同款。
+                    Button(batchSelectionAllPinned ? "取消置顶" : "置顶") {
+                        for app in selectedBatchApps {
+                            CZFListPinnedStore.shared.toggle(app)
+                        }
+                        LCAppSortManager.shared.czfResortAfterPinChange()
                     }
                     .disabled(batchSelectedIDs.isEmpty || batchBusy)
                     Button("删除") {
