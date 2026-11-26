@@ -5530,7 +5530,18 @@ private struct SourcePanelRow: View {
     // 注意：installedAppModel 只供 hasUpdate 版本比较；启动绝不走它
     //（多开时“打开”按下面 installedAppModels 走单开直启/多开选实例）。
     private var installedAppModel: LCAppModel? {
-        (sharedModel.apps + sharedModel.hiddenApps).first(where: { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) })
+        // 3.8.662（B2）：取最旧实例——照抄 CZFInstalledLookup.
+        // installedModel 的 min(by:) 谓词（3.8.649 B2）；原来
+        // first(where:) 取扫描顺序首个实例，新旧分身并存、源最新版
+        // 介于两者之间时，首个恰好是新分身就漏检更新。谓词“a 在 b 前”
+        // 当且仅当 b 比 a 新，即 a 更旧；版本相等时比 build。
+        // 只供 hasUpdate 版本比较，启动路不动（见上注释）。
+        // appInfo.version() 是 ObjC NSString*（非可选），不加 ?? ""。
+        (sharedModel.apps + sharedModel.hiddenApps)
+            .filter { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) }
+            .min(by: { a, b in
+                czfIsNewerVersion(b.appInfo.version(), build: b.appInfo.buildVersion(), newerThan: a.appInfo.version(), installedBuild: a.appInfo.buildVersion())
+            })
     }
 
     private var installedAppModels: [LCAppModel] {

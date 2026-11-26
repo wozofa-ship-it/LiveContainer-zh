@@ -265,6 +265,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.651（F2）：仅无备份筛选——打开后列表只显示备份表里明确
     // 是“无备份”的 App；与两现有开关同款 @State（不持久化）。
     @State private var czfNoBackupOnly = false
+    // 3.8.662（F1）：仅快过期筛选——打开后列表只显示签名 7 天内
+    // 到期（含已过期）的 App；判据复用 CZFAppExpiryCache（与按
+    // 到期日排序同一份表，网格红字同款“<= 7”口径）；读不到
+    // mobileprovision 的不进表、不显示。与三现有开关同款 @State
+    //（不持久化），iOS 15 可用。
+    @State private var czfExpiringOnly = false
     // 3.8.643（F1）：坞内运行中窗口数——“关闭坞内全部窗口”按钮的
     // 显隐口径（0 即藏）；只计坞表条目，不计 isUsing 回落的原生窗——
     // closeAllWindows 只遍历 dockManager.apps，不进坞表的原生窗
@@ -392,6 +398,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 扫盘放后台，查表写表回主线程，行上只查表。
     private func refreshBackupStatus() {
         Task.detached {
+            // 3.8.662（B1）：在装 UUID 集——回主线程取快照（@Published
+            // apps/hiddenApps 不可后台直读，backupFolderName 同款
+            // main.sync 取法；本函数有后台路，批量备份/恢复收尾调
+            // 来时不在主线程）。
+            let installedUUIDs: Set<String> = await MainActor.run {
+                Set((sharedModel.apps + sharedModel.hiddenApps).compactMap { $0.appInfo.dataUUID })
+            }
             let fm = FileManager.default
             guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
             let backupRoot = docsURL.appendingPathComponent("Backups")
@@ -413,7 +426,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         if !info.dataUUID.isEmpty {
                             byUUID[info.dataUUID] = info.backupDate
                         }
-                        if !info.displayName.isEmpty && !info.bundleID.isEmpty {
+                        // 3.8.662（B1）：回落表只收孤儿/无 UUID 文件夹——
+                        // manifest 的 dataUUID 还在装时，这个文件夹是某
+                        // 个在装分身自己的备份，byUUID 已认领；再进
+                        // byNameBid 会让同名同包、自己没备份的兄弟分身
+                        // 回落命中它、误显示“已备份”（与 backupFolderName
+                        // 规则 1b 同口径：多开兄弟的 dataUUID 还在装，
+                        // 绝不动，各备各的）。dataUUID 为空的老备份照旧
+                        // 进表（规则 2 同款）；dataUUID 已不在装的孤儿
+                        // 文件夹也照旧进表（规则 1b 认领）。
+                        if !info.displayName.isEmpty && !info.bundleID.isEmpty,
+                           (info.dataUUID.isEmpty || !installedUUIDs.contains(info.dataUUID)) {
                             byNameBid["\(info.displayName)|\(info.bundleID)"] = info.backupDate
                         }
                     }
@@ -775,6 +798,20 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.662（F1）：仅快过期开关——与“仅无备份”开关并列；
+        // 显隐口径同款（topToolsExpanded, multiLCStatus != 2），
+        // 不需 #available；图标与“仅无备份”同款静态（不做
+        // fill/plain 两态）。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+                Button {
+                    czfExpiringOnly.toggle()
+                } label: {
+                    Label("仅快过期", systemImage: "clock.badge.exclamationmark")
+                }
+            }
+        }
+
         // 3.8.643（F1）：一键关闭坞内全部窗口——“仅运行中”开关旁；
         // 无坞内运行窗口时隐藏。文案收窄为“关闭坞内全部窗口”：
         // closeAllWindows 只遍历 dockManager.apps，原生窗口模式
@@ -1097,6 +1134,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
+            // 3.8.662（F1）：仅快过期——“仅无备份”行之后同款行。
+            Button {
+                czfExpiringOnly.toggle()
+            } label: {
+                HStack {
+                    Label("仅快过期", systemImage: "clock.badge.exclamationmark")
+                    Spacer()
+                    if czfExpiringOnly {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
             Button {
                 batchMode.toggle()
                 if !batchMode { batchSelectedIDs.removeAll() }
@@ -1379,7 +1433,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.651（UI 打磨）：列表空态文案——任一筛选开着且筛空时，
     // 别显示“去安装 App”的安装提示（App 都在，只是被筛掉了）。
     private var czfEmptyListTip: String {
-        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly {
+        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly {
             return "筛选条件下没有 App"
         }
         if sharedModel.multiLCStatus == 2 {
@@ -1415,6 +1469,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             apps = apps.filter { app in
                 guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
                 return backupStatusByID[id] == "无备份"
+            }
+        }
+        // 3.8.662（F1）：仅快过期——只留签名 7 天内到期（含已过期）
+        // 的 App；判据复用 CZFAppExpiryCache（与按到期日排序同一份
+        // 表，网格红字同款“<= 7”口径）；读不到 mobileprovision 的
+        // 不进表、这里直接筛掉（与 byExpiry“未知沉底”同口径）。
+        if czfExpiringOnly {
+            apps = apps.filter { app in
+                guard let daysLeft = CZFAppExpiryCache.shared.daysLeft(for: app) else { return false }
+                return daysLeft <= 7
             }
         }
         if searchContext.debouncedQuery.isEmpty {
@@ -1517,6 +1581,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return backupStatusByID[id] == "无备份"
             }
         }
+        // 3.8.662（F1）：隐藏区同加快过期条件——与可见区同一表、同一开关。
+        if czfExpiringOnly {
+            apps = apps.filter { app in
+                guard let daysLeft = CZFAppExpiryCache.shared.daysLeft(for: app) else { return false }
+                return daysLeft <= 7
+            }
+        }
         if searchContext.debouncedQuery.isEmpty || !sharedModel.isHiddenAppUnlocked {
             return apps
         } else {
@@ -1579,11 +1650,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 backupStatusCaption(for: app)
             }
-        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly {
+        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly && !czfExpiringOnly {
             // 优2：无搜索时行可长按拖动重排（搜索时显示是
             // 子集，拖了会丢位置，所以不挂拖拽）。
             // 3.8.653（B3）：筛选时显示同样是子集（仅运行中 /
-            // 仅可更新 / 仅无备份），同款不挂拖拽——否则被筛掉
+            // 仅可更新 / 仅无备份 / 仅快过期），同款不挂拖拽——否则被筛掉
             // 的 App 在提交时按名字沉到自定义顺序尾巴。
             VStack(alignment: .leading, spacing: 2) {
                 LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
@@ -1618,7 +1689,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.653（B3）：筛选时同样不启用——显示同样是子集，同款理由。
     private func commitDragReorder(draggedID: String, targetApp: LCAppModel) {
         defer { dragReorderID = nil }
-        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly else { return }
+        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly, !czfExpiringOnly else { return }
         let manager = sharedAppSortManager
         guard filteredApps.contains(where: { manager.getUniqueIdentifier(for: $0) == draggedID }) else { return }
         var visibleIDs = filteredApps.compactMap { manager.getUniqueIdentifier(for: $0) }
@@ -2357,7 +2428,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 isSearching: !searchContext.debouncedQuery.isEmpty,
                 // 3.8.653（B3）：筛选态也传进去——筛选时显示同样是子集，
                 // 网格拖拽与搜索同款禁用（CZFAppGridView.czfFiltering）。
-                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly,
+                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly,
                 expiryDays: czfExpiryDays,
                 actions: CZFAppGridActions(
                     isBatchSelected: { app in self.isBatchSelected(app) },
@@ -2582,6 +2653,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .onChange(of: czfNoBackupOnly) { _ in
             czfRefreshFilteredApps()
         }
+        // 3.8.662（F1）：开关翻动即重跑过滤（与仅无备份同款）。
+        .onChange(of: czfExpiringOnly) { _ in
+            czfRefreshFilteredApps()
+        }
         // 3.8.658（B1）：可更新名单变了即重跑过滤——源页刷新完成
         // 写新名单时 App 页已在前台、onAppear 不再触发，sortedApps/
         // 搜索/开关又都没变，过滤缓存此前永远不重算，新出现可更
@@ -2589,6 +2664,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 时重算；关着时名单不影响列表，不必跑。
         .onChange(of: czfUpdatableBundleIDs) { _ in
             if czfUpdatableOnly {
+                czfRefreshFilteredApps()
+            }
+        }
+        // 3.8.662（F1）：到期天数晚到时重跑过滤——
+        // czfRefreshSignatureExpiry 后台读完才写回 czfExpiryDays，
+        // 进页瞬间开着筛选时表还是空的，过滤只按空表跑过一次
+        //（3.8.658 B1 的 czfUpdatableBundleIDs 同款）。只在开关
+        // 开着时重算；关着时天数不影响列表，不必跑。
+        .onChange(of: czfExpiryDays) { _ in
+            if czfExpiringOnly {
                 czfRefreshFilteredApps()
             }
         }

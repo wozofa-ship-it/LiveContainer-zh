@@ -1667,6 +1667,13 @@ struct LCSourcesView: View {
         guard !query.isEmpty else {
             return source.apps
         }
+        // 3.8.662（F3）：搜源名即列出该源全部 App——displayName
+        // 含源名（未加载时回落 URL host）；此前只比 App 的六路
+        // 字段，搜源名时所有组都被 czfVisibleListEntries 丢掉、
+        // 结果是空页。网格路共用同一函数，一处改两路受益。
+        if item.displayName.localizedCaseInsensitiveContains(query) {
+            return source.apps
+        }
         // 3.8.603（O-18）：query.lowercased() 提到 filter 外——
         // 原来每 App 算一次，搜索时每遍过滤都重复算。
         let lower = query.lowercased()

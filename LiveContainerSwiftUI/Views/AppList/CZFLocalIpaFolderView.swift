@@ -330,6 +330,23 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         }
     }
 
+    // 3.8.662（B3）：搜索时补推全部未读详情——搜索只比已解出的
+    // version，没滚到的行 version 恒为 nil、搜版本号搜不到；
+    // 把全部未读详情的 id 一次推进 wantedDetailIDs，复用现有
+    // 3 个一组后台管道 + 磁盘缓存（多数是缓存命中，不全量解包）。
+    // 搜索框 onChange 节流后调；detailsCancelled 守卫与
+    // loadDetailIfNeeded 同款。
+    func czfRequestAllDetails() {
+        guard !detailsCancelled else { return }
+        for item in items where !item.detailLoaded {
+            guard !wantedDetailIDs.contains(item.id) else { continue }
+            wantedDetailIDs.insert(item.id)
+        }
+        if detailTask == nil, !wantedDetailIDs.isEmpty {
+            detailTask = Task { await processWantedDetails() }
+        }
+    }
+
     // 详情解包限流 3 个并发（安装审计 #5 / App #15）：
     // 抄 LCAltStoreSourcesView.refreshAllSources 的分块任务组
     // 写法，每 3 个一组并行解包，组间顺序等；100 个 IPA
@@ -621,6 +638,12 @@ struct CZFInlineIpaFolderSection: View {
     // 3.8.658（B2）：“清除文件夹”确认框开关——此前一点即清，
     // 与“换文件夹”并排、误触即丢绑定（重选可恢复，不是丢文件）。
     @State private var czfShowClearFolderConfirm = false
+    // 3.8.662（F2）：文件夹多选批量——状态放标题行（开关在标题行，
+    // 底栏在格子里）；选中集存 CZFLocalIpaItem.id（UUID），与 App 页
+    // batchSelectedIDs 同款不持久化；文件夹重扫会重建 id，旧选中
+    // 自然失效，格子按实际匹配到的项计数、不认 stale id。
+    @State private var czfBatchMode = false
+    @State private var czfSelectedIDs: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -660,12 +683,19 @@ struct CZFInlineIpaFolderSection: View {
                     }
                     Button("换文件夹", action: onPickFolder)
                         .font(.footnote)
+                    // 3.8.662（F2）：多选开关——点开后格子点按改为
+                    // 勾选（App 页菜单“多选”同款语义）；关掉即清选中。
+                    Button(czfBatchMode ? "完成" : "多选") {
+                        czfBatchMode.toggle()
+                        if !czfBatchMode { czfSelectedIDs.removeAll() }
+                    }
+                    .font(.footnote)
                 }
             }
             if let url = folderURL {
                 // 文件夹换了就重建模型重扫（StateObject 的
                 // folderURL 是 let，不重建就还是旧文件夹）。
-                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall)
+                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs)
                     .id(url)
             } else {
                 Button(action: onPickFolder) {
@@ -692,14 +722,20 @@ struct CZFInlineIpaFolderGrid: View {
     let folderURL: URL
     var onPickFolder: () -> Void
     var onInstall: (URL) -> Void
+    // 3.8.662（F2）：批量态与选中集由标题行持有（开关在标题行），
+    // 本格子只读/改；选中集是 Set<UUID>（CZFLocalIpaItem.id）。
+    @Binding var czfBatchMode: Bool
+    @Binding var czfSelectedIDs: Set<UUID>
 
     @StateObject private var model: CZFLocalIpaFolderModel
 
-    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void) {
+    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>) {
         self.folderURL = folderURL
         self.onPickFolder = onPickFolder
         self.onInstall = onInstall
         _model = StateObject(wrappedValue: CZFLocalIpaFolderModel(folderURL: folderURL))
+        _czfBatchMode = batchMode
+        _czfSelectedIDs = selectedIDs
     }
 
     // 3.8.442：列数跟上面已装 App 网格一致——原来写死 4 列，
@@ -722,6 +758,15 @@ struct CZFInlineIpaFolderGrid: View {
     // 分享表（ActivityViewController），删除先弹确认框。
     @State private var czfShareURL: URL?
     @State private var czfDeleteItem: CZFLocalIpaItem?
+    // 3.8.662（F2）：批量分享的 URL 组（空 = 未分享）与批量删除
+    // 确认框开关——与单项 czfShareURL / czfDeleteItem 分开记，
+    // sheet 与 alert 各自只用一套绑定（同一视图挂两个 .sheet /
+    // .alert 时只有一个会弹，见下面合并后的绑定）。
+    @State private var czfBatchShareURLs: [URL] = []
+    @State private var czfShowBatchDeleteConfirm = false
+    // 3.8.662（B3）：搜索节流任务——输入停 0.3 秒后才补推全部
+    // 未读详情；每敲一字取消上一个，不给每个前缀都全量推队。
+    @State private var czfSearchDetailTask: Task<Void, Never>?
 
     // 3.8.653（F1）：文件夹搜索字——不持久化（App 页 searchContext.query 同款）；
     // 只在格子内用，不挂 .searchable（源页 body 已有一个绑源 App 搜索的，
@@ -760,6 +805,35 @@ struct CZFInlineIpaFolderGrid: View {
 
     private var czfInstalledLookup: CZFInstalledLookup {
         CZFInstalledLookup(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps, pluginPaths: [])
+    }
+
+    // 3.8.662（F2）：实际选中的项——按 id 在当前列表里匹配；
+    // 重扫会重建 id，stale id 不进这里，底栏计数/禁用/分享/
+    // 删除都认它，不认原始 Set 的 count。
+    private var czfSelectedItems: [CZFLocalIpaItem] {
+        let ids = czfSelectedIDs
+        return model.items.filter { ids.contains($0.id) }
+    }
+
+    private func czfToggleSelection(_ item: CZFLocalIpaItem) {
+        if czfSelectedIDs.contains(item.id) {
+            czfSelectedIDs.remove(item.id)
+        } else {
+            czfSelectedIDs.insert(item.id)
+        }
+    }
+
+    // 3.8.662（F2）：批量删除——循环删文件后一次 model.scan()；
+    // URL 集变了，O-5 短路不命中，走全扫（单项删除同款）。
+    // 删完清选中、退出批量态。
+    private func czfDeleteBatchSelected() {
+        for url in czfSelectedItems.map(\.url) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        czfShowBatchDeleteConfirm = false
+        czfSelectedIDs.removeAll()
+        czfBatchMode = false
+        model.scan()
     }
 
     var body: some View {
@@ -823,21 +897,82 @@ struct CZFInlineIpaFolderGrid: View {
                                     onShare: { czfShareURL = item.url },
                                     onDelete: { czfDeleteItem = item },
                                     onCopyFileName: { UIPasteboard.general.string = item.fileName },
-                                    onTap: { onInstall(item.url) }
+                                    // 3.8.662（F2）：批量态——点格子改为勾选
+                                    //（App 页 batchMode 行首勾选圈同款语义），
+                                    // 平时点格子仍是安装；参数顺序与 cell 声明
+                                    // 一致（onTap 必须留在最后）。
+                                    czfBatchMode: czfBatchMode,
+                                    czfIsSelected: czfSelectedIDs.contains(item.id),
+                                    onTap: {
+                                        if czfBatchMode {
+                                            czfToggleSelection(item)
+                                        } else {
+                                            onInstall(item.url)
+                                        }
+                                    }
                                 )
                                 .onAppear { model.loadDetailIfNeeded(for: item) }
                             }
                         }
                     }
+                    // 3.8.662（F2）：批量底栏——分享 / 删除（计数是
+                    // 实际匹配到的选中项，未选时禁用）+ 取消（退出
+                    // 批量态并清选中）；只在批量态显示，搜索筛空时
+                    // 也在（选中项可能在筛掉的那部分里）。
+                    if czfBatchMode {
+                        HStack(spacing: 12) {
+                            Button("分享 (\(czfSelectedItems.count))") {
+                                czfBatchShareURLs = czfSelectedItems.map(\.url)
+                            }
+                            .disabled(czfSelectedItems.isEmpty)
+                            Button("删除 (\(czfSelectedItems.count))", role: .destructive) {
+                                czfShowBatchDeleteConfirm = true
+                            }
+                            .disabled(czfSelectedItems.isEmpty)
+                            Spacer()
+                            Button("取消") {
+                                czfBatchMode = false
+                                czfSelectedIDs.removeAll()
+                            }
+                        }
+                        .font(.footnote)
+                        .padding(.top, 4)
+                    }
                 }
             }
         }
         .onAppear { model.scan() }
-        .onDisappear { model.cancelDetailTasks() }
+        .onDisappear {
+            model.cancelDetailTasks()
+            // 3.8.662（B3）：节流任务也取消——睡醒后调
+            // czfRequestAllDetails 时 detailsCancelled 已是真、
+            // 方法内守卫会拦，但不留无用任务。
+            czfSearchDetailTask?.cancel()
+        }
+        // 3.8.662（B3）：搜版本号时补推全部未读详情——搜索只比
+        // 已解出的 version，没滚到的行 version 恒为 nil；输入停
+        // 0.3 秒后调模型新方法，把全部未读详情一次推进队里
+        //（复用 3 个一组后台管道 + 磁盘缓存，多数是缓存命中）。
+        // 搜索框清空时不推（无查询不必解详情）。
+        .onChange(of: czfSearchText) { _ in
+            czfSearchDetailTask?.cancel()
+            guard !czfSearchText.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            czfSearchDetailTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                model.czfRequestAllDetails()
+            }
+        }
         // 3.8.649（F1）：分享走系统分享表——分享的 URL 在内容闭包
         // 里当场抓住（CZFAppGridView:745 同款），不走 onDismiss 删文件。
-        .sheet(isPresented: Binding(get: { czfShareURL != nil }, set: { if !$0 { czfShareURL = nil } })) {
-            if let url = czfShareURL {
+        // 3.8.662（F2）：批量分享共用这一个 sheet——同一视图挂两个
+        // .sheet 时只有一个会弹；批量优先（单项分享时批量组是空的）。
+        .sheet(isPresented: Binding(get: { czfShareURL != nil || !czfBatchShareURLs.isEmpty }, set: { if !$0 { czfShareURL = nil; czfBatchShareURLs.removeAll() } })) {
+            if !czfBatchShareURLs.isEmpty {
+                ActivityViewController(activityItems: czfBatchShareURLs as [Any]) { _, _, _, _ in
+                    czfBatchShareURLs.removeAll()
+                }
+            } else if let url = czfShareURL {
                 ActivityViewController(activityItems: [url]) { _, _, _, _ in
                     czfShareURL = nil
                 }
@@ -846,17 +981,31 @@ struct CZFInlineIpaFolderGrid: View {
         // 3.8.649（F1）：删除是用户自选文件夹里的真实文件，必须带
         // 确认框；确认后删文件再重扫——删完地址集变了，O-5 短路
         // 不命中，走全扫，列表即时去掉已删的行。
-        .alert("删除 IPA", isPresented: Binding(get: { czfDeleteItem != nil }, set: { if !$0 { czfDeleteItem = nil } })) {
-            Button("删除", role: .destructive) {
-                if let item = czfDeleteItem {
-                    try? FileManager.default.removeItem(at: item.url)
-                    czfDeleteItem = nil
-                    model.scan()
+        // 3.8.662（F2）：批量删除共用这一个 alert——同一视图挂两个
+        // .alert 时只有一个会弹；标题保持“删除 IPA”，批量时 message
+        // 里写个数（标题用插值要 LocalizedStringKey 拼串，免生事）。
+        .alert("删除 IPA", isPresented: Binding(get: { czfDeleteItem != nil || czfShowBatchDeleteConfirm }, set: { if !$0 { czfDeleteItem = nil; czfShowBatchDeleteConfirm = false } })) {
+            if czfShowBatchDeleteConfirm {
+                Button("删除", role: .destructive) {
+                    czfDeleteBatchSelected()
                 }
+                Button("取消", role: .cancel) { czfShowBatchDeleteConfirm = false }
+            } else {
+                Button("删除", role: .destructive) {
+                    if let item = czfDeleteItem {
+                        try? FileManager.default.removeItem(at: item.url)
+                        czfDeleteItem = nil
+                        model.scan()
+                    }
+                }
+                Button("取消", role: .cancel) { czfDeleteItem = nil }
             }
-            Button("取消", role: .cancel) { czfDeleteItem = nil }
         } message: {
-            Text("将删除“\(czfDeleteItem?.fileName ?? "")”，文件会从文件夹中移除，此操作无法撤销。")
+            if czfShowBatchDeleteConfirm {
+                Text("将删除选中的 \(czfSelectedItems.count) 个 IPA，文件会从文件夹中移除，此操作无法撤销。")
+            } else {
+                Text("将删除“\(czfDeleteItem?.fileName ?? "")”，文件会从文件夹中移除，此操作无法撤销。")
+            }
         }
     }
 }
@@ -876,6 +1025,12 @@ struct CZFLocalIpaGridCell: View {
     var onShare: () -> Void = {}
     var onDelete: () -> Void = {}
     var onCopyFileName: () -> Void = {}
+    // 3.8.662（F2）：批量态——点格子改为勾选（父级 onTap 分支），
+    // 格子左上角挂勾选圈（App 页 batchMode 行首勾选圈同款写法，
+    // LCAppListView.swift:1560 起）；声明顺序注意：新项放
+    // onTap 前面，onTap 必须留在最后（trailing closure 绑定）。
+    var czfBatchMode = false
+    var czfIsSelected = false
     var onTap: () -> Void
 
     // 3.8.444：已安装标记（用户 13:51 令“不知道哪个安装了
@@ -961,6 +1116,17 @@ struct CZFLocalIpaGridCell: View {
                         .foregroundColor(.green)
                         .background(Color(.systemBackground).opacity(0.85), in: Circle())
                         .offset(x: 6, y: -6)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                // 3.8.662（F2）：批量态勾选圈——左上角，与右上角
+                // 的有新版/已装角标不叠；未选中是空圈、选中是实心。
+                if czfBatchMode {
+                    Image(systemName: czfIsSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundColor(czfIsSelected ? .accentColor : .secondary)
+                        .background(Color(.systemBackground).opacity(0.85), in: Circle())
+                        .offset(x: -6, y: -6)
                 }
             }
             Text(item.displayName)
