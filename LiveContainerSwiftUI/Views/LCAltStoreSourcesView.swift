@@ -2751,8 +2751,11 @@ private struct ManageSourcesSheet: View {
     // 删除只清 ViewModel 侧，选中集变幽灵、顶栏“安装”仍亮、点下去
     // 静默空跑）。父级在回调里按 czfSourceSelectionKey 前缀清掉
     // 该源的选中键；不传时按无回调处理，旧调用点不用改。
-    // 带默认值，memberwise init 调用点可省。
-    let onRemove: ((AltStoreSourcesViewModel.SourceItem) -> Void)? = nil
+    // 3.8.688 修法4：默认值放 init 参数上、属性本身不带默认值——
+    // let 属性带了 = nil 就是已初始化，init 里再赋一次报
+    // immutable value may only be initialized once（3.8.673
+    // dylibInstallingIDs 同款写法：属性无默认值，init 参数带 = []）。
+    let onRemove: ((AltStoreSourcesViewModel.SourceItem) -> Void)?
 
     // 3.8.688 修法（构建 run 45876896062 唯一红字原文：
     // LCAltStoreSourcesView.swift:1553:27: error: extra argument
