@@ -497,6 +497,17 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             LCAppSortManager.shared.czfResortAfterPinChange()
         })
 
+        // 3.8.700（F1）：固定到面板/取消固定——与“置顶”不同：置顶是
+        // 列表内排前（CZFListPinnedStore），固定是进坞固定区
+        //（CZFPinnedAppsStore，坞面板行菜单/源页菜单同款）；文案
+        // 按固定态翻，协调员定“固定到面板”。标题硬编码中文，同先例。
+        sectionChildren.append(UIAction(
+            title: CZFPinnedAppsStore.shared.isPinned(model) ? "取消固定" : "固定到面板",
+            image: UIImage(systemName: CZFPinnedAppsStore.shared.isPinned(model) ? "pin.slash" : "pin")
+        ) { _ in
+            CZFPinnedAppsStore.shared.toggle(model)
+        })
+
         // 3.8.431 设置低 #10：网格菜单有隐藏/锁定，列表菜单没有，
         // 两边补齐（调的都是 LCAppModel 已有方法，与网格同款）。
         sectionChildren.append(UIAction(

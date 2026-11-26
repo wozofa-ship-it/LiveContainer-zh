@@ -304,7 +304,12 @@ struct CZFSourceGridGroupHeaderView: View {
                     selectedIDs: selectedIDs,
                     onBatchInstall: onBatchInstall,
                     onToggleSelect: onToggleSelect,
-                    dylibInstallingIDs: dylibInstallingIDs
+                    dylibInstallingIDs: dylibInstallingIDs,
+                    // 3.8.700（F3）：详情页头菜单也要“更新本源全部
+                    // App”——27 轮 F1 只进了组头菜单，组头推入的详情
+                    // 页没往下传；两参原样转发。
+                    updateSourceApps: updateSourceApps,
+                    onUpdateSourceApps: onUpdateSourceApps
                 )
             } label: {
                 HStack(spacing: 10) {
@@ -552,6 +557,12 @@ struct CZFSourceAppGridCell: View {
     // ignoreRefresh 同款（LCAltStoreSourcesView :3461）。
     @State private var ignoreRefresh = false
 
+    // 3.8.700（B2）：长按菜单“打开”的多实例选择器 + 启动失败提示——
+    // 照抄详情页骨架（LCAltStoreSourcesView :4139 起，25 轮 F2 同款
+    // 口径）：行私有 state 够不着，只能照抄，不是复用。
+    @State private var czfShowInstancePicker = false
+    @State private var czfLaunchError: String?
+
     // 已安装标记（用户 12:03 令）：源里已装的 App，图标右上角打
     // 绿勾，免得重复装。App 部分判据与 LCSourceAppBanner.isInstalled
     // 同款：已装 + 隐藏 App 里按 bundleIdentifier 匹配；插件
@@ -605,6 +616,71 @@ struct CZFSourceAppGridCell: View {
         return czfIsNewerVersion(sourceVersion, build: latest.buildVersion, newerThan: installed.appInfo.version(), installedBuild: installed.appInfo.buildVersion())
     }
 
+    // 3.8.700（B2）：长按菜单“打开”判据——与详情页 czfDetailShowOpen
+    // 同款（非 dylib、已装、无更新）；hasUpdate 已含忽略口径。
+    private var czfGridIsDylib: Bool {
+        app.latestVersion?.downloadURL.pathExtension.lowercased() == "dylib"
+    }
+    private var czfGridShowOpen: Bool {
+        !czfGridIsDylib && isInstalled && !hasUpdate
+    }
+
+    // 3.8.700（B2）：格子内“打开”——照抄详情页 czfOpenInstalled
+    // 骨架（LCAltStoreSourcesView :4139 起）：单实例先过锁守卫再
+    // runApp，失败写本格 czfLaunchError 弹；多实例弹本格实例选择器
+    //（挂在格子自己身上，见 body 末尾；列表行两 sheet 同链先例）。
+    private func czfOpenInstalled() {
+        let matches = installedLookup.installedModels(bundleIdentifier: app.bundleIdentifier)
+        if matches.count == 1, let only = matches.first {
+            Task {
+                guard await only.czfAuthenticateIfLocked() else { return }
+                do {
+                    try await only.runApp()
+                } catch {
+                    await MainActor.run { czfLaunchError = error.localizedDescription }
+                }
+            }
+        } else if matches.count > 1 {
+            czfShowInstancePicker = true
+        }
+    }
+
+    // 3.8.700（B2）：实例选择器单抽一个 builder——body 已大，sheet
+    // 内容不直接塞进 body 表达式（3.8.688 体检查超时教训）。内容
+    // 照抄详情页那份（LCAltStoreSourcesView :4161 起）。
+    @ViewBuilder
+    private var czfInstancePickerSheet: some View {
+        NavigationView {
+            List(installedLookup.installedModels(bundleIdentifier: app.bundleIdentifier), id: \.self) { model in
+                Button {
+                    czfShowInstancePicker = false
+                    Task {
+                        guard await model.czfAuthenticateIfLocked() else { return }
+                        do {
+                            try await model.runApp()
+                        } catch {
+                            await MainActor.run { czfLaunchError = error.localizedDescription }
+                        }
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.appInfo.displayName())
+                            .font(.system(size: 15)).bold()
+                        Text("容器 \(model.uiSelectedContainer?.name ?? model.uiSelectedContainer?.folderName ?? "") • 版本 \(model.appInfo.version())")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("选择要打开的实例")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { czfShowInstancePicker = false }
+                }
+            }
+        }
+    }
+
     // 设置 #37：App 名晕影按 colorScheme 换色——浅色白晕影、
     // 深色黑晕影；原来写死白晕影，深色模式下白字 + 白晕影
     // 配浅色背景看不清。
@@ -654,8 +730,17 @@ struct CZFSourceAppGridCell: View {
                         Label("取消忽略更新", systemImage: "bell")
                     }
                 }
-                Button("lc.common.install".loc, systemImage: "square.and.arrow.down") {
-                    onInstall(app)
+                // 3.8.700（B2）：已装最新版时“安装”变“打开”——与详情页
+                // 顶部按钮、列表行绿色“打开”同款判据（czfGridShowOpen）；
+                // 有更新/未装/dylib 时仍是“安装”，老行为。
+                if czfGridShowOpen {
+                    Button("lc.common.open".loc, systemImage: "play.fill") {
+                        czfOpenInstalled()
+                    }
+                } else {
+                    Button("lc.common.install".loc, systemImage: "square.and.arrow.down") {
+                        onInstall(app)
+                    }
                 }
                 Button("新建", systemImage: "plus.square.on.square") {
                     onInstallAsNew(app)
@@ -762,13 +847,24 @@ struct CZFSourceAppGridCell: View {
                     // 低 #55：勾选圈向外偏移，别压在图标一角。
                     .offset(x: 6, y: -6)
             } else if hasUpdate {
-                // 有更新角标（用户 17:49 令）：红色下箭头圆标，
-                // 与绿勾同位置同偏移；有更新就说明已装，代替绿勾。
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.title3)
-                    .foregroundColor(.red)
-                    .background(Color(.systemBackground).opacity(0.85), in: Circle())
-                    .offset(x: 6, y: -6)
+                // 3.8.700（F2）：有更新角标可点——一点即更新（列表行橙色
+                // “更新”按钮同款动作，onInstall 双路都处理）；图标不变。
+                // 点按钮不开详情：按钮嵌在带 onTapGesture 的格子里，
+                // 点按钮只走按钮（列表行同款先例）。padding 把可点框
+                // 撑到 44pt，offset 反向补 12pt 回来，图标视觉位置
+                // 与原来一致（44 框居中会把图标往里推 12pt）。
+                Button {
+                    onInstall(app)
+                } label: {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.title3)
+                        .foregroundColor(.red)
+                        .background(Color(.systemBackground).opacity(0.85), in: Circle())
+                        .padding(12)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .offset(x: 18, y: -18)
             } else if isInstalled {
                 // 已安装标记（用户 12:03 令）：绿勾打在图标右上角，
                 // 与批量勾选圈同位置同偏移；批量模式下勾选圈优先，
@@ -783,6 +879,17 @@ struct CZFSourceAppGridCell: View {
         .contextMenu { czfGridContextMenu }
         .sheet(isPresented: $showDetail) {
             LCSourceAppDetailView(app: app, source: source, onDownloadVersion: onDownloadVersion, onInstall: onInstall, onInstallAsNew: onInstallAsNew, installedLookup: installedLookup)
+        }
+        // 3.8.700（B2）：实例选择器 + 启动失败本地弹——挂在本格上
+        //（列表行两 sheet 同链先例：showDetail 后再挂一个 sheet，
+        // 两单不同时开；launchError 挂本格，父级够不着也不经过它）。
+        .sheet(isPresented: $czfShowInstancePicker) {
+            czfInstancePickerSheet
+        }
+        .alert("lc.common.error".loc, isPresented: Binding(get: { czfLaunchError != nil }, set: { if !$0 { czfLaunchError = nil } })) {
+            Button("lc.common.ok".loc, role: .cancel) { czfLaunchError = nil }
+        } message: {
+            Text(czfLaunchError ?? "")
         }
     }
 }
@@ -811,12 +918,17 @@ struct CZFSourceDetailView: View {
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     // 3.8.672（B-1）：插件在途安装键集——往复用的列表行传。
     let dylibInstallingIDs: Set<String>
+    // 3.8.700（F3）：本源可更新子集 + 批量安装回调——组头 NavigationLink
+    // 转发进来，只往详情头菜单用；空即无菜单项。默认值走 init 参数
+    //（3.8.673 同款显式 init 写法），旧调用点不用改。
+    let updateSourceApps: [AltStoreSourceApp]
+    let onUpdateSourceApps: ([AltStoreSourceApp]) -> Void
 
     // 3.8.673 修法（红字 4）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报
     // extra argument，显式声明兜底；参数顺序与声明一致，
     // dylibInstallingIDs 仍带默认值，旧调用点可省。
-    init(item: AltStoreSourcesViewModel.SourceItem, viewModel: AltStoreSourcesViewModel, filteredApps: [AltStoreSourceApp], isFiltering: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onBatchInstall: @escaping () -> Void, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = []) {
+    init(item: AltStoreSourcesViewModel.SourceItem, viewModel: AltStoreSourcesViewModel, filteredApps: [AltStoreSourceApp], isFiltering: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onBatchInstall: @escaping () -> Void, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = [], updateSourceApps: [AltStoreSourceApp] = [], onUpdateSourceApps: @escaping ([AltStoreSourceApp]) -> Void = { _ in }) {
         self.item = item
         self.viewModel = viewModel
         self.filteredApps = filteredApps
@@ -832,6 +944,8 @@ struct CZFSourceDetailView: View {
         self.onBatchInstall = onBatchInstall
         self.onToggleSelect = onToggleSelect
         self.dylibInstallingIDs = dylibInstallingIDs
+        self.updateSourceApps = updateSourceApps
+        self.onUpdateSourceApps = onUpdateSourceApps
     }
 
     // S-13：toolbar 按钮装的是全部已勾（onBatchInstall 是主页面板
@@ -877,6 +991,14 @@ struct CZFSourceDetailView: View {
                     }
                     Button("复制源链接", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = item.url.absoluteString
+                    }
+                    // 3.8.700（F3）：更新本源全部 App——与组头菜单同款
+                    //（本源可更新子集，无子集不出现，暂停源子集天然
+                    // 为 0）；批量态下不给（删源同款口径）。
+                    if !isBatchMode, !updateSourceApps.isEmpty {
+                        Button("更新本源全部 App（\(updateSourceApps.count)）", systemImage: "arrow.down.circle") {
+                            onUpdateSourceApps(updateSourceApps)
+                        }
                     }
                     // 3.8.686（B1）：批量态下不给“删除源”——与组头同款：
                     // 详情页删源同样不碰视图层 selectedIDs，删完选中集

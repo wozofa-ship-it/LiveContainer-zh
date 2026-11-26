@@ -1297,7 +1297,13 @@ struct LCSourcesView: View {
                         // 列表/网格两路共用本 VStack，一处加两路受益。
                         // 3.8.696（F2）：.ipa/.tipa 链接不再出“添加为源”行——
                         // 它不是源 JSON，点下去 addSource 必失败弹错。
-                        if isFiltering, totalFilteredAppCount == 0, let czfAddURL = czfSearchSourceURL, !["ipa", "tipa"].contains(czfAddURL.pathExtension.lowercased()) {
+                        // 3.8.700（B3）：已加的源不再出“添加为源”行——原来
+                        // 只看搜索无匹配、不查该源是否已加，搜已加源的完整
+                        // URL 时行照常出现、点后才报 duplicate。viewModel
+                        // 的 normalizeSourceURL 是 private，视图侧只能做
+                        // 原样 URL 比对，覆盖粘贴原链接的主路；带尾斜杠等
+                        // 变体仍走现有 duplicate 友好报错兜底。
+                        if isFiltering, totalFilteredAppCount == 0, let czfAddURL = czfSearchSourceURL, !["ipa", "tipa"].contains(czfAddURL.pathExtension.lowercased()), !viewModel.sources.contains(where: { $0.url == czfAddURL }) {
                             Button {
                                 Task {
                                     if let error = await handleAddSource(czfAddURL.absoluteString) {

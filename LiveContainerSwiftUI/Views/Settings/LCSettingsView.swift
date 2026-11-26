@@ -449,7 +449,7 @@ struct LCSettingsView: View {
             && !czfSettingsSectionMatches("下载 仅Wi-Fi下载 自动安装 Wi-Fi")
             && !czfSettingsSectionMatches("杂项设置 多任务 更多设置 快捷图标 边框 静默切换App 打开链接 严格隐藏模式 不签名新App")
             && !czfSettingsSectionMatches("通知 清除通知 通知权限 证书到期提醒 首档提前提醒")
-            && !czfSettingsSectionMatches("存储管理 数据管理 存储 数据")
+            && !czfSettingsSectionMatches("存储管理 数据管理 存储 数据 备份 恢复 定时备份 选择备份")
             && !czfSettingsSectionMatches("后台保活 保活 白名单")
             && !czfSettingsSectionMatches("关于 检查更新 更新 SideInstaller Seal 复制安装链接")
             && !czfSettingsSectionMatches("开发者模式 注入 JIT 调试器 证书 导出")
@@ -467,7 +467,7 @@ struct LCSettingsView: View {
         if czfSettingsSectionMatches("下载 仅Wi-Fi下载 自动安装 Wi-Fi") { downloadSection }
         if czfSettingsSectionMatches("杂项设置 多任务 更多设置 快捷图标 边框 静默切换App 打开链接 严格隐藏模式 不签名新App") { miscSection }
         if czfSettingsSectionMatches("通知 清除通知 通知权限 证书到期提醒 首档提前提醒") { notificationSection }
-        if czfSettingsSectionMatches("存储管理 数据管理 存储 数据") { storageSection }
+        if czfSettingsSectionMatches("存储管理 数据管理 存储 数据 备份 恢复 定时备份 选择备份") { storageSection }
         if czfSettingsSectionMatches("后台保活 保活 白名单") { keepAliveSection }
         if czfSettingsSectionMatches("关于 检查更新 更新 SideInstaller Seal 复制安装链接") { aboutSection }
         if czfSettingsSectionMatches("开发者模式 注入 JIT 调试器 证书 导出") { developerSection }

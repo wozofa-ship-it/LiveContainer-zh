@@ -863,6 +863,13 @@ struct CZFAppGridCell: View {
             CZFListPinnedStore.shared.toggle(app)
             LCAppSortManager.shared.czfResortAfterPinChange()
         }
+        // 3.8.700（F1）：固定到面板/取消固定——与“置顶”不同：置顶是
+        // 列表内排前，固定是进坞固定区（CZFPinnedAppsStore，坞面板行
+        // 菜单/源页菜单同款）；文案按固定态翻，协调员定“固定到面板”。
+        // 标题硬编码中文，沿用本菜单“复制 Bundle ID”硬编码先例。
+        Button(CZFPinnedAppsStore.shared.isPinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isPinned(app) ? "pin.slash" : "pin") {
+            CZFPinnedAppsStore.shared.toggle(app)
+        }
         // 单 App VPN（banner 同款文案与开关语义）。
         Button(
             CZFVPNManager.isEnabled(for: app.appInfo) ? "关闭 VPN 打开" : "用 VPN 打开",
