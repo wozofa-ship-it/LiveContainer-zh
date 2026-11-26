@@ -894,9 +894,17 @@ struct CZFUpdatableAppsSheet: View {
         // 顺序定，显示较新的分身会把旧分身的更新藏起来。
         let matches = (sharedModel.apps + sharedModel.hiddenApps)
             .filter { czfSameBundleID($0.appInfo.bundleIdentifier() ?? "", app.bundleIdentifier) }
-        return matches.min(by: { a, b in
+        // 3.8.690（B1）：只升 build 的更新在清单里显示成“2.0 → 2.0”——
+        // 已装一侧原来只取 version()，build 丢了；与新版一侧同款拼
+        // “版本 (build)”（无 build 时回落纯版本号，与原来一字相同）。
+        guard let oldest = matches.min(by: { a, b in
             czfIsNewerVersion(b.appInfo.version() ?? "", build: b.appInfo.buildVersion(), newerThan: a.appInfo.version() ?? "", installedBuild: a.appInfo.buildVersion())
-        })?.appInfo.version() ?? ""
+        }) else { return "" }
+        let version = oldest.appInfo.version() ?? ""
+        if let build = oldest.appInfo.buildVersion(), !build.isEmpty {
+            return "\(version) (\(build))"
+        }
+        return version
     }
 
     var body: some View {
@@ -912,7 +920,7 @@ struct CZFUpdatableAppsSheet: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(app.name)
                                 .lineLimit(1)
-                            Text("\(installedVersion(for: app)) → \(app.latestVersion?.version ?? "")")
+                            Text("\(installedVersion(for: app)) → \(app.latestVersion?.czfVersionWithBuild ?? "")")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)
@@ -1292,6 +1300,11 @@ struct LCSourcesView: View {
                         CZFTwoYiSection(
                             installed: czfTwoYiApp != nil,
                             isDownloading: czfTwoYiDownloading,
+                            // 3.8.690（B2）：还在不在队里直接认共享排队名册
+                            // czfQueuedDownloads——排队名是 czfDisplayDownloadName
+                            // （LCDownloadView.swift:851），TwoYi 文件名 27 字
+                            // 节、无 UUID 前缀，显示名就是 lastPathComponent 原样。
+                            isQueued: downloadHelper.czfQueuedDownloads.contains(CZFTwoYi.downloadURL.lastPathComponent),
                             downloadProgress: downloadHelper.downloadProgress,
                             // 3.8.672（F-1）：下载排队——TwoYi 按钮只在
                             // 自己下载时禁用，别路下载中也能点、点下去
@@ -2821,12 +2834,29 @@ private struct ManageSourcesSheet: View {
                 
                 Section {
                     VStack(alignment: .leading, spacing: 12) {
-                        TextField("https://example.com/source.json", text: $manualSourceValue)
-                            .textContentType(.URL)
-                            .keyboardType(.URL)
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-                            .focused($isManualFieldFocused)
+                        // 3.8.690（F1）：从剪贴板粘贴——手动添加框原来
+                        // 只有输入框 +“添加源”按钮，链接在别处复制好
+                        // 还得手打；读剪贴板填入，焦点跟进输入框，再
+                        // 点“添加源”走现成 attemptManualAdd（非 URL
+                        // 照旧走 onAdd 的错误文案，不新增错误通道）。
+                        HStack(spacing: 8) {
+                            TextField("https://example.com/source.json", text: $manualSourceValue)
+                                .textContentType(.URL)
+                                .keyboardType(.URL)
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .focused($isManualFieldFocused)
+                            Button {
+                                if let pasted = UIPasteboard.general.string, !pasted.isEmpty {
+                                    manualSourceValue = pasted
+                                    isManualFieldFocused = true
+                                }
+                            } label: {
+                                Image(systemName: "doc.on.clipboard")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isAddingManual)
+                        }
                         
                         Button {
                             attemptManualAdd()
@@ -3034,6 +3064,7 @@ struct CZFSourceAppListView: View {
 private struct CZFTwoYiSection: View {
     var installed: Bool
     var isDownloading: Bool
+    var isQueued: Bool
     var downloadProgress: Float
     var installDisabled: Bool
     var onInstall: () -> Void
@@ -3048,9 +3079,20 @@ private struct CZFTwoYiSection: View {
                     .font(.headline)
                 Spacer()
                 if isDownloading {
-                    Text("\("lc.download.downloading".loc) \(Int(downloadProgress * 100))%")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    // 3.8.690（B2）：排队等待时进度串位——downloadProgress
+                    // 是共享 @Published，拿到锁后才重置为 0；正下着别路
+                    // IPA 时点 TwoYi，行上立刻显示别路的百分比。还在队
+                    // 里时只显“排队中”（现成 lc.download.queued，0 新
+                    // key），拿到锁后再显百分比；不新造状态。
+                    if isQueued {
+                        Text("lc.download.queued".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("\("lc.download.downloading".loc) \(Int(downloadProgress * 100))%")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 } else if installed {
                     Text("lc.common.installed".loc)
                         .font(.footnote)
@@ -3968,6 +4010,21 @@ struct LCSourceAppDetailView: View {
                                 }
                             }
                             .padding(.vertical, 2)
+                            // 3.8.690（F2）：版本行长按“安装此版本”——想装
+                            // 旧版原来要点行进旧版页再点安装；这里直接装，
+                            // 少进一页。行一级没有 onInstallVersion 那个闭包
+                            // （它只活在下面旧版页的 destination 里），故把
+                            // 3.8.666 F-2 的闭包体原样内联（切 App 页 + 写
+                            // 待装队列，autoReplace:false、preview:true）；
+                            // “下载”仍保留在旧版页内，不动。
+                            .contextMenu {
+                                Button("安装此版本") {
+                                    withAnimation {
+                                        DataManager.shared.model.selectedTab = .apps
+                                    }
+                                    CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: version.downloadURL, autoReplace: false, preview: true, forceAsNew: false))
+                                }
+                            }
                         }
                     }
                 }

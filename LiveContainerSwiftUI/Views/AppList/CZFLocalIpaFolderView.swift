@@ -993,7 +993,7 @@ struct CZFInlineIpaFolderGrid: View {
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass")
                             .foregroundStyle(.secondary)
-                        TextField("搜索文件名、显示名、版本号", text: $czfSearchText)
+                        TextField("搜索文件名、显示名、版本号、Bundle ID", text: $czfSearchText)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
                             // 3.8.682（B1）：iOS 15 兜底收键盘——键盘工具条
