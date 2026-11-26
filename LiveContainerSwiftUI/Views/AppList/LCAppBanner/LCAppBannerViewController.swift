@@ -508,6 +508,38 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             CZFPinnedAppsStore.shared.toggle(model)
         })
 
+        // 3.8.702（F2）：忽略此版本 / 取消忽略更新——网格菜单同款，
+        // UIKit 版；最新版从源页写的 CZFUpdatableLatestVersions 字典
+        // 取（归一 ID → 版本|build），写键用归一 Bundle ID，与
+        // computeUpdatableApps 的读键（源原始包名）同一口径；写完发
+        // CZFRecomputeUpdatableCache 只重算不联网。批量态设防现成：
+        // contextMenuInteraction 批量态直接 return nil，不另写门。
+        let czfNormalizedID = czfNormalizedBundleID(appInfo.bundleIdentifier() ?? "")
+        let czfLatestDict = CZFUpdateIgnore.latestVersionDict(from: UserDefaults.standard.string(forKey: "CZFUpdatableLatestVersions") ?? "")
+        let czfHasUpdate = Set((UserDefaults.standard.string(forKey: "CZFUpdatableBundleIDs") ?? "").split(separator: ",").map(String.init)).contains(czfNormalizedID)
+        if czfHasUpdate, let czfLatestKey = czfLatestDict[czfNormalizedID] {
+            sectionChildren.append(UIAction(
+                title: "忽略此版本",
+                image: UIImage(systemName: "bell.slash")
+            ) { _ in
+                CZFUpdateIgnore.setIgnored(czfLatestKey, for: czfNormalizedID)
+                NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            })
+        }
+        if let czfLatestKey = czfLatestDict[czfNormalizedID],
+           let czfStored = CZFUpdateIgnore.ignoredVersion(for: czfNormalizedID) {
+            let czfSplit = CZFUpdateIgnore.splitIgnoredKey(czfLatestKey)
+            if CZFUpdateIgnore.isIgnoredStored(czfStored, version: czfSplit.version, build: czfSplit.build) {
+                sectionChildren.append(UIAction(
+                    title: "取消忽略更新",
+                    image: UIImage(systemName: "bell")
+                ) { _ in
+                    CZFUpdateIgnore.setIgnored(nil, for: czfNormalizedID)
+                    NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+                })
+            }
+        }
+
         // 3.8.431 设置低 #10：网格菜单有隐藏/锁定，列表菜单没有，
         // 两边补齐（调的都是 LCAppModel 已有方法，与网格同款）。
         sectionChildren.append(UIAction(

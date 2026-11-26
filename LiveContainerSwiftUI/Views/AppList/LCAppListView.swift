@@ -2498,7 +2498,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // startInstallFromUrl 的 itms 分支。
             if let url = czfSearchURL, ["ipa", "tipa"].contains(url.pathExtension.lowercased()) {
                 Button {
-                    Task { await installFromUrl(urlStr: url.absoluteString) }
+                    // 3.8.702（B2）：装成功才清搜索——installFromUrl 返回
+                    // Bool，校验失败不丢用户粘贴的链接；清法照抄同页
+                    // “添加为源”行（MainActor.run 里写 query）。
+                    Task {
+                        if await installFromUrl(urlStr: url.absoluteString) {
+                            await MainActor.run { searchContext.query = "" }
+                        }
+                    }
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "square.and.arrow.down")

@@ -576,6 +576,10 @@ struct CZFAppGridCell: View {
     var actions: CZFAppGridActions
 
     @State private var czfCellError: String?
+    // 3.8.702（F2）：源页写的最新版本字典 + 可更新 ID 集（App 页读端；
+    // 字典含已忽略但有新版的 App，hasUpdate 仍以 ID 集为准）。
+    @AppStorage("CZFUpdatableLatestVersions") private var czfUpdatableLatestVersions = ""
+    @AppStorage("CZFUpdatableBundleIDs") private var czfUpdatableBundleIDs = ""
     // 3.8.645（F1）：导出 IPA——分享表要分享的 tmp .ipa（nil = 未导出/已分享完）
     // 与导出进行中标志（导出放后台线程，别卡主线程；导出中按钮置灰防重入）。
     @State private var czfExportIPAURL: URL?
@@ -775,6 +779,35 @@ struct CZFAppGridCell: View {
         }
     }
 
+    // 3.8.702（F2）：忽略此版本 / 取消忽略更新——源页行菜单同款
+    //（写完发 CZFRecomputeUpdatableCache 只重算不联网）；最新版
+    // 从源页写的 CZFUpdatableLatestVersions 字典取（归一 ID →
+    // 版本|build），写键用归一 Bundle ID，与 computeUpdatableApps
+    // 的读键（源原始包名）同一口径。批量态设防现成：.contextMenu
+    // 只在 !batchMode 时挂，不另写门。
+    @ViewBuilder
+    private var czfIgnoreUpdateMenuItems: some View {
+        let czfNormalizedID = czfNormalizedBundleID(app.appInfo.bundleIdentifier() ?? "")
+        let czfLatestDict = CZFUpdateIgnore.latestVersionDict(from: czfUpdatableLatestVersions)
+        let czfHasUpdate = Set(czfUpdatableBundleIDs.split(separator: ",").map(String.init)).contains(czfNormalizedID)
+        if czfHasUpdate, let czfLatestKey = czfLatestDict[czfNormalizedID] {
+            Button("忽略此版本", systemImage: "bell.slash") {
+                CZFUpdateIgnore.setIgnored(czfLatestKey, for: czfNormalizedID)
+                NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            }
+        }
+        if let czfLatestKey = czfLatestDict[czfNormalizedID],
+           let czfStored = CZFUpdateIgnore.ignoredVersion(for: czfNormalizedID) {
+            let czfSplit = CZFUpdateIgnore.splitIgnoredKey(czfLatestKey)
+            if CZFUpdateIgnore.isIgnoredStored(czfStored, version: czfSplit.version, build: czfSplit.build) {
+                Button("取消忽略更新", systemImage: "bell") {
+                    CZFUpdateIgnore.setIgnored(nil, for: czfNormalizedID)
+                    NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+                }
+            }
+        }
+    }
+
     // 长按菜单：banner makeContextMenu() 的 SwiftUI 复刻（顶层项
     // 逐项接现有方法）。banner 里没有“置顶”这一项，网格也不编。
     @ViewBuilder
@@ -870,6 +903,8 @@ struct CZFAppGridCell: View {
         Button(CZFPinnedAppsStore.shared.isPinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isPinned(app) ? "pin.slash" : "pin") {
             CZFPinnedAppsStore.shared.toggle(app)
         }
+        // 3.8.702（F2）：忽略此版本 / 取消忽略更新（见 czfIgnoreUpdateMenuItems）。
+        czfIgnoreUpdateMenuItems
         // 单 App VPN（banner 同款文案与开关语义）。
         Button(
             CZFVPNManager.isEnabled(for: app.appInfo) ? "关闭 VPN 打开" : "用 VPN 打开",

@@ -4408,6 +4408,29 @@ struct PinnedAppsStripView: View {
     }
     @State private var draggedPinKey: String?
 
+    // 3.8.702（F1）：固定区图标长按“取消固定”——固定区里的项恒为
+    // 已固定态，只给取消一侧（文案照抄 AppCardRow 与源行的翻态文案
+    // 中的取消一侧）；已装项调 toggle、源项调 toggleSourcePin，
+    // 存储就在同一作用域（pinnedStore）。抽独立 helper，body 只挂
+    // 一行（3.8.688 体检查超时教训）。
+    @ViewBuilder
+    private func pinnedItemContextMenu(for item: PinnedStripItem) -> some View {
+        switch item {
+        case .installed(let app):
+            Button {
+                pinnedStore.toggle(app)
+            } label: {
+                Label("取消固定", systemImage: "pin.slash")
+            }
+        case .source(let app):
+            Button {
+                pinnedStore.toggleSourcePin(app)
+            } label: {
+                Label("取消固定", systemImage: "pin.slash")
+            }
+        }
+    }
+
     var body: some View {
         // 直接贴面板底色排版，不再套一层灰卡（卡里套卡是用户
         // 点名"太丑"的主因）；图标 40pt / 圆角 12（用户定小点），
@@ -4456,6 +4479,9 @@ struct PinnedAppsStripView: View {
                                     return NSItemProvider(object: item.pinKey as NSString)
                                 }
                                 .onDrop(of: [.text], delegate: CZFPinnedReorderDelegate(targetIndex: index, store: pinnedStore, draggedKey: $draggedPinKey))
+                                .contextMenu {
+                                    pinnedItemContextMenu(for: item)
+                                }
                         }
                     }
                     // 图标列对齐：固定区图标左边缘与运行条、列表行

@@ -773,6 +773,34 @@ enum CZFUpdateIgnore {
         guard let latest = app.latestVersion else { return false }
         return isIgnoredStored(ignoredVersion(for: app.bundleIdentifier), version: latest.version, build: latest.buildVersion)
     }
+
+    // 3.8.702（F2）：“归一 Bundle ID → 最新版本|build”字典——源页
+    // refreshUpdatableCache 顺带写、App 页长按菜单读（0 新 key 之外
+    // 只加 CZFUpdatableLatestVersions 这一个）。
+    // 形态照抄 CZFUpdatableBundleIDs 的逗号串：`归一ID=版本|build`
+    // 逗号拼；`=` 与 `,` 不会出现在包名/版本号/build 里。
+    // 字典覆盖可更新 + 已忽略但有新版的 App：忽略的 App 不在可更新
+    // 名单里，只从名单取就永远取不到已忽略那份的最新版，App 页
+    // “取消忽略更新”也就无从判定。
+    static func latestVersionDict(from string: String) -> [String: String] {
+        var dict: [String: String] = [:]
+        for entry in string.split(separator: ",") {
+            let kv = entry.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2 else { continue }
+            dict[String(kv[0])] = String(kv[1])
+        }
+        return dict
+    }
+    static func latestVersionsString(from dict: [String: String]) -> String {
+        dict.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+    }
+    // 字典值（即 ignoredKey 的产物）拆回版本/build，供
+    // isIgnoredStored 比对；无 `|` 时只有短版本、build 为 nil。
+    static func splitIgnoredKey(_ key: String) -> (version: String, build: String?) {
+        let parts = key.split(separator: "|", maxSplits: 1)
+        guard parts.count == 2 else { return (key, nil) }
+        return (String(parts[0]), String(parts[1]))
+    }
 }
 
 /// 「跳过更新」的持久存储：键 CZFSkippedUpdates 存 [stableID: 版本号]。
@@ -903,6 +931,28 @@ struct CZFUpdatableAppsSheet: View {
     let onUpdateOne: (AltStoreSourceApp) async -> String?
     let onUpdateAll: () -> Void
     let onSkip: (AltStoreSourceApp) -> Void
+    // 3.8.702（B1）：手动刷新——走父级已有的 viewModel.refreshAllSources
+    //（@MainActor、带 O-10 重入守卫，手动刷新不受 300 秒节流，顶栏刷新
+    // 同款调用），不要新造刷新路。调用点只有一处（czfUpdatableAppsSheet）。
+    let onRefresh: () async -> Void
+    // 3.8.702（B1）：名单新鲜度——读与 App 页同一把 key
+    // CZFLastSourceAutoRefresh（0 新 key），300 秒阈值与文案照抄
+    // LCAppListView 的 czfUpdatableListStale/czfUpdatableStaleText。
+    @AppStorage("CZFLastSourceAutoRefresh") private var czfLastSourceAutoRefresh: Double = 0
+    private static let czfRelativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+    private var czfUpdatableListStale: Bool {
+        guard czfLastSourceAutoRefresh > 0 else { return true }
+        return Date().timeIntervalSince1970 - czfLastSourceAutoRefresh > 300
+    }
+    private var czfUpdatableStaleText: String {
+        guard czfLastSourceAutoRefresh > 0 else { return "可更新名单尚未检查过" }
+        let checkedDate = Date(timeIntervalSince1970: czfLastSourceAutoRefresh)
+        return "可更新名单是\(Self.czfRelativeFormatter.localizedString(for: checkedDate, relativeTo: Date()))检查的"
+    }
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var sharedModel: SharedModel
@@ -941,6 +991,26 @@ struct CZFUpdatableAppsSheet: View {
         // NavigationView + Stack 样式（与本文件其余 sheet 同款）。
         NavigationView {
             List {
+                // 3.8.702（B1）：过期提示条——App 页有提示、这里没有，
+                // 同一份过期缓存；只在过期时显示，样式照抄 App 页
+                // czfUpdatableStaleHint（三角 + 文案 + 刷新按钮）。
+                if czfUpdatableListStale {
+                    Section {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                            Text(czfUpdatableStaleText)
+                                .font(.footnote)
+                            Spacer()
+                            Button("刷新") {
+                                Task { @MainActor in await onRefresh() }
+                            }
+                            .font(.footnote)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                }
                 ForEach(apps, id: \.czfStableID) { app in
                     HStack(spacing: 12) {
                         SourceIconView(url: app.iconURL)
@@ -1057,6 +1127,13 @@ struct LCSourcesView: View {
     // App 页“仅可更新”开关按它过滤；与红点数同一处写、新鲜度同款
     // （只在源页刷新缓存时更新，长期不进源页会旧）。
     @AppStorage("CZFUpdatableBundleIDs") private var updatableBundleIDs = ""
+    // 3.8.702（F2）：可更新 + 已忽略但有新版的 App 的最新“版本|build”
+    // 字典（`归一ID=版本|build` 逗号串，见 CZFUpdateIgnore）——供
+    // App 页长按菜单“忽略此版本/取消忽略更新”取最新版；与
+    // updatableBundleIDs 同一处写、同一处删键。键口径与读键一致：
+    // 写键是归一 Bundle ID，App 页忽略写键也用归一 ID（源原始包名
+    // 本来就没有队尾段，归一后与读键相同）。
+    @AppStorage("CZFUpdatableLatestVersions") private var updatableLatestVersions = ""
     // 可更新名单缓存：原来 updatableApps 是计算属性，body 每次
     // 渲染（搜字、展开、加载状态变）都把全部源 × 全部 App 比一
     // 遍版本、还逐个读忽略记录；改成算一次存起来，只在源/已装/
@@ -1572,6 +1649,19 @@ struct LCSourcesView: View {
                         // App 页“仅可更新”仍按旧 ID 集列出刚更新的行；
                         // 按新名单顺手重算（refreshUpdatableCache :1780 同款拼接）。
                         updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
+                        // 3.8.702（F2）：字典同步删键——只删这一项，不从名单
+                        // 重算（已忽略的 App 不在 cachedUpdatableApps 里，
+                        // 重算会丢它们的最新版）。
+                        var czfLatestDict = CZFUpdateIgnore.latestVersionDict(from: updatableLatestVersions)
+                        czfLatestDict.removeValue(forKey: czfNormalizedBundleID(app.bundleIdentifier))
+                        updatableLatestVersions = CZFUpdateIgnore.latestVersionsString(from: czfLatestDict)
+                        // 3.8.702（B3）：dylib 单行成功、名单变空即关 sheet——
+                        // onUpdateAll 与 onSkip 名单为空时都关了，唯独这条漏了；
+                        // 非 dylib 路走 install 切 App 页、不留空 sheet，这里不切
+                        // 页，sheet 会赖在空名单上。照抄 onSkip 的写法。
+                        if cachedUpdatableApps.isEmpty {
+                            showUpdatableList = false
+                        }
                     }
                     return nil
                 case .failed(let error):
@@ -1608,6 +1698,10 @@ struct LCSourcesView: View {
                 updatableCountBadge = cachedUpdatableApps.count
                 // 3.8.653（B2）：同上，ID 集与名单同一处写（:1780 同款拼接）。
                 updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
+                // 3.8.702（F2）：字典同步删键（同上，只删这一项）。
+                var czfLatestDict = CZFUpdateIgnore.latestVersionDict(from: updatableLatestVersions)
+                czfLatestDict.removeValue(forKey: czfNormalizedBundleID(app.bundleIdentifier))
+                updatableLatestVersions = CZFUpdateIgnore.latestVersionsString(from: czfLatestDict)
                 // 3.8.688（B3）：跳光即关 sheet——onSkip 只剔名单、不碰
                 // showUpdatableList，名单跳空后 List 为空、标题与底部
                 // 按钮都变“全部更新(0)”、sheet 赖在屏幕上；点下去
@@ -1616,6 +1710,16 @@ struct LCSourcesView: View {
                 // 只动现成 @State，不碰跳过持久化、不碰红点重算。
                 if cachedUpdatableApps.isEmpty {
                     showUpdatableList = false
+                }
+            },
+            // 3.8.702（B1）：sheet 内手动刷新——走 viewModel.refreshAllSources
+            //（顶栏刷新同款）；成功后补写 CZFLastSourceAutoRefresh 戳
+            //（手动刷新今天不写戳，只 autoRefresh 写，不补写则刷新完提示
+            // 条仍显示过期；与 autoRefreshSourcesIfNeeded 成功写戳同款）。
+            // Task { @MainActor in } 调用（sheet 内按钮同款），戳写在主线程。
+            onRefresh: {
+                if await viewModel.refreshAllSources() {
+                    lastSourceAutoRefresh = Date().timeIntervalSince1970
                 }
             }
         )
@@ -2130,6 +2234,9 @@ struct LCSourcesView: View {
     private var czfSearchIpaRow: some View {
         if isFiltering, let czfIpaURL = czfSearchIpaURL {
             Button {
+                // 3.8.702（B2）：点按即清搜索——入队本身不失败，与切
+                // Tab 同步；同页“添加为源”行成功即清同款。
+                searchContext.query = ""
                 withAnimation {
                     DataManager.shared.model.selectedTab = .apps
                 }
@@ -2383,7 +2490,11 @@ struct LCSourcesView: View {
     /// 按包名先到先得，源里原版 1.0 排在汉化版 1.2 前面时，
     /// 名单里就是 1.0，点更新装完 1.0、1.2 又冒出来，得更新
     /// 两次。顺序仍按首次出现的包名排，不改名单顺序。
-    private func computeUpdatableApps() -> [AltStoreSourceApp] {
+    // 3.8.702（F2）：includeIgnored=true 时不过滤已忽略的 App——
+    // refreshUpdatableCache 用它给字典补“已忽略但有新版”的最新版
+    //（App 页“取消忽略更新”要这个值判定）；可更新名单与红点仍走
+    // 默认 false，不进忽略的 App。
+    private func computeUpdatableApps(includeIgnored: Bool = false) -> [AltStoreSourceApp] {
         // 3.8.637（B1）：已装键是个人 ID 改写后的 ID、源里的键是原始 ID，
         // 精确比对查不到、Tab 红点不到它。两边都归一到去队尾段的 ID。
         // 3.8.649（B2）：同包名多分身时取最旧实例的版本 / build——
@@ -2417,7 +2528,7 @@ struct LCSourcesView: View {
                 guard let latest = app.latestVersion,
                       let installedVersion = installed[czfNormalizedBundleID(app.bundleIdentifier)],
                       czfIsNewerVersion(latest.version, build: latest.buildVersion, newerThan: installedVersion, installedBuild: installedBuilds[czfNormalizedBundleID(app.bundleIdentifier)]),
-                      !CZFUpdateIgnore.isIgnoredStored(CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier), version: latest.version, build: latest.buildVersion) else {
+                      includeIgnored || !CZFUpdateIgnore.isIgnoredStored(CZFUpdateIgnore.ignoredVersion(for: app.bundleIdentifier), version: latest.version, build: latest.buildVersion) else {
                     continue
                 }
                 if let existing = bestByBundle[app.bundleIdentifier] {
@@ -2450,6 +2561,23 @@ struct LCSourcesView: View {
         // 同款 czfNormalizedBundleID（去队尾段），不归一就比对不上
         // 个人 ID 改写后的 ID（3.8.637 B1 同款教训）。
         updatableBundleIDs = list.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
+        // 3.8.702（F2）：顺带写最新版本字典——名单里的可更新 App +
+        // 已忽略但有新版的 App（computeUpdatableApps(includeIgnored:)
+        // 再算一份、只留 isIgnored 的；跳过的 App 不在名单里、也不进
+        // 字典，App 页 hasUpdate 口径与“仅可更新”一致）。
+        // latestVersion 在 computeUpdatableApps 里已守卫非空。
+        var czfLatestDict: [String: String] = [:]
+        for app in list {
+            if let latest = app.latestVersion {
+                czfLatestDict[czfNormalizedBundleID(app.bundleIdentifier)] = CZFUpdateIgnore.ignoredKey(version: latest.version, build: latest.buildVersion)
+            }
+        }
+        for app in computeUpdatableApps(includeIgnored: true) where CZFUpdateIgnore.isIgnored(app) {
+            if let latest = app.latestVersion {
+                czfLatestDict[czfNormalizedBundleID(app.bundleIdentifier)] = CZFUpdateIgnore.ignoredKey(version: latest.version, build: latest.buildVersion)
+            }
+        }
+        updatableLatestVersions = CZFUpdateIgnore.latestVersionsString(from: czfLatestDict)
     }
 
     // 3.8.696（F1）：本源可更新子集——cachedUpdatableApps 按
@@ -2986,6 +3114,14 @@ private struct ManageSourcesSheet: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .textSelection(.enabled)
+                                }
+                            }
+                            // 3.8.702（F3）：行长按“复制源链接”——原来只能精确
+                            // 长按小字号 URL 再选区复制；文案与写法照抄组头菜单
+                            // 同款一行（AltStoreSourceSectionView）。
+                            .contextMenu {
+                                Button("复制源链接", systemImage: "doc.on.doc") {
+                                    UIPasteboard.general.string = item.url.absoluteString
                                 }
                             }
                             .swipeActions(edge: .trailing) {
