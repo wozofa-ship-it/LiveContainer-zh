@@ -591,7 +591,7 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         // 否则卸载/隐藏/锁定/“备份这个 App”全能点，“备份这个
         // App”还会把已选多项无声替换成 1 项。
         guard !czfBatchMode else { return nil }
-        UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             self?.makeContextMenu()
         }
     }
