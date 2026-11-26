@@ -3515,6 +3515,67 @@ struct LCSourceAppBanner: View {
         return ""
     }
     
+    // 3.8.692 修法 1（构建 run 45890414484 红字原文修）：长按菜单
+    // 单抽一个 builder——body 在 :3518 报 `the compiler is unable
+    // to type-check this expression in reasonable time`，本批给
+    // sheet 调用点加了一个实参、菜单里改了一处绑定，体检查超时；
+    // 菜单内容一字不动，只换宿主（3.8.688 同款拆法）。
+    @ViewBuilder
+    private var czfBannerContextMenu: some View {
+        // 3.8.684（F2）：固定到面板——坞源面板行菜单同款入口
+        // （MultitaskDockView rowContextMenu），源页不用再绕
+        // 进坞找它；文案按固定态翻，0 新 key。
+        Button {
+            CZFPinnedAppsStore.shared.toggleSourcePin(app)
+        } label: {
+            Label(CZFPinnedAppsStore.shared.isSourcePinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isSourcePinned(app) ? "pin.slash" : "pin")
+        }
+        // 3.8.684（B2）：批量态下不提供忽略/取消忽略——点按已
+        // 设防，长按再改忽略名单会绕过批量流程、重算红点；
+        // 复制两项与固定项照常留（只读，不碰批量队列）。
+        if !isBatchMode {
+        if hasUpdate, let latest = app.latestVersion {
+            Button {
+                // 3.8.692（B3）：忽略记“版本|build”，不是只记短版本。
+                CZFUpdateIgnore.setIgnored(CZFUpdateIgnore.ignoredKey(version: latest.version, build: latest.buildVersion), for: app.bundleIdentifier)
+                ignoreRefresh.toggle()
+                // S-12：只重算红点和「全部更新」名单，不用
+                // 联网刷新源——发 CZFRecomputeUpdatableCache，
+                // 不再挂"刷新源"的通知。
+                NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            } label: {
+                Label("忽略此版本", systemImage: "bell.slash")
+            }
+        }
+        if CZFUpdateIgnore.isIgnored(app) {
+            Button {
+                CZFUpdateIgnore.setIgnored(nil, for: app.bundleIdentifier)
+                ignoreRefresh.toggle()
+                // S-12：同上，只重算，不刷新源。
+                NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            } label: {
+                Label("取消忽略更新", systemImage: "bell")
+            }
+        }
+        }
+        // 3.8.682（F2）：复制版本号 / 复制 Bundle ID——与 App 页
+        // 长按菜单同款（3.8.639/647），源页原来只有“忽略此版本”；
+        // 版本号取源最新版，读不到或为 "?" 时不显示（网格 :834
+        // 同款判法）；标题硬编码中文。0 新 key。
+        if let version = app.latestVersion?.version, version != "?" {
+            Button {
+                UIPasteboard.general.string = version
+            } label: {
+                Label("复制版本号", systemImage: "doc.on.doc")
+            }
+        }
+        Button {
+            UIPasteboard.general.string = app.bundleIdentifier
+        } label: {
+            Label("复制 Bundle ID", systemImage: "doc.on.doc")
+        }
+    }
+
     var body: some View {
         HStack {
             HStack(alignment: .center, spacing: 12) {
@@ -3756,58 +3817,7 @@ struct LCSourceAppBanner: View {
             }
         }
         .contextMenu {
-            // 3.8.684（F2）：固定到面板——坞源面板行菜单同款入口
-            // （MultitaskDockView rowContextMenu），源页不用再绕
-            // 进坞找它；文案按固定态翻，0 新 key。
-            Button {
-                CZFPinnedAppsStore.shared.toggleSourcePin(app)
-            } label: {
-                Label(CZFPinnedAppsStore.shared.isSourcePinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isSourcePinned(app) ? "pin.slash" : "pin")
-            }
-            // 3.8.684（B2）：批量态下不提供忽略/取消忽略——点按已
-            // 设防，长按再改忽略名单会绕过批量流程、重算红点；
-            // 复制两项与固定项照常留（只读，不碰批量队列）。
-            if !isBatchMode {
-            if hasUpdate, let latest = app.latestVersion {
-                Button {
-                    // 3.8.692（B3）：忽略记“版本|build”，不是只记短版本。
-                    CZFUpdateIgnore.setIgnored(CZFUpdateIgnore.ignoredKey(version: latest.version, build: latest.buildVersion), for: app.bundleIdentifier)
-                    ignoreRefresh.toggle()
-                    // S-12：只重算红点和「全部更新」名单，不用
-                    // 联网刷新源——发 CZFRecomputeUpdatableCache，
-                    // 不再挂"刷新源"的通知。
-                    NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
-                } label: {
-                    Label("忽略此版本", systemImage: "bell.slash")
-                }
-            }
-            if CZFUpdateIgnore.isIgnored(app) {
-                Button {
-                    CZFUpdateIgnore.setIgnored(nil, for: app.bundleIdentifier)
-                    ignoreRefresh.toggle()
-                    // S-12：同上，只重算，不刷新源。
-                    NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
-                } label: {
-                    Label("取消忽略更新", systemImage: "bell")
-                }
-            }
-            }
-            // 3.8.682（F2）：复制版本号 / 复制 Bundle ID——与 App 页
-            // 长按菜单同款（3.8.639/647），源页原来只有“忽略此版本”；
-            // 版本号取源最新版，读不到或为 "?" 时不显示（网格 :834
-            // 同款判法）；标题硬编码中文。0 新 key。
-            if let version = app.latestVersion?.version, version != "?" {
-                Button {
-                    UIPasteboard.general.string = version
-                } label: {
-                    Label("复制版本号", systemImage: "doc.on.doc")
-                }
-            }
-            Button {
-                UIPasteboard.general.string = app.bundleIdentifier
-            } label: {
-                Label("复制 Bundle ID", systemImage: "doc.on.doc")
-            }
+            czfBannerContextMenu
         }
         .sheet(isPresented: $showDetail) {
             LCSourceAppDetailView(app: app, source: source, onDownloadVersion: downloadVersionAction, onInstall: installAction, onInstallAsNew: installAsNewAction, installedLookup: installedLookup)
@@ -3877,6 +3887,20 @@ struct LCSourceAppDetailView: View {
     // 盖着时弹不出来，也不走父级 errorMessage），打开逻辑照抄
     // 行上骨架放详情页内（见 czfOpenInstalled）。
     let installedLookup: CZFInstalledLookup? = nil
+    // 3.8.692 修法 2（构建 run 45890414484 红字原文修）：显式 init——
+    // 网格调用点报 `extra argument 'installedLookup' in call`，行调
+    // 用点同款传参却没报；memberwise 合成在 :3518 体检查超时级联
+    // 下不可靠，显式声明兜底，与 LCSourceAppBanner 的 3.8.673
+    // 显式 init 同款；参数顺序与声明一致，installedLookup 带默认
+    // 值，旧调用点可省。
+    init(app: AltStoreSourceApp, source: AltStoreSource, onDownloadVersion: @escaping (URL) -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, installedLookup: CZFInstalledLookup? = nil) {
+        self.app = app
+        self.source = source
+        self.onDownloadVersion = onDownloadVersion
+        self.onInstall = onInstall
+        self.onInstallAsNew = onInstallAsNew
+        self.installedLookup = installedLookup
+    }
     @Environment(\.dismiss) private var dismiss
     @State private var copiedDownloadURL = false
     // S-10②：无下载链接时安装/新建不在父级写错（详情单还在
