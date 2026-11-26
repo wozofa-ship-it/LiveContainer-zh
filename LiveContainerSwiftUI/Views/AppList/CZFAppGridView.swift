@@ -808,6 +808,26 @@ struct CZFAppGridCell: View {
         }
     }
 
+    // 3.8.704（F-3）：更新这个 App——仅有更新时出现；URL 从源页写的
+    // CZFUpdatableDownloadURLs 字典取（归一 ID → 下载 URL），三重门
+    // 缺一不可：在可更新 ID 集内（已忽略/已跳过/暂停源的 App 天然不
+    // 在集内，与“仅可更新”口径一致）+ 字典有该 ID 的 URL + 后缀
+    // ipa/tipa（dylib 仍走源页清单的 installTweakIfDylib 路）。
+    // 只写待装队列（preview:true，安装前预览确认），App 页
+    // onReceive/onAppear 排空，不切 Tab。字典读法走 CZFSkippedUpdate
+    // 同款整存整取；ID 集是 @AppStorage，变了即触发本 cell 重算。
+    @ViewBuilder
+    private var czfUpdateMenuItem: some View {
+        let czfNormalizedID = czfNormalizedBundleID(app.appInfo.bundleIdentifier() ?? "")
+        let czfHasUpdate = Set(czfUpdatableBundleIDs.split(separator: ",").map(String.init)).contains(czfNormalizedID)
+        let czfDownloadURLs = (UserDefaults.standard.dictionary(forKey: "CZFUpdatableDownloadURLs") as? [String: String]) ?? [:]
+        if czfHasUpdate, let czfURLString = czfDownloadURLs[czfNormalizedID], let czfURL = URL(string: czfURLString), ["ipa", "tipa"].contains(czfURL.pathExtension.lowercased()) {
+            Button("更新这个 App", systemImage: "arrow.down.circle") {
+                CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: czfURL, autoReplace: false, preview: true, forceAsNew: false))
+            }
+        }
+    }
+
     // 长按菜单：banner makeContextMenu() 的 SwiftUI 复刻（顶层项
     // 逐项接现有方法）。banner 里没有“置顶”这一项，网格也不编。
     @ViewBuilder
@@ -871,7 +891,11 @@ struct CZFAppGridCell: View {
         // version 是 "?"（读不到）时不显示，照抄版本行 app.version == "?" 的判法。
         if app.version != "?" {
             Button("复制版本号", systemImage: "doc.on.doc") {
-                UIPasteboard.general.string = app.version
+                // 3.8.704（B-1）：复制带 build 的版本号，与显示一致——
+                // 只升 build 的更新原来复制出来与已装版无异；build 缺省
+                // "0" 时只复制短版本（LCAppListView :1684 同款守卫）。
+                let czfBuild = app.appInfo.buildVersion() ?? ""
+                UIPasteboard.general.string = czfBuild != "0" && !czfBuild.isEmpty ? "\(app.version) (\(czfBuild))" : app.version
             }
         }
         // 3.8.645（F1）：导出 IPA——把已装 App 的 .app 原样打成标准
@@ -905,6 +929,8 @@ struct CZFAppGridCell: View {
         }
         // 3.8.702（F2）：忽略此版本 / 取消忽略更新（见 czfIgnoreUpdateMenuItems）。
         czfIgnoreUpdateMenuItems
+        // 3.8.704（F3）：更新这个 App（见 czfUpdateMenuItem），仅有更新时出现。
+        czfUpdateMenuItem
         // 单 App VPN（banner 同款文案与开关语义）。
         Button(
             CZFVPNManager.isEnabled(for: app.appInfo) ? "关闭 VPN 打开" : "用 VPN 打开",

@@ -5944,6 +5944,9 @@ private struct SourcePanelRow: View {
     @ObservedObject private var sharedModel = DataManager.shared.model
     @ObservedObject private var pinnedStore = CZFPinnedAppsStore.shared
     @State private var copied = false
+    // 3.8.704（F-2）：忽略/取消忽略后翻一下，强制本行按新状态重画
+    //（hasUpdate 读它建立依赖，源页列表行 :3759 同款）。
+    @State private var ignoreRefresh = false
     // 3.8.292：两个 sheet 合并成一个 enum 驱动（同一视图挂两
     // 个 .sheet 只有一个会真正弹出，另一个静默失效；291 的版
     // 本单可能顶掉多开实例选择单）。打开处改 activeSheet =
@@ -5985,6 +5988,7 @@ private struct SourcePanelRow: View {
     }
 
     private var hasUpdate: Bool {
+        _ = ignoreRefresh
         // 3.8.574（L105）：坞源面板这份 hasUpdate 是第三份手写版本
         // 比较，只比版本号、不比 build、也不查忽略——只升 build 的
         // 更新（2.0/b50 → 2.0/b100）在源页/网格/横幅都打更新角标，
@@ -6040,6 +6044,28 @@ private struct SourcePanelRow: View {
             activeSheet = .versions
         } label: {
             Label("历史版本…", systemImage: "clock.arrow.circlepath")
+        }
+        // 3.8.704（F-2）：忽略此版本 / 取消忽略更新——源页列表行
+        // / 网格同款；面板无批量模式，不设防。点完翻 ignoreRefresh
+        // 强制本行重算 hasUpdate，并发 CZFRecomputeUpdatableCache
+        // 重算 App 页/源页的计数与名单。
+        if hasUpdate, let latest = app.latestVersion {
+            Button {
+                CZFUpdateIgnore.setIgnored(CZFUpdateIgnore.ignoredKey(version: latest.version, build: latest.buildVersion), for: app.bundleIdentifier)
+                ignoreRefresh.toggle()
+                NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            } label: {
+                Label("忽略此版本", systemImage: "bell.slash")
+            }
+        }
+        if CZFUpdateIgnore.isIgnored(app) {
+            Button {
+                CZFUpdateIgnore.setIgnored(nil, for: app.bundleIdentifier)
+                ignoreRefresh.toggle()
+                NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            } label: {
+                Label("取消忽略更新", systemImage: "bell")
+            }
         }
     }
 

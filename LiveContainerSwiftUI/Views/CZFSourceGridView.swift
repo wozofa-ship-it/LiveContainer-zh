@@ -759,7 +759,9 @@ struct CZFSourceAppGridCell: View {
             // 0 新 key。
             if let version = app.latestVersion?.version, version != "?" {
                 Button {
-                    UIPasteboard.general.string = version
+                    // 3.8.704（B-1）：复制带 build 的版本号，与详情页
+                    // 版本行文案（czfVersionWithBuild）同一值。
+                    UIPasteboard.general.string = app.latestVersion?.czfVersionWithBuild
                 } label: {
                     Label("复制版本号", systemImage: "doc.on.doc")
                 }

@@ -897,6 +897,10 @@ struct CZFInlineIpaFolderGrid: View {
             item.fileName.localizedCaseInsensitiveContains(q) ||
             item.displayName.localizedCaseInsensitiveContains(q) ||
             (item.version?.localizedCaseInsensitiveContains(q) ?? false) ||
+            // 3.8.704（B-2）：搜 build 号也命中——副标题明明显示
+            // “版本 v (b)”，搜 build 号却搜不到（App 页 3.8.658 F3
+            // 同款；build 缺省 "0" 不参与匹配）。
+            ((item.build ?? "") != "0" && (item.build?.localizedCaseInsensitiveContains(q) ?? false)) ||
             (item.bundleIdentifier?.localizedCaseInsensitiveContains(q) ?? false)
         }
     }
@@ -1347,7 +1351,13 @@ struct CZFLocalIpaGridCell: View {
             // 标题硬编码中文，沿用本菜单“复制文件名”先例。
             if let version = item.version, version != "?" {
                 Button("复制版本号", systemImage: "doc.on.doc") {
-                    UIPasteboard.general.string = version
+                    // 3.8.704（B-1）：带 build，与副标题 czfVersionText
+                    // 同款“版本 (build)”拼法；无 build 时保持原样。
+                    if let czfBuild = item.build, !czfBuild.isEmpty {
+                        UIPasteboard.general.string = "\(version) (\(czfBuild))"
+                    } else {
+                        UIPasteboard.general.string = version
+                    }
                 }
             }
             if let bundleID = item.bundleIdentifier, !bundleID.isEmpty {

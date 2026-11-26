@@ -1655,6 +1655,11 @@ struct LCSourcesView: View {
                         var czfLatestDict = CZFUpdateIgnore.latestVersionDict(from: updatableLatestVersions)
                         czfLatestDict.removeValue(forKey: czfNormalizedBundleID(app.bundleIdentifier))
                         updatableLatestVersions = CZFUpdateIgnore.latestVersionsString(from: czfLatestDict)
+                        // 3.8.704（F-3）：URL 字典同步删键（与版本字典同款，
+                        // 只删这一项；App 页“更新这个 App”不再为它出现）。
+                        var czfDownloadURLs = (UserDefaults.standard.dictionary(forKey: "CZFUpdatableDownloadURLs") as? [String: String]) ?? [:]
+                        czfDownloadURLs.removeValue(forKey: czfNormalizedBundleID(app.bundleIdentifier))
+                        UserDefaults.standard.set(czfDownloadURLs, forKey: "CZFUpdatableDownloadURLs")
                         // 3.8.702（B3）：dylib 单行成功、名单变空即关 sheet——
                         // onUpdateAll 与 onSkip 名单为空时都关了，唯独这条漏了；
                         // 非 dylib 路走 install 切 App 页、不留空 sheet，这里不切
@@ -1702,6 +1707,11 @@ struct LCSourcesView: View {
                 var czfLatestDict = CZFUpdateIgnore.latestVersionDict(from: updatableLatestVersions)
                 czfLatestDict.removeValue(forKey: czfNormalizedBundleID(app.bundleIdentifier))
                 updatableLatestVersions = CZFUpdateIgnore.latestVersionsString(from: czfLatestDict)
+                // 3.8.704（F-3）：URL 字典同步删键（与版本字典同款，
+                // 只删这一项；跳过的 App 不再出现“更新这个 App”）。
+                var czfDownloadURLs = (UserDefaults.standard.dictionary(forKey: "CZFUpdatableDownloadURLs") as? [String: String]) ?? [:]
+                czfDownloadURLs.removeValue(forKey: czfNormalizedBundleID(app.bundleIdentifier))
+                UserDefaults.standard.set(czfDownloadURLs, forKey: "CZFUpdatableDownloadURLs")
                 // 3.8.688（B3）：跳光即关 sheet——onSkip 只剔名单、不碰
                 // showUpdatableList，名单跳空后 List 为空、标题与底部
                 // 按钮都变“全部更新(0)”、sheet 赖在屏幕上；点下去
@@ -2578,6 +2588,19 @@ struct LCSourcesView: View {
             }
         }
         updatableLatestVersions = CZFUpdateIgnore.latestVersionsString(from: czfLatestDict)
+        // 3.8.704（F-3）：顺带写最新版下载 URL 字典——App 页“更新这个
+        // App”读它；只含可更新名单里的 App（已忽略/已跳过/暂停源天然
+        // 不在名单里，与“仅可更新”口径一致）。逗号串存不下 URL（查询
+        // 串含 `=`/`,`，会切坏格式），走 CZFSkippedUpdate 同款
+        // [String: String] 整存整取、每次全量重写，过期键随重算自动
+        // 消失（已装/已忽略/已跳过时不再写入）。
+        var czfDownloadURLDict: [String: String] = [:]
+        for app in list {
+            if let latest = app.latestVersion {
+                czfDownloadURLDict[czfNormalizedBundleID(app.bundleIdentifier)] = latest.downloadURL.absoluteString
+            }
+        }
+        UserDefaults.standard.set(czfDownloadURLDict, forKey: "CZFUpdatableDownloadURLs")
     }
 
     // 3.8.696（F1）：本源可更新子集——cachedUpdatableApps 按
@@ -3868,7 +3891,9 @@ struct LCSourceAppBanner: View {
         // 同款判法）；标题硬编码中文。0 新 key。
         if let version = app.latestVersion?.version, version != "?" {
             Button {
-                UIPasteboard.general.string = version
+                // 3.8.704（B-1）：复制带 build 的版本号，与详情页
+                // 版本行文案（czfVersionWithBuild）同一值。
+                UIPasteboard.general.string = app.latestVersion?.czfVersionWithBuild
             } label: {
                 Label("复制版本号", systemImage: "doc.on.doc")
             }
@@ -4345,7 +4370,10 @@ struct LCSourceAppDetailView: View {
                             Text(app.name)
                                 .font(.headline)
                             if let latest = app.latestVersion {
-                                Text("版本 \(latest.version)")
+                                // 3.8.704（B-3）：顶部与版本行口径一致，显
+                                // “版本 (build)”——只升 build 的更新在顶部
+                                // 原来与已装版看起来完全相同。
+                                Text("版本 \(latest.czfVersionWithBuild)")
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                             }
@@ -4525,6 +4553,15 @@ struct LCSourceAppDetailView: View {
                                     UIPasteboard.general.string = version.downloadURL.absoluteString
                                 } label: {
                                     Label("复制下载链接", systemImage: "doc.on.doc")
+                                }
+                                // 3.8.704（F-1）：复制版本号——与同行显示文案
+                                // （version.czfVersionWithBuild）同一值；必须
+                                // 用 czfVersionWithBuild 而不是 version.version，
+                                // 否则丢 build（B-1 同根）。
+                                Button {
+                                    UIPasteboard.general.string = version.czfVersionWithBuild
+                                } label: {
+                                    Label("复制版本号", systemImage: "doc.on.doc")
                                 }
                             }
                         }

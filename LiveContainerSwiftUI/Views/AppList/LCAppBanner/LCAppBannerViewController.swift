@@ -463,7 +463,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 title: "复制版本号",
                 image: UIImage(systemName: "doc.on.doc")
             ) { _ in
-                UIPasteboard.general.string = model.version
+                // 3.8.704（B-1）：复制带 build 的版本号，与显示一致——
+                // 只升 build 的更新原来复制出来与已装版无异；build 缺省
+                // "0" 时只复制短版本（LCAppListView :1684 同款守卫）。
+                let czfBuild = appInfo.buildVersion() ?? ""
+                UIPasteboard.general.string = czfBuild != "0" && !czfBuild.isEmpty ? "\(model.version) (\(czfBuild))" : model.version
             })
         }
 
@@ -538,6 +542,20 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                     NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
                 })
             }
+        }
+
+        // 3.8.704（F-3）：更新这个 App——网格菜单同款；仅有更新时出现，
+        // 三重门与网格同款（可更新集内 + 字典有 URL + 后缀 ipa/tipa，
+        // dylib 仍走源页清单）。只写待装队列（preview:true），App 页
+        // onReceive/onAppear 排空；czfHasUpdate 与 czfNormalizedID 复用
+        // 上面忽略段的现成量。
+        if czfHasUpdate, let czfURLString = (UserDefaults.standard.dictionary(forKey: "CZFUpdatableDownloadURLs") as? [String: String])?[czfNormalizedID], let czfURL = URL(string: czfURLString), ["ipa", "tipa"].contains(czfURL.pathExtension.lowercased()) {
+            sectionChildren.append(UIAction(
+                title: "更新这个 App",
+                image: UIImage(systemName: "arrow.down.circle")
+            ) { _ in
+                CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: czfURL, autoReplace: false, preview: true, forceAsNew: false))
+            })
         }
 
         // 3.8.431 设置低 #10：网格菜单有隐藏/锁定，列表菜单没有，
