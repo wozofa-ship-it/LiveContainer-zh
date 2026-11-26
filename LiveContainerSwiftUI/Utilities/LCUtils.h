@@ -50,6 +50,10 @@ uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 + (BOOL)isAppGroupAltStoreLike;
 + (Store)store;
 + (NSString *)appUrlScheme;
+// P0 回归（3.8.665）：把 LiveProcess 客进程判据转发给 Swift——
+// NSUserDefaults(LiveContainer) 的 isLiveProcess 声明在 utils.h
+//（本文件已引），Swift 侧走这一行转发，不直接碰分类方法。
++ (BOOL)czfIsLiveProcess;
 + (NSString *)storeInstallURLScheme;
 + (NSString *)getVersionInfo;
 + (NSString *)liveProcessBundleIdentifier;

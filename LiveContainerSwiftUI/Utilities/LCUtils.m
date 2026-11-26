@@ -289,6 +289,13 @@
     return NSBundle.mainBundle.infoDictionary[@"CFBundleURLTypes"][0][@"CFBundleURLSchemes"][0];
 }
 
+// P0 回归（3.8.665）：客进程判据转发（LCBootstrap.m:64-66 实现，
+// 客扩展入口置 true；同版重签的分身 scheme 仍是 livecontainer，
+// 旧 multiLCStatus == 2 判据在客场景恒为假）。
++ (BOOL)czfIsLiveProcess {
+    return [NSUserDefaults isLiveProcess];
+}
+
 + (BOOL)isAppGroupAltStoreLike {
     return [LCSharedUtils.appGroupID containsString:@"SideStore"] || [LCSharedUtils.appGroupID containsString:@"AltStore"];
 }

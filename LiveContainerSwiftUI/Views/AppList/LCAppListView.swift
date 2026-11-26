@@ -281,6 +281,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 顶栏三个工具（数据管理/VPN/多选）收起/展开：默认收起，点
     // 箭头展开、再点收起；只管显隐，三个功能本身不动。
     @State private var topToolsExpanded = false
+    // P0 回归（3.8.665）：客场景判据——当前进程是不是 LiveProcess
+    // 客进程（LCBootstrap 的 isLiveProcess，经 LCUtils.czfIsLiveProcess
+    // 转发），不是 scheme 身份。第一轮用 multiLCStatus == 2
+    //（scheme != livecontainer）当门控，但同版重签的分身 scheme 仍
+    // 是 livecontainer、status 恒 0，门控在用户手里是死的
+    //（live-p0-rerecon-186）。客进程由扩展入口构造保证
+    // isLiveProcess = true，与签名队伍/plist 全无关。进程启动后
+    // 不变，View 重建重读也恒为同一值。
+    private let czfIsGuestScene = LCUtils.czfIsLiveProcess()
     // 3.8.281：顶部 VPN 开关用的核心运行状态（CZFVPNManager 不是
     // ObservableObject，本地 @State 存一份，进页/点按后从
     // shared.isRunning 刷新，与设置页同款读法）。
@@ -760,7 +769,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.641（F2）：仅运行中开关——多选按钮旁；16 以下隐藏
         //（MultitaskDockManager 是 16+ 类型，见 CZFRunningDot 注释）。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2, #available(iOS 16.0, *) {
+            if topToolsExpanded, !czfIsGuestScene, #available(iOS 16.0, *) {
                 Button {
                     czfRunningOnly.toggle()
                 } label: {
@@ -775,7 +784,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.653（B1）：开关开着时常驻——数归零后按钮消失，页内就
         // 再无办法关掉筛选（只能退出重进等 @State 重建）。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2, czfUpdatableCount > 0 || czfUpdatableOnly {
+            if topToolsExpanded, !czfIsGuestScene, czfUpdatableCount > 0 || czfUpdatableOnly {
                 Button {
                     czfUpdatableOnly.toggle()
                 } label: {
@@ -789,7 +798,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         //（backupStatusCaption 同款）；纯数据过滤，iOS 15 也可用，
         // 不需 16+ 门控。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 Button {
                     czfNoBackupOnly.toggle()
                 } label: {
@@ -799,11 +808,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
 
         // 3.8.662（F1）：仅快过期开关——与“仅无备份”开关并列；
-        // 显隐口径同款（topToolsExpanded, multiLCStatus != 2），
+        // 显隐口径同款（topToolsExpanded, !czfIsGuestScene），
         // 不需 #available；图标与“仅无备份”同款静态（不做
         // fill/plain 两态）。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 Button {
                     czfExpiringOnly.toggle()
                 } label: {
@@ -820,7 +829,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 红色是 UI 打磨：与坞里 closeAllStripButton 的红字同款，
         // 标明这是破坏性操作。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2, #available(iOS 16.0, *), czfDockRunningCount > 0 {
+            if topToolsExpanded, !czfIsGuestScene, #available(iOS 16.0, *), czfDockRunningCount > 0 {
                 Button {
                     czfShowCloseAllConfirm = true
                 } label: {
@@ -843,7 +852,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 里面 HStack 紧排，pill 变窄、看着利落。
         ToolbarItem(placement: .topBarLeading) {
             HStack(spacing: 16) {
-                if sharedModel.multiLCStatus != 2 {
+                if !czfIsGuestScene {
                     // 3.8.428 设置#26：进度圈与“+”菜单并存——原来安装
                     // 进行中整个“+”被换成进度圈，安装期间没法再从
                     // “+”选 IPA 排队；现在“+”常驻，进度圈只在进行
@@ -919,7 +928,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 用户 14:17：顶栏全藏、只留展开箭头——文件夹也收进
         // 折叠里（点箭头才出来），默认只剩一个“>”。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 NavigationLink {
                     LCDataManagementView(initialSheet: .restore)
                 } label: {
@@ -936,7 +945,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.285：嵌套 Menu 写在 body 里让编译器 type-check
             // 超时（构建 331 红字），菜单抽到上面 vpnShieldMenu，
             // 这里只留一行调用。
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 vpnShieldMenu
             }
         }
@@ -944,7 +953,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 新4（3.8.277）：多选模式入口。开时行首挂勾选圈、
         // 整行点按即勾选；关时清空勾选。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 Button {
                     batchMode.toggle()
                     if !batchMode { batchSelectedIDs.removeAll() }
@@ -961,7 +970,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.337：用户 14:17 顶栏全藏只留展开箭头——链接也收进
         // 折叠里，默认不显示，点箭头才出来。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 Button("lc.appList.openLink".loc, systemImage: "link", action: {
                     Task { await onOpenWebViewTapped() }
                 })
@@ -970,7 +979,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
         // 3.8.337：同上，排序菜单也收进折叠里。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
             Menu {
                 // 优3（3.8.277）：排序切换那一下不做全量动画——
                 // 列表带 .animation(.easeInOut, value: filteredApps)，
@@ -1038,7 +1047,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 点开只弹设置 sheet，不强制切模式；模式由 sheet 里
         // 的显示模式 Picker 决定。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 Button {
                     czfGridSettingsShow = true
                 } label: {
@@ -1050,7 +1059,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // “?”帮助收到“>”展开的工具组（用户 21:48 令）：原来常驻
         // 在 leading pill 里占地方，挪到这里，点“>”展开才看到。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, sharedModel.multiLCStatus != 2 {
+            if topToolsExpanded, !czfIsGuestScene {
                 Button("Help".loc, systemImage: "questionmark") {
                     helpPresent = true
                 }
@@ -1058,13 +1067,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
-    // P0（3.8.655）：副 LC 行内工具面板——容器见 czfAppScrollContent
-    // 注释。全部是行内 Button / NavigationLink / DisclosureGroup，
-    // 不弹任何系统菜单/浮层：每一行都在 ScrollView 内容里、在窗
-    // bounds 内，点按必中；面板外没有拦截层，窗外点按照常穿到
-    // 下面 App。动作与顶栏工具组一字同款（同一状态、同一函数），
-    // 只换容器；主 LC 不渲染它（门控在 ScrollView 那边）。
-    // 拆三段写，免得单个表达式 type-check 超时（3.8.285 同款）。
+    // P0（3.8.655）/ 回归（3.8.665）：客场景 LC 分身的行内工具面板——
+    // 容器见 czfAppScrollContent 注释。全部是行内 Button /
+    // NavigationLink / DisclosureGroup，不弹任何系统菜单/浮层：
+    // 每一行都在 ScrollView 内容里、在窗 bounds 内，点按必中；
+    // 面板外没有拦截层，窗外点按照常穿到下面 App。动作与顶栏
+    // 工具组一字同款（同一状态、同一函数），只换容器；宿主主 LC
+    // 不渲染它（门控在 ScrollView 那边）。拆三段写，免得单个
+    // 表达式 type-check 超时（3.8.285 同款）。
     @ViewBuilder
     private var czfSecondaryToolsPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1080,6 +1090,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            Divider()
+            // P0 回归（3.8.665）：安装入口——顶栏“+”在客场景被 gate
+            // 掉，面板里补三行（动作与顶栏“+”菜单一字同款），否则
+            // 客 LC 丢掉安装入口。文案复用现成 key，0 新 key。
+            czfSecondaryToolsInstallSection
             Divider()
             // 筛选开关（显隐口径与 czfRunningTools 同款）。
             if #available(iOS 16.0, *) {
@@ -1228,6 +1243,40 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
         .padding(.horizontal, 12)
         .padding(.top, 8)
+    }
+
+    // P0 回归（3.8.665）：安装行的行内版——与顶栏“+”菜单同款
+    // 三行（IPA / URL / APK），动作一字同款（choosingIPA /
+    // startInstallFromUrl / choosingAPK）；不弹系统菜单。
+    // 单独成段，面板主 VStack 不多占 buildBlock 分量。
+    @ViewBuilder
+    private var czfSecondaryToolsInstallSection: some View {
+        Button {
+            choosingIPA = true
+        } label: {
+            Label("lc.appList.installFromIpa".loc, systemImage: "doc.badge.plus")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        Divider()
+        Button {
+            Task { await startInstallFromUrl() }
+        } label: {
+            Label("lc.appList.installFromUrl".loc, systemImage: "link.badge.plus")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        Divider()
+        Button {
+            choosingAPK = true
+        } label: {
+            Label("lc.appList.installFromApk".loc, systemImage: "square.and.arrow.down")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     // 盾牌菜单的行内版：同一文案、同一函数（toggleVPNCore /
@@ -2554,14 +2603,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     private var czfAppScrollContent: some View {
         ScrollViewReader { proxy in
         ScrollView {
-            // P0（3.8.655）：副 LC（multiLCStatus == 2）的 App 页
-            // 跑在宿主进程的虚拟窗里（Decorated 窗），系统顶栏溢出
-            // 菜单伸出顶栏 bounds——可见但点不到，触摸穿到下面 App。
-            // 副 LC 下不走顶栏溢出：工具收进下面的行内面板（在
+            // P0（3.8.655）/ 回归（3.8.665）：客场景 LC 分身
+            //（LiveProcess 客进程，czfIsGuestScene）的 App 页跑在
+            // 客进程的虚拟窗里（Decorated 窗），系统顶栏溢出菜单
+            // 伸出顶栏 bounds——可见但点不到，触摸穿到下面 App。
+            // 客场景下不走顶栏溢出：工具收进下面的行内面板（在
             // ScrollView 内容里，全部可视区都在窗 bounds 内，点按
             // 必中）；顶栏只留“+”与“>”，不再产生溢出菜单。
-            // 主 LC（status 0）一字不动，顶栏溢出菜单照常。
-            if topToolsExpanded, sharedModel.multiLCStatus == 2 {
+            // 宿主主 LC（!czfIsGuestScene）一字不动，顶栏溢出菜单照常。
+            // 判据用 isLiveProcess 而不用 multiLCStatus == 2：同版
+            // 重签的分身 scheme 仍是 livecontainer、status 恒 0，
+            // 旧判据在客场景恒为假（live-p0-rerecon-186）。
+            if topToolsExpanded, czfIsGuestScene {
                 czfSecondaryToolsPanel
                     .id("czfSecondaryToolsPanel")
             }
@@ -2709,7 +2762,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 面板插在内容顶部：用户在列表下方滚动时点“>”，面板
             // 在屏外；展开后滚回顶部，面板立即在眼前。下一轮跑，
             // 等面板布局落定再滚。
-            if expanded, sharedModel.multiLCStatus == 2 {
+            if expanded, czfIsGuestScene {
                 DispatchQueue.main.async {
                     withAnimation { proxy.scrollTo("czfSecondaryToolsPanel", anchor: .top) }
                 }
