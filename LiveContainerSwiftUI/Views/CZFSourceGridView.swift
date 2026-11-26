@@ -258,12 +258,22 @@ struct CZFSourceGridGroupHeaderView: View {
                 }
             }
             .buttonStyle(.plain)
+            // 3.8.658（F2）：停用后组头补“已暂停”小字。
+            if viewModel.isSourcePaused(item.url) {
+                Text("已暂停")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             if item.isLoading {
                 ProgressView()
             } else {
                 Menu {
                     Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
+                    // 3.8.658（F2）：暂停检查更新（与列表组头同款）。
+                    Button(viewModel.isSourcePaused(item.url) ? "lc.sources.resumeUpdates".loc : "lc.sources.pauseUpdates".loc, systemImage: viewModel.isSourcePaused(item.url) ? "play.fill" : "pause.fill") {
+                        viewModel.togglePauseSource(item.url)
+                    }
                     Button("复制源链接", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = item.url.absoluteString
                     }
@@ -667,12 +677,22 @@ struct CZFSourceDetailView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     Text(item.source?.name ?? item.displayName)
                         .font(.system(.title2).bold())
+                    // 3.8.658（F2）：停用后补“已暂停”小字。
+                    if viewModel.isSourcePaused(item.url) {
+                        Text("已暂停")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     if item.isLoading {
                         ProgressView()
                     } else {
                         Menu {
                             Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
+                            // 3.8.658（F2）：暂停检查更新（与组头同款）。
+                            Button(viewModel.isSourcePaused(item.url) ? "lc.sources.resumeUpdates".loc : "lc.sources.pauseUpdates".loc, systemImage: viewModel.isSourcePaused(item.url) ? "play.fill" : "pause.fill") {
+                                viewModel.togglePauseSource(item.url)
+                            }
                             Button("复制源链接", systemImage: "doc.on.doc") {
                                 UIPasteboard.general.string = item.url.absoluteString
                             }

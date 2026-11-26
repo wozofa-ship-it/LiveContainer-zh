@@ -183,6 +183,37 @@ final class AltStoreSourcesViewModel: ObservableObject {
     @Published private(set) var sources: [SourceItem] = []
     @Published var isRefreshingAll = false
     private let defaultsKey = "LCAltStoreSourceURLs"
+    // 3.8.658（F2）：停用源集合——暂停检查更新的源 URL（absoluteString）。
+    // 留着源、留着缓存内容，只是不再自动联网刷它、也不再算进可更新
+    // 名单；单源手动刷新不拦（显式点的那次仍可刷）。与源列表同库
+    // 同款（UserDefaults.standard，[String]），删源时顺带清记录，
+    // 免得同 URL 重加回来还停着。@Published：组头 Menu 文案与
+    // “已暂停”小字跟它走；视图另有 onChange 重算可更新缓存。
+    @Published private(set) var disabledSourceURLs: Set<String> = []
+    private let disabledKey = "CZFDisabledSourceURLs"
+
+    func isSourcePaused(_ url: URL) -> Bool {
+        disabledSourceURLs.contains(url.absoluteString)
+    }
+
+    func togglePauseSource(_ url: URL) {
+        let key = url.absoluteString
+        if disabledSourceURLs.contains(key) {
+            disabledSourceURLs.remove(key)
+        } else {
+            disabledSourceURLs.insert(key)
+        }
+        persistDisabledSources()
+    }
+
+    private func persistDisabledSources() {
+        UserDefaults.standard.set(Array(disabledSourceURLs), forKey: disabledKey)
+    }
+
+    private func loadDisabledSources() {
+        let stored = UserDefaults.standard.array(forKey: disabledKey) as? [String] ?? []
+        disabledSourceURLs = Set(stored)
+    }
 
     private let cacheDirectoryName = "AltStoreSourceCache"
     private var hasLoadedSources = false
@@ -216,6 +247,9 @@ final class AltStoreSourcesViewModel: ObservableObject {
     
     func removeSource(_ item: SourceItem) {
         sources.removeAll { $0.id == item.id }
+        // 3.8.658（F2）：删源顺带清停用记录，同 URL 重加回来不还停着。
+        disabledSourceURLs.remove(item.url.absoluteString)
+        persistDisabledSources()
         persistSources()
         removeCache(for: item.url)
     }
@@ -243,7 +277,9 @@ final class AltStoreSourcesViewModel: ObservableObject {
         // 都在主 actor 上串行，网络 await 会挂起让出，不会
         // 出现多任务同时改数组的竞态；缓存已在 loadStoredSources
         // 里先显示，刷新期间旧内容不清空，失败只记 error。
-        let urls = sources.map({ $0.url })
+        // 3.8.658（F2）：停用源不进自动刷新——只刷未停用的源；
+        // 单源手动刷新 refreshSource(url:) 不拦。
+        let urls = sources.map({ $0.url }).filter { !disabledSourceURLs.contains($0.absoluteString) }
         var start = 0
         while start < urls.count {
             let chunk = Array(urls[start..<min(start + 4, urls.count)])
@@ -257,7 +293,8 @@ final class AltStoreSourcesViewModel: ObservableObject {
         // 3.8.653（F2）：上次检查更新时间——至少一个源本次成功才写；
         // 单源成功已在 refreshSource 成功处写过，这里是整组刷新的
         // 收口；全失败（断网）不写，时间戳才诚实。
-        if sources.contains(where: { $0.error == nil }) {
+        // 3.8.658（F2）：停用源不算——全停用时一个都没查，时间戳不写。
+        if sources.contains(where: { $0.error == nil && !disabledSourceURLs.contains($0.url.absoluteString) }) {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
         }
     }
@@ -311,6 +348,8 @@ final class AltStoreSourcesViewModel: ObservableObject {
     // init 时 sources 为空，与旧行为完全一致。面板每次调出前调一次
     // reloadStoredSources() 再刷新。
     private func loadStoredSources() {
+        // 3.8.658（F2）：停用集合随源列表一起读回。
+        loadDisabledSources()
         let defaults = UserDefaults.standard
         let stored = defaults.array(forKey: defaultsKey) as? [String] ?? []
         // 3.8.553（L83）：已存的重复源（归一前加进来的两种写法）
@@ -1130,6 +1169,9 @@ struct LCSourcesView: View {
                                     onDownload: download(app:),
                                     onDownloadVersion: downloadVersion(url:),
                                     onRemove: { sourcePendingRemoval = entry.item },
+                                    // 3.8.658（F2）：停用开关接 ViewModel。
+                                    isPaused: viewModel.isSourcePaused(entry.item.url),
+                                    onTogglePause: { viewModel.togglePauseSource(entry.item.url) },
                                     toggleExpanded: { toggleExpansion(for: entry.item.id) },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
@@ -1503,6 +1545,11 @@ struct LCSourcesView: View {
             expandedSources = expandedSources.intersection(newSet).union(newlyAdded)
             czfKnownSourceIDs = newSet
         }
+        // 3.8.658（F2）：停用/恢复源即重算可更新名单与红点——
+        // togglePauseSource 不改 sources，上面那路 onChange 不触发。
+        .onChange(of: viewModel.disabledSourceURLs) { _ in
+            refreshUpdatableCache()
+        }
         .onChange(of: sharedModel.apps) { _ in
             refreshUpdatableCache()
         }
@@ -1574,6 +1621,15 @@ struct LCSourcesView: View {
                 return true
             }
             if let subtitle = app.subtitle?.lowercased(), subtitle.contains(lower) {
+                return true
+            }
+            // 3.8.658（F3）：源页搜索顺带支持版本号 + build 号——
+            // 原来只比名字/Bundle ID/开发者/副标题，版本号都不比；
+            // 与 App 页同款，build 缺省 "0" 不参与匹配。
+            if let latest = app.latestVersion, latest.version.lowercased().contains(lower) {
+                return true
+            }
+            if let build = app.latestVersion?.buildVersion?.lowercased(), build != "0", build.contains(lower) {
                 return true
             }
             return false
@@ -1782,6 +1838,9 @@ struct LCSourcesView: View {
         var bestByBundle: [String: AltStoreSourceApp] = [:]
         var order: [String] = []
         for item in viewModel.sources {
+            // 3.8.658（F2）：停用源不参与可更新计算——缓存内容照常
+            // 显示、可安装，只是不再把它算进可更新名单与红点。
+            guard !viewModel.isSourcePaused(item.url) else { continue }
             guard let source = item.source else { continue }
             for app in source.apps {
                 guard let latest = app.latestVersion,
@@ -2521,6 +2580,10 @@ private struct AltStoreSourceSectionView: View {
     //（onDownload 只下最新版，历史版本走这条）。
     let onDownloadVersion: (URL) -> Void
     let onRemove: () -> Void
+    // 3.8.658（F2）：停用开关——组头 Menu 里“暂停检查更新 /
+    // 恢复检查”，停用后组头补“已暂停”小字。
+    let isPaused: Bool
+    let onTogglePause: () -> Void
     let toggleExpanded: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
@@ -2541,6 +2604,13 @@ private struct AltStoreSourceSectionView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                // 3.8.658（F2）：停用后组头补“已暂停”小字——缓存内容
+                // 照常显示、可安装，不藏 App。
+                if isPaused {
+                    Text("已暂停")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 // 收起时刷新失败无处显示：有缓存 + 收起时，错误行
                 // 藏在未展开的内容里（S1 只在展开/过滤时渲染），
@@ -2556,6 +2626,9 @@ private struct AltStoreSourceSectionView: View {
                 } else {
                     Menu {
                         Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
+                        // 3.8.658（F2）：暂停检查更新——留着源、留着缓存，
+                        // 只跳过自动刷新与可更新计算；单源手动刷新不拦。
+                        Button(isPaused ? "lc.sources.resumeUpdates".loc : "lc.sources.pauseUpdates".loc, systemImage: isPaused ? "play.fill" : "pause.fill", action: onTogglePause)
                         Button("复制源链接", systemImage: "doc.on.doc") {
                             UIPasteboard.general.string = item.url.absoluteString
                         }

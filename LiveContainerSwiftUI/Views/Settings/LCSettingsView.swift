@@ -83,6 +83,10 @@ struct LCSettingsView: View {
     @AppStorage("LCSideJITServerAddress", store: LCUtils.appGroupUserDefault) var sideJITServerAddress : String = ""
     @AppStorage("LCDeviceUDID", store: LCUtils.appGroupUserDefault) var deviceUDID: String = ""
     @AppStorage("LCJITEnablerType", store: LCUtils.appGroupUserDefault) var JITEnabler: JITEnablerType = .SideJITServer
+    // 3.8.658（F1）：到期提醒首档提前天数（默认 3 天）——设置页
+    // Picker 可调；CZFExpiryReminder.schedule 读同一键拼档位。
+    // 存 Int 天数，不存 Date（第十轮教训）。CZF 前缀，进设置备份。
+    @AppStorage("CZFExpiryRemindFirstDays") private var czfExpiryRemindFirstDays = 3
     
     @State var store : Store = .Unknown
     
@@ -719,17 +723,35 @@ struct LCSettingsView: View {
                     .buttonStyle(.borderless)
                 }
             }
-            // 3.8.639（UI 打磨）：证书到期提醒说明行——F1 到期前 3 天 /
-            // 1 天 / 当天 09:00 各推一条；纯说明行，无开关、无新 key，
-            // 权限状态看上面权限行，不另读状态。
+            // 3.8.639（UI 打磨）：证书到期提醒说明行——首档 / 1 天 /
+            // 当天 09:00 各推一条；3.8.658（F1）：首档天数可调，
+            // 下面 Picker 改档位，文案跟当前档位走（首档=1 时
+            // 不重复写两遍 1 天）。改档位后当场不重排，下次进
+            // App 列表才按新档位排，行文案写明。
             HStack {
                 LCSettingsIcon(systemName: "bell.badge", color: .orange)
                 Text("证书到期提醒")
                 Spacer()
-                Text("到期前 3 天 / 1 天 / 当天 09:00")
+                Text(czfExpiryRemindFirstDays == 1 ? "到期前 1 天 / 当天 09:00" : "到期前 \(czfExpiryRemindFirstDays) 天 / 1 天 / 当天 09:00")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            // 3.8.658（F1）：首档提前天数 Picker——默认 3 天；
+            // Int 天数，不存 Date（第十轮教训）。
+            Picker(selection: $czfExpiryRemindFirstDays) {
+                ForEach(CZFExpiryReminder.firstDaysOptions, id: \.self) { days in
+                    Text("\(days) 天").tag(days)
+                }
+            } label: {
+                HStack {
+                    LCSettingsIcon(systemName: "calendar.badge.clock", color: .orange)
+                    Text("首档提前提醒")
+                }
+            }
+            .pickerStyle(.menu)
+            Text("改动后下次进入 App 列表时按新档位重排提醒")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             .onAppear { refreshNotificationAuth() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 refreshNotificationAuth()

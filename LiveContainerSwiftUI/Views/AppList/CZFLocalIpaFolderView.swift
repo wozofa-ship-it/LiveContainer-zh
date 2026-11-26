@@ -618,6 +618,9 @@ struct CZFInlineIpaFolderSection: View {
     // 3.8.649（F3）：文件夹排序开关——与下面格子读同一把
     // @AppStorage 键（UserDefaults 共享，两处都跟随）。
     @AppStorage("CZFLocalIpaFolderSort") private var czfSort = CZFLocalIpaFolderSort.name
+    // 3.8.658（B2）：“清除文件夹”确认框开关——此前一点即清，
+    // 与“换文件夹”并排、误触即丢绑定（重选可恢复，不是丢文件）。
+    @State private var czfShowClearFolderConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -642,8 +645,19 @@ struct CZFInlineIpaFolderSection: View {
                         Label(czfSort.czfDisplayName, systemImage: "arrow.up.arrow.down")
                             .font(.footnote)
                     }
-                    Button("清除文件夹", role: .destructive, action: onClearFolder)
-                        .font(.footnote)
+                    Button("清除文件夹", role: .destructive) {
+                        // 3.8.658（B2）：先弹确认再清——与“换文件夹”
+                        // 并排，误触即丢绑定；文案不写“无法撤销”
+                        //（重选即可恢复），只说要重新选择。
+                        czfShowClearFolderConfirm = true
+                    }
+                    .font(.footnote)
+                    .confirmationDialog("清除文件夹", isPresented: $czfShowClearFolderConfirm, titleVisibility: .visible) {
+                        Button("清除", role: .destructive, action: onClearFolder)
+                        Button("取消", role: .cancel) { }
+                    } message: {
+                        Text("将取消已选文件夹，需重新选择文件夹。文件夹里的 IPA 文件不会被删除。")
+                    }
                     Button("换文件夹", action: onPickFolder)
                         .font(.footnote)
                 }

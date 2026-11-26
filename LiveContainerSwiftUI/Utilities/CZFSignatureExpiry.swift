@@ -130,8 +130,9 @@ enum CZFSignatureExpiryReader {
 // 坑（解剖自我 2026-12-02 到期，全靠外部 cron 提醒），应用内
 // 提醒覆盖全部 App。只提醒，不续签：不恢复设置页已删的续签区，
 // 不加任何续签动作。
-// 口径：到期前 3 天 / 1 天 / 当天 09:00 各推一条；已过的档位不补
-// 推（当天 09:00 已过就不排当天的），已过期不排。identifier 用
+// 口径：到期前 首档 / 1 天 / 当天 09:00 各推一条（首档默认 3 天，
+// 设置页可调 1/3/5/7/14 天，见 CZFExpiryReminder.firstDays）；
+// 已过的档位不补推（当天 09:00 已过就不排当天的），已过期不排。identifier 用
 // 确定性 `CZFExpiry-<bundlePath>-<3|1|0>`，每次刷新先按前缀清
 // 掉该 App 的旧待发再重排（重签后续期、旧提醒自动作废）。
 // 仅 `.authorized` 才排；`.notDetermined` 时调一次
@@ -139,7 +140,21 @@ enum CZFSignatureExpiryReader {
 // UserNotifications 全版本可用，部署目标 iOS 15 无需 #available。
 // 文案沿用 `notifyBatchDone` 硬编码中文先例，0 新 key。
 enum CZFExpiryReminder {
-    private static let thresholds = [3, 1, 0]
+    // 3.8.658（F1）：首档提前天数可调——读 CZFExpiryRemindFirstDays
+    //（设置页 Picker，默认 3 天）；档位 = 去重排序后的 [首档, 1, 0]
+    //（首档=1 时为 [1, 0]）。存 Int 天数，不存 Date（第十轮教训：
+    //@AppStorage 的 Date 值类型只在 iOS 18+ 可用）。未存/非法值
+    // 一律回落 3 天，现有行为一字不变；identifier 前缀不动，
+    // 旧提醒仍按前缀清掉重排。
+    static let firstDaysKey = "CZFExpiryRemindFirstDays"
+    static let firstDaysOptions = [1, 3, 5, 7, 14]
+    static var firstDays: Int {
+        let stored = UserDefaults.standard.object(forKey: firstDaysKey) as? Int ?? 3
+        return (1...30).contains(stored) ? stored : 3
+    }
+    private static var thresholds: [Int] {
+        Array(Set([firstDays, 1, 0])).sorted(by: >)
+    }
 
     static func schedule(for items: [CZFSignatureExpiry]) {
         guard !items.isEmpty else { return }

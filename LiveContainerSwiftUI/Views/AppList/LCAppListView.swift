@@ -1428,6 +1428,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // CFBundleShortVersionString，取不到是 "?"）；
                 // "?" 不参与匹配，免得只输一个问号就列出全部。
                 (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery)) ||
+                // 3.8.658（F3）：搜 build 号也命中——详情页明明显示
+                // “版本 (build)”，搜索却只比短版本号；多开分身同版
+                // 本不同 build、或只记得 build 号时搜不到。build 缺省
+                // 是 "0"，不参与匹配，免得输个 0 列出全部。
+                ((app.appInfo.buildVersion() ?? "") != "0" && (app.appInfo.buildVersion() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery)) ||
                 // 3.8.637（A1）：备注与容器名也命中——备注是用户自己
                 // 写的内容（横幅上可见），容器名是各分身数据夹的名字；
                 // 以前只比名字/Bundle ID/版本号，这两路搜不到。
@@ -1519,6 +1524,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 app.appInfo.displayName().localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
                 (app.appInfo.bundleIdentifier() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery) ||
                 (app.version != "?" && app.version.localizedCaseInsensitiveContains(searchContext.debouncedQuery)) ||
+                // 3.8.658（F3）：隐藏区同加 build 号——与可见区同款
+                //（build 缺省 "0" 不参与匹配）。
+                ((app.appInfo.buildVersion() ?? "") != "0" && (app.appInfo.buildVersion() ?? "").localizedCaseInsensitiveContains(searchContext.debouncedQuery)) ||
                 // 3.8.641（B-hidden）：备注与容器名也命中——与可见区
                 // czfRefreshFilteredApps 内同款两路；A1（d6d6447e）只改了
                 // 可见区那处闭包，这里漏了，解锁隐藏 App 后搜备注/容器名
@@ -2573,6 +2581,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.651（F2）：开关翻动即重跑过滤（与仅可更新同款）。
         .onChange(of: czfNoBackupOnly) { _ in
             czfRefreshFilteredApps()
+        }
+        // 3.8.658（B1）：可更新名单变了即重跑过滤——源页刷新完成
+        // 写新名单时 App 页已在前台、onAppear 不再触发，sortedApps/
+        // 搜索/开关又都没变，过滤缓存此前永远不重算，新出现可更
+        // 新的 App 不进列表、已不在名单里的仍赖着。只在开关开着
+        // 时重算；关着时名单不影响列表，不必跑。
+        .onChange(of: czfUpdatableBundleIDs) { _ in
+            if czfUpdatableOnly {
+                czfRefreshFilteredApps()
+            }
         }
         .background {
             if #available(iOS 16.0, *) {
@@ -4045,7 +4063,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             //（别发 CZFRefreshSourcesRequest，源页 :1483 注释已有
             // 此教训）。源页 onReceive 接住重算；重算幂等，隐藏
             // Tab 的 onChange 万一本来就会触发，多发一次也无害。
-            NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            // 3.8.658（B3）：installIpaFile 是非隔离 async，本处在
+            // 裸 Task 执行器上——此前直接 post，接帖侧
+            // refreshUpdatableCache 写 @State/@AppStorage 就离主
+            // 线程报 Publishing changes、红点/名单偶尔不刷新。
+            // 回主线程再发，一次修掉所有接帖方；模型追加本身已
+            // 在上面排进主队列，重算读到的是安装后的模型。
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+            }
 
             // O-9：这里只做模型追加，不清 installprogressVisible——flag
             // 只由 installFromUrl 的 defer 一处清理（startInstallApp 路
