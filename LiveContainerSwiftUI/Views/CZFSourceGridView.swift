@@ -242,7 +242,7 @@ struct CZFSourceGridGroupHeaderView: View {
     let onBatchInstall: () -> Void
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     // 3.8.672（B-1）：插件在途安装键集——只往详情页传，不在组头用。
-    let dylibInstallingIDs: Set<String> = []
+    let dylibInstallingIDs: Set<String>
 
     // 3.8.673 修法（第四轮红字 1）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报
@@ -701,7 +701,7 @@ struct CZFSourceDetailView: View {
     let onBatchInstall: () -> Void
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     // 3.8.672（B-1）：插件在途安装键集——往复用的列表行传。
-    let dylibInstallingIDs: Set<String> = []
+    let dylibInstallingIDs: Set<String>
 
     // 3.8.673 修法（红字 4）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报

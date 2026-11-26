@@ -2764,7 +2764,7 @@ struct CZFSourceAppListView: View {
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     // 3.8.672（B-1）：插件在途安装键集——行安装按钮在途时变转圈；
     // 带默认值，网格详情页等复用方不传时按无在途处理。
-    let dylibInstallingIDs: Set<String> = []
+    let dylibInstallingIDs: Set<String>
 
     // 3.8.673 修法（红字 8）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报
@@ -2921,7 +2921,7 @@ private struct AltStoreSourceSectionView: View {
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     // 3.8.672（B-1）：插件在途安装键集——往下传给列表行；
     // 带默认值，旧调用点不传时按无在途处理。
-    let dylibInstallingIDs: Set<String> = []
+    let dylibInstallingIDs: Set<String>
 
     // 3.8.673 修法（第四轮红字 2）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报
@@ -3125,7 +3125,7 @@ struct LCSourceAppBanner: View {
     let installedLookup: CZFInstalledLookup
     // 3.8.672（B-1）：插件在途安装键集——在途的插件行安装按钮
     // 变转圈；带默认值，旧调用点不传时按无在途处理。
-    let dylibInstallingIDs: Set<String> = []
+    let dylibInstallingIDs: Set<String>
 
     // 3.8.673 修法（红字 7）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报
