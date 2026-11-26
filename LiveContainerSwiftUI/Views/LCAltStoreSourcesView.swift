@@ -1273,7 +1273,7 @@ struct LCSourcesView: View {
                             // \.item.id 推不出根类型（报成 Binding<C>），
                             // 与网格 ForEach 同款改按下标迭代；不用
                             // .indices（会被解析成 indices(where:) 方法）。
-                            ForEach(0..<czfVisibleListEntries.count, id: \.self) { index in
+                            ForEach(0..<czfVisibleListEntries.count, id: \.self) { (index: Int) in
                                 let entry = czfVisibleListEntries[index]
                                 let apps = entry.apps
                                 AltStoreSourceSectionView(

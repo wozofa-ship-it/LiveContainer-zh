@@ -172,7 +172,7 @@ struct CZFSourceGridView: View {
         // 方法），改用 0..<count（同文件 :399 已有先例）。
         let visibleItems = czfVisibleItems
         return VStack(alignment: .leading, spacing: 16) {
-            ForEach(0..<visibleItems.count, id: \.self) { index in
+            ForEach(0..<visibleItems.count, id: \.self) { (index: Int) in
                 let entry = visibleItems[index]
                 let item = entry.item
                 let apps = entry.apps
