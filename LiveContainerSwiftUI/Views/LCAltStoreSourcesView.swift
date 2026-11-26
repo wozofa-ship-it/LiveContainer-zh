@@ -258,7 +258,7 @@ final class AltStoreSourcesViewModel: ObservableObject {
         // 单源成功已在 refreshSource 成功处写过，这里是整组刷新的
         // 收口；全失败（断网）不写，时间戳才诚实。
         if sources.contains(where: { $0.error == nil }) {
-            UserDefaults.standard.set(Date(), forKey: "CZFSourceLastCheckDate")
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
         }
     }
     
@@ -286,14 +286,14 @@ final class AltStoreSourcesViewModel: ObservableObject {
             if let previousData, previousData == data, sources[sourceIndex].source != nil {
                 sources[sourceIndex].isLoading = false
                 // 3.8.653（F2）：数据未变也是查过一次（联网拉到了新数据）。
-                UserDefaults.standard.set(Date(), forKey: "CZFSourceLastCheckDate")
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
                 return
             }
             sources[sourceIndex].source = source
             sources[sourceIndex].isLoading = false
             storeCache(data, for: url)
             // 3.8.653（F2）：单源刷新成功也算一次检查（组头单刷同款）。
-            UserDefaults.standard.set(Date(), forKey: "CZFSourceLastCheckDate")
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
         } catch {
             if let sourceIndex = sources.firstIndex(where: { $0.url == url }) {
                 sources[sourceIndex].error = error.localizedDescription
@@ -932,22 +932,23 @@ struct LCSourcesView: View {
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
     // 3.8.653（F2）：上次检查更新时间——ViewModel 在刷新成功处写
-    // CZFSourceLastCheckDate（存 Date）。未写过走默认值 .distantPast =
-    // 尚未检查；只读，不写；失败不写（见 refreshAllSources /
-    // refreshSource 注释）。修法注：首推用无默认值的 Date?，编不过——
-    // @AppStorage 无默认值初始化只在 iOS 18+ 可用；带默认值的
-    // init(wrappedValue:_:store:) 自 iOS 14 就有，改走它。
-    @AppStorage("CZFSourceLastCheckDate") private var czfLastCheckDate: Date = .distantPast
+    // CZFSourceLastCheckDate（存秒数 Double，0 = 尚未检查）。只读，
+    // 不写；失败不写（见 refreshAllSources / refreshSource 注释）。
+    // 修法注：@AppStorage 的 Date 值类型无论带不带默认值都只在
+    // iOS 18+ 可用（两轮红字：init(_:store:) 与
+    // init(wrappedValue:_:store:) 各一处）；改存 Double 秒数，
+    // 同文件 CZFLastSourceAutoRefresh 同款，显示时再拼回 Date。
+    @AppStorage("CZFSourceLastCheckDate") private var czfLastCheckDate: Double = 0
 
     // 3.8.653（F2）：上次检查文案——有值拼日期（dateStyle .short /
     // timeStyle .medium，LCAppSettingsView.formatDate 同款），
     // 无值显示“尚未检查”。
     private var czfLastCheckText: String {
-        guard czfLastCheckDate != .distantPast else { return "尚未检查" }
+        guard czfLastCheckDate > 0 else { return "尚未检查" }
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         formatter.timeStyle = .medium
-        return "lc.sources.lastChecked".localizeWithFormat(formatter.string(from: czfLastCheckDate))
+        return "lc.sources.lastChecked".localizeWithFormat(formatter.string(from: Date(timeIntervalSince1970: czfLastCheckDate)))
     }
 
     /// 源页网格列数/图标大小分键迁移（3.8.461）：旧版与 App 页
