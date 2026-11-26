@@ -196,7 +196,10 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                     return (url, size, mtime)
                 }
                 let czfCurrentPrints: [(URL, Int64, Double)] = items.map { ($0.url, $0.fileSize, $0.modificationDate?.timeIntervalSince1970 ?? 0) }
-                if czfFoundPrints == czfCurrentPrints {
+                // 3.8.665 修法：元组数组没有 ==（元组不遵 Equatable，
+                // 构建 45776004621 唯一红字）——改逐项比对，顺序敏感
+                // 语义与原 == 一致（两边同按文件名排序）。
+                if czfFoundPrints.elementsEqual(czfCurrentPrints, by: { $0.0 == $1.0 && $0.1 == $1.1 && $0.2 == $1.2 }) {
                     return
                 }
             }
