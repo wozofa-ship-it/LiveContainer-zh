@@ -1123,6 +1123,19 @@ struct LCAppSettingsView: View {
                         Text("\(czfExpiry.dateText)（\(czfExpiry.label)）")
                             .foregroundStyle(.gray)
                     }
+                    // 3.8.660（F3）：签名团队只读行——数据源复用同一份
+                    // czfExpiry，不新增读盘；TeamName 缺失时显示 10 位
+                    // 队号（TeamIdentifier[0]，见 CZFSignatureExpiry），
+                    // 读不到 mobileprovision 的 App 本行与到期行一起不显示。
+                    if let team = czfExpiry.teamName {
+                        HStack {
+                            Text("签名团队")
+                            Spacer()
+                            Text(team)
+                                .foregroundStyle(.gray)
+                                .lineLimit(1)
+                        }
+                    }
                 }
             } header: {
                 Text("lc.common.statistics")
@@ -1133,9 +1146,11 @@ struct LCAppSettingsView: View {
                 let size = await LCStorageManagementModel.czfTotalSize(for: model)
                 await MainActor.run { czfTotalSize = size }
                 // 3.8.653（F3）：到期日顺手算——公开的 loadAll 单条目，
-                // 不动 private 的 cachedExpiryDate、不动 reader 签名；
+                // 不动 private 的 cachedExpiryInfo、不动 reader 签名；
                 // 快照在当前上下文取（bundlePath/displayName 纯读），
                 // 读盘放 detached（loadAll 自带 mtime+size 缓存）。
+                // 3.8.660（F3）：签名团队同条目一起回来（loadAll 已透传），
+                // 这里不新增读盘。
                 let czfExpiryEntries: [(name: String, bundlePath: String)] = {
                     guard let bundlePath = model.appInfo.bundlePath() else { return [] }
                     let name = model.appInfo.displayName() ?? model.appInfo.bundleIdentifier() ?? ""

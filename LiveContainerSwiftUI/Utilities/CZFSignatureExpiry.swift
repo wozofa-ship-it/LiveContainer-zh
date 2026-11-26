@@ -11,6 +11,9 @@ struct CZFSignatureExpiry: Identifiable {
     let name: String
     let bundlePath: String
     let expiryDate: Date
+    // 3.8.660（F3）：签名团队——TeamName，无则取 TeamIdentifier[0]；
+    // 读不到 mobileprovision 的 App 本字段为 nil，详情行不渲染。
+    let teamName: String?
 
     var daysLeft: Int {
         let cal = Calendar.current
@@ -71,42 +74,51 @@ enum CZFSignatureExpiryReader {
     // 后台线程调，缓存读写加锁（DateFormatter 那边是主
     // 线程渲染，不走这把锁）。
     private static let expiryCacheLock = NSLock()
-    private static var expiryCache: [String: (mtime: Date, size: Int, date: Date?)] = [:]
+    // 3.8.660（F3）：缓存多记 teamName——同一份 mobileprovision
+    // plist 里顺手取 TeamName/TeamIdentifier，缓存键（路径 + 修改
+    // 时间 + 大小）不变，重签必然改大小或修改时间、下一轮重读。
+    private static var expiryCache: [String: (mtime: Date, size: Int, date: Date?, teamName: String?)] = [:]
 
-    private static func cachedExpiryDate(inFile path: String) -> Date? {
+    private static func cachedExpiryInfo(inFile path: String) -> (date: Date?, teamName: String?) {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let mtime = attrs[.modificationDate] as? Date,
               let size = (attrs[.size] as? NSNumber)?.intValue else {
-            return expiryDate(inFile: path)
+            return expiryInfo(inFile: path)
         }
         expiryCacheLock.lock()
         let cached = expiryCache[path]
         expiryCacheLock.unlock()
         if let cached, cached.mtime == mtime, cached.size == size {
-            return cached.date
+            return (cached.date, cached.teamName)
         }
-        let date = expiryDate(inFile: path)
+        let info = expiryInfo(inFile: path)
         expiryCacheLock.lock()
-        expiryCache[path] = (mtime, size, date)
+        expiryCache[path] = (mtime, size, info.date, info.teamName)
         expiryCacheLock.unlock()
-        return date
+        return info
     }
 
     static func loadAll(entries: [(name: String, bundlePath: String)]) -> [CZFSignatureExpiry] {
         var out: [CZFSignatureExpiry] = []
         for e in entries {
-            guard let date = cachedExpiryDate(inFile: "\(e.bundlePath)/embedded.mobileprovision") else { continue }
-            out.append(CZFSignatureExpiry(name: e.name, bundlePath: e.bundlePath, expiryDate: date))
+            let info = cachedExpiryInfo(inFile: "\(e.bundlePath)/embedded.mobileprovision")
+            guard let date = info.date else { continue }
+            out.append(CZFSignatureExpiry(name: e.name, bundlePath: e.bundlePath, expiryDate: date, teamName: info.teamName))
         }
         return out.sorted { $0.expiryDate < $1.expiryDate }
     }
 
-    static func expiryDate(inFile path: String) -> Date? {
+    /// 3.8.660（F3）：一次解析同时取到期日与签名团队——TeamName
+    /// 无则取 TeamIdentifier[0]；mobileprovision 的 TeamName /
+    /// TeamIdentifier 与 ExpirationDate 是同一 CMS 扫描出的 plist
+    /// 的标准顶层键，无新解析逻辑。
+    static func expiryInfo(inFile path: String) -> (date: Date?, teamName: String?) {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let payload = plistPayload(in: data),
               let plist = try? PropertyListSerialization.propertyList(from: payload, format: nil),
-              let dict = plist as? [String: Any] else { return nil }
-        return dict["ExpirationDate"] as? Date
+              let dict = plist as? [String: Any] else { return (nil, nil) }
+        let teamName = (dict["TeamName"] as? String) ?? (dict["TeamIdentifier"] as? [String])?.first
+        return (dict["ExpirationDate"] as? Date, teamName)
     }
 
     // CMS 包里找 plist：XML 或 bplist00 开头那段（Side 同款）

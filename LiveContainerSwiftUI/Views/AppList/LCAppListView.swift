@@ -4073,6 +4073,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
             }
 
+            // 3.8.660（B1）：新装 App 当次没有备份状态行、开着“仅无备份”
+            // 时直接“消失”——备份状态表只由 refreshBackupStatus() 建，
+            // 全仓此前只有批量备份/恢复收尾与 onAppear 三处调用，安装
+            // 完成路不调：新模型 id 不在表里，行小字守卫不渲染、筛选
+            // 严格相等又把 nil 筛掉。安装完成这里补调一次（本处已在
+            // 主队列块内，顺序在模型追加之后）；表填好后开关开着已会
+            // 重跑过滤（:443-445），覆盖更新与全新安装走同一块，
+            // 一处补齐两路。
+            refreshBackupStatus()
+
             // O-9：这里只做模型追加，不清 installprogressVisible——flag
             // 只由 installFromUrl 的 defer 一处清理（startInstallApp 路
             // 由它自己清）；原来这里在 installIpaFile return 之后才跑，

@@ -890,6 +890,20 @@ struct CZFLocalIpaGridCell: View {
         return installedLookup.isInstalled(bundleIdentifier: bid)
     }
 
+    // 3.8.660（F1）：文件夹 IPA 有新版——短版本号比已装最旧实例新
+    // 就标；源页网格同款角标（CZFSourceGridView.hasUpdate），文件夹
+    // 区是唯一没跟上的地方。已装实例取最旧的（installedModel，
+    // 3.8.649 B2），比版本走全局 czfIsNewerVersion。文件夹 IPA
+    // 无 build，build 传 nil：短版本号相等时不标（同版不同 build
+    // 比不出来，要 build 级比较需 extractIpaInfo 多读一行
+    // CFBundleVersion 进 CZFLocalIpaItem，见 F1 精度限制）。
+    private var czfHasUpdate: Bool {
+        guard let version = item.version,
+              let bid = item.bundleIdentifier, !bid.isEmpty,
+              let installed = installedLookup.installedModel(bundleIdentifier: bid) else { return false }
+        return czfIsNewerVersion(version, build: nil, newerThan: installed.appInfo.version() ?? "", installedBuild: installed.appInfo.buildVersion())
+    }
+
     // App #16：detailLoaded 是“已尝试读详情”标记——读完
     // 仍没图标也没版本号 = 解包失败，挂一句“无法读取”，
     // 和“还在读”（占位图标）区分开。
@@ -933,7 +947,15 @@ struct CZFLocalIpaGridCell: View {
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
                 }
                 .aspectRatio(1, contentMode: .fit)
-                if czfIsInstalled {
+                if czfHasUpdate {
+                    // 有新版角标（3.8.660 F1）——与源页网格同口径：
+                    // 有更新就说明已装，红色下箭头代替绿勾（不叠两层）。
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.title3)
+                        .foregroundColor(.red)
+                        .background(Color(.systemBackground).opacity(0.85), in: Circle())
+                        .offset(x: 6, y: -6)
+                } else if czfIsInstalled {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.title3)
                         .foregroundColor(.green)

@@ -192,6 +192,13 @@ final class AltStoreSourcesViewModel: ObservableObject {
     @Published private(set) var disabledSourceURLs: Set<String> = []
     private let disabledKey = "CZFDisabledSourceURLs"
 
+    // 3.8.660（F2）：各源上次成功检查时间——[源 URL: Double 秒数]，
+    // 一个字典键，不按源建多个 key；Double 秒数（@AppStorage 的
+    // Date 值类型只在 iOS 18+ 可用，见 :980 同款教训）。@Published：
+    // 组头文案跟它走；删源时顺带清记录（同 disabledSourceURLs）。
+    @Published private(set) var czfLastCheckDates: [String: Double] = [:]
+    private let lastCheckDatesKey = "CZFSourceLastCheckDates"
+
     func isSourcePaused(_ url: URL) -> Bool {
         disabledSourceURLs.contains(url.absoluteString)
     }
@@ -213,6 +220,32 @@ final class AltStoreSourcesViewModel: ObservableObject {
     private func loadDisabledSources() {
         let stored = UserDefaults.standard.array(forKey: disabledKey) as? [String] ?? []
         disabledSourceURLs = Set(stored)
+    }
+
+    private func persistLastCheckDates() {
+        UserDefaults.standard.set(czfLastCheckDates, forKey: lastCheckDatesKey)
+    }
+
+    private func loadLastCheckDates() {
+        let stored = UserDefaults.standard.dictionary(forKey: lastCheckDatesKey) ?? [:]
+        czfLastCheckDates = stored.compactMapValues { $0 as? Double }
+    }
+
+    /// 某源一次检查成功后记戳（与全局 CZFSourceLastCheckDate 同处写，
+    /// 同口径：数据未变也算查过一次，失败不写）。
+    private func czfMarkSourceChecked(_ url: URL) {
+        czfLastCheckDates[url.absoluteString] = Date().timeIntervalSince1970
+        persistLastCheckDates()
+    }
+
+    /// 某源上次成功检查文案——复用全局脚注的 lc.sources.lastChecked
+    /// 格式串；从未成功过返回“尚未检查”（全局脚注同款硬编码文案）。
+    func czfLastCheckedText(for url: URL) -> String {
+        guard let timestamp = czfLastCheckDates[url.absoluteString], timestamp > 0 else { return "尚未检查" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return "lc.sources.lastChecked".localizeWithFormat(formatter.string(from: Date(timeIntervalSince1970: timestamp)))
     }
 
     private let cacheDirectoryName = "AltStoreSourceCache"
@@ -250,6 +283,9 @@ final class AltStoreSourcesViewModel: ObservableObject {
         // 3.8.658（F2）：删源顺带清停用记录，同 URL 重加回来不还停着。
         disabledSourceURLs.remove(item.url.absoluteString)
         persistDisabledSources()
+        // 3.8.660（F2）：删源顺带清该源的上次检查戳，同款。
+        czfLastCheckDates.removeValue(forKey: item.url.absoluteString)
+        persistLastCheckDates()
         persistSources()
         removeCache(for: item.url)
     }
@@ -258,16 +294,22 @@ final class AltStoreSourcesViewModel: ObservableObject {
         await refreshSource(url: item.url)
     }
     
-    func refreshAllSources() async {
+    /// 3.8.660（B2）：返回是否至少一源成功——自动刷新节流戳失败也
+    /// 消耗，断网打开后 5 分钟内不重试；成功才写戳（见
+    /// autoRefreshSourcesIfNeeded）。成功判据复用下面全局戳同款。
+    /// @discardableResult：其余 3 处调用点（:229、:1276、坞 :5330）
+    /// 不关心返回值，不改行为。
+    @discardableResult
+    func refreshAllSources() async -> Bool {
         guard !sources.isEmpty else {
-            return
+            return false
         }
         // O-10：重入守卫——顶栏刷新、组头刷新、管理源添加后
         // 刷新都能调这里，慢源拖住整组时再点会并行跑两组，
         // 两组 defer 各置一次 false，状态提前归零、刷新
         // 指示器提前灭。已在刷直接返回，不改刷新逻辑本身。
         guard !isRefreshingAll else {
-            return
+            return false
         }
         isRefreshingAll = true
         defer { isRefreshingAll = false }
@@ -294,9 +336,11 @@ final class AltStoreSourcesViewModel: ObservableObject {
         // 单源成功已在 refreshSource 成功处写过，这里是整组刷新的
         // 收口；全失败（断网）不写，时间戳才诚实。
         // 3.8.658（F2）：停用源不算——全停用时一个都没查，时间戳不写。
-        if sources.contains(where: { $0.error == nil && !disabledSourceURLs.contains($0.url.absoluteString) }) {
+        let czfRefreshSucceeded = sources.contains(where: { $0.error == nil && !disabledSourceURLs.contains($0.url.absoluteString) })
+        if czfRefreshSucceeded {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
         }
+        return czfRefreshSucceeded
     }
     
     private func refreshSource(url: URL) async {
@@ -324,6 +368,8 @@ final class AltStoreSourcesViewModel: ObservableObject {
                 sources[sourceIndex].isLoading = false
                 // 3.8.653（F2）：数据未变也是查过一次（联网拉到了新数据）。
                 UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
+                // 3.8.660（F2）：该源本次成功也记戳。
+                czfMarkSourceChecked(url)
                 return
             }
             sources[sourceIndex].source = source
@@ -331,6 +377,8 @@ final class AltStoreSourcesViewModel: ObservableObject {
             storeCache(data, for: url)
             // 3.8.653（F2）：单源刷新成功也算一次检查（组头单刷同款）。
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
+            // 3.8.660（F2）：该源本次成功也记戳。
+            czfMarkSourceChecked(url)
         } catch {
             if let sourceIndex = sources.firstIndex(where: { $0.url == url }) {
                 sources[sourceIndex].error = error.localizedDescription
@@ -350,6 +398,8 @@ final class AltStoreSourcesViewModel: ObservableObject {
     private func loadStoredSources() {
         // 3.8.658（F2）：停用集合随源列表一起读回。
         loadDisabledSources()
+        // 3.8.660（F2）：各源上次检查戳随源列表一起读回。
+        loadLastCheckDates()
         let defaults = UserDefaults.standard
         let stored = defaults.array(forKey: defaultsKey) as? [String] ?? []
         // 3.8.553（L83）：已存的重复源（归一前加进来的两种写法）
@@ -1012,13 +1062,21 @@ struct LCSourcesView: View {
 
     /// 自动刷新源：打开 App / 切到源页时后台刷一次，更新红点
     /// 才是准的；5 分钟内重复触发直接跳过，不浪费流量
+    /// 3.8.660（B2）：节流戳只在刷成功后写——原来先写戳再刷，
+    /// 断网失败也消耗掉 5 分钟窗口，网恢复后反复进出源页都不
+    /// 重刷；手动刷新在途时自动刷新的 Task 直接 no-op，戳也被
+    /// 白白消耗（同一根因第二条路）。Task 回主线程写戳（@AppStorage
+    /// 写与 refreshAllSources 的 MainActor 调用同款，见 L40）。
     private func autoRefreshSourcesIfNeeded() {
         let now = Date().timeIntervalSince1970
         guard now - lastSourceAutoRefresh > 300, !viewModel.sources.isEmpty else {
             return
         }
-        lastSourceAutoRefresh = now
-        Task { await viewModel.refreshAllSources() }
+        Task { @MainActor in
+            if await viewModel.refreshAllSources() {
+                lastSourceAutoRefresh = Date().timeIntervalSince1970
+            }
+        }
     }
     
     @EnvironmentObject private var sharedModel : SharedModel
@@ -1172,6 +1230,8 @@ struct LCSourcesView: View {
                                     // 3.8.658（F2）：停用开关接 ViewModel。
                                     isPaused: viewModel.isSourcePaused(entry.item.url),
                                     onTogglePause: { viewModel.togglePauseSource(entry.item.url) },
+                                    // 3.8.660（F2）：各源上次成功检查时间接 ViewModel。
+                                    lastCheckedText: viewModel.czfLastCheckedText(for: entry.item.url),
                                     toggleExpanded: { toggleExpansion(for: entry.item.id) },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
@@ -2584,6 +2644,9 @@ private struct AltStoreSourceSectionView: View {
     // 恢复检查”，停用后组头补“已暂停”小字。
     let isPaused: Bool
     let onTogglePause: () -> Void
+    // 3.8.660（F2）：各源上次成功检查文案（ViewModel 已拼好，
+    // 从未成功过为“尚未检查”），组头副标题下单独成行。
+    let lastCheckedText: String
     let toggleExpanded: () -> Void
     let isBatchMode: Bool
     let selectedIDs: Set<String>
@@ -2641,12 +2704,20 @@ private struct AltStoreSourceSectionView: View {
                 }
             }
             
-            if let subtitle = item.source?.subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else if item.source == nil, let host = item.url.host {
-                Text(host)
+            // 3.8.660（F2）：副标题与上次检查时间两行 footnote 收到
+            // 一个 VStack 里，行距 2pt（UI 打磨：原来两行之间是父级
+            // 12pt，太散）；检查时间单独成行，从未成功过显示“尚未检查”。
+            VStack(alignment: .leading, spacing: 2) {
+                if let subtitle = item.source?.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if item.source == nil, let host = item.url.host {
+                    Text(host)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Text(lastCheckedText)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

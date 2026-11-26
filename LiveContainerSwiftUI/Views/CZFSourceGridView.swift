@@ -225,6 +225,10 @@ struct CZFSourceGridGroupHeaderView: View {
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
 
     var body: some View {
+        // 3.8.660（F2）：各源上次成功检查时间——标题下一行 footnote，
+        // 与列表组头同款文案（viewModel.czfLastCheckedText，从未成功
+        // 过为“尚未检查”）；组头原来只有标题一行，时间行与标题行距 2pt。
+        VStack(alignment: .leading, spacing: 2) {
         HStack(alignment: .center, spacing: 12) {
             NavigationLink {
                 CZFSourceDetailView(
@@ -287,6 +291,10 @@ struct CZFSourceGridGroupHeaderView: View {
                         .accessibilityLabel("更多操作")
                 }
             }
+        }
+            Text(viewModel.czfLastCheckedText(for: item.url))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 }

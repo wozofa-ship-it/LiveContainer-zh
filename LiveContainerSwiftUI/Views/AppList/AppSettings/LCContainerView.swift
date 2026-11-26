@@ -597,10 +597,25 @@ struct LCContainerView : View {
         }
         
         await MainActor.run {
+            // 3.8.660（B3）：删容器后按大小排序仍用旧数——大小缓存
+            // （CZFAppSizeCache）只在安装/恢复两路失效，删容器不调
+            // removeSize；且 removeSize 不发 onChange、删容器也不
+            // 经过 $apps sink，旧数既不失效也不重算。所属 App 按
+            // isOwningAppLaunching 同款在 apps + hiddenApps 里按
+            // folderName 找；必须在 unbindContainer 之前取（解绑后
+            // uiContainers 里已无本容器、找不到了）；外置只解绑不
+            // 删盘、总占用不变，不失效。
+            let czfOwningApp = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.uiContainers.contains { $0.folderName == container.folderName } })
             dismiss()
             delegate.unbindContainer(container: container)
             if czfDeletedLocalFolder {
                 sharedModel.appDataFolderNames.removeAll { $0 == container.folderName }
+                if let czfOwningApp, let czfBundlePath = czfOwningApp.appInfo.bundlePath() {
+                    CZFAppSizeCache.shared.removeSize(forBundlePath: czfBundlePath)
+                    if LCAppSortManager.shared.appSortType == .bySize {
+                        CZFAppSizeCache.shared.czfEnsureSizes(for: [czfOwningApp])
+                    }
+                }
             }
         }
     }
@@ -864,6 +879,17 @@ struct LCContainerView : View {
         await MainActor.run {
             successInfo = "数据已删除"
             successShow = true
+            // 3.8.660（B3）：清数据后按大小排序仍用旧数——容器还在、
+            // 只是文件清掉了，总占用变小；同 removeContainer，所属
+            // App 按 folderName 找、失效 + bySize 下重算（容器未解绑，
+            // 这里取用不受顺序影响）。
+            if let czfOwningApp = (sharedModel.apps + sharedModel.hiddenApps).first(where: { $0.uiContainers.contains { $0.folderName == container.folderName } }),
+               let czfBundlePath = czfOwningApp.appInfo.bundlePath() {
+                CZFAppSizeCache.shared.removeSize(forBundlePath: czfBundlePath)
+                if LCAppSortManager.shared.appSortType == .bySize {
+                    CZFAppSizeCache.shared.czfEnsureSizes(for: [czfOwningApp])
+                }
+            }
         }
     }
 }
