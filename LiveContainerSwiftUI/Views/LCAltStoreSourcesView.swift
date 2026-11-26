@@ -1118,6 +1118,16 @@ struct LCSourcesView: View {
     // 不再直弹分享表，改弹 confirmationDialog（安装 / 分享 / 取消）；
     // dylib 不给“安装”按钮（非 IPA，无安装路）。
     @State private var czfDownloadedFilePending: URL?
+    // 3.8.672（F-2）：下载完成后自动安装开关——读设置页同键
+    //（CZFDownloadAutoInstall，默认关），见 czfDownloadVersionTo。
+    @AppStorage("CZFDownloadAutoInstall") private var czfDownloadAutoInstall = false
+    // 3.8.672（B-1）：插件在途安装键集——行安装按钮在途时变
+    // 转圈 + 禁用；键与 installTweakIfDylib 的去重键同一口径
+    //（见 czfDylibInstallKey），成功/失败都清掉。
+    @State private var czfDylibInstallingIDs: Set<String> = []
+    // 3.8.672（B-1）：刚装完的插件名——成功提示 alert 用，
+    // 弹完清掉；失败仍走 errorMessage。
+    @State private var czfDylibInstallSuccessName: String?
     // TwoYi 安卓系统（3.8.628，按需下载，不编进包）：
     // 安装状态派生（见 Shared.swift 的 CZFTwoYi），不另存 key。
     @State private var czfTwoYiDownloading = false
@@ -1216,7 +1226,11 @@ struct LCSourcesView: View {
                             installed: czfTwoYiApp != nil,
                             isDownloading: czfTwoYiDownloading,
                             downloadProgress: downloadHelper.downloadProgress,
-                            installDisabled: czfTwoYiDownloading || downloadHelper.isDownloading,
+                            // 3.8.672（F-1）：下载排队——TwoYi 按钮只在
+                            // 自己下载时禁用，别路下载中也能点、点下去
+                            // 进排队（:2144 守门已删，按钮再拦就白改了）；
+                            // 重复点按仍由 czfTwoYiDownloading 拦。
+                            installDisabled: czfTwoYiDownloading,
                             onInstall: { czfInstallTwoYi() },
                             onRemove: { czfTwoYiDeleteConfirm = true }
                         )
@@ -1239,6 +1253,9 @@ struct LCSourcesView: View {
                                 isBatchMode: isBatchMode,
                                 selectedIDs: selectedIDs,
                                 onBatchInstall: { batchInstallSelected() },
+                                // 3.8.672（B-1）：插件在途键集——网格详情页
+                                // 复用的列表行也要变转圈，往下传。
+                                dylibInstallingIDs: czfDylibInstallingIDs,
                                 onToggleSelect: { sourceURL, app in
                                     let key = czfSourceSelectionKey(sourceURL: sourceURL, app: app)
                                     if selectedIDs.contains(key) {
@@ -1271,6 +1288,9 @@ struct LCSourcesView: View {
                                     toggleExpanded: { toggleExpansion(for: entry.item.id) },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
+                                    // 3.8.672（B-1）：插件在途键集——行安装
+                                    // 按钮在途时变转圈，往下传。
+                                    dylibInstallingIDs: czfDylibInstallingIDs,
                                     onToggleSelect: { sourceURL, app in
                                         let key = czfSourceSelectionKey(sourceURL: sourceURL, app: app)
                                         if selectedIDs.contains(key) {
@@ -1457,6 +1477,21 @@ struct LCSourcesView: View {
                     Text(errorMessage ?? "")
                 }
         )
+        // 3.8.672（B-1）：插件安装成功提示——复用 errorMessage
+        // 同款 alert 槽位（background 叶子，各占一条分支），另起
+        // 标题/状态位；标题复用 lc.common.installed，0 新 key。
+        // 源页此前无 toast 槽，不新造 toast 体系。
+        .background(
+            EmptyView()
+                .alert("lc.common.installed".loc, isPresented: Binding<Bool>(
+                    get: { czfDylibInstallSuccessName != nil },
+                    set: { if !$0 { czfDylibInstallSuccessName = nil } })
+                ) {
+                    Button("lc.common.ok".loc, role: .cancel) { czfDylibInstallSuccessName = nil }
+                } message: {
+                    Text("\(czfDylibInstallSuccessName ?? "") 已安装")
+                }
+        )
         // 3.8.589（L121）：同款——也挪 background 叶子。
         .background(
             EmptyView()
@@ -1523,11 +1558,7 @@ struct LCSourcesView: View {
                 ) { destURL in
                     if destURL.pathExtension.lowercased() != "dylib" {
                         Button("lc.common.install".loc) {
-                            withAnimation {
-                                DataManager.shared.model.selectedTab = .apps
-                            }
-                            CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: destURL, autoReplace: false, preview: true, forceAsNew: false))
-                            czfDownloadedFilePending = nil
+                            czfInstallDownloadedFile(destURL)
                         }
                     }
                     Button("分享") {
@@ -1940,11 +1971,13 @@ struct LCSourcesView: View {
     // nonmutating，同一视图身份下各次调用共用同一份表。
     // 3.8.542（L157）
     private func installTweakIfDylib(app: AltStoreSourceApp) async -> CZFDylibInstallOutcome {
-        guard let downloadURL = app.latestVersion?.downloadURL,
-              downloadURL.pathExtension.lowercased() == "dylib" else {
+        // 3.8.672（B-1）：去重键走共用 czfDylibInstallKey（行在途态
+        // 同一口径）；helper 已验 dylib + 链接存在，downloadURL
+        // 再解一次只是取值。
+        guard let key = czfDylibInstallKey(for: app),
+              let downloadURL = app.latestVersion?.downloadURL else {
             return .notDylib
         }
-        let key = "\(app.name)-\(app.bundleIdentifier)/\(LCUtils.czfTweakFileName(for: downloadURL))"
         if let existing = czfDylibInstallInFlight[key] {
             return await existing.task.value
         }
@@ -1980,21 +2013,21 @@ struct LCSourcesView: View {
     private func installBatch(_ apps: [AltStoreSourceApp]) async -> CZFInstallBatchResult {
         var result = CZFInstallBatchResult()
         var switchedTab = false
+        // 3.8.672（B-2）：改两遍——第一遍只把全部非 dylib 的 IPA
+        // 入队（并照常切 App 页，让安装队列立即开工）；第二遍再
+        // 串行处理 dylib（仍 await installTweakIfDylib、仍进同一份
+        // result 计数，汇总文案与 czfShowBatchResult 调用点不动）。
+        // 原来一遍循环里 dylib 走 await 全程等完才计数，名单以
+        // dylib 开头时切页与入队全被拖后；S-8 的本意只是“等装完
+        // 再数，失败进汇总”，并未要求“先装插件再排 IPA”。
+        var dylibApps: [AltStoreSourceApp] = []
         for app in apps {
             guard let downloadURL = app.latestVersion?.downloadURL else {
                 result.skipped.append(app.name)
                 continue
             }
-            // S-8：dylib 走共用分支（installTweakIfDylib），等装完
-            // 再数，失败进汇总，不再后台 Task 静默丢掉。
-            switch await installTweakIfDylib(app: app) {
-            case .notDylib:
-                break
-            case .succeeded:
-                result.succeeded.append(app.name)
-                continue
-            case .failed(let error):
-                result.failed.append((name: app.name, reason: error.localizedDescription))
+            if downloadURL.pathExtension.lowercased() == "dylib" {
+                dylibApps.append(app)
                 continue
             }
             if !switchedTab {
@@ -2007,6 +2040,20 @@ struct LCSourcesView: View {
             // 改写入共享待装队列，App 页 onAppear 时排空进安装队列。
             CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: downloadURL, autoReplace: true, preview: false, forceAsNew: false))
             result.queued.append(app.name)
+        }
+        for app in dylibApps {
+            // S-8：dylib 走共用分支（installTweakIfDylib），等装完
+            // 再数，失败进汇总，不再后台 Task 静默丢掉。
+            switch await installTweakIfDylib(app: app) {
+            case .notDylib:
+                break
+            case .succeeded:
+                result.succeeded.append(app.name)
+                continue
+            case .failed(let error):
+                result.failed.append((name: app.name, reason: error.localizedDescription))
+                continue
+            }
         }
         return result
     }
@@ -2097,11 +2144,29 @@ struct LCSourcesView: View {
             // O-4：单装 dylib 不切 Tab，用户还留在源页，失败走
             // 源页 errorMessage 能看见；S-8：走共用分支，等结果
             // 再决定反馈（失败才写 errorMessage）。
+            // 3.8.672（B-1）：在途态——点下去先挂键（行按钮变转圈
+            // + 禁用，去重逻辑不动，重复点按仍由
+            // czfDylibInstallInFlight 拦）；成功/失败都清键，
+            // 成功再挂成功提示（失败仍走 errorMessage）。
+            if let key = czfDylibInstallKey(for: app) {
+                czfDylibInstallingIDs.insert(key)
+            }
             Task {
-                if case .failed(let error) = await installTweakIfDylib(app: app) {
-                    // 3.8.519（L44）：本 Task 是裸 Task、不在主 actor
-                    // 上（L40 同款），errorMessage 是 @State，回主线程再写。
-                    await MainActor.run { errorMessage = error.localizedDescription }
+                let outcome = await installTweakIfDylib(app: app)
+                // 3.8.519（L44）：本 Task 是裸 Task、不在主 actor
+                // 上（L40 同款），errorMessage 是 @State，回主线程再写。
+                await MainActor.run {
+                    if let key = czfDylibInstallKey(for: app) {
+                        czfDylibInstallingIDs.remove(key)
+                    }
+                    switch outcome {
+                    case .failed(let error):
+                        errorMessage = error.localizedDescription
+                    case .succeeded:
+                        czfDylibInstallSuccessName = app.name
+                    case .notDylib:
+                        break
+                    }
                 }
             }
             return
@@ -2140,10 +2205,9 @@ struct LCSourcesView: View {
     // 与源页单装同款（App 页排空进安装队列）。
     @MainActor
     private func czfInstallTwoYi() {
-        guard !downloadHelper.isDownloading else {
-            errorMessage = "正在下载中，请稍候"
-            return
-        }
+        // 3.8.672（F-1）：下载排队——TwoYi 同款守门改入队：正在
+        // 下载时不再顶回去（删掉上面的 isDownloading 守门），
+        // 共享 DownloadHelper 的排队名册里等锁，拿到锁自动开始。
         let need = CZFTwoYi.downloadSize * 3
         if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let freeSize = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
@@ -2354,15 +2418,26 @@ struct LCSourcesView: View {
         }
         let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let destURL = docsURL.appendingPathComponent(fileName)
-        if downloadHelper.isDownloading {
-            errorMessage = "正在下载中，请稍候"
-            return
-        }
+        // 3.8.672（F-1）：下载排队——正在下载时不再顶回去（删掉
+        // 上面的 isDownloading 守门），直接进 czfDownloadVersionTo，
+        // 共享 DownloadHelper 的排队名册里等锁，拿到锁自动开始。
         if FileManager.default.fileExists(atPath: destURL.path) {
             czfDownloadOverwritePending = (url: downloadURL, destURL: destURL)
             return
         }
         czfDownloadVersionTo(url: downloadURL, destURL: destURL)
+    }
+
+    // 3.8.672（F-2）：三选框“安装”按钮与自动安装共用的入队一步——
+    // 切 App 页 + 写共享待装队列（preview: true，不重新下载）；
+    // 顺手清掉三选框待装位（自动安装路本来就没有它，置 nil 无害）。
+    @MainActor
+    private func czfInstallDownloadedFile(_ destURL: URL) {
+        withAnimation {
+            DataManager.shared.model.selectedTab = .apps
+        }
+        CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: destURL, autoReplace: false, preview: true, forceAsNew: false))
+        czfDownloadedFilePending = nil
     }
 
     // S-7：存文件下载真正下的一步——走共享 DownloadHelper
@@ -2383,10 +2458,19 @@ struct LCSourcesView: View {
                     throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
                 }
                 await MainActor.run {
-                    // 3.8.668（F-3）：下完不再直弹分享表——改弹三选框
-                    // （安装 / 分享 / 取消），SwiftUI dialog 挂源页
-                    // 视图上，异步完成时不怕已有 sheet 顶掉（L85 同款）。
-                    czfDownloadedFilePending = destURL
+                    // 3.8.672（F-2）：下载完成后自动安装——开关开且非
+                    // dylib 时不置三选框待装位，直接走三选框“安装”同一
+                    // 段代码（czfInstallDownloadedFile）；dylib 永远不
+                    // 自动安装（无安装入口，16 轮 F-3 同款口径）；
+                    // 开关关时现状不变。
+                    if czfDownloadAutoInstall, destURL.pathExtension.lowercased() != "dylib" {
+                        czfInstallDownloadedFile(destURL)
+                    } else {
+                        // 3.8.668（F-3）：下完不再直弹分享表——改弹三选框
+                        // （安装 / 分享 / 取消），SwiftUI dialog 挂源页
+                        // 视图上，异步完成时不怕已有 sheet 顶掉（L85 同款）。
+                        czfDownloadedFilePending = destURL
+                    }
                     // 3.8.670（F-1）：源页下载完成推一条通知——App 不在
                     // 前台时三选框用户看不到；与三选框并存，不替掉它。
                     czfNotifyDownloadDone(fileName: destURL.lastPathComponent)
@@ -2669,6 +2753,9 @@ struct CZFSourceAppListView: View {
     let isBatchMode: Bool
     let selectedIDs: Set<String>
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
+    // 3.8.672（B-1）：插件在途安装键集——行安装按钮在途时变转圈；
+    // 带默认值，网格详情页等复用方不传时按无在途处理。
+    let dylibInstallingIDs: Set<String> = []
     @State private var showAllApps = false
 
     // 3.8.604（O-18）：已装查找表在父级一次算好，传给行
@@ -2698,7 +2785,7 @@ struct CZFSourceAppListView: View {
             // 解码重新生成，刷新一次全部行换身份、详情 sheet
             // 被关掉），改用包名+版本号的稳定身份。
             ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))], id: \.czfStableID) { app in
-                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, app: app)), onToggleSelect: { onToggleSelect(sourceURL, app) }, installedLookup: czfInstalledLookup)
+                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, app: app)), onToggleSelect: { onToggleSelect(sourceURL, app) }, installedLookup: czfInstalledLookup, dylibInstallingIDs: dylibInstallingIDs)
             }
             if filteredApps.isEmpty {
                 if source.apps.isEmpty || isFiltering {
@@ -2803,6 +2890,9 @@ private struct AltStoreSourceSectionView: View {
     let isBatchMode: Bool
     let selectedIDs: Set<String>
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
+    // 3.8.672（B-1）：插件在途安装键集——往下传给列表行；
+    // 带默认值，旧调用点不传时按无在途处理。
+    let dylibInstallingIDs: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2893,7 +2983,8 @@ private struct AltStoreSourceSectionView: View {
                         onDownloadVersion: onDownloadVersion,
                         isBatchMode: isBatchMode,
                         selectedIDs: selectedIDs,
-                        onToggleSelect: onToggleSelect
+                        onToggleSelect: onToggleSelect,
+                        dylibInstallingIDs: dylibInstallingIDs
                     )
                 }
             } else if let error = item.error {
@@ -2951,6 +3042,18 @@ func czfIsNewerVersion(_ version: String, build: String?, newerThan installedVer
     return aBuild > bBuild
 }
 
+// 3.8.672（B-1）：插件安装在途键——与 installTweakIfDylib
+// 的去重键同一口径（"\(name)-\(bundleIdentifier)/\(文件名)"），
+// 行安装按钮的在途态（LCSourceAppBanner）与去重字典共用这一份；
+// 非 dylib 返回 nil。不 private：行与源页共用。
+func czfDylibInstallKey(for app: AltStoreSourceApp) -> String? {
+    guard let downloadURL = app.latestVersion?.downloadURL,
+          downloadURL.pathExtension.lowercased() == "dylib" else {
+        return nil
+    }
+    return "\(app.name)-\(app.bundleIdentifier)/\(LCUtils.czfTweakFileName(for: downloadURL))"
+}
+
 // LCSourceAppBanner 不再 private：网格详情页（CZFSourceGridView.swift）
 // 复用同一份行（见 CZFSourceAppListView）。
 struct LCSourceAppBanner: View {
@@ -2966,6 +3069,9 @@ struct LCSourceAppBanner: View {
     let onToggleSelect: () -> Void
     // 3.8.604（O-18）：父级一次算好的已装查找表，行只查表。
     let installedLookup: CZFInstalledLookup
+    // 3.8.672（B-1）：插件在途安装键集——在途的插件行安装按钮
+    // 变转圈；带默认值，旧调用点不传时按无在途处理。
+    let dylibInstallingIDs: Set<String> = []
     
     @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
@@ -3246,6 +3352,18 @@ struct LCSourceAppBanner: View {
                         .background(Capsule().fill(Color.purple))
                         .clipShape(Capsule())
                     }
+                } else if isDylib, let czfInstallingKey = czfDylibInstallKey(for: app), dylibInstallingIDs.contains(czfInstallingKey) {
+                    // 3.8.672（B-1）：插件在途——按钮变转圈 + 不可再点
+                    //（ProgressView 本身无动作，去重逻辑不动）；
+                    // 样式与“安装”钮同一颗胶囊，行高不跳。
+                    ProgressView()
+                        .tint(.white)
+                        .frame(idealWidth: 70)
+                        .frame(height: 32)
+                        .background(
+                            Capsule().fill(dynamicColors ? primaryColor : Color("FontColor"))
+                        )
+                        .clipShape(Capsule())
                 } else {
                     Button {
                         installAction(app)

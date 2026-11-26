@@ -5507,7 +5507,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 3.8.560（L311-1）：installPreviewContinuation/Text/Show 是 @State；本闭包跑在裸 Task 的执行器上，直接写离主线程。continuation 由 withCheckedContinuation 同步创建、alert 靠 Show 弹出——三处回主线程写（Task 跳，alert 晚一拍弹出，不影响按钮/超时取 continuation：按钮在主线程读，超时 Task 也回主线程取）。
                     Task { @MainActor in
                         installPreviewContinuation = cont
-                        installPreviewText = text
+                        // 3.8.672（B-3）：预览文案加一句超时说明，让用户
+                        // 事前知道 5 分钟内未确认会自动取消、文件删除。
+                        installPreviewText = text + "\n\n5 分钟内未确认将自动取消，文件将被删除，需重新下载。"
                         installPreviewShow = true
                     }
                     // 3.8.428 设置#24：预览 alert 挂着 continuation，
@@ -5523,6 +5525,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                                 installPreviewContinuation = nil
                                 installPreviewShow = false
                                 cont.resume(returning: false)
+                                // 3.8.672（B-3）：超时只加提示，不改行为——
+                                // 5 分钟超时本身不动、取消删包不动（下面
+                                // !proceed 分支）；手动点取消不走这里、不弹。
+                                // 走现有 errorShow/errorInfo 通用报错槽，
+                                // 文案硬编码中文，0 新 key。
+                                errorInfo = "安装前预览已超时，安装取消，文件已删除，需重新下载"
+                                errorShow = true
                             }
                         }
                     }

@@ -83,6 +83,10 @@ struct LCSettingsView: View {
     // .hostDownloadConfiguration 读同一键（标准 UserDefaults），
     // 新起的下载会话不走蜂窝；开关状态随 App 重开保留。
     @AppStorage("CZFDownloadWiFiOnly") var czfDownloadWiFiOnly = false
+    // 3.8.672（F-2）：下载完成后自动安装——默认关；源页
+    // czfDownloadVersionTo 读同一键（标准 UserDefaults），
+    // 开时下完直接进安装预览、不弹三选框；dylib 永远不自动安装。
+    @AppStorage("CZFDownloadAutoInstall") var czfDownloadAutoInstall = false
     
     @AppStorage("LCSideJITServerAddress", store: LCUtils.appGroupUserDefault) var sideJITServerAddress : String = ""
     @AppStorage("LCDeviceUDID", store: LCUtils.appGroupUserDefault) var deviceUDID: String = ""
@@ -599,6 +603,20 @@ struct LCSettingsView: View {
                         Text("lc.settings.downloadWiFiOnly".loc)
                     }
                     Text("lc.settings.downloadWiFiOnly.desc".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            // 3.8.672（F-2）：下载完成后自动安装——与仅 Wi-Fi 开关
+            // 同款 Toggle + 图标 + .loc 标题 + .footnote 说明结构；
+            // 只对源页下载完成那一步生效，安装路本身不动。
+            Toggle(isOn: $czfDownloadAutoInstall) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        LCSettingsIcon(systemName: "square.and.arrow.down", color: .green)
+                        Text("lc.settings.downloadAutoInstall".loc)
+                    }
+                    Text("lc.settings.downloadAutoInstall.desc".loc)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

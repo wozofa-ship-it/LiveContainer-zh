@@ -156,6 +156,14 @@ public final class DownloadHelper : ObservableObject {
     @Published var downloadSpeed: Int64 = 0
     @Published var downloadETA: TimeInterval?
     @Published var paused = false
+    // 3.8.672（F-1）：下载排队——在途锁（czfDownloadInFlight）被占
+    // 时后到的下载不再被调用方顶回去，改在这里排队等锁：等锁的
+    // 请求按到达顺序记名（czfQueuedDownloads），拿到锁即摘掉；
+    // czfCurrentDownloadName 是当前在下那路的显示名（弹窗/胶囊
+    // 的排队行用）。只记内存，杀进程后排队项丢失可接受（续传
+    // 记录只保在途那路）。
+    @Published var czfQueuedDownloads: [String] = []
+    @Published var czfCurrentDownloadName: String?
     private var czfSpeedSamples: [(date: Date, bytes: Int64)] = []
     // 3.8.670（B-2）：失速心跳任务——download() 内创建、返回/抛错时停。
     private var czfStallHeartbeat: Task<Void, Never>?
@@ -192,6 +200,11 @@ public final class DownloadHelper : ObservableObject {
     func download(url: URL, to: URL, czfCancelRequested: (() async -> Bool)? = nil) async throws {
         // 3.8.572（L339-1）：L50-1 的查与置是两次 MainActor.run、中间隔一次 await——都在主线程跑不等于原子：两路同时等时都能读到空闲、都置真并行下，单槽 continuation/downloadTask 被盖掉，后完成那路见 continuation 已空、永远不恢复（L50-1 原文说的挂起，安装队停摆、只能杀 App）。
         // 触发口子是现成的：重试 2 秒间隙里 isDownloading 已是 false（completeCallback 清的）、标志仍占着，源页守门 S:1834 只认 isDownloading、覆盖确认 S:1262 根本没门，两路都能进轮询等；安装队尾那路同款。查与置必须同一次 MainActor.run 内原子完成；defer 里不能 await，清标志仍放主线程 Task。
+        // 3.8.672（F-1）：拿不到锁的请求记进排队名册再等，不再
+        // 被调用方顶回去；拿到锁即摘掉（只摘首个同名项，同名
+        // 两路排队时另一路还在册上）。等锁循环里不抛错，摘名
+        // 一定发生在拿到锁之后，不漏记。
+        var czfQueuedName: String? = nil
         while true {
             let acquired = await MainActor.run {
                 if czfDownloadInFlight { return false }
@@ -199,11 +212,27 @@ public final class DownloadHelper : ObservableObject {
                 return true
             }
             if acquired { break }
+            if czfQueuedName == nil {
+                let name = czfDisplayDownloadName(url)
+                czfQueuedName = name
+                await MainActor.run { czfQueuedDownloads.append(name) }
+            }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
-        defer {
-            Task { @MainActor in czfDownloadInFlight = false }
+        if let name = czfQueuedName {
+            await MainActor.run {
+                if let idx = czfQueuedDownloads.firstIndex(of: name) {
+                    czfQueuedDownloads.remove(at: idx)
+                }
+            }
         }
+        defer {
+            Task { @MainActor in
+                czfDownloadInFlight = false
+                czfCurrentDownloadName = nil
+            }
+        }
+        await MainActor.run { czfCurrentDownloadName = czfDisplayDownloadName(url) }
         currentURL = url
         // 3.8.666（B-1）：内存里没有同一地址的续传数据时，去盘上找——
         // 上次下载被杀/失败后留下的记录（Caches/CZFDownloadResume），
@@ -816,6 +845,28 @@ fileprivate func czfDownloadSpeedText(speed: Int64, eta: TimeInterval?) -> Strin
     return "\(speedText) · 还剩约 \(Int(eta / 3600)) 小时 \(Int(eta.truncatingRemainder(dividingBy: 3600) / 60)) 分钟"
 }
 
+// 3.8.672（F-1）：排队显示名——安装路落盘名带 "<UUID>-" 前缀
+//（LCAppListView 每次安装一段 UUID），显示时去掉，只留原文件名；
+// 源页下载本来就没有前缀，原样显示。
+fileprivate func czfDisplayDownloadName(_ url: URL) -> String {
+    let name = url.lastPathComponent
+    guard name.count > 37 else { return name }
+    let prefix = String(name.prefix(36))
+    guard name[name.index(name.startIndex, offsetBy: 36)] == "-",
+          UUID(uuidString: prefix) != nil else { return name }
+    return String(name.dropFirst(37))
+}
+
+// 3.8.672（F-1）：排队行文案——弹窗与收起胶囊共用；在途那路
+// 的文件名 + 首个排队项的位置（第 1 位）+ 还有几路在排；
+// 只有一路在排时不写“共 N 个”。
+fileprivate func czfDownloadQueueText(currentName: String?, queued: [String]) -> String {
+    guard let first = queued.first else { return "" }
+    let head = currentName.map { "\($0) · " } ?? ""
+    let tail = queued.count > 1 ? "（+\(queued.count - 1)）" : ""
+    return "\(head)\("lc.download.queued".loc)：\("lc.download.queuePosition".localizeWithFormat(1)) \(first)\(tail)"
+}
+
 // 下载量格式化：弹窗与收起胶囊共用（原来是 DownloadAlert 的
 // 私有方法，胶囊在另一个 View 里用不上，提到文件级）。
 fileprivate func formatBytes(_ bytes: Int64) -> String {
@@ -868,6 +919,18 @@ struct DownloadAlert : View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
+
+            // 3.8.672（F-1）：排队行——有路在等锁时才出现；在途那路
+            // 的文件名 + 首个排队项的位置；helper 是 @StateObject，
+            // 排队名册一变这里就重画。
+            if !helper.czfQueuedDownloads.isEmpty {
+                Text(czfDownloadQueueText(currentName: helper.czfCurrentDownloadName, queued: helper.czfQueuedDownloads))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .multilineTextAlignment(.center)
+            }
 
             // 按钮与收起态胶囊、全 App 的胶囊按钮同一套语言：
             // 以前是纯文字钮，混在材质卡上像没做完
@@ -971,6 +1034,19 @@ public struct DownloadAlertModifier: ViewModifier {
                             .padding(.vertical, 6)
                             .background(.ultraThinMaterial, in: Capsule())
                             .shadow(radius: 4)
+                            // 3.8.672（F-1）：收起胶囊里的排队行——与弹窗内同一份文案；
+                            // 只在有路排队时出现。
+                            if !helper.czfQueuedDownloads.isEmpty {
+                                Text(czfDownloadQueueText(currentName: helper.czfCurrentDownloadName, queued: helper.czfQueuedDownloads))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.85)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                                    .shadow(radius: 4)
+                            }
                         }
                         .padding(.trailing, 16)
                         .padding(.bottom, 100)
@@ -981,7 +1057,11 @@ public struct DownloadAlertModifier: ViewModifier {
         }
         .onChange(of: helper.isDownloading) { newVal in
             withAnimation(.easeInOut(duration: 0.1)) {
-                show = newVal
+                // 3.8.672（F-1）：在途那路刚完、下一路还没拿到锁
+                // 的瞬间 isDownloading 先翻 false（completeCallback
+                // 清的），排队名册还非空——弹窗不闪断，等下一路
+                // 拿到锁接上；名册空了才真正收起。
+                show = newVal || !helper.czfQueuedDownloads.isEmpty
             }
         }
     }

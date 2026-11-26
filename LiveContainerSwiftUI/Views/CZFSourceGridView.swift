@@ -98,6 +98,9 @@ struct CZFSourceGridView: View {
     // U10：勾选回调带源 feed URL——同一 App 在两个源里是两条
     // 记录，回调只给 app 时父视图分不清勾的是哪一个源的。
     var onToggleSelect: (URL, AltStoreSourceApp) -> Void
+    // 3.8.672（B-1）：插件在途安装键集——往组头/详情页传，复用的
+    // 列表行在途时变转圈；带默认值，旧调用点不传时按无在途处理。
+    var dylibInstallingIDs: Set<String> = []
 
     // 3.8.604（O-18）：已装查找表在父级一次算好，往下传给组
     // 内容与格子（见 CZFInstalledLookup）。sharedModel 来自
@@ -181,7 +184,8 @@ struct CZFSourceGridView: View {
                         isBatchMode: isBatchMode,
                         selectedIDs: selectedIDs,
                         onBatchInstall: onBatchInstall,
-                        onToggleSelect: onToggleSelect
+                        onToggleSelect: onToggleSelect,
+                        dylibInstallingIDs: dylibInstallingIDs
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
@@ -230,6 +234,8 @@ struct CZFSourceGridGroupHeaderView: View {
     // S-13：只往详情页传，不在组头用。
     let onBatchInstall: () -> Void
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
+    // 3.8.672（B-1）：插件在途安装键集——只往详情页传，不在组头用。
+    let dylibInstallingIDs: Set<String> = []
 
     var body: some View {
         // 3.8.660（F2）：各源上次成功检查时间——标题下一行 footnote，
@@ -252,7 +258,8 @@ struct CZFSourceGridGroupHeaderView: View {
                     isBatchMode: isBatchMode,
                     selectedIDs: selectedIDs,
                     onBatchInstall: onBatchInstall,
-                    onToggleSelect: onToggleSelect
+                    onToggleSelect: onToggleSelect,
+                    dylibInstallingIDs: dylibInstallingIDs
                 )
             } label: {
                 HStack(spacing: 10) {
@@ -664,6 +671,8 @@ struct CZFSourceDetailView: View {
     // S-13：详情页批量安装按钮——复用主页面板的 batchInstallSelected。
     let onBatchInstall: () -> Void
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
+    // 3.8.672（B-1）：插件在途安装键集——往复用的列表行传。
+    let dylibInstallingIDs: Set<String> = []
 
     // S-13：toolbar 按钮装的是全部已勾（onBatchInstall 是主页面板
     // 的 batchInstallSelected，跨源全装、不认搜索过滤），数字必须
@@ -746,7 +755,8 @@ struct CZFSourceDetailView: View {
                             onDownloadVersion: onDownloadVersion,
                             isBatchMode: isBatchMode,
                             selectedIDs: selectedIDs,
-                            onToggleSelect: onToggleSelect
+                            onToggleSelect: onToggleSelect,
+                            dylibInstallingIDs: dylibInstallingIDs
                         )
                     }
                 } else if let error = item.error {

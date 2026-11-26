@@ -707,6 +707,10 @@ struct CZFInlineIpaFolderSection: View {
     // 3.8.649（F3）：文件夹排序开关——与下面格子读同一把
     // @AppStorage 键（UserDefaults 共享，两处都跟随）。
     @AppStorage("CZFLocalIpaFolderSort") private var czfSort = CZFLocalIpaFolderSort.name
+    // 3.8.672（F-3）：只看有新版——不持久化（App 页“仅无备份”
+    // 筛选同款 @State）；开关在标题行、过滤在下面格子里，
+    // Binding 传下去；切文件夹后状态留在本节（与 App 页同款处理）。
+    @State private var czfOnlyUpdatable = false
     // 3.8.658（B2）：“清除文件夹”确认框开关——此前一点即清，
     // 与“换文件夹”并排、误触即丢绑定（重选可恢复，不是丢文件）。
     @State private var czfShowClearFolderConfirm = false
@@ -744,6 +748,11 @@ struct CZFInlineIpaFolderSection: View {
                         Label(czfSort.czfDisplayName, systemImage: "arrow.up.arrow.down")
                             .font(.footnote)
                     }
+                    // 3.8.672（F-3）：只看有新版——排序 Menu 旁的
+                    // Toggle，与 App 页“仅可更新”同款语义（只留带
+                    // 红箭头的行）；文案进表（lc.folder.onlyUpdatable）。
+                    Toggle("lc.folder.onlyUpdatable".loc, isOn: $czfOnlyUpdatable)
+                        .font(.footnote)
                     Button("清除文件夹", role: .destructive) {
                         // 3.8.658（B2）：先弹确认再清——与“换文件夹”
                         // 并排，误触即丢绑定；文案不写“无法撤销”
@@ -771,7 +780,7 @@ struct CZFInlineIpaFolderSection: View {
             if let url = folderURL {
                 // 文件夹换了就重建模型重扫（StateObject 的
                 // folderURL 是 let，不重建就还是旧文件夹）。
-                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs)
+                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable)
                     .id(url)
             } else {
                 Button(action: onPickFolder) {
@@ -802,16 +811,20 @@ struct CZFInlineIpaFolderGrid: View {
     // 本格子只读/改；选中集是 Set<UUID>（CZFLocalIpaItem.id）。
     @Binding var czfBatchMode: Bool
     @Binding var czfSelectedIDs: Set<UUID>
+    // 3.8.672（F-3）：只看有新版——标题行持有，格子只读；
+    // 过滤见下面 czfDisplayedItems。
+    @Binding var czfOnlyUpdatable: Bool
 
     @StateObject private var model: CZFLocalIpaFolderModel
 
-    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>) {
+    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>) {
         self.folderURL = folderURL
         self.onPickFolder = onPickFolder
         self.onInstall = onInstall
         _model = StateObject(wrappedValue: CZFLocalIpaFolderModel(folderURL: folderURL))
         _czfBatchMode = batchMode
         _czfSelectedIDs = selectedIDs
+        _czfOnlyUpdatable = onlyUpdatable
     }
 
     // 3.8.442：列数跟上面已装 App 网格一致——原来写死 4 列，
@@ -879,6 +892,14 @@ struct CZFInlineIpaFolderGrid: View {
         }
     }
 
+    // 3.8.672（F-3）：只看有新版——在搜索过滤之后再滤一层；
+    // 判定口径与行级角标同一份（czfFolderItemHasUpdate），
+    // 不动 czfFilteredItems（O-5 短路与搜索都不受影响）。
+    private var czfDisplayedItems: [CZFLocalIpaItem] {
+        guard czfOnlyUpdatable else { return czfFilteredItems }
+        return czfFilteredItems.filter { czfFolderItemHasUpdate(item: $0, installedLookup: czfInstalledLookup) }
+    }
+
     private var czfInstalledLookup: CZFInstalledLookup {
         CZFInstalledLookup(apps: sharedModel.apps, hiddenApps: sharedModel.hiddenApps, pluginPaths: [])
     }
@@ -900,17 +921,17 @@ struct CZFInlineIpaFolderGrid: View {
         }
     }
 
-    // 3.8.664（F3）：批量全选——全选范围取当前 czfFilteredItems
-    //（搜索时只含筛到的，与 App 页“搜索时只勾搜到的”同口径）；
-    // “取消全选”清掉全部已选项（含搜不到的那部分，App #12 先例）。
+    // 3.8.664（F3）：批量全选——全选范围取当前 czfDisplayedItems
+    //（搜索/只看有新版筛后剩下的，与 App 页“搜索时只勾搜到的”同口径）；
+    // “取消全选”清掉全部已选项（含筛掉的那部分，App #12 先例）。
     private var czfBatchAllSelected: Bool {
-        !czfFilteredItems.isEmpty && czfFilteredItems.allSatisfy { czfSelectedIDs.contains($0.id) }
+        !czfDisplayedItems.isEmpty && czfDisplayedItems.allSatisfy { czfSelectedIDs.contains($0.id) }
     }
     private func czfToggleBatchSelectAll() {
         if czfBatchAllSelected {
             czfSelectedIDs.removeAll()
         } else {
-            for item in czfFilteredItems {
+            for item in czfDisplayedItems {
                 czfSelectedIDs.insert(item.id)
             }
         }
@@ -976,14 +997,18 @@ struct CZFInlineIpaFolderGrid: View {
                     }
                     .padding(8)
                     .background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
-                    if czfFilteredItems.isEmpty {
-                        Text("没有匹配的 IPA")
+                    if czfDisplayedItems.isEmpty {
+                        // 3.8.672（F-3）：筛空文案——筛选开着且搜索本身
+                        // 有结果时，是“只看有新版”筛掉的，用 App 页
+                        // 3.8.651 同款文案（0 新 key）；搜索本身没结果
+                        // 时仍是“没有匹配的 IPA”。
+                        Text(czfOnlyUpdatable && !czfFilteredItems.isEmpty ? "筛选条件下没有 App" : "没有匹配的 IPA")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .center)
                     } else {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: czfColCount), spacing: 12) {
-                            ForEach(czfFilteredItems) { item in
+                            ForEach(czfDisplayedItems) { item in
                                 CZFLocalIpaGridCell(
                                     item: item,
                                     installedLookup: czfInstalledLookup,
@@ -1130,6 +1155,22 @@ struct CZFInlineIpaFolderGrid: View {
 // 一个 IPA 的格子（3.8.426）：源页同款——大图标 + 下方名字
 // （两行）+ 版本/大小，点格子直接安装。图标没解出来之前
 // 先显示占位，解出来那一行自己刷出来。
+// 3.8.672（F-3）：文件夹 IPA 有新版判定——行级角标与列表
+// 筛选共用这一份（口径与原来 cell 内 czfHasUpdate 一字相同，
+// 只是从 cell 里抽出来）：短版本号比已装最旧实例新就标；源页
+// 网格同款角标（CZFSourceGridView.hasUpdate）。已装实例取最旧
+// 的（installedModel，3.8.649 B2），比版本走全局
+// czfIsNewerVersion。3.8.668（B-2）：build 级比较——文件夹 IPA
+// 的 build 从 extractIpaInfo 读 CFBundleVersion 进 item.build，
+// 短版本号相等时按 build 比（同版高 build 也标）；build 读不到
+// 按 0 比，与源页网格同口径。
+func czfFolderItemHasUpdate(item: CZFLocalIpaItem, installedLookup: CZFInstalledLookup) -> Bool {
+    guard let version = item.version,
+          let bid = item.bundleIdentifier, !bid.isEmpty,
+          let installed = installedLookup.installedModel(bundleIdentifier: bid) else { return false }
+    return czfIsNewerVersion(version, build: item.build, newerThan: installed.appInfo.version() ?? "", installedBuild: installed.appInfo.buildVersion())
+}
+
 struct CZFLocalIpaGridCell: View {
     let item: CZFLocalIpaItem
     // 3.8.604（O-18）：父级一次算好的已装查找表，格子只查表。
@@ -1162,18 +1203,10 @@ struct CZFLocalIpaGridCell: View {
         return installedLookup.isInstalled(bundleIdentifier: bid)
     }
 
-    // 3.8.660（F1）：文件夹 IPA 有新版——短版本号比已装最旧实例新
-    // 就标；源页网格同款角标（CZFSourceGridView.hasUpdate）。已装
-    // 实例取最旧的（installedModel，3.8.649 B2），比版本走全局
-    // czfIsNewerVersion。3.8.668（B-2）：build 级比较——文件夹 IPA
-    // 的 build 从 extractIpaInfo 读 CFBundleVersion 进 item.build，
-    // 短版本号相等时按 build 比（同版高 build 也标）；build 读不到
-    // 按 0 比，与源页网格同口径。
+    // 3.8.660（F1）：文件夹 IPA 有新版——判定走文件级共用
+    // czfFolderItemHasUpdate（列表筛选同一口径）。
     private var czfHasUpdate: Bool {
-        guard let version = item.version,
-              let bid = item.bundleIdentifier, !bid.isEmpty,
-              let installed = installedLookup.installedModel(bundleIdentifier: bid) else { return false }
-        return czfIsNewerVersion(version, build: item.build, newerThan: installed.appInfo.version() ?? "", installedBuild: installed.appInfo.buildVersion())
+        czfFolderItemHasUpdate(item: item, installedLookup: installedLookup)
     }
 
     // 3.8.668（B-2/UI 打磨）：副标题版本行——有 build 时“版本 1.2 (123)”；
