@@ -2923,6 +2923,31 @@ private struct AltStoreSourceSectionView: View {
     // 带默认值，旧调用点不传时按无在途处理。
     let dylibInstallingIDs: Set<String> = []
 
+    // 3.8.673 修法（第四轮红字 2）：显式 init——带默认值的
+    // dylibInstallingIDs 在 memberwise init 下调用点报
+    // extra argument，显式声明兜底；参数顺序与声明一致，
+    // dylibInstallingIDs 仍带默认值，旧调用点可省。
+    init(item: AltStoreSourcesViewModel.SourceItem, filteredApps: [AltStoreSourceApp], isFiltering: Bool, isExpanded: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isPaused: Bool, onTogglePause: @escaping () -> Void, lastCheckedText: String, toggleExpanded: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = []) {
+        self.item = item
+        self.filteredApps = filteredApps
+        self.isFiltering = isFiltering
+        self.isExpanded = isExpanded
+        self.onRefresh = onRefresh
+        self.onInstall = onInstall
+        self.onInstallAsNew = onInstallAsNew
+        self.onDownload = onDownload
+        self.onDownloadVersion = onDownloadVersion
+        self.onRemove = onRemove
+        self.isPaused = isPaused
+        self.onTogglePause = onTogglePause
+        self.lastCheckedText = lastCheckedText
+        self.toggleExpanded = toggleExpanded
+        self.isBatchMode = isBatchMode
+        self.selectedIDs = selectedIDs
+        self.onToggleSelect = onToggleSelect
+        self.dylibInstallingIDs = dylibInstallingIDs
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 12) {

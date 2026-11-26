@@ -244,6 +244,28 @@ struct CZFSourceGridGroupHeaderView: View {
     // 3.8.672（B-1）：插件在途安装键集——只往详情页传，不在组头用。
     let dylibInstallingIDs: Set<String> = []
 
+    // 3.8.673 修法（第四轮红字 1）：显式 init——带默认值的
+    // dylibInstallingIDs 在 memberwise init 下调用点报
+    // extra argument，显式声明兜底；参数顺序与声明一致，
+    // dylibInstallingIDs 仍带默认值，旧调用点可省。
+    init(item: AltStoreSourcesViewModel.SourceItem, viewModel: AltStoreSourcesViewModel, apps: [AltStoreSourceApp], isFiltering: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onBatchInstall: @escaping () -> Void, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = []) {
+        self.item = item
+        self.viewModel = viewModel
+        self.apps = apps
+        self.isFiltering = isFiltering
+        self.onRefresh = onRefresh
+        self.onInstall = onInstall
+        self.onInstallAsNew = onInstallAsNew
+        self.onDownload = onDownload
+        self.onDownloadVersion = onDownloadVersion
+        self.onRemove = onRemove
+        self.isBatchMode = isBatchMode
+        self.selectedIDs = selectedIDs
+        self.onBatchInstall = onBatchInstall
+        self.onToggleSelect = onToggleSelect
+        self.dylibInstallingIDs = dylibInstallingIDs
+    }
+
     var body: some View {
         // 3.8.660（F2）：各源上次成功检查时间——标题下一行 footnote，
         // 与列表组头同款文案（viewModel.czfLastCheckedText，从未成功
