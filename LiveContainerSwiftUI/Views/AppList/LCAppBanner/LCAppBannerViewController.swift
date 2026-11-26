@@ -32,7 +32,11 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     // touchUpInside，1.5 秒内的这次点按要吞掉，否则长按
     // 又出面板又启动，面板会被盖住。
     private var runControlLongPressAt: Date?
-    
+
+    // P0 hitTest 诊断（3.8.678）：只读诊断口，不改行为。
+    // 命中 banner 行时，观察器经响应链读本卡的 bundle id。
+    var czfDiagnosticBundleID: String? { configuration.model.appInfo.bundleIdentifier() }
+
     init(delegate: LCAppBannerDelegate, config: LCAppBannerConfiguration) {
         self.delegate = delegate
         self.configuration = config

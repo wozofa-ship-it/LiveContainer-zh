@@ -2106,8 +2106,15 @@ extension Notification.Name {
     // Documents/CZF-HitTest.log（见 CZFHitTestLog）。
     // topToolsExpanded 的镜像见 CZFHitTestState.swift。
     private static var czfHitTestMenuPresented = false
+    // 3.8.678：会话开关态只记一次（第一触摸）。
+    private static var czfHitTestSessionLogged = false
 
     static func czfHitTestObserve(window: UIWindow, event: UIEvent) {
+        // 3.8.678：会话开始记一次开关态（与下面每触的量分开）。
+        if !czfHitTestSessionLogged {
+            czfHitTestSessionLogged = true
+            CZFHitTestLog.czfHitTestLogLine("SESSION maxOneAppOnStage=\(UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") ? 1 : 0) topTools=\(CZFHitTestState.topToolsExpanded ? 1 : 0) live=\(LCUtils.czfIsLiveProcess() ? 1 : 0)")
+        }
         guard let touches = event.allTouches, !touches.isEmpty else { return }
         for touch in touches {
             guard touch.phase == .began || touch.phase == .ended || touch.phase == .cancelled else { continue }
@@ -2257,6 +2264,13 @@ extension Notification.Name {
         } else {
             CZFHitTestLog.czfHitTestLogLine("DOCK none (no hostingController view)")
         }
+
+        // 3.8.678：下面四组无条件记——上轮只在命中 Decorated 窗
+        // 时记状态，miss 时全无证据；本轮每触必记。
+        czfHitTestLogDecoratedAll(window: window, winPt: winPt)
+        czfHitTestLogHostView(window: window)
+        czfHitTestLogBannerHit(window: window, winPt: winPt, hit: hit)
+        czfHitTestLogDockCount()
     }
 
     private static func czfHitTestLogDecorated(_ d: DecoratedAppSceneViewController, window: UIWindow, winPt: CGPoint, event: UIEvent) {
@@ -2342,6 +2356,151 @@ extension Notification.Name {
         } else {
             CZFHitTestLog.czfHitTestLogLine("NAVBAR-GESTURE none")
         }
+    }
+
+    // MARK: - P0 hitTest 诊断（3.8.678）：无条件补记的四组量
+    // 只读状态、只记日志，不改任何行为。3.8.677 日志的缺口：
+    // 53 次点按全 miss，命中时才记的 DECOR/NAVBAR 一行没有，
+    // 小窗 frame 错位 / 卡住态（alpha=0 + scale + hidden=NO）
+    // / 根本没点到三种可能全无证据。本轮每触必记下面四组。
+
+    // 1. Decorated 层：全部坞条目每窗一行（命中与否都记）。
+    private static func czfHitTestLogDecoratedAll(window: UIWindow, winPt: CGPoint) {
+        let entries = Self.shared.apps
+        if entries.isEmpty {
+            CZFHitTestLog.czfHitTestLogLine("DECOR-ALL none (dock apps empty)")
+            return
+        }
+        for entry in entries {
+            // 取 Decorated VC：与 LCAppModel.swift:339 同款取法。
+            guard let d = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else {
+                CZFHitTestLog.czfHitTestLogLine("DECOR-ALL uuid=\(entry.appUUID) noDecoratedVC")
+                continue
+            }
+            // 私有标志（.m 扩展里声明）经 KVC 读，键名已在源码里核过。
+            let minimizedVal = d.value(forKey: "czfMinimized") as? Bool
+            let minStr = minimizedVal.map { $0 ? "1" : "0" } ?? "?"
+            // .h 无 nullability 标注，d.view 导入 Swift 是 Optional，先解包。
+            guard let dView = d.view else {
+                CZFHitTestLog.czfHitTestLogLine("DECOR-ALL uuid=\(entry.appUUID) max=\(d.isMaximized ? 1 : 0) min=\(minStr) view=nil")
+                continue
+            }
+            // 框：同窗转触摸窗坐标；异窗记自己窗里的框 + 所在窗类名。
+            let frameStr: String
+            if let ownWin = dView.window, ownWin === window {
+                let f = dView.convert(dView.bounds, to: window)
+                frameStr = "frameWin=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height)))"
+            } else if let ownWin = dView.window {
+                let f = dView.convert(dView.bounds, to: ownWin)
+                frameStr = "frameOwnWin=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height))) win=\(NSStringFromClass(type(of: ownWin)))"
+            } else {
+                frameStr = "frameWin=n/a win=nil"
+            }
+            // transform a/b/c/d/tx/ty（卡住态 scale=0.1 在这里现形）；
+            // superview 链查 VirtualWindowsHostView 在第几层。
+            let t = dView.transform
+            var chain: [String] = []
+            var hostDepth = -1
+            var sv: UIView? = dView.superview
+            var depth = 0
+            while let cur = sv, depth < 8 {
+                let name = NSStringFromClass(type(of: cur))
+                chain.append(name)
+                if name == "VirtualWindowsHostView", hostDepth < 0 { hostDepth = depth }
+                sv = cur.superview
+                depth += 1
+            }
+            let ptInside = (dView.window === window) ? dView.convert(dView.bounds, to: window).contains(winPt) : false
+            CZFHitTestLog.czfHitTestLogLine("DECOR-ALL uuid=\(entry.appUUID) max=\(d.isMaximized ? 1 : 0) min=\(minStr) \(frameStr) hid=\(dView.isHidden ? 1 : 0) a=\(String(format: "%.2f", dView.alpha)) transform=(\(String(format: "%.2f", t.a)),\(String(format: "%.2f", t.b)),\(String(format: "%.2f", t.c)),\(String(format: "%.2f", t.d)),\(String(format: "%.1f", t.tx)),\(String(format: "%.1f", t.ty))) ui=\(dView.isUserInteractionEnabled ? 1 : 0) hostDepth=\(hostDepth) ptInside=\(ptInside ? 1 : 0) superChain=\(chain.joined(separator: " > "))")
+        }
+    }
+
+    // 2. 宿主窗层：VirtualWindowsHostView 自身 + 各子视图框。
+    private static func czfHitTestLogHostView(window: UIWindow) {
+        var host: UIView? = nil
+        var hostWin: UIWindow? = nil
+        for w in czfHitTestAllWindows() {
+            var count = 0
+            czfHitTestWalk(w, depth: 0, count: &count) { v in
+                if host == nil, NSStringFromClass(type(of: v)) == "VirtualWindowsHostView" {
+                    host = v
+                    hostWin = w
+                }
+            }
+            if host != nil { break }
+        }
+        guard let hostView = host, let hw = hostWin else {
+            CZFHitTestLog.czfHitTestLogLine("HOST-VIEW none (no VirtualWindowsHostView in any window)")
+            return
+        }
+        let inWin = (hw === window)
+        let tag = inWin ? "frameWin" : "frameOwnWin"
+        let f = hostView.convert(hostView.bounds, to: hw)
+        let winSuffix = inWin ? "" : " win=\(NSStringFromClass(type(of: hw)))"
+        CZFHitTestLog.czfHitTestLogLine("HOST-VIEW \(tag)=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height)))\(winSuffix) hid=\(hostView.isHidden ? 1 : 0) a=\(String(format: "%.2f", hostView.alpha)) ui=\(hostView.isUserInteractionEnabled ? 1 : 0) subviews=\(hostView.subviews.count)")
+        for sub in hostView.subviews {
+            let sf = sub.convert(sub.bounds, to: hw)
+            CZFHitTestLog.czfHitTestLogLine("HOST-SUB \(NSStringFromClass(type(of: sub))) \(tag)=(\(Int(sf.origin.x)),\(Int(sf.origin.y)),\(Int(sf.size.width)),\(Int(sf.size.height))) hid=\(sub.isHidden ? 1 : 0) a=\(String(format: "%.2f", sub.alpha)) ui=\(sub.isUserInteractionEnabled ? 1 : 0)")
+        }
+    }
+
+    // 3. 命中视图身份：HIT 最深视图若在 banner 行内，记该行
+    // 的 app（bundle id）与按钮身份，不只记类名。
+    private static func czfHitTestLogBannerHit(window: UIWindow, winPt: CGPoint, hit: UIView?) {
+        guard let hitView = hit else {
+            CZFHitTestLog.czfHitTestLogLine("HIT-BANNER none hit=nil")
+            return
+        }
+        var banner: LCAppBannerRootView? = nil
+        var v: UIView? = hitView
+        while let cur = v {
+            if let b = cur as? LCAppBannerRootView { banner = b; break }
+            v = cur.superview
+        }
+        guard let bannerView = banner else {
+            CZFHitTestLog.czfHitTestLogLine("HIT-BANNER none hit=\(NSStringFromClass(type(of: hitView)))")
+            return
+        }
+        // 分区：命中视图或其祖先（到 banner 为止）是哪个控件；
+        // 都不是时按点位分：行首 74pt 内（图标 14 + 宽 60，
+        // LCAppBannerView.swift setupView 声明）= 图标区。
+        let ptInBanner = bannerView.convert(winPt, from: window)
+        var inRun = false
+        var inMin = false
+        var inSmall = false
+        var inStack = false
+        var cursor: UIView? = hitView
+        while let cur = cursor, cur !== bannerView {
+            if cur === bannerView.runControl { inRun = true }
+            if let min = bannerView.minimizeControl, cur === min { inMin = true }
+            if let small = bannerView.smallWindowControl, cur === small { inSmall = true }
+            if cur is UIStackView { inStack = true }
+            cursor = cur.superview
+        }
+        let zone: String
+        if inRun { zone = "run" }
+        else if inMin { zone = "minimize" }
+        else if inSmall { zone = "small-window" }
+        else if inStack { zone = "text" }
+        else if ptInBanner.x < 74 { zone = "icon" }
+        else { zone = "other" }
+        // bundle id：经响应链找 LCAppBannerViewController 的只读诊断口。
+        var bid = "?"
+        var responder: UIResponder? = bannerView
+        while let r = responder {
+            if let vc = r as? LCAppBannerViewController {
+                bid = vc.czfDiagnosticBundleID ?? "?"
+                break
+            }
+            responder = r.next
+        }
+        CZFHitTestLog.czfHitTestLogLine("HIT-BANNER bid=\(bid) zone=\(zone) hit=\(NSStringFromClass(type(of: hitView))) ptInBanner=\(CZFHitTestLog.czfPointString(ptInBanner))")
+    }
+
+    // 4. dock 计数：条目数 + 各条目 uuid。
+    private static func czfHitTestLogDockCount() {
+        let uuids = Self.shared.apps.map { $0.appUUID }
+        CZFHitTestLog.czfHitTestLogLine("DOCK-COUNT n=\(uuids.count) uuids=[\(uuids.joined(separator: ","))]")
     }
 
     @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {

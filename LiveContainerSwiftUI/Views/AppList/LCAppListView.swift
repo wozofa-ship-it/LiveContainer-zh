@@ -800,6 +800,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded, !czfIsGuestScene {
                 Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("仅无备份")
                     czfNoBackupOnly.toggle()
                 } label: {
                     Label("仅无备份", systemImage: "externaldrive.badge.questionmark")
@@ -814,6 +816,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded, !czfIsGuestScene {
                 Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("仅快过期")
                     czfExpiringOnly.toggle()
                 } label: {
                     Label("仅快过期", systemImage: "clock.badge.exclamationmark")
@@ -831,6 +835,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded, !czfIsGuestScene, #available(iOS 16.0, *), czfDockRunningCount > 0 {
                 Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("关闭坞内全部窗口")
                     czfShowCloseAllConfirm = true
                 } label: {
                     Label("关闭坞内全部窗口", systemImage: "xmark.circle")
@@ -838,6 +844,42 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
             }
         }
+    }
+
+    // MARK: - P0 hitTest 诊断（3.8.678）：只记日志，不改行为
+    // 溢出菜单项点按记项名；随后 +0.5s / +2.0s 各记一次跟进：
+    // czfShowCloseAllConfirm 的实时值 + 当前 presented 链
+    //（alert / sheet 是否真呈现）。Bool 的每次变化另由下面
+    // .onChange(of: czfShowCloseAllConfirm) 记。binding 在方法
+    // 里先取成局部量再进 asyncAfter 闭包，不在闭包里碰 self。
+    private func czfLogMenuItemTap(_ name: String) {
+        CZFHitTestLog.czfHitTestLogLine("MENU-ITEM tap=\(name) confirm=\(czfShowCloseAllConfirm ? 1 : 0)")
+        let confirmBinding = $czfShowCloseAllConfirm
+        for delay in [0.5, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                CZFHitTestLog.czfHitTestLogLine("MENU-ITEM-FOLLOWUP t=+\(delay)s item=\(name) confirm=\(confirmBinding.wrappedValue ? 1 : 0) \(Self.czfPresentedChainDescription())")
+            }
+        }
+    }
+
+    // 当前 presented 链（keyWindow 的 rootVC 起）：alert /
+    // sheet 是否真在屏幕上以它为准，不是只看开关 Bool。
+    private static func czfPresentedChainDescription() -> String {
+        var chain: [String] = []
+        var hasAlert = false
+        for scene in UIApplication.shared.connectedScenes {
+            guard let ws = scene as? UIWindowScene, let key = ws.keyWindow else { continue }
+            var vc: UIViewController? = key.rootViewController
+            var n = 0
+            while let cur = vc, n < 8 {
+                chain.append(NSStringFromClass(type(of: cur)))
+                if cur is UIAlertController { hasAlert = true }
+                vc = cur.presentedViewController
+                n += 1
+            }
+        }
+        if chain.isEmpty { return "presented=none alert=0" }
+        return "presented=\(chain.joined(separator: " -> ")) alert=\(hasAlert ? 1 : 0)"
     }
 
     // 3.8.330：顶栏抽出来——body 1911 行，328 的收起/展开
@@ -974,6 +1016,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded, !czfIsGuestScene {
                 Button("lc.appList.openLink".loc, systemImage: "link", action: {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("打开链接")
                     Task { await onOpenWebViewTapped() }
                 })
             }
@@ -992,6 +1036,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Picker("Sort by", selection: Binding(
                     get: { sharedAppSortManager.appSortType },
                     set: { newValue in
+                        // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                        czfLogMenuItemTap("Sort by")
                         var transaction = Transaction()
                         transaction.disablesAnimations = true
                         withTransaction(transaction) {
@@ -1016,6 +1062,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     Divider()
                     
                     Button {
+                        // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                        czfLogMenuItemTap("自定义排序管理")
                         customSortViewPresent = true
                     } label: {
                         Label("lc.appList.sort.customManage".loc, systemImage: "slider.horizontal.3")
@@ -1027,13 +1075,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Divider()
                 Picker("排序方案", selection: Binding(
                     get: { sharedAppSortManager.currentSchemeName },
-                    set: { sharedAppSortManager.switchScheme(to: $0) }
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    set: { czfLogMenuItemTap("排序方案"); sharedAppSortManager.switchScheme(to: $0) }
                 )) {
                     ForEach(sharedAppSortManager.schemes.keys.sorted(), id: \.self) { name in
                         Text(name).tag(name)
                     }
                 }
                 Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("管理排序方案")
                     sortSchemesViewPresent = true
                 } label: {
                     Label("管理排序方案…", systemImage: "folder.badge.gearshape")
@@ -1051,6 +1102,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded, !czfIsGuestScene {
                 Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("网格设置")
                     czfGridSettingsShow = true
                 } label: {
                     Label("网格设置", systemImage: "slider.horizontal.3")
@@ -1063,6 +1116,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ToolbarItem(placement: .topBarTrailing) {
             if topToolsExpanded, !czfIsGuestScene {
                 Button("Help".loc, systemImage: "questionmark") {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("帮助")
                     helpPresent = true
                 }
             }
@@ -3163,6 +3218,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     Text("将关闭坞内全部 \(czfDockRunningCount) 个运行中窗口。")
                 }
         )
+        // P0 hitTest 诊断（3.8.678）：只记每次开关变化，不改行为。
+        // 不管哪路置位/复位（溢出菜单、次级面板、alert 消失），都留痕。
+        .onChange(of: czfShowCloseAllConfirm) { newValue in
+            CZFHitTestLog.czfHitTestLogLine("MENU-CONFIRM showCloseAllConfirm=\(newValue ? 1 : 0)")
+        }
         // 3.8.589（L121）：同款——也挪 background 叶子。
         .background(
             EmptyView()
