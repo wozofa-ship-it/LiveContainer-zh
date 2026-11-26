@@ -10,11 +10,47 @@
 
 @implementation VirtualWindowsHostView
 - (instancetype)init {
-    CGRect frame = ((UIWindowScene *)UIApplication.sharedApplication.connectedScenes.anyObject).keyWindow.bounds;
+    UIWindow *keyWindow = ((UIWindowScene *)UIApplication.sharedApplication.connectedScenes.anyObject).keyWindow;
+    // CZF 3.8.680：init 时 keyWindow 可能还没就绪（nil.keyWindow.bounds
+    // 得 CGRectZero），容器生来就是零框，之后再没人改过它的 frame
+    //（全仓 grep 无一处写 windowHostingView.frame）。keyWindow 为空
+    // 时用屏幕 bounds 兜底；挂载时 didMoveToSuperview 再按父视图校准。
+    CGRect frame = keyWindow ? keyWindow.bounds : UIScreen.mainScreen.bounds;
     self = [super initWithFrame:frame];
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.shouldForwardTapAction = YES;
     return self;
+}
+- (void)didMoveToSuperview {
+    [super didMoveToSuperview];
+    // CZF 3.8.680：挂载时按父视图 bounds 校准 frame。父视图是
+    // keyWindow 根视图的第一个子视图（全屏容器）；init 的 frame 只在
+    // keyWindow 就绪时才对，挂载时再校准一次，之后 autoresizing
+    //（flexible 宽高）跟随转屏。
+    if (self.superview) {
+        self.frame = self.superview.bounds;
+    }
+}
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if ([super pointInside:point withEvent:event]) {
+        return YES;
+    }
+    // CZF 3.8.680：容器 frame 为零时 super pointInside 恒返 NO，
+    // hitTest 根本走不到子视图——小窗看得见、点不到，顶栏按钮、
+    // 菜单、拖动全死（3.8.679 日志：HOST-VIEW frameWin=(0,0,0,0)，
+    // 子窗 frameWin=(0,62,440,894) 正常、ptInside=1）。
+    // 点落在任一可见可交互子视图 frame 内即放行，让 hitTest 走到
+    // 子视图；不在任何子窗内仍返 NO，空区继续穿透到宿主 UI
+    //（原有 hit==self → nil 设计不变）。
+    for (UIView *subview in self.subviews) {
+        if (subview.hidden || subview.alpha < 0.01 || !subview.userInteractionEnabled) {
+            continue;
+        }
+        if (CGRectContainsPoint(subview.frame, point)) {
+            return YES;
+        }
+    }
+    return NO;
 }
 - (BOOL)handleStatusBarTapAction:(UIAction *)action {
     if(!self.shouldForwardTapAction) return NO;
