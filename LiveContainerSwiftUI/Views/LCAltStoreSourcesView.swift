@@ -821,14 +821,33 @@ enum CZFSkippedUpdate {
     }
 }
 
-// U10 批量勾选键：源 feed URL + bundleIdentifier。同一 App 在
-// 两个源里是两条记录，只用 bundleIdentifier 会两边同打勾；
+// U10 批量勾选键：源 feed URL + czfStableID（包名 + 名字）。
+// 同一 App 在两个源里是两条记录，只用包名会两边同打勾；
+// 同源同包名双变体（汉化版/原版）名字不同，键也不同，不再
+// 共用一个键（3.8.664 B3：原来只拼 bundleIdentifier，双变体
+// 勾一个等于勾两个、批量安装去重又静默丢一个）。
 // 源标识用 SourceItem 的 feed URL（item.url / item.id，
 // 稳定唯一），不用 AltStoreSource.identifier（可选、
 // 可能为空/重复）也不用 AltStoreSource.id（每次解码
 // 新 UUID，不稳定）。
-func czfSourceSelectionKey(sourceURL: URL, bundleIdentifier: String) -> String {
-    "\(sourceURL.absoluteString):\(bundleIdentifier)"
+func czfSourceSelectionKey(sourceURL: URL, app: AltStoreSourceApp) -> String {
+    "\(sourceURL.absoluteString):\(app.czfStableID)"
+}
+
+// 3.8.664（B3/F1）：已勾去重计数——按 czfStableID（包名 + 名字）
+// 去重后的条数，与 batchInstallSelected 实际装的数一致
+//（S-13 同款口径：同一 App 在两个源里各勾一次只装一次，
+// 只数 selectedIDs 会多算；同源双变体名字不同、各算一个）。
+func czfDedupedSelectedCount(sources: [AltStoreSourcesViewModel.SourceItem], selectedIDs: Set<String>) -> Int {
+    var seen = Set<String>()
+    var count = 0
+    for item in sources {
+        guard let source = item.source else { continue }
+        for app in source.apps where selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, app: app)) {
+            if seen.insert(app.czfStableID).inserted { count += 1 }
+        }
+    }
+    return count
 }
 
 // B-10：按 czfStableID 显式去重（留第一条）。
@@ -1194,6 +1213,7 @@ struct LCSourcesView: View {
                                 iconSize: czfSourceGridIconSize,
                                 filteredApps: { item in filteredApps(for: item) },
                                 isFiltering: isFiltering,
+                                searchQuery: searchContext.debouncedQuery,
                                 onRefresh: { item in Task { await viewModel.refreshSource(item) } },
                                 onInstall: install(app:),
                                 onInstallAsNew: installAsNew(app:),
@@ -1204,7 +1224,7 @@ struct LCSourcesView: View {
                                 selectedIDs: selectedIDs,
                                 onBatchInstall: { batchInstallSelected() },
                                 onToggleSelect: { sourceURL, app in
-                                    let key = czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)
+                                    let key = czfSourceSelectionKey(sourceURL: sourceURL, app: app)
                                     if selectedIDs.contains(key) {
                                         selectedIDs.remove(key)
                                     } else {
@@ -1236,7 +1256,7 @@ struct LCSourcesView: View {
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
                                     onToggleSelect: { sourceURL, app in
-                                        let key = czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)
+                                        let key = czfSourceSelectionKey(sourceURL: sourceURL, app: app)
                                         if selectedIDs.contains(key) {
                                             selectedIDs.remove(key)
                                         } else {
@@ -1382,6 +1402,28 @@ struct LCSourcesView: View {
                         }
                     }
                 }
+            }
+        }
+        // 3.8.664（F1）：批量底栏——批量模式 + “源”分段时才出现
+        //（App 页批量底栏同款挂法与样式：直接挂 NavigationView 上、
+        // 浅灰实底）；只放已选数 + 全选/取消全选 + 取消，安装仍在
+        // 顶栏，不重复造第二个安装钮。
+        .safeAreaInset(edge: .bottom) {
+            if isBatchMode && czfSourcesTab == 0 {
+                HStack {
+                    Text("已选 \(czfBatchSelectedCount) 个")
+                        .font(.subheadline)
+                    Button(czfBatchAllSelected ? "取消全选" : "全选") {
+                        czfToggleBatchSelectAll()
+                    }
+                    Spacer()
+                    Button("取消") {
+                        isBatchMode = false
+                        selectedIDs.removeAll()
+                    }
+                }
+                .padding()
+                .background(Color(.secondarySystemBackground))
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
@@ -1649,9 +1691,17 @@ struct LCSourcesView: View {
         guard isFiltering else {
             return viewModel.sources.map { ($0, $0.source?.apps ?? []) }
         }
+        let query = searchContext.debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         return viewModel.sources.compactMap { item in
             let apps = filteredApps(for: item)
-            return apps.isEmpty ? nil : (item, apps)
+            if !apps.isEmpty { return (item, apps) }
+            // 3.8.664（B2）：source == nil（仍在加载/加载失败）的组，
+            // 源名命中搜索词时也保留——组头 + 加载中/错误块照常显示，
+            // 不再搜源名时整组消失；名字不命中仍丢掉（无 App 可列）。
+            if item.source == nil, !query.isEmpty, item.displayName.localizedCaseInsensitiveContains(query) {
+                return (item, apps)
+            }
+            return nil
         }
     }
     
@@ -1662,18 +1712,23 @@ struct LCSourcesView: View {
     }
     
     private func filteredApps(for item: AltStoreSourcesViewModel.SourceItem) -> [AltStoreSourceApp] {
-        guard let source = item.source else { return [] }
         let query = searchContext.debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            return source.apps
+            return item.source?.apps ?? []
         }
+        // 3.8.664（B2）：源名匹配移到 guard 之前——source == nil
+        //（仍在加载/加载失败）的源原来在 guard 处直接 return []，
+        // 搜源名时整组消失；先比源名，名字命中即返回该源全部 App
+        //（source 为 nil 时无 App、返回 []，组是否保留由可见条目
+        // 按源名匹配判断，见 czfVisibleListEntries / czfVisibleItems）。
         // 3.8.662（F3）：搜源名即列出该源全部 App——displayName
         // 含源名（未加载时回落 URL host）；此前只比 App 的六路
         // 字段，搜源名时所有组都被 czfVisibleListEntries 丢掉、
         // 结果是空页。网格路共用同一函数，一处改两路受益。
         if item.displayName.localizedCaseInsensitiveContains(query) {
-            return source.apps
+            return item.source?.apps ?? []
         }
+        guard let source = item.source else { return [] }
         // 3.8.603（O-18）：query.lowercased() 提到 filter 外——
         // 原来每 App 算一次，搜索时每遍过滤都重复算。
         let lower = query.lowercased()
@@ -1714,16 +1769,48 @@ struct LCSourcesView: View {
         return await viewModel.addSource(from: trimmed)
     }
     
+    // 3.8.664（F1）：批量全选用的当前列表——全部可见源组过滤后
+    // 的 App（搜索时只含搜到的，未搜索时是全部）；“全选”只勾
+    // 这些。“取消全选”清掉全部已选项（App #12 同款：原来只清
+    // 当前列表的，搜索时看不见的已选项还留在批量里）。
+    private var czfBatchCurrentList: [(sourceURL: URL, app: AltStoreSourceApp)] {
+        viewModel.sources.flatMap { item in
+            filteredApps(for: item).map { (sourceURL: item.url, app: $0) }
+        }
+    }
+    private var czfBatchAllSelected: Bool {
+        !czfBatchCurrentList.isEmpty && czfBatchCurrentList.allSatisfy { entry in
+            selectedIDs.contains(czfSourceSelectionKey(sourceURL: entry.sourceURL, app: entry.app))
+        }
+    }
+    private func czfToggleBatchSelectAll() {
+        if czfBatchAllSelected {
+            selectedIDs.removeAll()
+        } else {
+            for entry in czfBatchCurrentList {
+                selectedIDs.insert(czfSourceSelectionKey(sourceURL: entry.sourceURL, app: entry.app))
+            }
+        }
+    }
+    // 3.8.664（F1）：底栏已选数——按 czfStableID 去重后的条数，
+    // 与 batchInstallSelected 实际装的数一致（S-13 同款口径）。
+    private var czfBatchSelectedCount: Int {
+        czfDedupedSelectedCount(sources: viewModel.sources, selectedIDs: selectedIDs)
+    }
+
     @MainActor
     private func batchInstallSelected() {
         let appsToInstall = viewModel.sources.flatMap { item -> [AltStoreSourceApp] in
             guard let source = item.source else { return [] }
-            return source.apps.filter { selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: $0.bundleIdentifier)) }
+            return source.apps.filter { selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, app: $0)) }
         }
-        // 源中 #5：按 bundleIdentifier 去重，同一 App 在两个源
-        // 里只装一次（保留第一次出现的记录）。
-        var seenBundleIDs = Set<String>()
-        let dedupedApps = appsToInstall.filter { seenBundleIDs.insert($0.bundleIdentifier).inserted }
+        // 源中 #5：按 czfStableID（包名 + 名字）去重，同一 App 在
+        // 两个源里只装一次（保留第一次出现的记录）；同源同包名
+        // 双变体（汉化版/原版）名字不同、键不同，各装一个
+        // （3.8.664 B3：原来按 bundleIdentifier 去重，双变体
+        // 批量安装时静默丢一个）。
+        var seenStableIDs = Set<String>()
+        let dedupedApps = appsToInstall.filter { seenStableIDs.insert($0.czfStableID).inserted }
         isBatchMode = false
         selectedIDs.removeAll()
         Task { @MainActor in
@@ -2553,7 +2640,7 @@ struct CZFSourceAppListView: View {
             // 解码重新生成，刷新一次全部行换身份、详情 sheet
             // 被关掉），改用包名+版本号的稳定身份。
             ForEach(filteredApps[0..<(showAllApps ? filteredApps.count : min(50, filteredApps.count))], id: \.czfStableID) { app in
-                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, bundleIdentifier: app.bundleIdentifier)), onToggleSelect: { onToggleSelect(sourceURL, app) }, installedLookup: czfInstalledLookup)
+                LCSourceAppBanner(app: app, source: source, installAction: onInstall, installAsNewAction: onInstallAsNew, downloadAction: onDownload, downloadVersionAction: onDownloadVersion, isBatchMode: isBatchMode, isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: sourceURL, app: app)), onToggleSelect: { onToggleSelect(sourceURL, app) }, installedLookup: czfInstalledLookup)
             }
             if filteredApps.isEmpty {
                 if source.apps.isEmpty || isFiltering {

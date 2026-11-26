@@ -183,7 +183,20 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             var found: [URL] = []
             if (try? collectIpaURLs(in: folderURL, into: &found)) != nil {
                 let sortedFound = found.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-                if sortedFound == items.map(\.url) {
+                // 3.8.664（B1）：短路比对改指纹（URL + 修改时间 + 大小）——
+                // 同名 IPA 被新文件替换时地址集不变，只比 URL 会短路返回、
+                // 列表仍显旧版本/大小/“有更新”徽标；任一文件指纹不同即走
+                // 全扫。全扫重建全部行（detailLoaded 回 false，变化的行
+                // 重新读详情），详情缓存键同样含修改时间 + 大小，旧缓存
+                // 不再命中——两道门都动，只动一道仍 stale。
+                let czfFoundPrints: [(URL, Int64, Double)] = sortedFound.map { url in
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                    let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+                    let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                    return (url, size, mtime)
+                }
+                let czfCurrentPrints: [(URL, Int64, Double)] = items.map { ($0.url, $0.fileSize, $0.modificationDate?.timeIntervalSince1970 ?? 0) }
+                if czfFoundPrints == czfCurrentPrints {
                     return
                 }
             }
@@ -823,6 +836,22 @@ struct CZFInlineIpaFolderGrid: View {
         }
     }
 
+    // 3.8.664（F3）：批量全选——全选范围取当前 czfFilteredItems
+    //（搜索时只含筛到的，与 App 页“搜索时只勾搜到的”同口径）；
+    // “取消全选”清掉全部已选项（含搜不到的那部分，App #12 先例）。
+    private var czfBatchAllSelected: Bool {
+        !czfFilteredItems.isEmpty && czfFilteredItems.allSatisfy { czfSelectedIDs.contains($0.id) }
+    }
+    private func czfToggleBatchSelectAll() {
+        if czfBatchAllSelected {
+            czfSelectedIDs.removeAll()
+        } else {
+            for item in czfFilteredItems {
+                czfSelectedIDs.insert(item.id)
+            }
+        }
+    }
+
     // 3.8.662（F2）：批量删除——循环删文件后一次 model.scan()；
     // URL 集变了，O-5 短路不命中，走全扫（单项删除同款）。
     // 删完清选中、退出批量态。
@@ -929,6 +958,11 @@ struct CZFInlineIpaFolderGrid: View {
                                 czfShowBatchDeleteConfirm = true
                             }
                             .disabled(czfSelectedItems.isEmpty)
+                            // 3.8.664（F3）：全选/取消全选——文案沿用 App 页
+                            // 硬编码中文（LCAppListView:2755 同款）。
+                            Button(czfBatchAllSelected ? "取消全选" : "全选") {
+                                czfToggleBatchSelectAll()
+                            }
                             Spacer()
                             Button("取消") {
                                 czfBatchMode = false

@@ -82,6 +82,9 @@ struct CZFSourceGridView: View {
     var iconSize: Int
     var filteredApps: (AltStoreSourcesViewModel.SourceItem) -> [AltStoreSourceApp]
     var isFiltering: Bool
+    // 3.8.664（B2）：搜索词——czfVisibleItems 保留 source == nil 的组时
+    // 按源名匹配判断（列表路 czfVisibleListEntries 同款）。
+    var searchQuery: String
     var onRefresh: (AltStoreSourcesViewModel.SourceItem) -> Void
     var onInstall: (AltStoreSourceApp) -> Void
     var onInstallAsNew: (AltStoreSourceApp) -> Void
@@ -139,7 +142,11 @@ struct CZFSourceGridView: View {
     private var czfVisibleItems: [(item: AltStoreSourcesViewModel.SourceItem, apps: [AltStoreSourceApp])] {
         let computed = items.map { (item: $0, apps: filteredApps($0)) }
         guard isFiltering else { return computed }
-        return computed.filter { !$0.apps.isEmpty }
+        // 3.8.664（B2）：source == nil（仍在加载/加载失败）的组，
+        // 源名命中搜索词时也保留（列表路 czfVisibleListEntries 同款）——
+        // 组头 + 加载中/错误块照常显示；名字不命中仍丢掉。
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return computed.filter { !$0.apps.isEmpty || ($0.item.source == nil && !query.isEmpty && $0.item.displayName.localizedCaseInsensitiveContains(query)) }
     }
 
     var body: some View {
@@ -361,9 +368,10 @@ struct CZFSourceGridGroupContentView: View {
                                             source: source,
                                             iconFactor: iconFactor,
                                             isBatchMode: isBatchMode,
-                                            // U10：勾选键 = 源 feed URL + bundleIdentifier，
-                                            // 同一 App 在两个源里不再两边同打勾。
-                                            isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: app.bundleIdentifier)),
+                                            // U10：勾选键 = 源 feed URL + czfStableID
+                                            //（包名 + 名字），同一 App 在两个源里不再
+                                            // 两边同打勾，同源双变体也不再共用一个键。
+                                            isSelected: selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, app: app)),
                                             onToggleSelect: { onToggleSelect(item.url, app) },
                                             onInstall: onInstall,
                                             onInstallAsNew: onInstallAsNew,
@@ -662,18 +670,13 @@ struct CZFSourceDetailView: View {
     // 跟动作一致。原来数的是本源搜索过滤后的已勾：搜索开着时数字
     // 比实际装的少；本源没勾但别源有勾时按钮还会被禁用。改数全部
     // 已勾（selectedIDs 本身就是跨源全集，不认搜索），再按
-    // batchInstallSelected 同口径跨源同包名去重——同一 App 在
+    // batchInstallSelected 同口径跨源同 czfStableID 去重——同一 App 在
     // 两个源里各勾一次只装一次，只数 selectedIDs 会多算。
     private var czfSelectedCountTotal: Int {
-        var seen = Set<String>()
-        var count = 0
-        for item in viewModel.sources {
-            guard let source = item.source else { continue }
-            for app in source.apps where selectedIDs.contains(czfSourceSelectionKey(sourceURL: item.url, bundleIdentifier: app.bundleIdentifier)) {
-                if seen.insert(app.bundleIdentifier).inserted { count += 1 }
-            }
-        }
-        return count
+        // 3.8.664（B3）：去重键由 bundleIdentifier 改 czfStableID，
+        // 同源双变体（汉化版/原版）各算一个；计数逻辑抽共用
+        // czfDedupedSelectedCount，与主页面板底栏同口径。
+        czfDedupedSelectedCount(sources: viewModel.sources, selectedIDs: selectedIDs)
     }
 
     var body: some View {

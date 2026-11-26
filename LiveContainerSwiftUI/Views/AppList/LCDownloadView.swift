@@ -19,6 +19,13 @@ public final class DownloadHelper : ObservableObject {
     // 批量安装期间为 true：新下载不把弹窗重新弹出来，
     // 保持用户上次的收起/展开状态
     var batchMode = false
+    // 3.8.664（F2）：实时速度 + 剩余时间 + 暂停/继续——速度用
+    // 滑动窗口：每次进度回调记 (Date, totalBytesWritten)，取近
+    // 2 秒增量；总长度未知（totalSize <= 0）时只显速度、不显 ETA。
+    @Published var downloadSpeed: Int64 = 0
+    @Published var downloadETA: TimeInterval?
+    @Published var paused = false
+    private var czfSpeedSamples: [(date: Date, bytes: Int64)] = []
     // 进度发布节流用：上次发布进度的时间
     private var lastProgressPublish = Date.distantPast
     private var downloadTask: URLSessionDownloadTask?
@@ -63,7 +70,13 @@ public final class DownloadHelper : ObservableObject {
         // 下一轮开始时被擦除（重试循环的查取消跑在它前面，窗口虽小
         // 仍是真口子）；移到 download() 入口、拿了在途锁之后清，
         // 重试不再碰它。
-        await MainActor.run { cancelled = false }
+        await MainActor.run {
+            cancelled = false
+            // 3.8.664（F2）：新下载从未暂停态开始——paused 只在这里复位，
+            // 不在 downloadOnce 里（重试建新任务时不擦掉用户已按的暂停，
+            // 见 downloadOnce 末尾按标志立即挂起）。
+            paused = false
+        }
         // 3.8.900（L564-3）：下载阶段的取消检查点——进度条旁 ✕ 只置
         // czfInstallCancelRequested（LCAppListView），原来 download() 全程
         // 不读它，✕ 要等整个下载跑完才在下载后检查点生效，大包/慢网下
@@ -137,6 +150,11 @@ public final class DownloadHelper : ObservableObject {
             downloadProgress = 0.0
             downloadedSize = 0
             totalSize = 0
+            // 3.8.664（F2）：新一轮尝试重开速度窗口——样本/速度/ETA
+            // 都清掉；paused 不在这里复位（见 download() 入口）。
+            downloadSpeed = 0
+            downloadETA = nil
+            czfSpeedSamples.removeAll()
 
             isDownloading = true
         }
@@ -153,6 +171,12 @@ public final class DownloadHelper : ObservableObject {
                 // 不发 UI 更新。
                 CZFVPNManager.shared.noteHostActivity()
                 Task{ await MainActor.run {
+                    // 3.8.664（F2）：滑动窗口样本——每次回调都记（不过
+                    // 节流门，保证窗口准），只留近 2 秒内的；速度与
+                    // ETA 的发布仍走下面的节流门（与进度同一节流）。
+                    let czfSampleNow = Date()
+                    self.czfSpeedSamples.append((date: czfSampleNow, bytes: downloaded))
+                    self.czfSpeedSamples.removeAll { czfSampleNow.timeIntervalSince($0.date) > 2 }
                     // 节流：进度回调一秒能来几十次，每次都发布
                     // 会让监听这个对象的整个 App 列表跟着重绘，
                     // 下载中滑动就一卡一卡。进度变化不到 1% 且
@@ -168,6 +192,8 @@ public final class DownloadHelper : ObservableObject {
                     self.downloadProgress = progress
                     self.downloadedSize = downloaded
                     self.totalSize = total
+                    self.downloadSpeed = self.czfCurrentSpeed()
+                    self.downloadETA = self.czfCurrentETA()
                 }}
             }, completeCallback: {tempFileURL, error in
                 Task{ await MainActor.run {
@@ -246,6 +272,10 @@ public final class DownloadHelper : ObservableObject {
                 downloadTask = session.downloadTask(with: url)
             }
             downloadTask?.resume()
+            // 3.8.664（F2）：重试间隙里用户按了暂停时没有在途任务、
+            // pause() 只置了标志；新任务建好按标志立即挂起，不让
+            // 重试悄悄跑起来（paused 在 download() 入口才复位）。
+            if paused { downloadTask?.suspend() }
             // 2026-11-24（发热 H-2 宿主代理闲置上限）：下载会话建好、
             // 任务开始跑就是一次宿主活动（首字节未到也算一次）；
             // 进行中由上面进度回调续记，停在 0 字节的下载也至少
@@ -261,6 +291,40 @@ public final class DownloadHelper : ObservableObject {
         }
     }
     
+    // 3.8.664（F2）：滑动窗口速度——近 2 秒样本首尾增量 ÷ 时间跨度；
+    // 样本不足 2 个或跨度过小时返回 0，不拿上次速度冒充。
+    private func czfCurrentSpeed() -> Int64 {
+        guard czfSpeedSamples.count >= 2,
+              let first = czfSpeedSamples.first,
+              let last = czfSpeedSamples.last else { return 0 }
+        let span = last.date.timeIntervalSince(first.date)
+        guard span > 0.05 else { return 0 }
+        return Int64(Double(last.bytes - first.bytes) / span)
+    }
+
+    // 3.8.664（F2）：剩余时间——剩余字节 ÷ 速度；总长度未知或速度
+    // 为 0 时返回 nil（界面只显速度、不显 ETA）。
+    private func czfCurrentETA() -> TimeInterval? {
+        guard totalSize > 0, downloadSpeed > 0 else { return nil }
+        let remaining = totalSize - downloadedSize
+        guard remaining > 0 else { return nil }
+        return TimeInterval(remaining) / TimeInterval(downloadSpeed)
+    }
+
+    // 3.8.664（F2）：暂停/继续——suspend/resume，不走 cancel 路，
+    // 不断开、不丢 resumeData；暂停不改 minimized，batchMode 下
+    // 暂停不重弹弹窗。重试间隙里没有在途任务时只置标志，新任务
+    // 建好后按标志立即挂起（见 downloadOnce 末尾）。
+    func pause() {
+        paused = true
+        downloadTask?.suspend()
+    }
+
+    func resume() {
+        paused = false
+        downloadTask?.resume()
+    }
+
     func cancel() {
         if let continuation {
             continuation.resume()
@@ -280,6 +344,22 @@ public final class DownloadHelper : ObservableObject {
     }
 }
 
+// 3.8.664（F2）：速度 + 剩余时间文案——弹窗与收起胶囊共用；
+// 总长度未知（eta 为 nil）时只显速度、不显 ETA；速度为 0 时
+// 显 "0 KB/s"（ByteCountFormatter 的 0 是 "Zero KB"，别直接用它）。
+// 文案硬编码中文（本文件“已下载 …”同款先例），不新增 L() key。
+fileprivate func czfDownloadSpeedText(speed: Int64, eta: TimeInterval?) -> String {
+    let speedText = speed > 0 ? "\(formatBytes(speed))/s" : "0 KB/s"
+    guard let eta, eta > 0 else { return speedText }
+    if eta < 60 {
+        return "\(speedText) · 还剩约 \(Int(eta)) 秒"
+    }
+    if eta < 3600 {
+        return "\(speedText) · 还剩约 \(Int(eta / 60)) 分钟"
+    }
+    return "\(speedText) · 还剩约 \(Int(eta / 3600)) 小时 \(Int(eta.truncatingRemainder(dividingBy: 3600) / 60)) 分钟"
+}
+
 // 下载量格式化：弹窗与收起胶囊共用（原来是 DownloadAlert 的
 // 私有方法，胶囊在另一个 View 里用不上，提到文件级）。
 fileprivate func formatBytes(_ bytes: Int64) -> String {
@@ -297,7 +377,9 @@ struct DownloadAlert : View {
             .edgesIgnoringSafeArea(.all) // Covers entire screen
         
         VStack {
-            Text("lc.download.downloading".loc)
+            // 3.8.664（F2/UI 打磨）：暂停时标题改“已暂停”，不再顶着
+            // “下载中”（进度条已冻住，标题还说在下是错文案）。
+            Text(helper.paused ? "已暂停" : "lc.download.downloading".loc)
                 .font(.headline)
                 .padding(.top)
             
@@ -321,11 +403,28 @@ struct DownloadAlert : View {
                     .padding(.bottom)
             }
 
+            // 3.8.664（F2）：速度 + 剩余时间行——总长度未知时只显速度、
+            // 不显 ETA（见 czfDownloadSpeedText）；与进度同一节流发布，
+            // 不另起刷新。
+            Text(czfDownloadSpeedText(speed: helper.downloadSpeed, eta: helper.downloadETA))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
             // 按钮与收起态胶囊、全 App 的胶囊按钮同一套语言：
             // 以前是纯文字钮，混在材质卡上像没做完
             HStack(spacing: 12) {
                 Button(action: { helper.minimized = true }) {
                     Text("隐藏")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 8)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                        .foregroundColor(.accentColor)
+                }
+                // 3.8.664（F2）：暂停/继续——suspend/resume，不走
+                // cancel 路，不断开、不丢 resumeData。
+                Button(action: { helper.paused ? helper.resume() : helper.pause() }) {
+                    Text(helper.paused ? "lc.download.resume".loc : "lc.download.pause".loc)
                         .font(.subheadline.weight(.medium))
                         .padding(.horizontal, 22)
                         .padding(.vertical, 8)
@@ -373,25 +472,44 @@ public struct DownloadAlertModifier: ViewModifier {
                     Spacer()
                     HStack {
                         Spacer()
-                        Button {
-                            helper.minimized = false
-                        } label: {
-                            HStack(spacing: 6) {
-                                // 总长度未知时不显示百分比，只显已下载量。
-                                if helper.totalSize > 0 {
-                                    ProgressView(value: helper.downloadProgress, total: 1)
-                                        .progressViewStyle(.circular)
-                                    Text("下载中 \(Int(helper.downloadProgress * 100))%")
-                                        .font(.caption.bold())
-                                } else {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
-                                    Text("下载中 \(formatBytes(helper.downloadedSize))")
+                        // 3.8.664（F2）：收起胶囊下方补速度行 + 暂停/继续——
+                        // 与弹窗内同一套文案/同一节流；暂停不改 minimized，
+                        // batchMode 下暂停不重弹弹窗。
+                        VStack(spacing: 6) {
+                            Button {
+                                helper.minimized = false
+                            } label: {
+                                HStack(spacing: 6) {
+                                    // 总长度未知时不显示百分比，只显已下载量。
+                                    if helper.totalSize > 0 {
+                                        ProgressView(value: helper.downloadProgress, total: 1)
+                                            .progressViewStyle(.circular)
+                                        Text(helper.paused ? "已暂停 \(Int(helper.downloadProgress * 100))%" : "下载中 \(Int(helper.downloadProgress * 100))%")
+                                            .font(.caption.bold())
+                                    } else {
+                                        ProgressView()
+                                            .progressViewStyle(.circular)
+                                        Text(helper.paused ? "已暂停 \(formatBytes(helper.downloadedSize))" : "下载中 \(formatBytes(helper.downloadedSize))")
+                                            .font(.caption.bold())
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(.ultraThinMaterial, in: Capsule())
+                                .shadow(radius: 4)
+                            }
+                            HStack(spacing: 8) {
+                                Text(czfDownloadSpeedText(speed: helper.downloadSpeed, eta: helper.downloadETA))
+                                    .font(.caption)
+                                Button {
+                                    helper.paused ? helper.resume() : helper.pause()
+                                } label: {
+                                    Text(helper.paused ? "lc.download.resume".loc : "lc.download.pause".loc)
                                         .font(.caption.bold())
                                 }
                             }
                             .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
+                            .padding(.vertical, 6)
                             .background(.ultraThinMaterial, in: Capsule())
                             .shadow(radius: 4)
                         }
