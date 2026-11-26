@@ -255,7 +255,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // iOS 15 下开关隐藏（MultitaskDockManager 是 16+ 类型）。
     @State private var czfRunningOnly = false
     // 3.8.643（F3）：仅可更新筛选——打开后列表只显示源里有新版本
-    // 的已装 App；可更新数为 0 时开关隐藏（读 CZFUpdatableAppCount）。
+    // 的已装 App；可更新数为 0 时开关隐藏（读 CZFUpdatableAppCount），
+    // 但开关开着时常驻（3.8.653 B1：数归零开关消失就关不掉筛选）。
     // 纯数据过滤，iOS 15 也可用。集合来自源页写进来的
     // CZFUpdatableBundleIDs（归一 Bundle ID 逗号串）。
     @AppStorage("CZFUpdatableBundleIDs") private var czfUpdatableBundleIDs = ""
@@ -748,8 +749,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 3.8.643（F3）：仅可更新开关——与“仅运行中”开关并列；
         // 可更新数为 0 时隐藏（读 CZFUpdatableAppCount）；纯数据过滤，
         // iOS 15 也可用，不需 16+ 门控。
+        // 3.8.653（B1）：开关开着时常驻——数归零后按钮消失，页内就
+        // 再无办法关掉筛选（只能退出重进等 @State 重建）。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, czfUpdatableCount > 0 {
+            if topToolsExpanded, czfUpdatableCount > 0 || czfUpdatableOnly {
                 Button {
                     czfUpdatableOnly.toggle()
                 } label: {
@@ -1258,9 +1261,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 backupStatusCaption(for: app)
             }
-        } else if searchContext.debouncedQuery.isEmpty {
+        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly {
             // 优2：无搜索时行可长按拖动重排（搜索时显示是
             // 子集，拖了会丢位置，所以不挂拖拽）。
+            // 3.8.653（B3）：筛选时显示同样是子集（仅运行中 /
+            // 仅可更新 / 仅无备份），同款不挂拖拽——否则被筛掉
+            // 的 App 在提交时按名字沉到自定义顺序尾巴。
             VStack(alignment: .leading, spacing: 2) {
                 LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
                     .onDrag {
@@ -1291,9 +1297,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 规则追加在后（字母序）；隐藏区 App 保持现有相对顺序
     // 跟在后面（与 LCCustomSortView.saveChanges 的拼接同款）。
     // 搜索时不启用（显示是子集，写全量顺序会丢位置）。
+    // 3.8.653（B3）：筛选时同样不启用——显示同样是子集，同款理由。
     private func commitDragReorder(draggedID: String, targetApp: LCAppModel) {
         defer { dragReorderID = nil }
-        guard searchContext.debouncedQuery.isEmpty else { return }
+        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly else { return }
         let manager = sharedAppSortManager
         guard filteredApps.contains(where: { manager.getUniqueIdentifier(for: $0) == draggedID }) else { return }
         var visibleIDs = filteredApps.compactMap { manager.getUniqueIdentifier(for: $0) }
@@ -2030,6 +2037,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 columns: czfGridColumns,
                 iconSize: czfGridIconSize,
                 isSearching: !searchContext.debouncedQuery.isEmpty,
+                // 3.8.653（B3）：筛选态也传进去——筛选时显示同样是子集，
+                // 网格拖拽与搜索同款禁用（CZFAppGridView.czfFiltering）。
+                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly,
                 expiryDays: czfExpiryDays,
                 actions: CZFAppGridActions(
                     isBatchSelected: { app in self.isBatchSelected(app) },

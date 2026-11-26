@@ -709,6 +709,11 @@ struct CZFInlineIpaFolderGrid: View {
     @State private var czfShareURL: URL?
     @State private var czfDeleteItem: CZFLocalIpaItem?
 
+    // 3.8.653（F1）：文件夹搜索字——不持久化（App 页 searchContext.query 同款）；
+    // 只在格子内用，不挂 .searchable（源页 body 已有一个绑源 App 搜索的，
+    // 同一 NavigationView 双 .searchable 会抢同一个搜索栏）。
+    @State private var czfSearchText = ""
+
     // 3.8.649（F3）：display 排序只能是渲染层派生数组——items
     // 本身必须保持文件名序，O-5 短路（:180–183）拿
     // sortedFound == items.map(\.url) 比地址集，改 items 顺序
@@ -721,6 +726,21 @@ struct CZFInlineIpaFolderGrid: View {
             return model.items.sorted { $0.fileSize > $1.fileSize }
         case .recent:
             return model.items.sorted { ($0.modificationDate ?? .distantPast) > ($1.modificationDate ?? .distantPast) }
+        }
+    }
+
+    // 3.8.653（F1）：搜索过滤派生——在排序派生之后再滤一层，不动
+    // czfSortedItems（O-5 短路与排序都不受影响）；四路匹配与 App 页
+    // :1112-1122 同款（大小写不敏感），字段都在 CZFLocalIpaItem：
+    // fileName / displayName / version / bundleIdentifier（详情解出后才有）。
+    private var czfFilteredItems: [CZFLocalIpaItem] {
+        let q = czfSearchText.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return czfSortedItems }
+        return czfSortedItems.filter { item in
+            item.fileName.localizedCaseInsensitiveContains(q) ||
+            item.displayName.localizedCaseInsensitiveContains(q) ||
+            (item.version?.localizedCaseInsensitiveContains(q) ?? false) ||
+            (item.bundleIdentifier?.localizedCaseInsensitiveContains(q) ?? false)
         }
     }
 
@@ -756,17 +776,44 @@ struct CZFInlineIpaFolderGrid: View {
                 // 到的 IPA 不解包。列数/间距与原来一致（列数读
                 // 同一份网格设置，横向间距 16、纵向 12），末行
                 // 不用再手填 Color.clear 占位。
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: czfColCount), spacing: 12) {
-                    ForEach(czfSortedItems) { item in
-                        CZFLocalIpaGridCell(
-                            item: item,
-                            installedLookup: czfInstalledLookup,
-                            onShare: { czfShareURL = item.url },
-                            onDelete: { czfDeleteItem = item },
-                            onCopyFileName: { UIPasteboard.general.string = item.fileName },
-                            onTap: { onInstall(item.url) }
-                        )
-                        .onAppear { model.loadDetailIfNeeded(for: item) }
+                VStack(alignment: .leading, spacing: 8) {
+                    // 3.8.653（F1）：本地搜索框——放大镜 + 清除按钮（本批 UI 打磨）；
+                    // 搜索只滤本格子，不动源列表（源搜索仍走顶栏 .searchable）。
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("搜索文件名、显示名、版本号", text: $czfSearchText)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        if !czfSearchText.isEmpty {
+                            Button { czfSearchText = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(8)
+                    .background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                    if czfFilteredItems.isEmpty {
+                        Text("没有匹配的 IPA")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    } else {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: czfColCount), spacing: 12) {
+                            ForEach(czfFilteredItems) { item in
+                                CZFLocalIpaGridCell(
+                                    item: item,
+                                    installedLookup: czfInstalledLookup,
+                                    onShare: { czfShareURL = item.url },
+                                    onDelete: { czfDeleteItem = item },
+                                    onCopyFileName: { UIPasteboard.general.string = item.fileName },
+                                    onTap: { onInstall(item.url) }
+                                )
+                                .onAppear { model.loadDetailIfNeeded(for: item) }
+                            }
+                        }
                     }
                 }
             }

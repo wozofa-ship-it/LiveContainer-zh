@@ -108,6 +108,9 @@ struct LCAppSettingsView: View {
     // 3.8.637（A2）：本 App 总占用（包 + 容器），nil = 还在算；
     // 只读显示，算在后台（LCStorageManagementModel.czfTotalSize）。
     @State private var czfTotalSize: Int64?
+    // 3.8.653（F3）：签名到期信息——后台读盘后填；读不到 mobileprovision
+    // 的 App 为 nil，该行直接不渲染（列表徽章“读不到不列入”同口径）。
+    @State private var czfExpiry: CZFSignatureExpiry?
     // 3.8.647（F1）：各容器占用大小（键见 czfContainerSizeKey），
     // 后台算、回主线程写（总占用行同款 .task 模式）；缺失 = 还在算。
     @State private var czfContainerSizes: [String: Int64] = [:]
@@ -1109,6 +1112,18 @@ struct LCAppSettingsView: View {
                             .foregroundStyle(.gray)
                     }
                 }
+                // 3.8.653（F3）：签名到期日只读行——标签硬编码“签名到期”，
+                // 沿用同区“相对路径/显示名/版本”先例，0 新 key；日期+剩天数
+                // 复用 CZFSignatureExpiry.dateText 与 label(forDaysLeft:)。
+                // 读不到到期日的 App 不渲染本行。
+                if let czfExpiry {
+                    HStack {
+                        Text("签名到期")
+                        Spacer()
+                        Text("\(czfExpiry.dateText)（\(czfExpiry.label)）")
+                            .foregroundStyle(.gray)
+                    }
+                }
             } header: {
                 Text("lc.common.statistics")
             }
@@ -1117,6 +1132,19 @@ struct LCAppSettingsView: View {
                 // 不保证落在主 actor，显式回主线程，见 L40 同款）。
                 let size = await LCStorageManagementModel.czfTotalSize(for: model)
                 await MainActor.run { czfTotalSize = size }
+                // 3.8.653（F3）：到期日顺手算——公开的 loadAll 单条目，
+                // 不动 private 的 cachedExpiryDate、不动 reader 签名；
+                // 快照在当前上下文取（bundlePath/displayName 纯读），
+                // 读盘放 detached（loadAll 自带 mtime+size 缓存）。
+                let czfExpiryEntries: [(name: String, bundlePath: String)] = {
+                    guard let bundlePath = model.appInfo.bundlePath() else { return [] }
+                    let name = model.appInfo.displayName() ?? model.appInfo.bundleIdentifier() ?? ""
+                    return [(name: name, bundlePath: bundlePath)]
+                }()
+                let czfExpiryLoaded = await Task.detached(priority: .utility) {
+                    CZFSignatureExpiryReader.loadAll(entries: czfExpiryEntries).first
+                }.value
+                await MainActor.run { czfExpiry = czfExpiryLoaded }
             }
     }
 

@@ -254,6 +254,12 @@ final class AltStoreSourcesViewModel: ObservableObject {
             }
             start += 4
         }
+        // 3.8.653（F2）：上次检查更新时间——至少一个源本次成功才写；
+        // 单源成功已在 refreshSource 成功处写过，这里是整组刷新的
+        // 收口；全失败（断网）不写，时间戳才诚实。
+        if sources.contains(where: { $0.error == nil }) {
+            UserDefaults.standard.set(Date(), forKey: "CZFSourceLastCheckDate")
+        }
     }
     
     private func refreshSource(url: URL) async {
@@ -279,11 +285,15 @@ final class AltStoreSourcesViewModel: ObservableObject {
             // 就走下面的 catch 报错，不再静默空白。
             if let previousData, previousData == data, sources[sourceIndex].source != nil {
                 sources[sourceIndex].isLoading = false
+                // 3.8.653（F2）：数据未变也是查过一次（联网拉到了新数据）。
+                UserDefaults.standard.set(Date(), forKey: "CZFSourceLastCheckDate")
                 return
             }
             sources[sourceIndex].source = source
             sources[sourceIndex].isLoading = false
             storeCache(data, for: url)
+            // 3.8.653（F2）：单源刷新成功也算一次检查（组头单刷同款）。
+            UserDefaults.standard.set(Date(), forKey: "CZFSourceLastCheckDate")
         } catch {
             if let sourceIndex = sources.firstIndex(where: { $0.url == url }) {
                 sources[sourceIndex].error = error.localizedDescription
@@ -921,6 +931,21 @@ struct LCSourcesView: View {
     @State private var czfIpaFolderURL: URL? = nil
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
+    // 3.8.653（F2）：上次检查更新时间——ViewModel 在刷新成功处写
+    // CZFSourceLastCheckDate（存 Date）；无值 = 尚未检查。只读，
+    // 不写；失败不写（见 refreshAllSources / refreshSource 注释）。
+    @AppStorage("CZFSourceLastCheckDate") private var czfLastCheckDate: Date?
+
+    // 3.8.653（F2）：上次检查文案——有值拼日期（dateStyle .short /
+    // timeStyle .medium，LCAppSettingsView.formatDate 同款），
+    // 无值显示“尚未检查”。
+    private var czfLastCheckText: String {
+        guard let date = czfLastCheckDate else { return "尚未检查" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .medium
+        return "lc.sources.lastChecked".localizeWithFormat(formatter.string(from: date))
+    }
 
     /// 源页网格列数/图标大小分键迁移（3.8.461）：旧版与 App 页
     /// 共用 CZFAppGridColumns/CZFAppGridIconSize，首次进源页把
@@ -1130,6 +1155,13 @@ struct LCSourcesView: View {
                             .frame(minHeight: 160, alignment: .center)
                             .padding(.horizontal)
                         }
+                        // 3.8.653（F2）：上次检查更新时间 footnote——列表底部一行；
+                        // 源为空的空态分支里不出现（无源可查，时间戳无意义）。
+                        Text(czfLastCheckText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.horizontal)
                     }
                     // 顶部留白 + 底部留白（3.8.421，建议第 1、6 条）：
                     // 顶部 8pt，第一组完整露出来，不顶到搜索栏下；
@@ -1352,6 +1384,10 @@ struct LCSourcesView: View {
                         await MainActor.run {
                             cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
                             updatableCountBadge = cachedUpdatableApps.count
+                            // 3.8.653（B2）：ID 集与名单同一处写——只改名单+红点，
+                            // App 页“仅可更新”仍按旧 ID 集列出刚更新的行；
+                            // 按新名单顺手重算（refreshUpdatableCache :1780 同款拼接）。
+                            updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
                         }
                         return nil
                     case .failed(let error):
@@ -1382,6 +1418,8 @@ struct LCSourcesView: View {
                     CZFSkippedUpdate.setSkipped(app.latestVersion?.version, for: app.czfStableID)
                     cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
                     updatableCountBadge = cachedUpdatableApps.count
+                    // 3.8.653（B2）：同上，ID 集与名单同一处写（:1780 同款拼接）。
+                    updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
                 }
             )
         }

@@ -119,6 +119,10 @@ struct CZFAppGridView: View {
     // 默认 false，老调用点不传也能编；有词时空态不显示安装提示。
     // LCAppListView 接线：isSearching: searchContext.debouncedQuery != ""
     var isSearching: Bool = false
+    // 3.8.653（B3）：任一筛选开着（仅运行中 / 仅可更新 / 仅无备份）——
+    // 调用方传三开关的或；筛选时显示同样是子集，拖拽与搜索同款禁用。
+    // 只进拖拽守卫，不进 :410 空态判断（筛空时安装提示是否显示不变）。
+    var czfFiltering: Bool = false
     // F1（3.8.635）：签名剩余天数——bundlePath → daysLeft，列表页
     // 后台读盘后传进来；没读到的 App 不显示，不影响别的格子。
     var expiryDays: [String: Int] = [:]
@@ -138,6 +142,7 @@ struct CZFAppGridView: View {
     // 网格拖拽重排（3.8.453）：长按图标拖到另一个图标上松手即换位，
     // 复用列表模式的 LCAppReorderDropDelegate + 同款提交逻辑。
     // 搜索中（显示子集）与批量模式（点按是勾选）不挂拖拽，见下面。
+    // 3.8.653（B3）：筛选开着时显示同样是子集，同款不挂拖拽。
     @State private var czfGridDragID: String?
 
     // 网格拖拽提交（3.8.453）：与 LCAppListView.commitDragReorder
@@ -146,7 +151,7 @@ struct CZFAppGridView: View {
     // App Group 并刷新设置备份（LCAppSortManager.didSet）。
     private func czfCommitGridDragReorder(draggedID: String, targetApp: LCAppModel) {
         defer { czfGridDragID = nil }
-        guard !isSearching && !batchMode else { return }
+        guard !isSearching && !czfFiltering && !batchMode else { return }
         let manager = LCAppSortManager.shared
         // 可见顺序 = 网格现在显示的 apps（已按排序排好）；隐藏的
         // 追加在尾巴，与列表模式 commitDragReorder 同口径。
@@ -363,8 +368,9 @@ struct CZFAppGridView: View {
                 // 网格拖拽重排（3.8.453）：长按图标拖到另一个图标上松手
                 // 即换位，复用列表模式的 DropDelegate + 提交逻辑。
                 // 搜索中（子集）与批量模式（点按是勾选）不挂拖拽。
+                // 3.8.653（B3）：筛选开着时显示同样是子集，同款不挂拖拽。
                 .onDrag {
-                    guard !isSearching && !batchMode,
+                    guard !isSearching && !czfFiltering && !batchMode,
                           let id = LCAppSortManager.shared.getUniqueIdentifier(for: app) else {
                         return NSItemProvider()
                     }
@@ -388,7 +394,7 @@ struct CZFAppGridView: View {
                         actions: czfCellActions()
                     )
                     .onDrag {
-                        guard !isSearching && !batchMode,
+                        guard !isSearching && !czfFiltering && !batchMode,
                               let id = LCAppSortManager.shared.getUniqueIdentifier(for: app) else {
                             return NSItemProvider()
                         }
