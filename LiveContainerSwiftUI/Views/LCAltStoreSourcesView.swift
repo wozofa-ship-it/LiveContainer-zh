@@ -1458,6 +1458,118 @@ struct LCSourcesView: View {
         }
     }
 
+    // 3.8.688 修法（构建 run 45874596602 唯一红字原文：
+    // LCAltStoreSourcesView.swift:1465:44: error: the compiler is
+    // unable to type-check this expression in reasonable time; try
+    // breaking up the expression into distinct sub-expressions）——
+    // czfSourcesBodyA 一串修饰符里又添了 F2 的 alert 叶子与 B1/B3
+    // 的闭包，整串表达式算不过来。按本文件 3.8.423/424 同款拆法：
+    // 把最大的两块（全部更新清单 sheet、管理源 sheet）各抽成独立
+    // @ViewBuilder，BodyA 只留一行调用；内容一字不动，只换缩进。
+    @ViewBuilder
+    private var czfUpdatableAppsSheet: some View {
+        CZFUpdatableAppsSheet(
+            apps: cachedUpdatableApps,
+            onUpdateOne: { app in
+                // O-4：单行更新不关整单。S-3：失败返回错误文本，
+                // 由 sheet 内 alert 显示，不再写父级 errorMessage
+                // （sheet 盖着时父级 alert 弹不出来，见 B-11）。
+                guard app.latestVersion?.downloadURL != nil else {
+                    return "lc.sources.error.missingDownload".loc
+                }
+                // S-3/S-8：dylib 等装完再决定——成功才从名单
+                // 剔除，失败行保留、错误文本进 sheet 内显示。
+                switch await installTweakIfDylib(app: app) {
+                case .notDylib:
+                    break
+                case .succeeded:
+                    // 3.8.581（L411-1）：本闭包唯一调用方是 sheet 行按钮的裸 Task（:794，Swift 5.0 靶下 Button 闭包的 Task 不继承 MainActor），await 之后在全局执行器上跑；cachedUpdatableApps 是 @State（:886）、updatableCountBadge 是 @AppStorage（:881），离主线程写报 Publishing changes、更新完的行可能不消失、红标可能不刷新（L40/L44/L395-1 同款——L161 只包了调用方 Task 自己的 updatingIDs/sheetError 写，闭包内部这两处漏了）。回主线程再写。
+                    await MainActor.run {
+                        cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                        updatableCountBadge = cachedUpdatableApps.count
+                        // 3.8.653（B2）：ID 集与名单同一处写——只改名单+红点，
+                        // App 页“仅可更新”仍按旧 ID 集列出刚更新的行；
+                        // 按新名单顺手重算（refreshUpdatableCache :1780 同款拼接）。
+                        updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
+                    }
+                    return nil
+                case .failed(let error):
+                    return error.localizedDescription
+                }
+                // 3.8.581（L411-1）：同上，install(app:) 在这里直接调；它里面写 @Published selectedTab（切 App 页）+ 无锁静态数组 CZFSourcePendingInstall.append（与 App 页 onAppear/onReceive 的主线程排空竞态），必须回主线程再调。
+                // 3.8.649（B3）：这里不乐观剔除——install(app:) 只切
+                // Tab + 写待装队列，成败未定；先剔除再装、装失败
+                // 时 apps 不变、onChange 不重算，行与红点就此消失、
+                // 直到下次进源页才回来。改等 apps 变化后由 onChange
+                // 重算自然消失（成功装完行即走，失败行与红点保留）。
+                await MainActor.run {
+                    install(app: app)
+                }
+                return nil
+            },
+            onUpdateAll: {
+                showUpdatableList = false
+                Task { @MainActor in
+                    let result = await installBatch(cachedUpdatableApps)
+                    czfShowBatchResult(result)
+                }
+            },
+            // 跳过（持久 + 带版本）：记进 CZFSkippedUpdate（源出
+            // 新版本才重新出现），再从名单剔除并同步红点；图标
+            // 上的更新角标（hasUpdate）不受影响。
+            onSkip: { app in
+                CZFSkippedUpdate.setSkipped(app.latestVersion?.version, for: app.czfStableID)
+                cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
+                updatableCountBadge = cachedUpdatableApps.count
+                // 3.8.653（B2）：同上，ID 集与名单同一处写（:1780 同款拼接）。
+                updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
+                // 3.8.688（B3）：跳光即关 sheet——onSkip 只剔名单、不碰
+                // showUpdatableList，名单跳空后 List 为空、标题与底部
+                // 按钮都变“全部更新(0)”、sheet 赖在屏幕上；点下去
+                // onUpdateAll 走空 installBatch、czfShowBatchResult
+                // 直接 return，零反馈。名单变空即事毕，直接关回源页。
+                // 只动现成 @State，不碰跳过持久化、不碰红点重算。
+                if cachedUpdatableApps.isEmpty {
+                    showUpdatableList = false
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var czfManageSourcesSheet: some View {
+        if #available(iOS 16.0, *) {
+            ManageSourcesSheet(
+                viewModel: viewModel,
+                isPresented: $isManagingSources,
+                onAdd: { rawValue in
+                    await handleAddSource(rawValue)
+                },
+                // 3.8.688（B1）：删源清选中集——22 轮 B1 同款 hazard：
+                // 删源只清 ViewModel 侧，不碰视图层 selectedIDs；
+                // 删完选中集变幽灵、顶栏“安装”仍亮、点下去静默空跑。
+                // 选中键是 czfSourceSelectionKey（源 feed URL + ":" +
+                // czfStableID），按该源 URL 前缀整批清掉；不碰续签过滤。
+                onRemove: { item in
+                    selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
+                }
+            )
+            .presentationDetents([.large])
+        } else {
+            ManageSourcesSheet(
+                viewModel: viewModel,
+                isPresented: $isManagingSources,
+                onAdd: { rawValue in
+                    await handleAddSource(rawValue)
+                },
+                // 3.8.688（B1）：删源清选中集——与上面 iOS 16+ 分支同款（见该处注释）。
+                onRemove: { item in
+                    selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
+                }
+            )
+        }
+    }
+
     // body 再拆分（3.8.424，423 构建仍红字）：与 App 页同款，
     // body 还是算不过来。抽 Group 不够，改两段拆：A=导航栏+
     // 弹层，body=A+搜索+事件回调。只拆不改逻辑。
@@ -1705,104 +1817,10 @@ struct LCSourcesView: View {
             CZFAppGridSettingsView(columns: $czfSourceGridColumns, iconSize: $czfSourceGridIconSize, gridMode: $czfSourceGridMode, showSort: false, isSource: true)
         }
         .sheet(isPresented: $showUpdatableList) {
-            CZFUpdatableAppsSheet(
-                apps: cachedUpdatableApps,
-                onUpdateOne: { app in
-                    // O-4：单行更新不关整单。S-3：失败返回错误文本，
-                    // 由 sheet 内 alert 显示，不再写父级 errorMessage
-                    // （sheet 盖着时父级 alert 弹不出来，见 B-11）。
-                    guard app.latestVersion?.downloadURL != nil else {
-                        return "lc.sources.error.missingDownload".loc
-                    }
-                    // S-3/S-8：dylib 等装完再决定——成功才从名单
-                    // 剔除，失败行保留、错误文本进 sheet 内显示。
-                    switch await installTweakIfDylib(app: app) {
-                    case .notDylib:
-                        break
-                    case .succeeded:
-                        // 3.8.581（L411-1）：本闭包唯一调用方是 sheet 行按钮的裸 Task（:794，Swift 5.0 靶下 Button 闭包的 Task 不继承 MainActor），await 之后在全局执行器上跑；cachedUpdatableApps 是 @State（:886）、updatableCountBadge 是 @AppStorage（:881），离主线程写报 Publishing changes、更新完的行可能不消失、红标可能不刷新（L40/L44/L395-1 同款——L161 只包了调用方 Task 自己的 updatingIDs/sheetError 写，闭包内部这两处漏了）。回主线程再写。
-                        await MainActor.run {
-                            cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
-                            updatableCountBadge = cachedUpdatableApps.count
-                            // 3.8.653（B2）：ID 集与名单同一处写——只改名单+红点，
-                            // App 页“仅可更新”仍按旧 ID 集列出刚更新的行；
-                            // 按新名单顺手重算（refreshUpdatableCache :1780 同款拼接）。
-                            updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
-                        }
-                        return nil
-                    case .failed(let error):
-                        return error.localizedDescription
-                    }
-                    // 3.8.581（L411-1）：同上，install(app:) 在这里直接调；它里面写 @Published selectedTab（切 App 页）+ 无锁静态数组 CZFSourcePendingInstall.append（与 App 页 onAppear/onReceive 的主线程排空竞态），必须回主线程再调。
-                    // 3.8.649（B3）：这里不乐观剔除——install(app:) 只切
-                    // Tab + 写待装队列，成败未定；先剔除再装、装失败
-                    // 时 apps 不变、onChange 不重算，行与红点就此消失、
-                    // 直到下次进源页才回来。改等 apps 变化后由 onChange
-                    // 重算自然消失（成功装完行即走，失败行与红点保留）。
-                    await MainActor.run {
-                        install(app: app)
-                    }
-                    return nil
-                },
-                onUpdateAll: {
-                    showUpdatableList = false
-                    Task { @MainActor in
-                        let result = await installBatch(cachedUpdatableApps)
-                        czfShowBatchResult(result)
-                    }
-                },
-                // 跳过（持久 + 带版本）：记进 CZFSkippedUpdate（源出
-                // 新版本才重新出现），再从名单剔除并同步红点；图标
-                // 上的更新角标（hasUpdate）不受影响。
-                onSkip: { app in
-                    CZFSkippedUpdate.setSkipped(app.latestVersion?.version, for: app.czfStableID)
-                    cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
-                    updatableCountBadge = cachedUpdatableApps.count
-                    // 3.8.653（B2）：同上，ID 集与名单同一处写（:1780 同款拼接）。
-                    updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
-                    // 3.8.688（B3）：跳光即关 sheet——onSkip 只剔名单、不碰
-                    // showUpdatableList，名单跳空后 List 为空、标题与底部
-                    // 按钮都变“全部更新(0)”、sheet 赖在屏幕上；点下去
-                    // onUpdateAll 走空 installBatch、czfShowBatchResult
-                    // 直接 return，零反馈。名单变空即事毕，直接关回源页。
-                    // 只动现成 @State，不碰跳过持久化、不碰红点重算。
-                    if cachedUpdatableApps.isEmpty {
-                        showUpdatableList = false
-                    }
-                }
-            )
+            czfUpdatableAppsSheet
         }
         .sheet(isPresented: $isManagingSources) {
-            if #available(iOS 16.0, *) {
-                ManageSourcesSheet(
-                    viewModel: viewModel,
-                    isPresented: $isManagingSources,
-                    onAdd: { rawValue in
-                        await handleAddSource(rawValue)
-                    },
-                    // 3.8.688（B1）：删源清选中集——22 轮 B1 同款 hazard：
-                    // 删源只清 ViewModel 侧，不碰视图层 selectedIDs；
-                    // 删完选中集变幽灵、顶栏“安装”仍亮、点下去静默空跑。
-                    // 选中键是 czfSourceSelectionKey（源 feed URL + ":" +
-                    // czfStableID），按该源 URL 前缀整批清掉；不碰续签过滤。
-                    onRemove: { item in
-                        selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
-                    }
-                )
-                .presentationDetents([.large])
-            } else {
-                ManageSourcesSheet(
-                    viewModel: viewModel,
-                    isPresented: $isManagingSources,
-                    onAdd: { rawValue in
-                        await handleAddSource(rawValue)
-                    },
-                    // 3.8.688（B1）：删源清选中集——与上面 iOS 16+ 分支同款（见该处注释）。
-                    onRemove: { item in
-                        selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
-                    }
-                )
-            }
+            czfManageSourcesSheet
         }
         // 本地 IPA 文件夹选择器（3.8.454）：文件夹区移到源页，
         // 选文件夹存在共用 CZFLocalIpaFolderStore；内嵌区直接
