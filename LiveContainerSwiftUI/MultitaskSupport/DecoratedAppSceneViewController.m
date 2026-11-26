@@ -1,5 +1,6 @@
 #import "DecoratedAppSceneViewController.h"
 #import "ResizeHandleView.h"
+#import "CZFHitTestLog.h"
 #import "LiveContainerSwiftUI-Swift.h"
 #import "AppSceneViewController.h"
 #import "UIKitPrivate+MultitaskSupport.h"
@@ -527,6 +528,9 @@
     // P0 标题栏修法（3.8.673）诊断：动作入口只打一句，确认按钮
     // 点按是否走到动作（两标志位是 ↗ 卡住的鉴别项）。
     NSLog(@"[CZF-TitleBar] closeWindow maxAnim=%d pipAnim=%d", (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
+    // P0 hitTest 诊断（3.8.676）：同一句再写进文件日志
+    //（NSLog 应用内拿不到，文件日志是判据）。
+    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] closeWindow maxAnim=%d pipAnim=%d", (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating]];
     self.czfMinimized = NO;
     // 关窗前记下窗口状态，下次打开还原（用户要的核心点）
     [self czfDismissKeyboard];
@@ -543,6 +547,8 @@
     // P0 标题栏修法（3.8.673）诊断：动作入口只打一句（放守卫之前，
     // 藏着的窗口被误点也能留痕）。
     NSLog(@"[CZF-TitleBar] minimizeWindow hidden=%d maxAnim=%d pipAnim=%d", (int)self.view.hidden, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
+    // P0 hitTest 诊断（3.8.676）：同一句再写进文件日志。
+    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] minimizeWindow hidden=%d maxAnim=%d pipAnim=%d", (int)self.view.hidden, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating]];
     if (self.view.hidden) return;
     // 最小化先收键盘：只藏窗口视图收不掉键盘——键盘窗口
     // 不随本视图隐藏而消失，游客切最小化后键盘会继续盖在
@@ -644,6 +650,8 @@
 - (void)maximizeWindow {
     // P0 标题栏修法（3.8.673）诊断：动作入口只打一句。
     NSLog(@"[CZF-TitleBar] maximizeWindow max=%d maxAnim=%d pipAnim=%d", (int)self.isMaximized, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
+    // P0 hitTest 诊断（3.8.676）：同一句再写进文件日志。
+    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] maximizeWindow max=%d maxAnim=%d pipAnim=%d", (int)self.isMaximized, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating]];
     // C1：重入守卫——还原 0.3 秒动画内标志还没落位时再调，
     // 旧代码会按旧标志再走一次还原、两套动画同改 frame；
     // 现在进行中直接返回，程序化切换（unmaximizeWindow）
@@ -1017,6 +1025,12 @@
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesBegan:touches withEvent:event];
+    // P0 hitTest 诊断（3.8.676）：只记日志。这一行出现 = 触摸
+    // 真的递送到了 Decorated 视图；不出现 = 死在更早的递送层。
+    UITouch *czfTouch = touches.anyObject;
+    if (czfTouch) {
+        [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"DECOR-TOUCHES-BEGAN pt=%@ winPt=%@ max=%d hid=%d a=%.2f", [CZFHitTestLog czfPointString:[czfTouch locationInView:self.view]], [CZFHitTestLog czfPointString:[czfTouch locationInView:czfTouch.window]], (int)self.isMaximized, (int)self.view.hidden, self.view.alpha]];
+    }
     // 标题栏等非游客内容区域：按下就置顶。游客内容（passthrough
     // view）的触摸到不了这里，改走 czfRaiseWindowOnTap 手势识别器。
     [self.view.superview bringSubviewToFront:self.view];

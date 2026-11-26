@@ -908,6 +908,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // 不动，三个功能本身也不动。
         ToolbarItem(placement: .topBarTrailing) {
             Button {
+                // P0 hitTest 诊断（3.8.676）：只镜像开关态，不改行为。
+                CZFHitTestState.topToolsExpanded = !topToolsExpanded
                 withAnimation { topToolsExpanded.toggle() }
             } label: {
                 Label("更多工具".loc, systemImage: topToolsExpanded ? "chevron.left" : "chevron.right")

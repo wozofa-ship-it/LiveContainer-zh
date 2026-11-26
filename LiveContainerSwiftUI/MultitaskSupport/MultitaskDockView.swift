@@ -2097,6 +2097,245 @@ extension Notification.Name {
         }
     }
 
+    // MARK: - P0 hitTest 诊断（3.8.676）：只观察，绝不改行为
+    // sendEvent 钩子只在已有转发之后调用本观察器；手动调
+    // window.hitTest / navBar.hitTest 是纯查询（不递送事件），
+    // 不改触摸去向；每个新增日志调用都不改控制流。判据：
+    // 三处 [CZF-TitleBar] 动作日志有痕 = 点按到了按钮、死在
+    // 动作/守卫；无痕 = 死在递送层。日志写
+    // Documents/CZF-HitTest.log（见 CZFHitTestLog）。
+    // topToolsExpanded 的镜像见 CZFHitTestState.swift。
+    private static var czfHitTestMenuPresented = false
+
+    static func czfHitTestObserve(window: UIWindow, event: UIEvent) {
+        guard let touches = event.allTouches, !touches.isEmpty else { return }
+        for touch in touches {
+            guard touch.phase == .began || touch.phase == .ended || touch.phase == .cancelled else { continue }
+            czfHitTestLogTouch(window: window, touch: touch, event: event)
+        }
+    }
+
+    private static func czfHitTestAllWindows() -> [UIWindow] {
+        var all: [UIWindow] = []
+        for scene in UIApplication.shared.connectedScenes {
+            if let ws = scene as? UIWindowScene {
+                all.append(contentsOf: ws.windows)
+            }
+        }
+        all.sort { $0.windowLevel < $1.windowLevel }
+        return all
+    }
+
+    private static func czfHitTestLogWindows() {
+        let all = czfHitTestAllWindows()
+        CZFHitTestLog.czfHitTestLogLine("WINDOWS n=\(all.count)")
+        for w in all {
+            CZFHitTestLog.czfHitTestLogLine("  WIN " + CZFHitTestLog.czfDescribeWindow(w))
+        }
+    }
+
+    private static func czfHitTestWalk(_ view: UIView, depth: Int, count: inout Int, visit: (UIView) -> Void) {
+        guard depth <= 10, count < 4000 else { return }
+        count += 1
+        visit(view)
+        for sub in view.subviews {
+            czfHitTestWalk(sub, depth: depth + 1, count: &count, visit: visit)
+        }
+    }
+
+    private static func czfHitTestLogTouch(window: UIWindow, touch: UITouch, event: UIEvent) {
+        let phase: String
+        switch touch.phase {
+        case .began:
+            phase = "began"
+        case .ended:
+            phase = "ended"
+        case .cancelled:
+            phase = "cancelled"
+        default:
+            phase = "other"
+        }
+        let winPt = touch.location(in: window)
+        let winPtStr = CZFHitTestLog.czfPointString(winPt)
+        let keyWin = window.windowScene?.keyWindow
+        let keyWinStr = keyWin.map { NSStringFromClass(type(of: $0)) } ?? "nil"
+        let touchWinIsKey = (touch.window === keyWin)
+        CZFHitTestLog.czfHitTestLogLine("TOUCH phase=\(phase) win=\(NSStringFromClass(type(of: window))) winPt=\(winPtStr) touchWinIsSelf=\(touch.window === window ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0) touchWinIsKey=\(touchWinIsKey ? 1 : 0) keyWin=\(keyWinStr) live=\(LCUtils.czfIsLiveProcess() ? 1 : 0) topTools=\(CZFHitTestState.topToolsExpanded ? 1 : 0)")
+
+        if touch.phase == .began {
+            czfHitTestLogWindows()
+        }
+
+        // 菜单层：全进程找菜单类视图（溢出菜单/上下文菜单/弹出层）。
+        let allWindows = czfHitTestAllWindows()
+        var menus: [(UIView, UIWindow)] = []
+        for w in allWindows {
+            var count = 0
+            czfHitTestWalk(w, depth: 0, count: &count) { v in
+                let name = NSStringFromClass(type(of: v)).lowercased()
+                if name.contains("menu") || name.contains("popover") {
+                    menus.append((v, w))
+                }
+            }
+        }
+        if menus.isEmpty {
+            if czfHitTestMenuPresented {
+                czfHitTestMenuPresented = false
+                CZFHitTestLog.czfHitTestLogLine("MENU-DISMISSED")
+            }
+            CZFHitTestLog.czfHitTestLogLine("MENU none")
+        } else {
+            if !czfHitTestMenuPresented {
+                czfHitTestMenuPresented = true
+                CZFHitTestLog.czfHitTestLogLine("MENU-PRESENTED n=\(menus.count)")
+                czfHitTestLogWindows()
+                if let key = window.windowScene?.keyWindow {
+                    var chain: [String] = []
+                    var vc: UIViewController? = key.rootViewController
+                    var n = 0
+                    while let v = vc, n < 4 {
+                        chain.append(NSStringFromClass(type(of: v)))
+                        vc = v.presentedViewController
+                        n += 1
+                    }
+                    CZFHitTestLog.czfHitTestLogLine("MENU-PRESENTER rootVC=\(chain.joined(separator: " -> "))")
+                }
+            }
+            for (mv, mw) in menus {
+                let sameWin = (mw === window)
+                let frameInWin = (mv.window === mw) ? mv.convert(mv.bounds, to: mw) : .zero
+                let insideStr: String
+                if sameWin {
+                    insideStr = frameInWin.contains(winPt) ? "1" : "0"
+                } else {
+                    insideStr = "n/a"
+                }
+                let localPt = sameWin ? mv.convert(winPt, from: window) : .zero
+                CZFHitTestLog.czfHitTestLogLine("MENU view=\(NSStringFromClass(type(of: mv))) win=\(NSStringFromClass(type(of: mw))) frame=(\(Int(frameInWin.origin.x)),\(Int(frameInWin.origin.y)),\(Int(frameInWin.size.width)),\(Int(frameInWin.size.height))) localPt=\(CZFHitTestLog.czfPointString(localPt)) ptInside=\(insideStr)")
+            }
+        }
+
+        // 递送链：手动 hitTest 是纯查询，不递送事件。
+        let hit = window.hitTest(winPt, withEvent: event)
+        if let hitView = hit {
+            var chain: [String] = []
+            var v: UIView? = hitView
+            while let cur = v {
+                chain.append(NSStringFromClass(type(of: cur)))
+                if cur === window { break }
+                v = cur.superview
+            }
+            let localPt = hitView.convert(winPt, from: window)
+            let hostInChain = chain.contains("VirtualWindowsHostView") ? 1 : 0
+            CZFHitTestLog.czfHitTestLogLine("HIT chain=\(chain.joined(separator: " > ")) localPt=\(CZFHitTestLog.czfPointString(localPt)) hostViewInChain=\(hostInChain)")
+        } else {
+            CZFHitTestLog.czfHitTestLogLine("HIT nil (window hitTest returned nil — touch falls through to the window below)")
+        }
+
+        // Decorated 链：从命中视图沿响应链找 Decorated VC。
+        var decorated: DecoratedAppSceneViewController? = nil
+        var responder: UIResponder? = hit
+        while let r = responder {
+            if let d = r as? DecoratedAppSceneViewController {
+                decorated = d
+                break
+            }
+            responder = r.next
+        }
+        if let d = decorated {
+            czfHitTestLogDecorated(d, window: window, winPt: winPt, event: event)
+        } else {
+            CZFHitTestLog.czfHitTestLogLine("DECOR none (touch did not land in any Decorated window)")
+        }
+
+        // 坞：hostingController 视图框与点是否落在其内。
+        if let dockView = Self.shared.hostingController?.view {
+            let inWin = (dockView.window === window)
+            let f = inWin ? dockView.convert(dockView.bounds, to: window) : .zero
+            let insideStr = inWin ? (f.contains(winPt) ? "1" : "0") : "n/a"
+            CZFHitTestLog.czfHitTestLogLine("DOCK collapsed=\(Self.shared.isCollapsed ? 1 : 0) \(CZFHitTestLog.czfDescribeView(dockView)) frameWin=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height))) ptInside=\(insideStr)")
+        } else {
+            CZFHitTestLog.czfHitTestLogLine("DOCK none (no hostingController view)")
+        }
+    }
+
+    private static func czfHitTestLogDecorated(_ d: DecoratedAppSceneViewController, window: UIWindow, winPt: CGPoint, event: UIEvent) {
+        func b(_ v: Bool?) -> String {
+            return v.map { $0 ? "1" : "0" } ?? "?"
+        }
+        // 私有标志（.m 扩展里声明）经 KVC 读，键名已在源码里核过。
+        let maxAnimVal = d.value(forKey: "czfMaximizeAnimating") as? Bool
+        let pipAnimVal = d.value(forKey: "czfPiPMinimizeAnimating") as? Bool
+        let minimizedVal = d.value(forKey: "czfMinimized") as? Bool
+        let dView = d.view
+        let inWin = (dView.window === window)
+        let dFrame = inWin ? dView.convert(dView.bounds, to: window) : .zero
+        let ptInside = inWin ? dFrame.contains(winPt) : false
+        CZFHitTestLog.czfHitTestLogLine("DECOR max=\(d.isMaximized ? 1 : 0) maxAnim=\(b(maxAnimVal)) pipAnim=\(b(pipAnimVal)) minimized=\(b(minimizedVal)) hid=\(dView.isHidden ? 1 : 0) a=\(String(format: "%.2f", dView.alpha)) frame=(\(Int(dFrame.origin.x)),\(Int(dFrame.origin.y)),\(Int(dFrame.size.width)),\(Int(dFrame.size.height))) ptInside=\(ptInside ? 1 : 0)")
+
+        let navBar = d.navigationBar
+        let navInWin = (navBar.window === window)
+        let navFrame = navInWin ? navBar.convert(navBar.bounds, to: window) : .zero
+        if navInWin {
+            let navPt = navBar.convert(winPt, from: window)
+            let navHit = navBar.hitTest(navPt, withEvent: event)
+            let navHitStr = navHit.map { NSStringFromClass(type(of: $0)) } ?? "nil"
+            CZFHitTestLog.czfHitTestLogLine("NAVBAR \(CZFHitTestLog.czfDescribeView(navBar)) frameWin=(\(Int(navFrame.origin.x)),\(Int(navFrame.origin.y)),\(Int(navFrame.size.width)),\(Int(navFrame.size.height))) localPt=\(CZFHitTestLog.czfPointString(navPt)) hit=\(navHitStr)")
+        } else {
+            CZFHitTestLog.czfHitTestLogLine("NAVBAR \(CZFHitTestLog.czfDescribeView(navBar)) not in this window (navBar.window != touched window)")
+        }
+
+        var btnLines: [String] = []
+        var count = 0
+        czfHitTestWalk(navBar, depth: 0, count: &count) { v in
+            let name = NSStringFromClass(type(of: v))
+            if name.contains("ButtonBar") || name.contains("UIButtonBarButton") {
+                let inW = (v.window === window)
+                let f = inW ? v.convert(v.bounds, to: window) : .zero
+                let inside = inW ? f.contains(winPt) : false
+                var extra = ""
+                if let c = v as? UIControl {
+                    extra = " enabled=\(c.isEnabled ? 1 : 0)"
+                }
+                btnLines.append("\(name) frame=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height))) ptInside=\(inside ? 1 : 0)\(extra)")
+            }
+        }
+        if btnLines.isEmpty {
+            CZFHitTestLog.czfHitTestLogLine("NAVBAR-BUTTONS none found (no _UIButtonBarButton in navBar hierarchy)")
+        } else {
+            for l in btnLines {
+                CZFHitTestLog.czfHitTestLogLine("NAVBAR-BUTTON \(l)")
+            }
+        }
+
+        if let gestures = navBar.gestureRecognizers, !gestures.isEmpty {
+            for g in gestures {
+                let stateStr: String
+                switch g.state {
+                case .possible:
+                    stateStr = "possible"
+                case .began:
+                    stateStr = "began"
+                case .changed:
+                    stateStr = "changed"
+                case .ended:
+                    stateStr = "ended"
+                case .cancelled:
+                    stateStr = "cancelled"
+                case .failed:
+                    stateStr = "failed"
+                case .recognized:
+                    stateStr = "recognized"
+                default:
+                    stateStr = "unknown"
+                }
+                CZFHitTestLog.czfHitTestLogLine("NAVBAR-GESTURE \(NSStringFromClass(type(of: g))) state=\(stateStr) enabled=\(g.isEnabled ? 1 : 0) cancels=\(g.cancelsTouchesInView ? 1 : 0) delaysBegan=\(g.delaysTouchesBegan ? 1 : 0) delaysEnded=\(g.delaysTouchesEnded ? 1 : 0)")
+            }
+        } else {
+            CZFHitTestLog.czfHitTestLogLine("NAVBAR-GESTURE none")
+        }
+    }
+
     @objc private func handleGlobalSwipe(_ gesture: UIPanGestureRecognizer) {
         // 不再要求 isVisible：源面板和 App 面板都要在"没打开任何
         // App"时也能从主界面调出（用户定：任意位置可调出面板）。
@@ -6497,6 +6736,8 @@ extension UIWindow {
         // 包一层 #available，iOS 15 下跳过（管理器本身也不跑）。
         if #available(iOS 16.0, *) {
             MultitaskDockManager.czfHostOutwardObserve(window: self, event: event)
+            // P0 hitTest 诊断（3.8.676）：纯观察，转发之后才记日志。
+            MultitaskDockManager.czfHitTestObserve(window: self, event: event)
         }
     }
 }

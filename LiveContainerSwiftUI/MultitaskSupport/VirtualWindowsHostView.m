@@ -6,6 +6,7 @@
 //
 #import "DecoratedAppSceneViewController.h"
 #import "VirtualWindowsHostView.h"
+#import "CZFHitTestLog.h"
 
 @implementation VirtualWindowsHostView
 - (instancetype)init {
@@ -41,6 +42,10 @@
 }
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView* hitView = [super hitTest:point withEvent:event];
+    // P0 hitTest 诊断（3.8.676）：只记日志，行为一字不动。
+    // 这一行出现 = 触摸走到了宿主窗的 hitTest；hitView==self
+    // 时返 nil（触摸穿到宿主 App），否则返命中的子视图。
+    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"HOST-HIT pt=%@ hit=%@ fwd=%d", [CZFHitTestLog czfPointString:point], hitView ? NSStringFromClass([hitView class]) : @"nil", (int)(hitView != self)]];
     if(hitView == self) {
         self.shouldForwardTapAction = NO;
         return nil;
