@@ -262,6 +262,29 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @AppStorage("CZFUpdatableBundleIDs") private var czfUpdatableBundleIDs = ""
     @AppStorage("CZFUpdatableAppCount") private var czfUpdatableCount = 0
     @State private var czfUpdatableOnly = false
+    // 3.8.696（B1）：仅可更新名单的新鲜度——读源页写进来的
+    // CZFLastSourceAutoRefresh（源页 autoRefreshSourcesIfNeeded
+    // 成功才写，0 新 key）；与源页同一 300 秒阈值，过期即名单
+    // 可能旧（新更新不出现、已装完的仍赖着）。App 页开关只读
+    // 持久化集合，不触发刷新（刷新架构不动，见源页注释）。
+    @AppStorage("CZFLastSourceAutoRefresh") private var czfLastSourceAutoRefresh: Double = 0
+    private var czfUpdatableListStale: Bool {
+        guard czfLastSourceAutoRefresh > 0 else { return true }
+        return Date().timeIntervalSince1970 - czfLastSourceAutoRefresh > 300
+    }
+    // 3.8.637（A3）同款相对时间 formatter——LCAppBannerView 的那份
+    // 是 private static，跨文件不可见，这里自备一份（abbreviated
+    // 样式，中文下出“5分钟前”这类短文案）。
+    private static let czfRelativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+    private var czfUpdatableStaleText: String {
+        guard czfLastSourceAutoRefresh > 0 else { return "可更新名单尚未检查过" }
+        let checkedDate = Date(timeIntervalSince1970: czfLastSourceAutoRefresh)
+        return "可更新名单是\(Self.czfRelativeFormatter.localizedString(for: checkedDate, relativeTo: Date()))检查的"
+    }
     // 3.8.651（F2）：仅无备份筛选——打开后列表只显示备份表里明确
     // 是“无备份”的 App；与两现有开关同款 @State（不持久化）。
     @State private var czfNoBackupOnly = false
@@ -2702,6 +2725,34 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     // body 拆分（3.8.423，422 构建红字）：body 太大编译器
     // 算不过来（unable to type-check in reasonable time）。
+    // 3.8.696（B1）：仅可更新名单过期提示——开关开着且名单过期
+    //（300 秒未刷新）时贴在列表顶部：新更新可能没出现、已装完的
+    // 可能仍赖着；点“去源页刷新”切源页，源页 onAppear 即按需
+    // 自动刷新。只读提示，不碰刷新架构。抽成独立 builder 再挂进
+    // ScrollView（3.8.688 体检查超时教训，大 ScrollView 不再直接加表达式）。
+    @ViewBuilder
+    private var czfUpdatableStaleHint: some View {
+        if czfUpdatableOnly, czfUpdatableListStale {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                Text(czfUpdatableStaleText)
+                    .font(.footnote)
+                Spacer()
+                Button("去源页刷新") {
+                    sharedModel.selectedTab = .sources
+                }
+                .font(.footnote)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(10)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal)
+        }
+    }
+
     // 把最大的块——ScrollView（含背景/onAppear/onChange）
     // 抽出来，body 只剩 NavigationView + 修饰符。只拆不改逻辑。
     @ViewBuilder
@@ -2710,6 +2761,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ScrollView {
             // 3.8.684（F3）：回到顶部锚点——点当前“App” Tab 即滚到这里。
             Color.clear.frame(height: 0).id("czfAppListTop")
+            czfUpdatableStaleHint
             // P0（3.8.655）/ 回归（3.8.665）：客场景 LC 分身
             //（LiveProcess 客进程，czfIsGuestScene）的 App 页跑在
             // 客进程的虚拟窗里（Decorated 窗），系统顶栏溢出菜单

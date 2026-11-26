@@ -101,6 +101,10 @@ struct CZFSourceGridView: View {
     // 3.8.672（B-1）：插件在途安装键集——往组头/详情页传，复用的
     // 列表行在途时变转圈；带默认值，旧调用点不传时按无在途处理。
     var dylibInstallingIDs: Set<String> = []
+    // 3.8.696（F1）：本源可更新子集的算子 + 批量安装回调——往组头传，
+    // 组头按本源 apps 取子集；带默认值，旧调用点不传时按无可更新处理。
+    var updatableAppsForSource: ([AltStoreSourceApp]) -> [AltStoreSourceApp] = { _ in [] }
+    var onUpdateSourceApps: ([AltStoreSourceApp]) -> Void = { _ in }
 
     // 3.8.604（O-18）：已装查找表在父级一次算好，往下传给组
     // 内容与格子（见 CZFInstalledLookup）。sharedModel 来自
@@ -192,7 +196,13 @@ struct CZFSourceGridView: View {
                         selectedIDs: selectedIDs,
                         onBatchInstall: onBatchInstall,
                         onToggleSelect: onToggleSelect,
-                        dylibInstallingIDs: dylibInstallingIDs
+                        dylibInstallingIDs: dylibInstallingIDs,
+                        // 3.8.696（F1）：组头“更新本源全部 App”——
+                        // 本源可更新子集（算子按本源 apps 取交集）+
+                        // 批量安装回调；实参按声明顺序，在
+                        // dylibInstallingIDs 之后。
+                        updateSourceApps: updatableAppsForSource(apps),
+                        onUpdateSourceApps: onUpdateSourceApps
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
@@ -243,12 +253,16 @@ struct CZFSourceGridGroupHeaderView: View {
     let onToggleSelect: (URL, AltStoreSourceApp) -> Void
     // 3.8.672（B-1）：插件在途安装键集——只往详情页传，不在组头用。
     let dylibInstallingIDs: Set<String>
+    // 3.8.696（F1）：本源可更新子集 + 批量安装回调——父级按
+    // czfStableID 与该源 apps 取交集算好；空即无菜单项。
+    let updateSourceApps: [AltStoreSourceApp]
+    let onUpdateSourceApps: ([AltStoreSourceApp]) -> Void
 
     // 3.8.673 修法（第四轮红字 1）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报
     // extra argument，显式声明兜底；参数顺序与声明一致，
     // dylibInstallingIDs 仍带默认值，旧调用点可省。
-    init(item: AltStoreSourcesViewModel.SourceItem, viewModel: AltStoreSourcesViewModel, apps: [AltStoreSourceApp], isFiltering: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onBatchInstall: @escaping () -> Void, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = []) {
+    init(item: AltStoreSourcesViewModel.SourceItem, viewModel: AltStoreSourcesViewModel, apps: [AltStoreSourceApp], isFiltering: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onBatchInstall: @escaping () -> Void, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = [], updateSourceApps: [AltStoreSourceApp] = [], onUpdateSourceApps: @escaping ([AltStoreSourceApp]) -> Void = { _ in }) {
         self.item = item
         self.viewModel = viewModel
         self.apps = apps
@@ -264,6 +278,8 @@ struct CZFSourceGridGroupHeaderView: View {
         self.onBatchInstall = onBatchInstall
         self.onToggleSelect = onToggleSelect
         self.dylibInstallingIDs = dylibInstallingIDs
+        self.updateSourceApps = updateSourceApps
+        self.onUpdateSourceApps = onUpdateSourceApps
     }
 
     var body: some View {
@@ -323,6 +339,14 @@ struct CZFSourceGridGroupHeaderView: View {
                     }
                     Button("复制源链接", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = item.url.absoluteString
+                    }
+                    // 3.8.696（F1）：更新本源全部 App——与列表组头同款
+                    //（本源可更新子集，无子集不出现，暂停源子集天然
+                    // 为 0）；批量态下不给（删源同款口径）。
+                    if !isBatchMode, !updateSourceApps.isEmpty {
+                        Button("更新本源全部 App（\(updateSourceApps.count)）", systemImage: "arrow.down.circle") {
+                            onUpdateSourceApps(updateSourceApps)
+                        }
                     }
                     // 3.8.686（B1）：批量态下不给“删除源”——与列表组头
                     // 同款（LCAltStoreSourcesView）：删源不碰视图层

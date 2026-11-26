@@ -1274,6 +1274,10 @@ struct LCSourcesView: View {
                     VStack(spacing: 16) {
                         // 3.8.684（F3）：回到顶部锚点——点当前“源” Tab 即滚到这里。
                         Color.clear.frame(height: 0).id("czfSourcesListTop")
+                        // 3.8.696（F2）：.ipa/.tipa 直链先给“安装这个 IPA”行
+                        //（见 czfSearchIpaRow，列表/网格两路共用本 VStack，
+                        // 一处加两路受益）；再往下才是“添加为源”行。
+                        czfSearchIpaRow
                         // 3.8.688（F2）：搜不到时输入像 URL 就给一行“添加为源”——
                         // 原来搜索无匹配时列表只剩 TwoYi 区、无任何空态文案与下一步
                         // 入口，要加这个源必须点 + → 管理源 sheet → 再粘贴一次。
@@ -1282,7 +1286,9 @@ struct LCSourcesView: View {
                         // 新源组直接现身，失败进本页独立的 czfAddSourceError
                         // alert（不走父级 errorMessage，见该 @State 注释）。
                         // 列表/网格两路共用本 VStack，一处加两路受益。
-                        if isFiltering, totalFilteredAppCount == 0, let czfAddURL = czfSearchSourceURL {
+                        // 3.8.696（F2）：.ipa/.tipa 链接不再出“添加为源”行——
+                        // 它不是源 JSON，点下去 addSource 必失败弹错。
+                        if isFiltering, totalFilteredAppCount == 0, let czfAddURL = czfSearchSourceURL, !["ipa", "tipa"].contains(czfAddURL.pathExtension.lowercased()) {
                             Button {
                                 Task {
                                     if let error = await handleAddSource(czfAddURL.absoluteString) {
@@ -1380,7 +1386,13 @@ struct LCSourcesView: View {
                                 // 复用的列表行也要变转圈，往下传。
                                 // 3.8.673 修法（红字 6）：实参须按声明顺序，
                                 // onToggleSelect 在 dylibInstallingIDs 之前。
-                                dylibInstallingIDs: czfDylibInstallingIDs
+                                dylibInstallingIDs: czfDylibInstallingIDs,
+                                // 3.8.696（F1）：组头“更新本源全部 App”——
+                                // 子集算子 + 批量安装回调往网格里传，组头
+                                // 再按本源 apps 取子集；实参按声明顺序，
+                                // 在 dylibInstallingIDs 之后。
+                                updatableAppsForSource: czfUpdatableApps(for:),
+                                onUpdateSourceApps: czfUpdateSourceApps(apps:)
                             )
                             .padding(.horizontal)
                         } else {
@@ -1422,7 +1434,13 @@ struct LCSourcesView: View {
                                     // 按钮在途时变转圈，往下传。
                                     // 3.8.673 修法（红字 6 同款）：实参须按声明
                                     // 顺序，onToggleSelect 在 dylibInstallingIDs 之前。
-                                    dylibInstallingIDs: czfDylibInstallingIDs
+                                    dylibInstallingIDs: czfDylibInstallingIDs,
+                                    // 3.8.696（F1）：组头“更新本源全部 App”——
+                                    // 本源可更新子集（按 czfStableID 与该源
+                                    // filteredApps 取交集）+ 批量安装回调；
+                                    // 实参按声明顺序，在 dylibInstallingIDs 之后。
+                                    updateSourceApps: czfUpdatableApps(for: apps),
+                                    onUpdateSourceApps: czfUpdateSourceApps(apps:)
                                 )
                                 .padding(.horizontal)
                                 .animation(.easeInOut, value: apps.count)
@@ -2055,6 +2073,73 @@ struct LCSourcesView: View {
         return comps.url
     }
 
+    // 3.8.696（F2）：搜索输入像 .ipa/.tipa 直链才返回它——App 页
+    // czfSearchURL 同款判法（LCAppListView:2351-2370：带协议直接用、
+    // 裸域名补 https、带空格/其他协议头/无点的不算），再按后缀
+    // 认 ipa/tipa。App 页的 czfSearchURL 是 private 计算属性，
+    // 跨文件不可见，这里内联同款判法；源页 czfSearchSourceURL
+    // 只认带协议完整 URL，口径比 App 页窄，不可直接套用，否则
+    // 裸域名 .ipa 链接仍无行。
+    private var czfSearchIpaURL: URL? {
+        let q = searchContext.debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, !q.contains(" ") else { return nil }
+        let url: URL?
+        if let comps = URLComponents(string: q), let scheme = comps.scheme?.lowercased(),
+           (scheme == "http" || scheme == "https"), comps.host != nil {
+            url = comps.url
+        } else {
+            if q.contains("://") { return nil }
+            guard q.contains(".") else { return nil }
+            let parts = q.split(separator: ".")
+            let isIPv4 = parts.count == 4 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy({ $0.isNumber }) }
+            guard parts.count >= 2,
+                  (isIPv4 || (q == q.lowercased() && parts.last!.count >= 2 && parts.last!.allSatisfy({ $0.isLetter }))) else { return nil }
+            url = URL(string: "https://" + q)
+        }
+        guard let ipaURL = url, ["ipa", "tipa"].contains(ipaURL.pathExtension.lowercased()) else { return nil }
+        return ipaURL
+    }
+
+    // 3.8.696（F2）：搜到 .ipa/.tipa 直链给一行“安装这个 IPA”——
+    // App 页 26 轮 F2（LCAppListView:2427-2450）同款，点按直接
+    // 写待装队列并切 App 页（install(app:) 的收尾两行同款），
+    // 不用进 + 菜单“从链接安装”重粘一遍；样式照抄下面“添加为源”
+    // 行（圆角 22 同款）。出现条件与 App 页同款：输入是 .ipa
+    // 直链即出现，不要求零结果。抽成独立 builder 再挂进搜索
+    // VStack（3.8.688 体检查超时教训，大 VStack 不再直接加表达式）。
+    @ViewBuilder
+    private var czfSearchIpaRow: some View {
+        if isFiltering, let czfIpaURL = czfSearchIpaURL {
+            Button {
+                withAnimation {
+                    DataManager.shared.model.selectedTab = .apps
+                }
+                CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: czfIpaURL, autoReplace: false, preview: true, forceAsNew: false))
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("安装这个 IPA")
+                            .font(.headline)
+                        Text(czfIpaURL.absoluteString)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundColor(.secondary)
+                }
+                .padding(10)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 22))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal)
+        }
+    }
+
     @MainActor
     private func handleAddSource(_ rawValue: String) async -> String? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2346,6 +2431,27 @@ struct LCSourcesView: View {
         // 同款 czfNormalizedBundleID（去队尾段），不归一就比对不上
         // 个人 ID 改写后的 ID（3.8.637 B1 同款教训）。
         updatableBundleIDs = list.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
+    }
+
+    // 3.8.696（F1）：本源可更新子集——cachedUpdatableApps 按
+    // czfStableID（包名 + 名字，跨源同键）与该源 filteredApps
+    // 取交集；暂停源 computeUpdatableApps 已跳过，子集天然为 0。
+    // 同一 App 跨两源时两边按钮都会带它，装的是名单里那一份
+    // 最新版，不会多装，不另做归属逻辑。
+    private func czfUpdatableApps(for sourceApps: [AltStoreSourceApp]) -> [AltStoreSourceApp] {
+        let ids = Set(sourceApps.map { $0.czfStableID })
+        return cachedUpdatableApps.filter { ids.contains($0.czfStableID) }
+    }
+
+    // 3.8.696（F1）：组头“更新本源全部 App”的执行——与“全部更新”
+    // onUpdateAll（:1559-1564）同一形态：Task { @MainActor in
+    // installBatch + czfShowBatchResult }；installBatch 与
+    // czfShowBatchResult 都是 @MainActor。
+    private func czfUpdateSourceApps(apps: [AltStoreSourceApp]) {
+        Task { @MainActor in
+            let result = await installBatch(apps)
+            czfShowBatchResult(result)
+        }
     }
 
     @MainActor
@@ -3091,13 +3197,16 @@ struct CZFSourceAppListView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            } else if filteredApps.count > 50 && !showAllApps {
+            } else if filteredApps.count > 50 {
                 Text("lc.sources.section.tooManyApps".loc)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button("展开全部（共 \(filteredApps.count) 个）") {
-                    showAllApps = true
+                // 3.8.696（B2）：展开后要能收回去——原来按钮只在
+                // !showAllApps 分支里、点按只写 true，全仓无一处
+                // 写回 false；改 toggle，文案按态翻。
+                Button(showAllApps ? "收起" : "展开全部（共 \(filteredApps.count) 个）") {
+                    showAllApps.toggle()
                 }
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3209,12 +3318,16 @@ private struct AltStoreSourceSectionView: View {
     // 3.8.672（B-1）：插件在途安装键集——往下传给列表行；
     // 带默认值，旧调用点不传时按无在途处理。
     let dylibInstallingIDs: Set<String>
+    // 3.8.696（F1）：本源可更新子集 + 批量安装回调——父级按
+    // czfStableID 与该源 filteredApps 取交集算好；空即无菜单项。
+    let updateSourceApps: [AltStoreSourceApp]
+    let onUpdateSourceApps: ([AltStoreSourceApp]) -> Void
 
     // 3.8.673 修法（第四轮红字 2）：显式 init——带默认值的
     // dylibInstallingIDs 在 memberwise init 下调用点报
     // extra argument，显式声明兜底；参数顺序与声明一致，
     // dylibInstallingIDs 仍带默认值，旧调用点可省。
-    init(item: AltStoreSourcesViewModel.SourceItem, filteredApps: [AltStoreSourceApp], isFiltering: Bool, isExpanded: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isPaused: Bool, onTogglePause: @escaping () -> Void, lastCheckedText: String, toggleExpanded: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = []) {
+    init(item: AltStoreSourcesViewModel.SourceItem, filteredApps: [AltStoreSourceApp], isFiltering: Bool, isExpanded: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isPaused: Bool, onTogglePause: @escaping () -> Void, lastCheckedText: String, toggleExpanded: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = [], updateSourceApps: [AltStoreSourceApp] = [], onUpdateSourceApps: @escaping ([AltStoreSourceApp]) -> Void = { _ in }) {
         self.item = item
         self.filteredApps = filteredApps
         self.isFiltering = isFiltering
@@ -3233,6 +3346,8 @@ private struct AltStoreSourceSectionView: View {
         self.selectedIDs = selectedIDs
         self.onToggleSelect = onToggleSelect
         self.dylibInstallingIDs = dylibInstallingIDs
+        self.updateSourceApps = updateSourceApps
+        self.onUpdateSourceApps = onUpdateSourceApps
     }
 
     var body: some View {
@@ -3277,6 +3392,15 @@ private struct AltStoreSourceSectionView: View {
                         Button(isPaused ? "lc.sources.resumeUpdates".loc : "lc.sources.pauseUpdates".loc, systemImage: isPaused ? "play.fill" : "pause.fill", action: onTogglePause)
                         Button("复制源链接", systemImage: "doc.on.doc") {
                             UIPasteboard.general.string = item.url.absoluteString
+                        }
+                        // 3.8.696（F1）：更新本源全部 App——本源可更新子集
+                        //（无子集不出现，暂停源子集天然为 0）；批量态下
+                        // 不给（删源同款口径）。同一 App 跨两源时两边
+                        // 按钮都会带它，装的是名单里那一份最新版，不多装。
+                        if !isBatchMode, !updateSourceApps.isEmpty {
+                            Button("更新本源全部 App（\(updateSourceApps.count)）", systemImage: "arrow.down.circle") {
+                                onUpdateSourceApps(updateSourceApps)
+                            }
                         }
                         // 3.8.686（B1）：批量态下不给“删除源”——删源只清
                         // ViewModel 侧，不碰视图层 selectedIDs；删完选中集
@@ -4294,6 +4418,9 @@ private struct LCSourceAppVersionDetailView: View {
     let onDownloadVersion: (URL) -> Void
     let onInstallVersion: (URL) -> Void
     @Environment(\.dismiss) private var dismiss
+    // 3.8.696（F3）：复制下载链接的反馈态——主详情页同款（写剪贴板 +
+    // 本地 Bool 翻“已复制”，不关单）；带默认值，调用点不动。
+    @State private var czfCopiedDownloadURL = false
 
     var body: some View {
         List {
@@ -4335,6 +4462,20 @@ private struct LCSourceAppVersionDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.blue)
+                // 3.8.696（F3）：复制下载链接——主详情页同款（写剪贴板 +
+                // 本地 Bool 翻“已复制”），复制的是本版链接；旧版页
+                // 原来只有下载行 +“安装此版本”，无复制。
+                Button {
+                    UIPasteboard.general.string = version.downloadURL.absoluteString
+                    czfCopiedDownloadURL = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: czfCopiedDownloadURL ? "checkmark" : "doc.on.doc")
+                        Text(czfCopiedDownloadURL ? "已复制" : "复制下载链接")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
                 // 3.8.666（F-2）：安装此版本——先关详情单再写待装队列，
                 // 与下载按钮同款顺序；下载按钮保留不动（仍有人只要文件）。
                 // UI 打磨：borderedProminent，与详情页「安装」主按钮同款。

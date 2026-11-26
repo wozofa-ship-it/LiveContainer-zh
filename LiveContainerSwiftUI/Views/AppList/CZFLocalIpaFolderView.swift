@@ -1105,6 +1105,13 @@ struct CZFInlineIpaFolderGrid: View {
             }
         }
         .onAppear { model.scan() }
+        // 3.8.696（B3）：文件夹分段下拉刷新——源分段同款入口（源页
+        // :1487 的 .refreshable）；model.scan() 是同步 void、后台开
+        // Task 跑，指示器在闭包返回时即消失，不等到扫完（与源页
+        // await refreshAllSources() 的指示器行为不同）；旧列表在扫
+        // 期间仍可见（O-5 注释 :969 起），扫完整体替换。模型是
+        // @MainActor，await 进去。
+        .refreshable { await model.scan() }
         .onDisappear {
             model.cancelDetailTasks()
             // 3.8.662（B3）：节流任务也取消——睡醒后调
