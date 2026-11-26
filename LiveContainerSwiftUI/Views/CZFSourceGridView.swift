@@ -524,6 +524,10 @@ struct CZFSourceAppGridCell: View {
 
     @State private var showDetail = false
 
+    // 3.8.694（F1）：忽略后本地刷新触发——与列表行 @State
+    // ignoreRefresh 同款（LCAltStoreSourcesView :3461）。
+    @State private var ignoreRefresh = false
+
     // 已安装标记（用户 12:03 令）：源里已装的 App，图标右上角打
     // 绿勾，免得重复装。App 部分判据与 LCSourceAppBanner.isInstalled
     // 同款：已装 + 隐藏 App 里按 bundleIdentifier 匹配；插件
@@ -564,6 +568,7 @@ struct CZFSourceAppGridCell: View {
     // 格子一直只有绿勾、看不出哪个有更新。有更新就说明
     // 已装，角标代替绿勾（不叠两层）；批量模式下勾选圈优先。
     private var hasUpdate: Bool {
+        _ = ignoreRefresh
         // latest 先解包：latestVersion?.buildVersion 是 String??（双层
         // 可选），直接传给 String? 参数编不过；解包后 buildVersion
         // 是 String?，单层。
@@ -580,6 +585,82 @@ struct CZFSourceAppGridCell: View {
     // 深色黑晕影；原来写死白晕影，深色模式下白字 + 白晕影
     // 配浅色背景看不清。
     @Environment(\.colorScheme) private var colorScheme
+
+    // 3.8.694（F1）：格子长按菜单单抽一个 builder——body 体检查
+    // 超时的教训（3.8.688/692 同款拆法）：菜单内容一字不动，只换
+    // 宿主；新增忽略两项一并放在这里，不再撑大 body。
+    @ViewBuilder
+    private var czfGridContextMenu: some View {
+            // 3.8.684（B3）：批量态下只留“应用详情”（只读开单）——
+            // 点按/双击已设防，长按再点“安装”会绕过批量队列当场
+            // 单装，底栏已选数与实际安装脱节；App 页网格同款
+            // （低 #9：批量态下不挂菜单，这里留详情不断路）。
+            if isBatchMode {
+                Button("应用详情", systemImage: "info.circle") {
+                    showDetail = true
+                }
+            } else {
+                // 3.8.684（F2）：固定到面板——与列表行菜单同款
+                // （LCSourceAppBanner），文案按固定态翻，0 新 key。
+                Button {
+                    CZFPinnedAppsStore.shared.toggleSourcePin(app)
+                } label: {
+                    Label(CZFPinnedAppsStore.shared.isSourcePinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isSourcePinned(app) ? "pin.slash" : "pin")
+                }
+                // 3.8.694（F1）：忽略此版本 / 取消忽略更新——与列表行
+                // 菜单同款（LCAltStoreSourcesView czfBannerContextMenu）；
+                // 格子看得到更新角标却没法忽略，必须切回列表模式。
+                // 批量态下不提供（点按已设防，长按改忽略名单会绕过
+                // 批量流程）；复制两项照常留（只读）。
+                if hasUpdate, let latest = app.latestVersion {
+                    Button {
+                        CZFUpdateIgnore.setIgnored(CZFUpdateIgnore.ignoredKey(version: latest.version, build: latest.buildVersion), for: app.bundleIdentifier)
+                        ignoreRefresh.toggle()
+                        NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+                    } label: {
+                        Label("忽略此版本", systemImage: "bell.slash")
+                    }
+                }
+                if CZFUpdateIgnore.isIgnored(app) {
+                    Button {
+                        CZFUpdateIgnore.setIgnored(nil, for: app.bundleIdentifier)
+                        ignoreRefresh.toggle()
+                        NotificationCenter.default.post(name: Notification.Name("CZFRecomputeUpdatableCache"), object: nil)
+                    } label: {
+                        Label("取消忽略更新", systemImage: "bell")
+                    }
+                }
+                Button("lc.common.install".loc, systemImage: "square.and.arrow.down") {
+                    onInstall(app)
+                }
+                Button("新建", systemImage: "plus.square.on.square") {
+                    onInstallAsNew(app)
+                }
+                Button("lc.common.download".loc, systemImage: "arrow.down.circle") {
+                    onDownload(app)
+                }
+                Button("应用详情", systemImage: "info.circle") {
+                    showDetail = true
+                }
+            }
+            // 3.8.686（F2）：复制版本号 / 复制 Bundle ID——与列表行
+            // 菜单同款（LCAltStoreSourcesView :3540-3558，3.8.682）；
+            // 版本号读不到或为 "?" 时不显示；只读，不碰批量队列，
+            // 批量态下照常留（行菜单 B2 同款口径）。标题硬编码中文。
+            // 0 新 key。
+            if let version = app.latestVersion?.version, version != "?" {
+                Button {
+                    UIPasteboard.general.string = version
+                } label: {
+                    Label("复制版本号", systemImage: "doc.on.doc")
+                }
+            }
+            Button {
+                UIPasteboard.general.string = app.bundleIdentifier
+            } label: {
+                Label("复制 Bundle ID", systemImage: "doc.on.doc")
+            }
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -664,54 +745,7 @@ struct CZFSourceAppGridCell: View {
                     .offset(x: 6, y: -6)
             }
         }
-        .contextMenu {
-            // 3.8.684（B3）：批量态下只留“应用详情”（只读开单）——
-            // 点按/双击已设防，长按再点“安装”会绕过批量队列当场
-            // 单装，底栏已选数与实际安装脱节；App 页网格同款
-            // （低 #9：批量态下不挂菜单，这里留详情不断路）。
-            if isBatchMode {
-                Button("应用详情", systemImage: "info.circle") {
-                    showDetail = true
-                }
-            } else {
-                // 3.8.684（F2）：固定到面板——与列表行菜单同款
-                // （LCSourceAppBanner），文案按固定态翻，0 新 key。
-                Button {
-                    CZFPinnedAppsStore.shared.toggleSourcePin(app)
-                } label: {
-                    Label(CZFPinnedAppsStore.shared.isSourcePinned(app) ? "取消固定" : "固定到面板", systemImage: CZFPinnedAppsStore.shared.isSourcePinned(app) ? "pin.slash" : "pin")
-                }
-                Button("lc.common.install".loc, systemImage: "square.and.arrow.down") {
-                    onInstall(app)
-                }
-                Button("新建", systemImage: "plus.square.on.square") {
-                    onInstallAsNew(app)
-                }
-                Button("lc.common.download".loc, systemImage: "arrow.down.circle") {
-                    onDownload(app)
-                }
-                Button("应用详情", systemImage: "info.circle") {
-                    showDetail = true
-                }
-            }
-            // 3.8.686（F2）：复制版本号 / 复制 Bundle ID——与列表行
-            // 菜单同款（LCAltStoreSourcesView :3540-3558，3.8.682）；
-            // 版本号读不到或为 "?" 时不显示；只读，不碰批量队列，
-            // 批量态下照常留（行菜单 B2 同款口径）。标题硬编码中文。
-            // 0 新 key。
-            if let version = app.latestVersion?.version, version != "?" {
-                Button {
-                    UIPasteboard.general.string = version
-                } label: {
-                    Label("复制版本号", systemImage: "doc.on.doc")
-                }
-            }
-            Button {
-                UIPasteboard.general.string = app.bundleIdentifier
-            } label: {
-                Label("复制 Bundle ID", systemImage: "doc.on.doc")
-            }
-        }
+        .contextMenu { czfGridContextMenu }
         .sheet(isPresented: $showDetail) {
             LCSourceAppDetailView(app: app, source: source, onDownloadVersion: onDownloadVersion, onInstall: onInstall, onInstallAsNew: onInstallAsNew, installedLookup: installedLookup)
         }

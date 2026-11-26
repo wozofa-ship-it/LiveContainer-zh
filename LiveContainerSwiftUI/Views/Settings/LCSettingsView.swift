@@ -433,6 +433,28 @@ struct LCSettingsView: View {
         return keywords.localizedCaseInsensitiveContains(q)
     }
 
+    // 3.8.694（B1）：搜不到时空态——查询非空且 12 区全不匹配时，
+    // 12 区全被过滤门藏掉、只剩版本页脚，看着像页面坏了；补一行
+    // footnote 空态文案（硬编码中文，本地文件夹“没有匹配的 IPA”、
+    // 插件页“没有找到匹配的插件”同款先例，0 新 key）。关键词表
+    // 与下面 czfFilteredSettingsSections 同一份，改一处两处同步。
+    private var czfNoSettingsSectionMatches: Bool {
+        let q = czfSearchText.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return false }
+        return !czfSettingsSectionMatches("免JIT模式 证书 导入证书 删除证书 诊断")
+            && !czfSettingsSectionMatches("多LiveContainer 多开 分身 诊断")
+            && !czfSettingsSectionMatches("JIT 启用工具 地址 UDID StikDebug SideJITServer")
+            && !czfSettingsSectionMatches("模拟器 32位")
+            && !czfSettingsSectionMatches("外观 界面 动态颜色 深色模式图标")
+            && !czfSettingsSectionMatches("下载 仅Wi-Fi下载 自动安装 Wi-Fi")
+            && !czfSettingsSectionMatches("杂项设置 多任务 更多设置 快捷图标 边框 静默切换App 打开链接 严格隐藏模式 不签名新App")
+            && !czfSettingsSectionMatches("通知 清除通知 通知权限 证书到期提醒 首档提前提醒")
+            && !czfSettingsSectionMatches("存储管理 数据管理 存储 数据")
+            && !czfSettingsSectionMatches("后台保活 保活 白名单")
+            && !czfSettingsSectionMatches("关于 检查更新 更新 SideInstaller Seal 复制安装链接")
+            && !czfSettingsSectionMatches("开发者模式 注入 JIT 调试器 证书 导出")
+    }
+
     // 3.8.690（F3）：12 个区先拆到这个子 builder 里再挂过滤门——
     // body 的 Form 只剩两行（3.8.688 体检查超时的教训：表达式
     // 撑大前先拆子 builder）；versionFooter 常驻，不进过滤。
@@ -449,6 +471,15 @@ struct LCSettingsView: View {
         if czfSettingsSectionMatches("后台保活 保活 白名单") { keepAliveSection }
         if czfSettingsSectionMatches("关于 检查更新 更新 SideInstaller Seal 复制安装链接") { aboutSection }
         if czfSettingsSectionMatches("开发者模式 注入 JIT 调试器 证书 导出") { developerSection }
+        // 3.8.694（B1）：12 区全不匹配时补空态文案，只加显示，
+        // 不动各区内容与过滤门；保活区尤其只显隐（H-1 不动）。
+        if czfNoSettingsSectionMatches {
+            Section {
+                Text("没有匹配的设置")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     @ViewBuilder private var jitLessSection: some View {

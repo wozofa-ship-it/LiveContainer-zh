@@ -2891,6 +2891,22 @@ private struct ManageSourcesSheet: View {
                             }
                             .buttonStyle(.bordered)
                             .disabled(isAddingManual)
+                            // 3.8.694（F3）：长按“粘贴并添加”——读剪贴板
+                            // 填入后直接调同一 struct 内的 attemptManualAdd()，
+                            // 校验与错误通道与点“添加源”一字相同，0 新错误
+                            // 通道；点按行为保持 24 轮原样（填入 + 聚焦，
+                            // 可再改链接）。不新增按钮、不改布局，不碰删源
+                            // 逻辑与父级选中集。
+                            .contextMenu {
+                                Button {
+                                    if let pasted = UIPasteboard.general.string, !pasted.isEmpty {
+                                        manualSourceValue = pasted
+                                        attemptManualAdd()
+                                    }
+                                } label: {
+                                    Label("粘贴并添加", systemImage: "doc.on.clipboard.fill")
+                                }
+                            }
                         }
                         
                         Button {

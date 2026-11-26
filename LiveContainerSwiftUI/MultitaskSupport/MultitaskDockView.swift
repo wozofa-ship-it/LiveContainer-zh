@@ -4694,6 +4694,10 @@ struct AllAppsListView: View {
                 .padding([.horizontal, .bottom], 16)
                 .id("czfAppPanelTop")
             }
+            // 3.8.694（B3）：面板搜索后滚列表收键盘——与 B2 同款一行
+            // 现成助手；只加列表滚动收键盘修饰符，不动
+            // VirtualWindowsHostView 本身（不碰 frame/pointInside/挂载）。
+            .czfScrollDismissesKeyboard()
             .onChange(of: dockManager.czfAppPanelOpenCounter) { _ in
                 // 每次调出回到初始状态：滚回最顶部（用户定，
                 // 不留上次滑动的位置），搜索也一并清空。

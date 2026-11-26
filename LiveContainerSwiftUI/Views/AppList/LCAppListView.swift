@@ -2418,6 +2418,37 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 .buttonStyle(.plain)
             }
+            // 3.8.694（F2）：粘贴的 .ipa/.tipa 直链给一行“安装这个
+            // IPA”——点按直接走同一 struct 内的 installFromUrl，
+            // 不用再进 + 菜单“从链接安装”重粘一遍；样式照抄上面
+            // “打开网址”那行（圆角 22 同款）。czfSearchURL 只放行
+            // http/https，itms-services:// 进不来，不撞
+            // startInstallFromUrl 的 itms 分支。
+            if let url = czfSearchURL, ["ipa", "tipa"].contains(url.pathExtension.lowercased()) {
+                Button {
+                    Task { await installFromUrl(urlStr: url.absoluteString) }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("安装这个 IPA")
+                                .font(.headline)
+                            Text(url.absoluteString)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(10)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 22))
+                }
+                .buttonStyle(.plain)
+            }
             Button {
                 if let url = czfSearchWebURL {
                     Task { await openWebView(urlString: url.absoluteString) }

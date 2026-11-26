@@ -477,6 +477,11 @@ struct LCDataManagementView : View {
             // 有这一个 searchable，不存在双 searchable 抢占。
             // prompt 硬编码中文“搜索备份”，沿用 CZF 新增 UI 先例。
             .searchable(text: $czfBackupSearchText, prompt: "搜索备份")
+            // 3.8.694（B2）：搜索后滚列表收键盘——恢复页 List 漏了，
+            // 与 23 轮 B2（App 页/源页/插件页/设置页）同款一行；
+            // 不碰备份列表身份（backupListVersion 防闪退机制不动）
+            // 与恢复逻辑。
+            .czfScrollDismissesKeyboard()
             .navigationTitle("lc.settings.restoreBackup".loc)
             .onAppear {
                 czfDirectCoverAppeared = true
