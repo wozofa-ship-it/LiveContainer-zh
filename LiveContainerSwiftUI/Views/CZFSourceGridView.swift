@@ -165,8 +165,13 @@ struct CZFSourceGridView: View {
         // 组头立即定高排布，确定性布局；每组内容仍是 LazyVGrid
         // （格子懒加载还在，性能不丢）。组头跟着内容一起滑走，
         // 不钉住。
-        VStack(alignment: .leading, spacing: 16) {
-            ForEach(czfVisibleItems, id: \.item.id) { entry in
+        // 3.8.673 修法（红字 1-3）：ForEach 用元组 keypath
+        // \.item.id 在本文件里推不出根类型（报成 Binding<C>），
+        // 改按下标迭代，行身份用下标；visibleItems 只算一次。
+        let visibleItems = czfVisibleItems
+        return VStack(alignment: .leading, spacing: 16) {
+            ForEach(visibleItems.indices, id: \.self) { index in
+                let entry = visibleItems[index]
                 let item = entry.item
                 let apps = entry.apps
                 VStack(alignment: .leading, spacing: 8) {
@@ -674,6 +679,28 @@ struct CZFSourceDetailView: View {
     // 3.8.672（B-1）：插件在途安装键集——往复用的列表行传。
     let dylibInstallingIDs: Set<String> = []
 
+    // 3.8.673 修法（红字 4）：显式 init——带默认值的
+    // dylibInstallingIDs 在 memberwise init 下调用点报
+    // extra argument，显式声明兜底；参数顺序与声明一致，
+    // dylibInstallingIDs 仍带默认值，旧调用点可省。
+    init(item: AltStoreSourcesViewModel.SourceItem, viewModel: AltStoreSourcesViewModel, filteredApps: [AltStoreSourceApp], isFiltering: Bool, onRefresh: @escaping () -> Void, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, onRemove: @escaping () -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onBatchInstall: @escaping () -> Void, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = []) {
+        self.item = item
+        self.viewModel = viewModel
+        self.filteredApps = filteredApps
+        self.isFiltering = isFiltering
+        self.onRefresh = onRefresh
+        self.onInstall = onInstall
+        self.onInstallAsNew = onInstallAsNew
+        self.onDownload = onDownload
+        self.onDownloadVersion = onDownloadVersion
+        self.onRemove = onRemove
+        self.isBatchMode = isBatchMode
+        self.selectedIDs = selectedIDs
+        self.onBatchInstall = onBatchInstall
+        self.onToggleSelect = onToggleSelect
+        self.dylibInstallingIDs = dylibInstallingIDs
+    }
+
     // S-13：toolbar 按钮装的是全部已勾（onBatchInstall 是主页面板
     // 的 batchInstallSelected，跨源全装、不认搜索过滤），数字必须
     // 跟动作一致。原来数的是本源搜索过滤后的已勾：搜索开着时数字
@@ -688,104 +715,116 @@ struct CZFSourceDetailView: View {
         czfDedupedSelectedCount(sources: viewModel.sources, selectedIDs: selectedIDs)
     }
 
+    // 3.8.673 修法（红字 5）：body 表达式超时——头与内容
+    // 各抽一个 @ViewBuilder 子表达式，body 只剩组装；
+    // 逻辑与文案一字不动，只挪位置。
+    @ViewBuilder
+    private var czfDetailHeader: some View {
+        HStack(alignment: .center, spacing: 12) {
+            SourceIconView(url: item.primaryIconURL)
+                .frame(width: 36, height: 36)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            Text(item.source?.name ?? item.displayName)
+                .font(.system(.title2).bold())
+            // 3.8.658（F2）：停用后补“已暂停”小字。
+            if viewModel.isSourcePaused(item.url) {
+                Text("已暂停")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if item.isLoading {
+                ProgressView()
+            } else {
+                Menu {
+                    Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
+                    // 3.8.658（F2）：暂停检查更新（与组头同款）。
+                    Button(viewModel.isSourcePaused(item.url) ? "lc.sources.resumeUpdates".loc : "lc.sources.pauseUpdates".loc, systemImage: viewModel.isSourcePaused(item.url) ? "play.fill" : "pause.fill") {
+                        viewModel.togglePauseSource(item.url)
+                    }
+                    Button("复制源链接", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = item.url.absoluteString
+                    }
+                    Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .imageScale(.large)
+                        .foregroundColor(.secondary)
+                        // 低 #63：同组头，Menu label 补无障碍标签。
+                        .accessibilityLabel("更多操作")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var czfDetailContent: some View {
+        if let subtitle = item.source?.subtitle, !subtitle.isEmpty {
+            Text(subtitle)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        } else if item.source == nil, let host = item.url.host {
+            Text(host)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        // S1：有缓存 source 时先显示 App 列表，刷新失败只在
+        // 列表上方贴一行小提示；无缓存时仍走下面的大错误块。
+        if let source = item.source {
+            VStack(alignment: .leading, spacing: 12) {
+                if let error = item.error {
+                    CZFSourceRefreshErrorRow(error: error, onRefresh: onRefresh)
+                }
+                CZFSourceAppListView(
+                    source: source,
+                    sourceURL: item.url,
+                    filteredApps: filteredApps,
+                    isFiltering: isFiltering,
+                    onInstall: onInstall,
+                    onInstallAsNew: onInstallAsNew,
+                    onDownload: onDownload,
+                    onDownloadVersion: onDownloadVersion,
+                    isBatchMode: isBatchMode,
+                    selectedIDs: selectedIDs,
+                    onToggleSelect: onToggleSelect,
+                    dylibInstallingIDs: dylibInstallingIDs
+                )
+            }
+        } else if let error = item.error {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("lc.sources.section.error".loc)
+                    .font(.subheadline)
+                    .bold()
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("lc.sources.refresh".loc, action: onRefresh)
+                    .font(.footnote)
+            }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color(uiColor: UIColor.secondarySystemBackground))
+            )
+        } else if item.isLoading {
+            ProgressView("lc.sources.loading".loc)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            // 设置 #33：同款缺口——error 与 source 同时为
+            // nil 且不在加载时，之前这里渲染为空；补空态文案。
+            Text("lc.sources.section.noApps".loc)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 12) {
-                    SourceIconView(url: item.primaryIconURL)
-                        .frame(width: 36, height: 36)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    Text(item.source?.name ?? item.displayName)
-                        .font(.system(.title2).bold())
-                    // 3.8.658（F2）：停用后补“已暂停”小字。
-                    if viewModel.isSourcePaused(item.url) {
-                        Text("已暂停")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if item.isLoading {
-                        ProgressView()
-                    } else {
-                        Menu {
-                            Button("lc.sources.refresh".loc, systemImage: "arrow.clockwise", action: onRefresh)
-                            // 3.8.658（F2）：暂停检查更新（与组头同款）。
-                            Button(viewModel.isSourcePaused(item.url) ? "lc.sources.resumeUpdates".loc : "lc.sources.pauseUpdates".loc, systemImage: viewModel.isSourcePaused(item.url) ? "play.fill" : "pause.fill") {
-                                viewModel.togglePauseSource(item.url)
-                            }
-                            Button("复制源链接", systemImage: "doc.on.doc") {
-                                UIPasteboard.general.string = item.url.absoluteString
-                            }
-                            Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .imageScale(.large)
-                                .foregroundColor(.secondary)
-                                // 低 #63：同组头，Menu label 补无障碍标签。
-                                .accessibilityLabel("更多操作")
-                        }
-                    }
-                }
-
-                if let subtitle = item.source?.subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else if item.source == nil, let host = item.url.host {
-                    Text(host)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                // S1：有缓存 source 时先显示 App 列表，刷新失败只在
-                // 列表上方贴一行小提示；无缓存时仍走下面的大错误块。
-                if let source = item.source {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if let error = item.error {
-                            CZFSourceRefreshErrorRow(error: error, onRefresh: onRefresh)
-                        }
-                        CZFSourceAppListView(
-                            source: source,
-                            sourceURL: item.url,
-                            filteredApps: filteredApps,
-                            isFiltering: isFiltering,
-                            onInstall: onInstall,
-                            onInstallAsNew: onInstallAsNew,
-                            onDownload: onDownload,
-                            onDownloadVersion: onDownloadVersion,
-                            isBatchMode: isBatchMode,
-                            selectedIDs: selectedIDs,
-                            onToggleSelect: onToggleSelect,
-                            dylibInstallingIDs: dylibInstallingIDs
-                        )
-                    }
-                } else if let error = item.error {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("lc.sources.section.error".loc)
-                            .font(.subheadline)
-                            .bold()
-                        Text(error)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Button("lc.sources.refresh".loc, action: onRefresh)
-                            .font(.footnote)
-                    }
-                    .padding()
-                    .background(
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(Color(uiColor: UIColor.secondarySystemBackground))
-                    )
-                } else if item.isLoading {
-                    ProgressView("lc.sources.loading".loc)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    // 设置 #33：同款缺口——error 与 source 同时为
-                    // nil 且不在加载时，之前这里渲染为空；补空态文案。
-                    Text("lc.sources.section.noApps".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                czfDetailHeader
+                czfDetailContent
             }
             .padding()
         }

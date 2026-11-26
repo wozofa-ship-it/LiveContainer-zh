@@ -1253,9 +1253,6 @@ struct LCSourcesView: View {
                                 isBatchMode: isBatchMode,
                                 selectedIDs: selectedIDs,
                                 onBatchInstall: { batchInstallSelected() },
-                                // 3.8.672（B-1）：插件在途键集——网格详情页
-                                // 复用的列表行也要变转圈，往下传。
-                                dylibInstallingIDs: czfDylibInstallingIDs,
                                 onToggleSelect: { sourceURL, app in
                                     let key = czfSourceSelectionKey(sourceURL: sourceURL, app: app)
                                     if selectedIDs.contains(key) {
@@ -1263,7 +1260,12 @@ struct LCSourcesView: View {
                                     } else {
                                         selectedIDs.insert(key)
                                     }
-                                }
+                                },
+                                // 3.8.672（B-1）：插件在途键集——网格详情页
+                                // 复用的列表行也要变转圈，往下传。
+                                // 3.8.673 修法（红字 6）：实参须按声明顺序，
+                                // onToggleSelect 在 dylibInstallingIDs 之前。
+                                dylibInstallingIDs: czfDylibInstallingIDs
                             )
                             .padding(.horizontal)
                         } else {
@@ -1288,9 +1290,6 @@ struct LCSourcesView: View {
                                     toggleExpanded: { toggleExpansion(for: entry.item.id) },
                                     isBatchMode: isBatchMode,
                                     selectedIDs: selectedIDs,
-                                    // 3.8.672（B-1）：插件在途键集——行安装
-                                    // 按钮在途时变转圈，往下传。
-                                    dylibInstallingIDs: czfDylibInstallingIDs,
                                     onToggleSelect: { sourceURL, app in
                                         let key = czfSourceSelectionKey(sourceURL: sourceURL, app: app)
                                         if selectedIDs.contains(key) {
@@ -1298,7 +1297,12 @@ struct LCSourcesView: View {
                                         } else {
                                             selectedIDs.insert(key)
                                         }
-                                    }
+                                    },
+                                    // 3.8.672（B-1）：插件在途键集——行安装
+                                    // 按钮在途时变转圈，往下传。
+                                    // 3.8.673 修法（红字 6 同款）：实参须按声明
+                                    // 顺序，onToggleSelect 在 dylibInstallingIDs 之前。
+                                    dylibInstallingIDs: czfDylibInstallingIDs
                                 )
                                 .padding(.horizontal)
                                 .animation(.easeInOut, value: apps.count)
@@ -2756,6 +2760,26 @@ struct CZFSourceAppListView: View {
     // 3.8.672（B-1）：插件在途安装键集——行安装按钮在途时变转圈；
     // 带默认值，网格详情页等复用方不传时按无在途处理。
     let dylibInstallingIDs: Set<String> = []
+
+    // 3.8.673 修法（红字 8）：显式 init——带默认值的
+    // dylibInstallingIDs 在 memberwise init 下调用点报
+    // extra argument，显式声明兜底；参数顺序与声明一致，
+    // dylibInstallingIDs 仍带默认值，旧调用点可省。
+    init(source: AltStoreSource, sourceURL: URL, filteredApps: [AltStoreSourceApp], isFiltering: Bool, onInstall: @escaping (AltStoreSourceApp) -> Void, onInstallAsNew: @escaping (AltStoreSourceApp) -> Void, onDownload: @escaping (AltStoreSourceApp) -> Void, onDownloadVersion: @escaping (URL) -> Void, isBatchMode: Bool, selectedIDs: Set<String>, onToggleSelect: @escaping (URL, AltStoreSourceApp) -> Void, dylibInstallingIDs: Set<String> = []) {
+        self.source = source
+        self.sourceURL = sourceURL
+        self.filteredApps = filteredApps
+        self.isFiltering = isFiltering
+        self.onInstall = onInstall
+        self.onInstallAsNew = onInstallAsNew
+        self.onDownload = onDownload
+        self.onDownloadVersion = onDownloadVersion
+        self.isBatchMode = isBatchMode
+        self.selectedIDs = selectedIDs
+        self.onToggleSelect = onToggleSelect
+        self.dylibInstallingIDs = dylibInstallingIDs
+    }
+
     @State private var showAllApps = false
 
     // 3.8.604（O-18）：已装查找表在父级一次算好，传给行
@@ -3072,6 +3096,24 @@ struct LCSourceAppBanner: View {
     // 3.8.672（B-1）：插件在途安装键集——在途的插件行安装按钮
     // 变转圈；带默认值，旧调用点不传时按无在途处理。
     let dylibInstallingIDs: Set<String> = []
+
+    // 3.8.673 修法（红字 7）：显式 init——带默认值的
+    // dylibInstallingIDs 在 memberwise init 下调用点报
+    // extra argument，显式声明兜底；参数顺序与声明一致，
+    // dylibInstallingIDs 仍带默认值，旧调用点可省。
+    init(app: AltStoreSourceApp, source: AltStoreSource, installAction: @escaping (AltStoreSourceApp) -> Void, installAsNewAction: @escaping (AltStoreSourceApp) -> Void, downloadAction: @escaping (AltStoreSourceApp) -> Void, downloadVersionAction: @escaping (URL) -> Void, isBatchMode: Bool, isSelected: Bool, onToggleSelect: @escaping () -> Void, installedLookup: CZFInstalledLookup, dylibInstallingIDs: Set<String> = []) {
+        self.app = app
+        self.source = source
+        self.installAction = installAction
+        self.installAsNewAction = installAsNewAction
+        self.downloadAction = downloadAction
+        self.downloadVersionAction = downloadVersionAction
+        self.isBatchMode = isBatchMode
+        self.isSelected = isSelected
+        self.onToggleSelect = onToggleSelect
+        self.installedLookup = installedLookup
+        self.dylibInstallingIDs = dylibInstallingIDs
+    }
     
     @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) private var dynamicColors = true
     @Environment(\.colorScheme) var colorScheme
