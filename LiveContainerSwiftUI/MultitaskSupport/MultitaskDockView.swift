@@ -2130,7 +2130,7 @@ extension Notification.Name {
         let all = czfHitTestAllWindows()
         CZFHitTestLog.czfHitTestLogLine("WINDOWS n=\(all.count)")
         for w in all {
-            CZFHitTestLog.czfHitTestLogLine("  WIN " + CZFHitTestLog.czfDescribeWindow(w))
+            CZFHitTestLog.czfHitTestLogLine("  WIN " + CZFHitTestLog.czfDescribe(w))
         }
     }
 
@@ -2216,7 +2216,7 @@ extension Notification.Name {
         }
 
         // 递送链：手动 hitTest 是纯查询，不递送事件。
-        let hit = window.hitTest(winPt, withEvent: event)
+        let hit = window.hitTest(winPt, with: event)
         if let hitView = hit {
             var chain: [String] = []
             var v: UIView? = hitView
@@ -2253,7 +2253,7 @@ extension Notification.Name {
             let inWin = (dockView.window === window)
             let f = inWin ? dockView.convert(dockView.bounds, to: window) : .zero
             let insideStr = inWin ? (f.contains(winPt) ? "1" : "0") : "n/a"
-            CZFHitTestLog.czfHitTestLogLine("DOCK collapsed=\(Self.shared.isCollapsed ? 1 : 0) \(CZFHitTestLog.czfDescribeView(dockView)) frameWin=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height))) ptInside=\(insideStr)")
+            CZFHitTestLog.czfHitTestLogLine("DOCK collapsed=\(Self.shared.isCollapsed ? 1 : 0) \(CZFHitTestLog.czfDescribe(dockView)) frameWin=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height))) ptInside=\(insideStr)")
         } else {
             CZFHitTestLog.czfHitTestLogLine("DOCK none (no hostingController view)")
         }
@@ -2267,22 +2267,30 @@ extension Notification.Name {
         let maxAnimVal = d.value(forKey: "czfMaximizeAnimating") as? Bool
         let pipAnimVal = d.value(forKey: "czfPiPMinimizeAnimating") as? Bool
         let minimizedVal = d.value(forKey: "czfMinimized") as? Bool
-        let dView = d.view
+        // 构建红字：.h 无 nullability 标注，d.view / d.navigationBar
+        // 导入 Swift 是 Optional，必须先解包（只记日志，不改行为）。
+        guard let dView = d.view else {
+            CZFHitTestLog.czfHitTestLogLine("DECOR view=nil")
+            return
+        }
         let inWin = (dView.window === window)
         let dFrame = inWin ? dView.convert(dView.bounds, to: window) : .zero
         let ptInside = inWin ? dFrame.contains(winPt) : false
         CZFHitTestLog.czfHitTestLogLine("DECOR max=\(d.isMaximized ? 1 : 0) maxAnim=\(b(maxAnimVal)) pipAnim=\(b(pipAnimVal)) minimized=\(b(minimizedVal)) hid=\(dView.isHidden ? 1 : 0) a=\(String(format: "%.2f", dView.alpha)) frame=(\(Int(dFrame.origin.x)),\(Int(dFrame.origin.y)),\(Int(dFrame.size.width)),\(Int(dFrame.size.height))) ptInside=\(ptInside ? 1 : 0)")
 
-        let navBar = d.navigationBar
+        guard let navBar = d.navigationBar else {
+            CZFHitTestLog.czfHitTestLogLine("DECOR navBar=nil")
+            return
+        }
         let navInWin = (navBar.window === window)
         let navFrame = navInWin ? navBar.convert(navBar.bounds, to: window) : .zero
         if navInWin {
             let navPt = navBar.convert(winPt, from: window)
-            let navHit = navBar.hitTest(navPt, withEvent: event)
+            let navHit = navBar.hitTest(navPt, with: event)
             let navHitStr = navHit.map { NSStringFromClass(type(of: $0)) } ?? "nil"
-            CZFHitTestLog.czfHitTestLogLine("NAVBAR \(CZFHitTestLog.czfDescribeView(navBar)) frameWin=(\(Int(navFrame.origin.x)),\(Int(navFrame.origin.y)),\(Int(navFrame.size.width)),\(Int(navFrame.size.height))) localPt=\(CZFHitTestLog.czfPointString(navPt)) hit=\(navHitStr)")
+            CZFHitTestLog.czfHitTestLogLine("NAVBAR \(CZFHitTestLog.czfDescribe(navBar)) frameWin=(\(Int(navFrame.origin.x)),\(Int(navFrame.origin.y)),\(Int(navFrame.size.width)),\(Int(navFrame.size.height))) localPt=\(CZFHitTestLog.czfPointString(navPt)) hit=\(navHitStr)")
         } else {
-            CZFHitTestLog.czfHitTestLogLine("NAVBAR \(CZFHitTestLog.czfDescribeView(navBar)) not in this window (navBar.window != touched window)")
+            CZFHitTestLog.czfHitTestLogLine("NAVBAR \(CZFHitTestLog.czfDescribe(navBar)) not in this window (navBar.window != touched window)")
         }
 
         var btnLines: [String] = []
