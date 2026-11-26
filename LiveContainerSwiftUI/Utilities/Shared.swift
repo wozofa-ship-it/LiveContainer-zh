@@ -134,6 +134,11 @@ class SharedModel: ObservableObject {
             return .settings
         case "source":
             return multiLCStatus == 2 ? .apps : .sources
+        case "update-list":
+            // 3.8.698（F1）：App 页“全部更新(n)”的跨页深链——
+            // 递补消费时切回源页（默认分支回 .apps 会把链切丢，
+            // 源页 onChange 守卫 selectedTab == .sources 不放行）。
+            return .sources
         default:
             return .apps
         }

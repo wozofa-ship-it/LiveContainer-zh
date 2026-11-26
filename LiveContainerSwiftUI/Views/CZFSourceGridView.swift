@@ -684,6 +684,17 @@ struct CZFSourceAppGridCell: View {
             } label: {
                 Label("复制 Bundle ID", systemImage: "doc.on.doc")
             }
+            // 3.8.698（F3）：复制下载链接——格子是唯一复制不到下载
+            // 链接的入口（列表行卡片与详情页顶部都有复制）。放复制
+            // 两项所在的批量态分支之外，批量态下照常留（只读，不碰
+            // 批量队列）；无最新版下载链接时不显示。
+            if let downloadURL = app.latestVersion?.downloadURL {
+                Button {
+                    UIPasteboard.general.string = downloadURL.absoluteString
+                } label: {
+                    Label("复制下载链接", systemImage: "doc.on.doc")
+                }
+            }
     }
 
     var body: some View {

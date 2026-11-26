@@ -823,6 +823,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.698（F1）：App 页“全部更新(n)”——仅可更新筛选态下
+        // 直达源页的全部更新清单（源页顶栏同款按钮只在源页出现，
+        // App 页原来只有筛选开关、没有批量更新入口）。复用现成
+        // 跨页触发器 czfOpenUpdateListFromApps（先切源页 Tab 再写
+        // deepLink，顺序不可换）；文案沿用源页
+        // "全部更新(\(czfUpdatableCount))"，门控与仅可更新同款。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, !czfIsGuestScene, czfUpdatableOnly, czfUpdatableCount > 0 {
+                Button {
+                    czfOpenUpdateListFromApps()
+                } label: {
+                    Label("全部更新(\(czfUpdatableCount))", systemImage: "arrow.down.circle.fill")
+                }
+            }
+        }
+
         // 3.8.651（F2）：仅无备份开关——与“仅可更新”开关并列；
         // 图标复用行下无备份小字的 externaldrive.badge.questionmark
         //（backupStatusCaption 同款）；纯数据过滤，iOS 15 也可用，
@@ -889,6 +905,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 CZFHitTestLog.czfHitTestLogLine("MENU-ITEM-FOLLOWUP t=+\(delay)s item=\(name) confirm=\(confirmBinding.wrappedValue ? 1 : 0) \(Self.czfPresentedChainDescription())")
             }
+        }
+    }
+
+    // 3.8.698（F1）：App 页“全部更新(n)”的跨页触发器——复用
+    // 现成 deepLink 队列，不新造触发器。顺序不可换：先切源页
+    // Tab（源页 onChange/onAppear 的守卫要求 selectedTab ==
+    // .sources），再写链；槽被占时排队（LCTabView.dispatchURL
+    // 同款写法），消费方置 nil 时 didSet 递补；tab(for:) 已认
+    // "update-list" → .sources，递补时不会被切回 App 页丢链。
+    private func czfOpenUpdateListFromApps() {
+        sharedModel.selectedTab = .sources
+        guard let url = URL(string: "livecontainer://update-list") else { return }
+        if sharedModel.deepLink == nil {
+            sharedModel.deepLink = url
+        } else {
+            sharedModel.deepLinkQueue.append(url)
         }
     }
 
@@ -1213,6 +1245,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             Image(systemName: "checkmark")
                                 .foregroundStyle(Color.accentColor)
                         }
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
+            // 3.8.698（F1）：面板里同款“全部更新(n)”行——与顶栏
+            // 按钮同一动作（czfOpenUpdateListFromApps），仅可更新
+            // 筛选态且有可更新 App 时出现；门控与顶栏同款。
+            if topToolsExpanded, !czfIsGuestScene, czfUpdatableOnly, czfUpdatableCount > 0 {
+                Button {
+                    czfOpenUpdateListFromApps()
+                } label: {
+                    HStack {
+                        Label("全部更新(\(czfUpdatableCount))", systemImage: "arrow.down.circle.fill")
+                        Spacer()
                     }
                 }
                 .buttonStyle(.plain)

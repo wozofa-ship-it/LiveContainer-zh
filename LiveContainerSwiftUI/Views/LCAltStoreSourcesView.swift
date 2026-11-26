@@ -778,7 +778,9 @@ enum CZFUpdateIgnore {
 /// 「跳过更新」的持久存储：键 CZFSkippedUpdates 存 [stableID: 版本号]。
 /// 跳过只藏更新清单与红点，图标更新角标（hasUpdate）不受影响——
 /// 与 CZFUpdateIgnore（忽略此版本，连角标一起藏）不同，别混用。
-/// 跳过当且仅当源里最新版本号等于记的版本；源出了新版本就重新提醒。
+/// 跳过当且仅当源里最新版本与 build 都等于记的（3.8.698 B1：
+/// 只升 build 也是新版本，跳过后新 build 要重新提醒）；源出了
+/// 新版本就重新提醒。
 enum CZFSkippedUpdate {
     private static let key = "CZFSkippedUpdates"
 
@@ -801,13 +803,20 @@ enum CZFSkippedUpdate {
     }
 
     static func isSkipped(_ app: AltStoreSourceApp) -> Bool {
-        guard let latest = app.latestVersion?.version else { return false }
-        return skippedVersion(for: app.czfStableID) == latest
+        guard let latest = app.latestVersion else { return false }
+        // 3.8.698（B1）：照抄 25 轮 B3（CZFUpdateIgnore）——跳过
+        // 键改记“版本|build”，只升 build 的更新跳过后新 build
+        // 重新提醒；老条目（无 `|`）按短版本通配保留，与 B3 同款。
+        return CZFUpdateIgnore.isIgnoredStored(skippedVersion(for: app.czfStableID), version: latest.version, build: latest.buildVersion)
     }
 
     /// 清过期条目：已装版本已 ≥ 跳过记的版本（已更新过了），
     /// 该条目永不再命中，读时顺手删掉，别让 UserDefaults 无限长。
     /// 未装的 App 保守保留（重装旧版回来时跳过仍有效）。
+    /// 3.8.698（B1）：跳过值现为“版本|build”——pruneStale 只比
+    /// 版本段（czfIsVersion 按 `.` 切，Int("0|100") ?? 0 得 0），
+    /// 比较结果不变；只升 build 后条目多留一阵，直到版本号越过
+    /// 才清，属无害残留（与 B3 老条目同款），不用改。
     static func pruneStale(installed apps: [LCAppModel]) {
         // L149-1：按包名收全部已装分身的版本，不只取首个——
         // 只按首个分身判会误删：新分身排在前时条目被删，之后
@@ -1584,7 +1593,11 @@ struct LCSourcesView: View {
             // 新版本才重新出现），再从名单剔除并同步红点；图标
             // 上的更新角标（hasUpdate）不受影响。
             onSkip: { app in
-                CZFSkippedUpdate.setSkipped(app.latestVersion?.version, for: app.czfStableID)
+                // 3.8.698（B1）：跳过表改记“版本|build”（照抄 25 轮
+                // B3 的 CZFUpdateIgnore.ignoredKey）——只升 build 的
+                // 更新原来只记短版本，跳过后新 build 永不再提醒。
+                // build 为空时只记短版本，与 B3 同款。
+                CZFSkippedUpdate.setSkipped(app.latestVersion.map { CZFUpdateIgnore.ignoredKey(version: $0.version, build: $0.buildVersion) }, for: app.czfStableID)
                 cachedUpdatableApps.removeAll { $0.czfStableID == app.czfStableID }
                 updatableCountBadge = cachedUpdatableApps.count
                 // 3.8.653（B2）：同上，ID 集与名单同一处写（:1780 同款拼接）。
@@ -2892,6 +2905,15 @@ struct LCSourcesView: View {
                     }
                 }
             }
+        } else if url.host == "update-list" {
+            // 3.8.698（F1）：App 页“全部更新(n)”的跨页触发——
+            // App 页先切源页 Tab 再写 deepLink，源页 onChange/
+            // onAppear 守卫（selectedTab == .sources）放行后到
+            // 这里；名单非空才弹 sheet（空时不弹，按钮本身只在
+            // czfUpdatableCount > 0 时出现，双保险）。
+            if !cachedUpdatableApps.isEmpty {
+                showUpdatableList = true
+            }
         }
     }
 }
@@ -3755,6 +3777,12 @@ struct LCSourceAppBanner: View {
                 Button {
                     UIPasteboard.general.string = downloadURL.absoluteString
                     copiedCardURL = true
+                    // 3.8.698（B3）：2 秒后复位反馈态——原来只置 true
+                    // 永不复位，图标永久变勾、再点也没有新反馈。
+                    // binding 先取成局部量再进闭包，不在闭包里碰
+                    // self（LCAppListView :886-895 同款 idiom）。
+                    let copiedFlag = $copiedCardURL
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedFlag.wrappedValue = false }
                 } label: {
                     Image(systemName: copiedCardURL ? "checkmark" : "doc.on.doc")
                         .font(.subheadline.weight(.semibold))
@@ -4256,6 +4284,12 @@ struct LCSourceAppDetailView: View {
                             Button {
                                 UIPasteboard.general.string = downloadURL.absoluteString
                                 copiedDownloadURL = true
+                                // 3.8.698（B3）：2 秒后复位反馈态——原来只置
+                                // true 永不复位，“复制”钮永久显示“已复制”。
+                                // binding 先取成局部量再进闭包，不在闭包里
+                                // 碰 self（LCAppListView :886-895 同款 idiom）。
+                                let copiedFlag = $copiedDownloadURL
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedFlag.wrappedValue = false }
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: copiedDownloadURL ? "checkmark" : "doc.on.doc")
@@ -4331,12 +4365,24 @@ struct LCSourceAppDetailView: View {
                             // 3.8.666 F-2 的闭包体原样内联（切 App 页 + 写
                             // 待装队列，autoReplace:false、preview:true）；
                             // “下载”仍保留在旧版页内，不动。
+                            // 3.8.698（F2/B2）：版本行长按菜单补“复制下载
+                            // 链接”（与“安装此版本”并列，无反馈态，与
+                            // 同文件菜单里的复制项同款）；B2：先 dismiss()
+                            // 再切 Tab、再写待装队列——与旧版页 :4483 顺序
+                            // 一字相同，否则详情单盖住安装预览、点了像
+                            // 没反应（3.8.690 F2 内联时把 dismiss() 丢了）。
                             .contextMenu {
                                 Button("安装此版本") {
+                                    dismiss()
                                     withAnimation {
                                         DataManager.shared.model.selectedTab = .apps
                                     }
                                     CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: version.downloadURL, autoReplace: false, preview: true, forceAsNew: false))
+                                }
+                                Button {
+                                    UIPasteboard.general.string = version.downloadURL.absoluteString
+                                } label: {
+                                    Label("复制下载链接", systemImage: "doc.on.doc")
                                 }
                             }
                         }
@@ -4468,6 +4514,12 @@ private struct LCSourceAppVersionDetailView: View {
                 Button {
                     UIPasteboard.general.string = version.downloadURL.absoluteString
                     czfCopiedDownloadURL = true
+                    // 3.8.698（B3）：2 秒后复位反馈态——原来只置 true
+                    // 永不复位，旧版页“复制下载链接”永久显示“已复制”。
+                    // binding 先取成局部量再进闭包，不在闭包里碰
+                    // self（LCAppListView :886-895 同款 idiom）。
+                    let copiedFlag = $czfCopiedDownloadURL
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedFlag.wrappedValue = false }
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: czfCopiedDownloadURL ? "checkmark" : "doc.on.doc")
