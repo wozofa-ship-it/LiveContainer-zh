@@ -5716,6 +5716,26 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             sharedModel.arm32EmuApps.removeAll { now in
                 return app == now
             }
+            // 3.8.686（B2）：删掉被选中的 32 位模拟器后清选择值——
+            // 只摘表不清选择，悬空的选择此后每次 32 位启动都在
+            // LCBootstrap 报“The specified 32-bit emulator app is
+            // not found”，直到用户亲手重选。选择值就是
+            // relativeBundlePath（Picker 的 tag，LCSettingsView
+            // :539-547）；全局值走 LCUtils.appGroupUserDefault，
+            // 与 LCSettingsView :103 的 @AppStorage 同一 store；
+            // 单 App 值走 model.uiSelected32BitEmulator，didSet
+            // 直写 appInfo.selected32BitEmulator（LCAppModel
+            // :670-672），与设置页 Picker 同一条写路。arm32EmuApps
+            // 与 apps/hiddenApps 是同一批 model 实例（冷启动扫描
+            // 同一个 model 双份进表），扫 apps + hiddenApps 即全覆盖。
+            if let deletedPath = app.appInfo.relativeBundlePath, !deletedPath.isEmpty {
+                if LCUtils.appGroupUserDefault.string(forKey: "LCSelected32BitEmulator") == deletedPath {
+                    LCUtils.appGroupUserDefault.set("", forKey: "LCSelected32BitEmulator")
+                }
+                for model in sharedModel.apps + sharedModel.hiddenApps where model.uiSelected32BitEmulator == deletedPath {
+                    model.uiSelected32BitEmulator = ""
+                }
+            }
             // 3.8.568（L322-1）：删 App 也要取消它排进 deferredEnsureApps 的启动请求——L295-1 只修了关窗那路（K:591）；测速窗口内起 App 后删掉它，收尾补跑会把核心起在已删 App 的节点上，起后无人能停（V:1050-1061 注释自述）。删只走 removeApp 这一个漏斗（单删/批量/网格三路全经它），用传入 model 自身的 appInfo 取消，不查表；没排进的取消是空操作。
             CZFVPNManager.shared.cancelDeferredEnsure(for: app.appInfo)
             // 3.8.900（L585-A2）：删 App 也清它的三枚 VPN 键（开关/钉死/跟随）——不清除掉的钉死 override 会让已删 App 的节点永远判钉死，被动跟随再也不敢挪走核心。

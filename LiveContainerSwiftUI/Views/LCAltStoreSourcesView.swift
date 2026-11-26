@@ -1365,6 +1365,13 @@ struct LCSourcesView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 100)
                 }
+                // 3.8.686（F3）：下拉刷新全部源——与 App 页同款
+                // （LCAppListView :2705-2708）；复用已有的
+                // refreshAllSources（自带节流、重入守卫与成功判据，
+                // 3.8.660 B2）。iOS 15+ API，无新 key、无新助手。
+                .refreshable {
+                    await viewModel.refreshAllSources()
+                }
                 // 自定义背景（3.8.416）：与 App 页同款——图挂
                 // ScrollView 的 .background，不包 ZStack，
                 // 不动 NavigationView 排布（415 血泪：ZStack
@@ -3020,7 +3027,13 @@ private struct AltStoreSourceSectionView: View {
                         Button("复制源链接", systemImage: "doc.on.doc") {
                             UIPasteboard.general.string = item.url.absoluteString
                         }
-                        Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                        // 3.8.686（B1）：批量态下不给“删除源”——删源只清
+                        // ViewModel 侧，不碰视图层 selectedIDs；删完选中集
+                        // 变幽灵、顶栏“安装”仍亮、点下去静默空跑。单项菜单
+                        // 21 轮 B2/B3 同款设防；刷新/暂停/复制照常留（只读）。
+                        if !isBatchMode {
+                            Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                             .imageScale(.large)
@@ -3496,8 +3509,14 @@ struct LCSourceAppBanner: View {
             RoundedRectangle(cornerSize: CGSize(width: 22, height: 22))
                 .fill(backgroundColor)
         }
+        // 3.8.686（B3）：批量态下点行身即勾选——与格子同款
+        // （CZFSourceGridView :614-620）与 App 页批量行同款
+        // （LCAppListView :1758-1764）；原来批量态是空操作，
+        // 只能精确点右上角小圆圈。
         .onTapGesture {
-            if !isBatchMode {
+            if isBatchMode {
+                onToggleSelect()
+            } else {
                 showDetail = true
             }
         }

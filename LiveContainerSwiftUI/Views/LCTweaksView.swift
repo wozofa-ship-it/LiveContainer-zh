@@ -130,6 +130,12 @@ struct LCTweakFolderView : View {
     }
 
     var body: some View {
+        // 3.8.686（F1）：点当前 Tab 回到顶部——与 App/源页同款
+        // （ScrollViewReader + 锚点 id + CZFScrollCurrentTabToTop
+        // 订阅）；List 本身可滚，proxy.scrollTo 直接滚首段。
+        // 子文件夹视图同是本 struct，挂上去的实例各滚各的列表，
+        // 可见的那层滚到顶。
+        ScrollViewReader { czfTweakProxy in
         List {
             // 无证书密码时工具栏签名按钮直接消失、用户不知道缺什么：
             // 这里留一行提示（按钮本身不动，只加提示一种），指到
@@ -245,6 +251,8 @@ struct LCTweakFolderView : View {
                         .font(.system(size: 12))
                 }
             }
+            // 3.8.686（F1）：回到顶部锚点——点当前“模块” Tab 即滚到这里。
+            .id("czfTweakFolderTop")
         }
         // 3.8.571（L102）：外部写盘后列表要跟上——源页/面板装
         // 插件直接写磁盘，不经过本视图的 tweakItems；切 Tab
@@ -359,6 +367,14 @@ struct LCTweakFolderView : View {
         }, onDismiss: {
             choosingTweak = false
         })
+        // 3.8.686（F1）：点当前 Tab 回到顶部——只在当前就是
+        // 模块页时滚（App/源/设置页同款各守自己的 Tab）。
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFScrollCurrentTabToTop"))) { output in
+            guard (output.object as? LCTabIdentifier) == .tweaks else { return }
+            guard sharedModel.selectedTab == .tweaks else { return }
+            withAnimation { czfTweakProxy.scrollTo("czfTweakFolderTop", anchor: .top) }
+        }
+        }
     }
     
     func setTweakEnabled(tweakItem: LCTweakItem, enabled: Bool) {

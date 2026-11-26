@@ -260,8 +260,13 @@ struct LCSettingsView: View {
 
     var body: some View {
         NavigationView {
+            // 3.8.686（F1）：点当前 Tab 回到顶部——与 App/源页同款
+            // （ScrollViewReader + 锚点 id + CZFScrollCurrentTabToTop
+            // 订阅）；Form 本身可滚，proxy.scrollTo 直接滚首段。
+            ScrollViewReader { czfSettingsProxy in
             Form {
                 jitLessSection
+                    .id("czfSettingsTop")
                 multiLCSection
                 jitSection
                 emulatorSection
@@ -388,6 +393,14 @@ struct LCSettingsView: View {
                     certificateImportPasswordAlert.show = false
                 }
             )
+            // 3.8.686（F1）：点当前 Tab 回到顶部——只在当前就是
+            // 设置页时滚（App/源页同款各守自己的 Tab）。
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFScrollCurrentTabToTop"))) { output in
+                guard (output.object as? LCTabIdentifier) == .settings else { return }
+                guard sharedModel.selectedTab == .settings else { return }
+                withAnimation { czfSettingsProxy.scrollTo("czfSettingsTop", anchor: .top) }
+            }
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .onAppear() {

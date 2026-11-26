@@ -324,7 +324,13 @@ struct CZFSourceGridGroupHeaderView: View {
                     Button("复制源链接", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = item.url.absoluteString
                     }
-                    Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                    // 3.8.686（B1）：批量态下不给“删除源”——与列表组头
+                    // 同款（LCAltStoreSourcesView）：删源不碰视图层
+                    // selectedIDs，删完选中集变幽灵、顶栏“安装”仍亮、
+                    // 点下去静默空跑；刷新/暂停/复制照常留（只读）。
+                    if !isBatchMode {
+                        Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .imageScale(.large)
@@ -688,6 +694,23 @@ struct CZFSourceAppGridCell: View {
                     showDetail = true
                 }
             }
+            // 3.8.686（F2）：复制版本号 / 复制 Bundle ID——与列表行
+            // 菜单同款（LCAltStoreSourcesView :3540-3558，3.8.682）；
+            // 版本号读不到或为 "?" 时不显示；只读，不碰批量队列，
+            // 批量态下照常留（行菜单 B2 同款口径）。标题硬编码中文。
+            // 0 新 key。
+            if let version = app.latestVersion?.version, version != "?" {
+                Button {
+                    UIPasteboard.general.string = version
+                } label: {
+                    Label("复制版本号", systemImage: "doc.on.doc")
+                }
+            }
+            Button {
+                UIPasteboard.general.string = app.bundleIdentifier
+            } label: {
+                Label("复制 Bundle ID", systemImage: "doc.on.doc")
+            }
         }
         .sheet(isPresented: $showDetail) {
             LCSourceAppDetailView(app: app, source: source, onDownloadVersion: onDownloadVersion, onInstall: onInstall, onInstallAsNew: onInstallAsNew)
@@ -786,7 +809,12 @@ struct CZFSourceDetailView: View {
                     Button("复制源链接", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = item.url.absoluteString
                     }
-                    Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                    // 3.8.686（B1）：批量态下不给“删除源”——与组头同款：
+                    // 详情页删源同样不碰视图层 selectedIDs，删完选中集
+                    // 变幽灵、顶栏“安装”仍亮、点下去静默空跑。
+                    if !isBatchMode {
+                        Button("lc.sources.removeSource".loc, systemImage: "trash", role: .destructive, action: onRemove)
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .imageScale(.large)

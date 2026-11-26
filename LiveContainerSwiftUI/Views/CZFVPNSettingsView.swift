@@ -104,8 +104,14 @@ struct CZFVPNSettingsView: View {
     }
 
     var body: some View {
+        // 3.8.686（F1）：点当前 Tab 回到顶部——模块页 VPN 分段，
+        // 与文件夹列表各守自己的滚动视图（LCTweaksView 里 if/else
+        // 只挂一个，同一时刻只有一个订阅在）；Form 本身可滚，
+        // proxy.scrollTo 直接滚首段。
+        ScrollViewReader { czfVPNProxy in
         Form {
             vpnSection
+                .id("czfVPNTop")
         }
         // 3.8.589（L121）：同一视图挂多个 .alert/.confirmationDialog 只有最后一个生效——
         // SwiftUI 同一分支只认最外层一个弹窗（sarunw 实证，L120 同款）。
@@ -224,6 +230,14 @@ struct CZFVPNSettingsView: View {
         // 测速中刷新不翻核心按钮（见 refreshVPNState 里的测速中守卫），不会打断测速。
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             refreshVPNState()
+        }
+        // 3.8.686（F1）：点当前 Tab 回到顶部——只在当前就是
+        // 模块页时滚（文件夹列表同款各守自己的 Tab）。
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("CZFScrollCurrentTabToTop"))) { output in
+            guard (output.object as? LCTabIdentifier) == .tweaks else { return }
+            guard sharedModel.selectedTab == .tweaks else { return }
+            withAnimation { czfVPNProxy.scrollTo("czfVPNTop", anchor: .top) }
+        }
         }
     }
 
