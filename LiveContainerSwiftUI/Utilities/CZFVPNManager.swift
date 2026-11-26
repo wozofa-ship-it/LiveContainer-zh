@@ -3786,12 +3786,20 @@ public final class CZFVPNManager {
     /// 下载用配置：走节点时改用前台配置——后台配置的下载任务由
     /// 系统进程执行、代理字典不生效；不开节点时维持后台配置原样
     public static func hostDownloadConfiguration(identifier: String) -> URLSessionConfiguration {
+        let config: URLSessionConfiguration
         if isHostProxyEnabled && shared.isRunning {
-            let config = URLSessionConfiguration.default
+            config = URLSessionConfiguration.default
             config.connectionProxyDictionary = proxyDictionary()
-            return config
+        } else {
+            config = URLSessionConfiguration.background(withIdentifier: identifier)
         }
-        return URLSessionConfiguration.background(withIdentifier: identifier)
+        // 3.8.670（F-3）：仅 Wi-Fi 下载——开关开时新起的会话不走
+        // 蜂窝；仅对新起会话生效，进行中任务不受影响；无 Wi-Fi 时
+        // 系统挂起任务等 Wi-Fi（不报错、不重下），连上后自动续跑。
+        if UserDefaults.standard.bool(forKey: "CZFDownloadWiFiOnly") {
+            config.allowsCellularAccess = false
+        }
+        return config
     }
 
     /// 宿主开关打开时把核心拉起来（源/下载要用），顺带取消待执行的自动停

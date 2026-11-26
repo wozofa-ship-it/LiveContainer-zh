@@ -2387,6 +2387,9 @@ struct LCSourcesView: View {
                     // （安装 / 分享 / 取消），SwiftUI dialog 挂源页
                     // 视图上，异步完成时不怕已有 sheet 顶掉（L85 同款）。
                     czfDownloadedFilePending = destURL
+                    // 3.8.670（F-1）：源页下载完成推一条通知——App 不在
+                    // 前台时三选框用户看不到；与三选框并存，不替掉它。
+                    czfNotifyDownloadDone(fileName: destURL.lastPathComponent)
                 }
             } catch {
                 await MainActor.run {

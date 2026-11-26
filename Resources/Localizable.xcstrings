@@ -22444,6 +22444,208 @@
         }
       }
     },
+    "lc.settings.downloadWiFiOnly": {
+      "extractionState": "manual",
+      "localizations": {
+        "ar": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "التنزيل عبر Wi-Fi فقط"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur über WLAN laden"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download on Wi-Fi only"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Descargar solo con Wi-Fi"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Télécharger en Wi-Fi uniquement"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scarica solo con Wi-Fi"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wi-Fi のみでダウンロード"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wi-Fi에서만 다운로드"
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pobieraj tylko przez Wi-Fi"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Baixar somente em Wi-Fi"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Загрузка только по Wi-Fi"
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ladda ned endast via Wi-Fi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yalnızca Wi-Fi ile indir"
+          }
+        },
+        "vi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chỉ tải xuống qua Wi-Fi"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅 Wi-Fi 下载"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "僅 Wi-Fi 下載"
+          }
+        }
+      }
+    },
+    "lc.settings.downloadWiFiOnly.desc": {
+      "extractionState": "manual",
+      "localizations": {
+        "ar": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "عند التفعيل، تتم التنزيلات عبر Wi-Fi فقط. وبدون Wi-Fi، تنتظر التنزيلات بدلاً من استخدام بيانات الجوال."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn aktiviert, erfolgen Downloads nur über WLAN. Ohne WLAN warten Downloads, statt mobile Daten zu verbrauchen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When on, downloads use Wi-Fi only. Without Wi-Fi, downloads wait instead of using cellular data."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Al activarlo, las descargas solo usan Wi-Fi. Sin Wi-Fi, las descargas esperan en lugar de usar datos móviles."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Si activé, les téléchargements utilisent uniquement le Wi-Fi. Sans Wi-Fi, ils attendent au lieu d'utiliser les données mobiles."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se attivo, i download usano solo il Wi-Fi. Senza Wi-Fi, i download restano in attesa invece di usare i dati mobili."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オンにすると、ダウンロードは Wi-Fi のみを使用します。Wi-Fi がない場合、モバイルデータを使わずに待機します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "켜면 다운로드는 Wi-Fi만 사용합니다. Wi-Fi가 없으면 모바일 데이터를 사용하는 대신 대기합니다."
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Po włączeniu pobieranie odbywa się tylko przez Wi-Fi. Bez Wi-Fi pobieranie czeka zamiast zużywać dane komórkowe."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quando ativado, os downloads usam somente Wi-Fi. Sem Wi-Fi, os downloads aguardam em vez de usar dados móveis."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Когда включено, загрузки идут только по Wi-Fi. Без Wi-Fi загрузки ждут, не расходуя мобильный трафик."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "När det är aktiverat används endast Wi-Fi för nedladdningar. Utan Wi-Fi väntar nedladdningarna i stället för att använda mobildata."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Açıkken indirmeler yalnızca Wi-Fi kullanır. Wi-Fi yoksa indirmeler mobil veri kullanmak yerine bekler."
+          }
+        },
+        "vi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Khi bật, nội dung tải xuống chỉ dùng Wi-Fi. Không có Wi-Fi, quá trình tải xuống sẽ chờ thay vì dùng dữ liệu di động."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开后下载只走 Wi-Fi，无 Wi-Fi 时下载会等待，不消耗流量"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開啟後下載只走 Wi-Fi，沒有 Wi-Fi 時下載會等待，不消耗流量"
+          }
+        }
+      }
+    },
     "lc.settings.error.certNotImported": {
       "extractionState": "stale",
       "localizations": {

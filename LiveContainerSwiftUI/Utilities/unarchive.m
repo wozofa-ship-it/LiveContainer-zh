@@ -94,6 +94,74 @@ NSData * _Nullable czfExtractIpaInfoPlist(NSString *ipaPath)
     return data;
 }
 
+// 3.8.670（F-2）：只读 Payload/*.app/embedded.mobileprovision
+// 这一条目，流式读进内存直接返回，不建临时目录、不落盘。
+// 与 czfExtractIpaInfoPlist 同款循环与路径校验；上限 1MB
+//（mobileprovision 约 10KB 级）；找不到返回 nil。
+NSData * _Nullable czfExtractIpaMobileProvision(NSString *ipaPath)
+{
+    struct archive *a;
+    struct archive_entry *entry;
+    int r;
+    NSMutableData *data = nil;
+
+    a = archive_read_new();
+    archive_read_support_format_all(a);
+    archive_read_support_filter_all(a);
+    if ((r = archive_read_open_filename(a, ipaPath.fileSystemRepresentation, 10240))) {
+        archive_read_free(a);
+        return nil;
+    }
+    while ((r = archive_read_next_header(a, &entry)) != ARCHIVE_EOF) {
+        if (r < ARCHIVE_OK)
+            fprintf(stderr, "%s\n", archive_error_string(a));
+        if (r < ARCHIVE_WARN) {
+            archive_read_close(a);
+            archive_read_free(a);
+            return nil;
+        }
+        NSString *path = [NSString stringWithUTF8String:archive_entry_pathname(entry)];
+        // Payload/<Name>.app/embedded.mobileprovision：中间只允许一段 .app 目录
+        BOOL isProvision = NO;
+        if ([path hasPrefix:@"Payload/"] && [path hasSuffix:@".app/embedded.mobileprovision"]) {
+            NSString *middle = [path substringWithRange:NSMakeRange(8, path.length - 8 - 29)];
+            if ([middle rangeOfString:@"/"].location == NSNotFound && middle.length > 4) {
+                isProvision = YES;
+            }
+        }
+        if (!isProvision) {
+            archive_read_data_skip(a);
+            continue;
+        }
+        // mobileprovision 约 10KB 级；超过 1MB 当异常包，拒绝进内存。
+        la_int64_t entrySize = archive_entry_size(entry);
+        if (entrySize > 1 * 1024 * 1024) {
+            archive_read_close(a);
+            archive_read_free(a);
+            return nil;
+        }
+        data = [NSMutableData dataWithCapacity:(NSUInteger)(entrySize > 0 ? entrySize : 0)];
+        for (;;) {
+            const void *buff;
+            size_t size;
+            la_int64_t offset;
+            r = archive_read_data_block(a, &buff, &size, &offset);
+            if (r == ARCHIVE_EOF)
+                break;
+            if (r < ARCHIVE_OK) {
+                archive_read_close(a);
+                archive_read_free(a);
+                return nil;
+            }
+            [data appendBytes:buff length:size];
+        }
+        break;
+    }
+    archive_read_close(a);
+    archive_read_free(a);
+    return data;
+}
+
 int extract(NSString* fileToExtract, NSString* extractionPath, NSProgress* progress)
 {
     struct archive *a;

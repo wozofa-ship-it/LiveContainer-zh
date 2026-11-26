@@ -7,6 +7,7 @@
 
 import CryptoKit
 import SwiftUI
+import UserNotifications
 
 // 3.8.666（B-1）：后台下载断点记录——进程被杀时内存里的
 // savedResumeData 一起死，续传数据只活在后台会话守护进程里；
@@ -24,6 +25,9 @@ private struct CZFDownloadResumeRecord: Codable {
     var urlString: String
     var destPath: String
     var autoResume: Bool
+    // 3.8.670（B-3）：连续最终失败计数——死链每次冷启动都重试 3 次
+    // 并弹下载弹窗；带默认值，老记录（无此键）解码不受影响。
+    var failCount: Int = 0
 }
 
 private enum CZFDownloadResumeStore {
@@ -63,11 +67,17 @@ private enum CZFDownloadResumeStore {
         guard let dir = directory(), let jsonURL = jsonURL(for: identifier) else { return }
         // 同一地址只留一份记录：新一轮下载（重试换 identifier）先清
         // 旧轮的，不然启动自动续会找回已失效的旧 identifier。
+        // 3.8.670（B-3）：换 identifier 不清失败计数——同一地址的旧
+        // 记录带过来的 failCount 要留着，不然每轮重试/每次冷启动
+        // 都从 0 开始，死链永远到不了 3 次阈值。
+        var czfOldFailCount = 0
         for old in allRecords() where old.record.urlString == url.absoluteString && old.identifier != identifier {
+            czfOldFailCount = max(czfOldFailCount, old.record.failCount)
             clearRecord(identifier: old.identifier)
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let record = CZFDownloadResumeRecord(identifier: identifier, urlString: url.absoluteString, destPath: dest.path, autoResume: autoResume)
+        var record = CZFDownloadResumeRecord(identifier: identifier, urlString: url.absoluteString, destPath: dest.path, autoResume: autoResume)
+        record.failCount = czfOldFailCount
         if let data = try? JSONEncoder().encode(record) {
             try? data.write(to: jsonURL, options: [.atomic])
         }
@@ -77,6 +87,16 @@ private enum CZFDownloadResumeStore {
         guard let jsonURL = jsonURL(for: identifier),
               var record = loadRecord(identifier: identifier) else { return }
         record.autoResume = autoResume
+        if let data = try? JSONEncoder().encode(record) {
+            try? data.write(to: jsonURL, options: [.atomic])
+        }
+    }
+
+    // 3.8.670（B-3）：只改失败计数，不动 autoResume 与其他字段。
+    static func updateFailCount(identifier: String, failCount: Int) {
+        guard let jsonURL = jsonURL(for: identifier),
+              var record = loadRecord(identifier: identifier) else { return }
+        record.failCount = failCount
         if let data = try? JSONEncoder().encode(record) {
             try? data.write(to: jsonURL, options: [.atomic])
         }
@@ -137,6 +157,8 @@ public final class DownloadHelper : ObservableObject {
     @Published var downloadETA: TimeInterval?
     @Published var paused = false
     private var czfSpeedSamples: [(date: Date, bytes: Int64)] = []
+    // 3.8.670（B-2）：失速心跳任务——download() 内创建、返回/抛错时停。
+    private var czfStallHeartbeat: Task<Void, Never>?
     // 进度发布节流用：上次发布进度的时间
     private var lastProgressPublish = Date.distantPast
     private var downloadTask: URLSessionDownloadTask?
@@ -234,6 +256,25 @@ public final class DownloadHelper : ObservableObject {
             }
         }
         defer { czfDownloadCancelTask?.cancel() }
+        // 3.8.670（B-2）：失速心跳——每 1 秒看一次最后样本时间，超 2 秒
+        // 无新样本就把速度清 0、ETA 清空（界面走 czfDownloadSpeedText
+        // 现成的 "0 KB/s" 分支，无新文案）；只在下载中且未暂停时跑，
+        // 暂停态不抢（暂停本就显示“已暂停”）。样本读写都在主线程
+        //（进度回调在 MainActor.run 里记），心跳也在主线程读。
+        // download() 返回/抛错时 defer 停掉。
+        czfStallHeartbeat = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await MainActor.run {
+                    guard isDownloading, !paused else { return }
+                    guard let last = czfSpeedSamples.last?.date else { return }
+                    guard Date().timeIntervalSince(last) > 2 else { return }
+                    downloadSpeed = 0
+                    downloadETA = nil
+                }
+            }
+        }
+        defer { czfStallHeartbeat?.cancel() }
         // 失败自动重试：最多 3 次（首次 + 2 次重试），网络抖
         // 一下不用用户再点一次。每次优先用上次留下的续传数
         // 据接着下（completeCallback 失败时已存好），不从 0
@@ -271,6 +312,20 @@ public final class DownloadHelper : ObservableObject {
                 if cancelled {
                     throw error
                 }
+            }
+        }
+        // 3.8.670（B-3）：最终失败出口记一次失败——3 次重试耗尽才到
+        // 这里（取消路在上面已直接抛，不计）；累计满 3 次最终失败
+        // 后把 autoResume 改 false，冷启动不再自动续、也不再弹下载
+        // 弹窗。阈值 3 次、处理 updateAutoResume(false) 而非
+        // clearRecord：记录与续传数据保留，手动重下同一地址仍从
+        // 断点续。成功时 downloadOnce 已清记录（含 failCount），
+        // 无需另清。
+        if let record = CZFDownloadResumeStore.loadRecord(forURL: url) {
+            let newCount = record.failCount + 1
+            CZFDownloadResumeStore.updateFailCount(identifier: record.identifier, failCount: newCount)
+            if newCount >= 3 {
+                CZFDownloadResumeStore.updateAutoResume(identifier: record.identifier, autoResume: false)
             }
         }
         throw lastError ?? NSError(domain: "DownloadHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败"])
@@ -504,6 +559,16 @@ public final class DownloadHelper : ObservableObject {
                 existing.resume()
                 while true {
                     if await MainActor.run(body: { cancelled }) { break }
+                    // 3.8.670（B-1）：暂停中跳过 getTasks 与进度发布、只睡
+                    // 5 秒再查——挂起的任务仍留在 getTasks 列表里，旧循环
+                    // 每 0.5 秒空转耗电；resume() 已会 downloadTask?.resume()，
+                    // 恢复后轮询自动回 0.5 秒节奏。不要改成暂停即 break
+                    // 走重试：那会丢掉被接管任务已下的字节（无 resumeData，
+                    // 重试从 0 下），比空转更差。
+                    if await MainActor.run(body: { paused }) {
+                        try? await Task.sleep(nanoseconds: 5_000_000_000)
+                        continue
+                    }
                     let tasks = await czfDownloadTasks(of: session)
                     guard let task = tasks.first(where: { $0.originalRequest?.url == url }) else { break }
                     await MainActor.run {
@@ -650,7 +715,14 @@ public final class DownloadHelper : ObservableObject {
             let dest = URL(fileURLWithPath: record.destPath)
             try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             if await MainActor.run(body: { isDownloading }) { return }
-            try? await download(url: url, to: dest)
+            // 3.8.670（F-1）：自动续传完成也推一条通知——冷启动续完
+            // 文件静默落盘，用户无从得知；失败/取消不推（只成功推）。
+            do {
+                try await download(url: url, to: dest)
+                czfNotifyDownloadDone(fileName: dest.lastPathComponent)
+            } catch {
+                // 失败就跳过本条、续下一条（原 try? 行为），不推通知。
+            }
         }
     }
 }
@@ -686,6 +758,9 @@ final class CZFBackgroundDownloadDelegate: NSObject, URLSessionDownloadDelegate 
                 try fm.moveItem(at: location, to: dest)
             }
             CZFDownloadResumeStore.clearRecord(identifier: identifier)
+            // 3.8.670（F-1）：后台接管完成也推一条通知——进程被杀后
+            // 系统唤起 App 搬完文件即止，用户无从得知。
+            czfNotifyDownloadDone(fileName: dest.lastPathComponent)
         } catch {
             print("CZFBackgroundDownloadDelegate move failed: \(error)")
         }
@@ -701,6 +776,27 @@ final class CZFBackgroundDownloadDelegate: NSObject, URLSessionDownloadDelegate 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         completionHandler()
         czfOnFinished?(identifier)
+    }
+}
+
+// 3.8.670（F-1）：下载完成本地通知——源页下载 / 自动续传 / 后台
+// 接管三路共用；照抄 LCAppListView.notifyBatchDone 的按需申请
+// 写法（未授权时静默跳过、不重复弹授权框）；identifier 用
+// CZFDownloadDone- 前缀，不走 CZFBatchInstall 静默分支，前台
+// 也弹横幅 + 响铃（见 AppDelegate CZFNotificationDelegate）。
+// 安装路不调：装完紧接着就是安装 UI + 批量通知，加了是噪音。
+// 标题/正文复用源页三选框现成文案，0 新 key。
+func czfNotifyDownloadDone(fileName: String) {
+    let center = UNUserNotificationCenter.current()
+    center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+        guard granted else {
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "下载完成"
+        content.body = "\(fileName) 已下载完成"
+        content.sound = .default
+        center.add(UNNotificationRequest(identifier: "CZFDownloadDone-\(UUID().uuidString)", content: content, trigger: nil))
     }
 }
 
@@ -765,10 +861,13 @@ struct DownloadAlert : View {
 
             // 3.8.664（F2）：速度 + 剩余时间行——总长度未知时只显速度、
             // 不显 ETA（见 czfDownloadSpeedText）；与进度同一节流发布，
-            // 不另起刷新。
+            // 不另起刷新。3.8.670（UI 打磨）：单行 + 缩放防截断，
+            // 窄屏下“还剩约 X 小时 Y 分钟”不断尾，纯样式。
             Text(czfDownloadSpeedText(speed: helper.downloadSpeed, eta: helper.downloadETA))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
 
             // 按钮与收起态胶囊、全 App 的胶囊按钮同一套语言：
             // 以前是纯文字钮，混在材质卡上像没做完

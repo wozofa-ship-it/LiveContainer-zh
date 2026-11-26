@@ -79,6 +79,10 @@ struct LCSettingsView: View {
     @AppStorage("LCStrictHiding", store: LCUtils.appGroupUserDefault) var strictHiding = false
     @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) var dynamicColors = true
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
+    // 3.8.670（F-3）：仅 Wi-Fi 下载——默认关；CZFVPNManager
+    // .hostDownloadConfiguration 读同一键（标准 UserDefaults），
+    // 新起的下载会话不走蜂窝；开关状态随 App 重开保留。
+    @AppStorage("CZFDownloadWiFiOnly") var czfDownloadWiFiOnly = false
     
     @AppStorage("LCSideJITServerAddress", store: LCUtils.appGroupUserDefault) var sideJITServerAddress : String = ""
     @AppStorage("LCDeviceUDID", store: LCUtils.appGroupUserDefault) var deviceUDID: String = ""
@@ -258,6 +262,7 @@ struct LCSettingsView: View {
                 jitSection
                 emulatorSection
                 interfaceSection
+                downloadSection
                 miscSection
                 notificationSection
                 storageSection
@@ -578,6 +583,29 @@ struct LCSettingsView: View {
             }
         } header: {
             Text("lc.settings.interface".loc)
+        }
+    }
+
+    @ViewBuilder private var downloadSection: some View {
+        // 3.8.670（F-3）：仅 Wi-Fi 下载——与界面区同款 Toggle +
+        // 图标 + .loc 标题 + .footnote 说明结构；只对新起的下载
+        // 会话生效，进行中任务不受影响；无 Wi-Fi 时系统挂起任务
+        // 等 Wi-Fi（不报错、不重下），连上后自动续跑。
+        Section{
+            Toggle(isOn: $czfDownloadWiFiOnly) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        LCSettingsIcon(systemName: "wifi", color: .blue)
+                        Text("lc.settings.downloadWiFiOnly".loc)
+                    }
+                    Text("lc.settings.downloadWiFiOnly.desc".loc)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } header: {
+            // 段名硬编码中文（模拟器区“模拟器”同款先例），不新增 key。
+            Text("下载")
         }
     }
 

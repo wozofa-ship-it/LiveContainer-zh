@@ -113,8 +113,15 @@ enum CZFSignatureExpiryReader {
     /// TeamIdentifier 与 ExpirationDate 是同一 CMS 扫描出的 plist
     /// 的标准顶层键，无新解析逻辑。
     static func expiryInfo(inFile path: String) -> (date: Date?, teamName: String?) {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let payload = plistPayload(in: data),
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return (nil, nil) }
+        return expiryInfo(inData: data)
+    }
+
+    /// 3.8.670（F-2）：Data 版入口——安装前预览从 IPA 里流式抽出
+    /// 的 mobileprovision 已是内存里的 Data，不必先落盘再走
+    /// inFile；CMS 扫 plist 的逻辑与 inFile 同一份（inFile 转调这里）。
+    static func expiryInfo(inData data: Data) -> (date: Date?, teamName: String?) {
+        guard let payload = plistPayload(in: data),
               let plist = try? PropertyListSerialization.propertyList(from: payload, format: nil),
               let dict = plist as? [String: Any] else { return (nil, nil) }
         let teamName = (dict["TeamName"] as? String) ?? (dict["TeamIdentifier"] as? [String])?.first

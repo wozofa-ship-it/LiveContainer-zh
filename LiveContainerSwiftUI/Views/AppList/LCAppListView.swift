@@ -4889,6 +4889,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         var lines = ["\(name)（版本 \(version)）", "Bundle ID：\(bundleId)", "大小：\(sizeText)"]
         lines.append(perms.isEmpty ? "声明的权限：无特殊权限" : "声明的权限：\(perms.joined(separator: "、"))")
+        // 3.8.670（F-2）：预览末尾加签名行——从 IPA 流式抽
+        // embedded.mobileprovision，CMS 扫 plist 复用
+        // CZFSignatureExpiryReader；有签名显团队 + 到期日（剩 N 天），
+        // 无 mobileprovision 显“未签名”，解析失败不加行、不拦安装。
+        // 日期格式器本地新建：本函数是 async、可能不在主线程，
+        // 不用 CZFSignatureExpiry 那个主线程专用的静态格式器。
+        if let provisionData = czfExtractIpaMobileProvision(url.path) {
+            let info = CZFSignatureExpiryReader.expiryInfo(inData: provisionData)
+            if let expiryDate = info.date {
+                let fmt = DateFormatter()
+                fmt.dateFormat = "M月d日"
+                let daysLeft = Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: Calendar.current.startOfDay(for: expiryDate)).day ?? 0
+                lines.append("签名：\(info.teamName ?? "?")，到期 \(fmt.string(from: expiryDate))（\(CZFSignatureExpiry.label(forDaysLeft: daysLeft))）")
+            }
+        } else {
+            lines.append("未签名（装后需签名）")
+        }
         return lines.joined(separator: "\n")
     }
 
