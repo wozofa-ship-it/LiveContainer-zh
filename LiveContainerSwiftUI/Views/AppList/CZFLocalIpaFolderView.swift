@@ -100,6 +100,9 @@ struct CZFLocalIpaItem: Identifiable {
     let fileName: String
     var displayName: String
     var version: String?
+    // 3.8.668（B-2）：build 号（CFBundleVersion）——同版不同 build
+    // 的包要按 build 比新旧；读不到为 nil，按 0 比。
+    var build: String?
     var sizeText: String
     var icon: UIImage?
     var detailLoaded = false
@@ -111,12 +114,13 @@ struct CZFLocalIpaItem: Identifiable {
     // 绿勾——读 Info.plist 得来，读不到时不打勾。
     var bundleIdentifier: String?
 
-    init(url: URL, fileName: String, displayName: String, version: String? = nil, sizeText: String, icon: UIImage? = nil, detailLoaded: Bool = false, fileSize: Int64 = 0, modificationDate: Date? = nil, bundleIdentifier: String? = nil, folderRoot: URL? = nil) {
+    init(url: URL, fileName: String, displayName: String, version: String? = nil, build: String? = nil, sizeText: String, icon: UIImage? = nil, detailLoaded: Bool = false, fileSize: Int64 = 0, modificationDate: Date? = nil, bundleIdentifier: String? = nil, folderRoot: URL? = nil) {
         self.id = Self.czfStableID(for: url, relativeTo: folderRoot)
         self.url = url
         self.fileName = fileName
         self.displayName = displayName
         self.version = version
+        self.build = build
         self.sizeText = sizeText
         self.icon = icon
         self.detailLoaded = detailLoaded
@@ -477,26 +481,33 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     // 读缓存：.json 在即命中，图标缺失不判整条未命中（无图
     // 标的包照常用名字/版本/包名，icon 为 nil）；只有 .json
     // 没有（或解析失败）才算未命中、走解包。
-    nonisolated private static func czfLoadCachedDetail(for url: URL, relativeTo folderRoot: URL?) -> (name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?)? {
+    // 3.8.668（B-2）：build 进缓存——旧缓存没有 "build" 键时按
+    // 未命中处理、走一次解包重存（新缓存总写该键，无 build 的包
+    // 写 ""，不再反复解包）；元组顺序与 extractIpaInfo 一致。
+    nonisolated private static func czfLoadCachedDetail(for url: URL, relativeTo folderRoot: URL?) -> (name: String?, version: String?, build: String?, icon: UIImage?, bundleIdentifier: String?)? {
         guard let dir = czfCacheDir,
               let key = czfCacheKey(for: url, relativeTo: folderRoot),
               let metaData = try? Data(contentsOf: dir.appendingPathComponent(key + ".json")),
-              let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
+              let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+              let build = meta["build"] as? String else { return nil }
         let icon = (try? Data(contentsOf: dir.appendingPathComponent(key + ".png"))).flatMap { UIImage(data: $0) }
-        return (meta["name"] as? String, meta["version"] as? String, icon, meta["bundleIdentifier"] as? String)
+        return (meta["name"] as? String, meta["version"] as? String, build, icon, meta["bundleIdentifier"] as? String)
     }
 
     // 存缓存：.json 总是存（无图标也存名字/版本/包名；解包
     // 完全失败时存空 {}，下次不再重复解这个坏包——键含修改
     // 时间 + 大小，文件一换键就变、自动失效）；.png 只有有
     // 图标时才存。
-    nonisolated private static func czfSaveCachedDetail(for url: URL, relativeTo folderRoot: URL?, name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?) {
+    // 3.8.668（B-2）：build 总写键（无 build 写 ""），与上面读缓存
+    // 的“无键即旧缓存”口径配对；解包完全失败时 build 也写 ""。
+    nonisolated private static func czfSaveCachedDetail(for url: URL, relativeTo folderRoot: URL?, name: String?, version: String?, build: String?, icon: UIImage?, bundleIdentifier: String?) {
         guard let dir = czfCacheDir,
               let key = czfCacheKey(for: url, relativeTo: folderRoot) else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var meta: [String: Any] = [:]
         if let name { meta["name"] = name }
         if let version { meta["version"] = version }
+        meta["build"] = build ?? ""
         if let bundleIdentifier { meta["bundleIdentifier"] = bundleIdentifier }
         if let data = try? JSONSerialization.data(withJSONObject: meta) {
             try? data.write(to: dir.appendingPathComponent(key + ".json"))
@@ -563,6 +574,7 @@ final class CZFLocalIpaFolderModel: ObservableObject {
                 if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
                     if let name = cached.name { self.items[idx].displayName = name }
                     if let version = cached.version { self.items[idx].version = version }
+                    if let build = cached.build, !build.isEmpty { self.items[idx].build = build }
                     if let icon = cached.icon { self.items[idx].icon = icon }
                     if let bundleIdentifier = cached.bundleIdentifier { self.items[idx].bundleIdentifier = bundleIdentifier }
                     self.items[idx].detailLoaded = true
@@ -572,12 +584,13 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         }
         let info = Self.extractIpaInfo(url: item.url)
         // 解出来了就存缓存，下次切回来直接读（无图标也存 .json）。
-        Self.czfSaveCachedDetail(for: item.url, relativeTo: folderRoot, name: info.name, version: info.version, icon: info.icon, bundleIdentifier: info.bundleIdentifier)
+        Self.czfSaveCachedDetail(for: item.url, relativeTo: folderRoot, name: info.name, version: info.version, build: info.build, icon: info.icon, bundleIdentifier: info.bundleIdentifier)
         await MainActor.run {
             guard !self.detailsCancelled else { return }
             if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
                 if let name = info.name { self.items[idx].displayName = name }
                 if let version = info.version { self.items[idx].version = version }
+                if let build = info.build { self.items[idx].build = build }
                 if let icon = info.icon { self.items[idx].icon = icon }
                 if let bundleIdentifier = info.bundleIdentifier { self.items[idx].bundleIdentifier = bundleIdentifier }
                 self.items[idx].detailLoaded = true
@@ -585,21 +598,24 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         }
     }
 
-    nonisolated private static func extractIpaInfo(url: URL) -> (name: String?, version: String?, icon: UIImage?, bundleIdentifier: String?) {
+    nonisolated private static func extractIpaInfo(url: URL) -> (name: String?, version: String?, build: String?, icon: UIImage?, bundleIdentifier: String?) {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("CZFIpaFolder-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: tmp) }
         try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)
         let progress = Progress.discreteProgress(totalUnitCount: 100)
-        guard extract(url.path, tmp.path, progress) == 0 else { return (nil, nil, nil, nil) }
+        guard extract(url.path, tmp.path, progress) == 0 else { return (nil, nil, nil, nil, nil) }
         let payload = tmp.appendingPathComponent("Payload")
         guard let contents = try? fm.contentsOfDirectory(atPath: payload.path),
-              let appName = contents.first(where: { $0.hasSuffix(".app") }) else { return (nil, nil, nil, nil) }
+              let appName = contents.first(where: { $0.hasSuffix(".app") }) else { return (nil, nil, nil, nil, nil) }
         let appDir = payload.appendingPathComponent(appName)
         guard let data = try? Data(contentsOf: appDir.appendingPathComponent("Info.plist")),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return (nil, nil, nil, nil) }
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return (nil, nil, nil, nil, nil) }
         let name = (plist["CFBundleDisplayName"] as? String) ?? (plist["CFBundleName"] as? String)
         let version = plist["CFBundleShortVersionString"] as? String
+        // 3.8.668（B-2）：build 号（CFBundleVersion）——同版不同 build
+        // 的包要按 build 比新旧；读不到为 nil，按 0 比。
+        let build = plist["CFBundleVersion"] as? String
         // 3.8.444：包名供格子打“已安装”绿勾。
         let bundleIdentifier = plist["CFBundleIdentifier"] as? String
         var icon: UIImage?
@@ -640,7 +656,7 @@ final class CZFLocalIpaFolderModel: ObservableObject {
         if let img = icon {
             icon = Self.czfMakeThumbnail(img)
         }
-        return (name, version, icon, bundleIdentifier)
+        return (name, version, build, icon, bundleIdentifier)
     }
 
     // 安装低 #19：按显示尺寸缩成缩略图——格子只显示约 85pt，
@@ -1147,17 +1163,25 @@ struct CZFLocalIpaGridCell: View {
     }
 
     // 3.8.660（F1）：文件夹 IPA 有新版——短版本号比已装最旧实例新
-    // 就标；源页网格同款角标（CZFSourceGridView.hasUpdate），文件夹
-    // 区是唯一没跟上的地方。已装实例取最旧的（installedModel，
-    // 3.8.649 B2），比版本走全局 czfIsNewerVersion。文件夹 IPA
-    // 无 build，build 传 nil：短版本号相等时不标（同版不同 build
-    // 比不出来，要 build 级比较需 extractIpaInfo 多读一行
-    // CFBundleVersion 进 CZFLocalIpaItem，见 F1 精度限制）。
+    // 就标；源页网格同款角标（CZFSourceGridView.hasUpdate）。已装
+    // 实例取最旧的（installedModel，3.8.649 B2），比版本走全局
+    // czfIsNewerVersion。3.8.668（B-2）：build 级比较——文件夹 IPA
+    // 的 build 从 extractIpaInfo 读 CFBundleVersion 进 item.build，
+    // 短版本号相等时按 build 比（同版高 build 也标）；build 读不到
+    // 按 0 比，与源页网格同口径。
     private var czfHasUpdate: Bool {
         guard let version = item.version,
               let bid = item.bundleIdentifier, !bid.isEmpty,
               let installed = installedLookup.installedModel(bundleIdentifier: bid) else { return false }
-        return czfIsNewerVersion(version, build: nil, newerThan: installed.appInfo.version() ?? "", installedBuild: installed.appInfo.buildVersion())
+        return czfIsNewerVersion(version, build: item.build, newerThan: installed.appInfo.version() ?? "", installedBuild: installed.appInfo.buildVersion())
+    }
+
+    // 3.8.668（B-2/UI 打磨）：副标题版本行——有 build 时“版本 1.2 (123)”；
+    // 无 build 时只显短版本号，样式不变。
+    private var czfVersionText: String? {
+        guard let v = item.version else { return nil }
+        if let b = item.build, !b.isEmpty { return "版本 \(v) (\(b))" }
+        return "版本 \(v)"
     }
 
     // App #16：detailLoaded 是“已尝试读详情”标记——读完
@@ -1237,7 +1261,7 @@ struct CZFLocalIpaGridCell: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .top)
                 .shadow(color: colorScheme == .dark ? .black.opacity(0.95) : .white.opacity(0.95), radius: 4, x: 0, y: 0)
-            Text(czfDetailFailed ? "无法读取".loc : [item.version.map { "版本 \($0)" }, item.sizeText.isEmpty ? nil : item.sizeText].compactMap { $0 }.joined(separator: " · "))
+            Text(czfDetailFailed ? "无法读取".loc : [czfVersionText, item.sizeText.isEmpty ? nil : item.sizeText].compactMap { $0 }.joined(separator: " · "))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

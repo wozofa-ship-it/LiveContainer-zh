@@ -312,7 +312,12 @@ public final class DownloadHelper : ObservableObject {
         // 会话保护，记录照记、接管时找不到在途任务就走续传重下。
         let czfIdentifier = czfSessionIdentifier ?? "com.livecontainer.download.\(UUID().uuidString)"
         czfCurrentSessionIdentifier = czfIdentifier
-        CZFDownloadResumeStore.saveRecord(identifier: czfIdentifier, url: url, dest: to, autoResume: true)
+        // 3.8.668（B-1）：重试间隙里用户按了暂停——pause() 只改内存，
+        // saveRecord(autoResume: true) 会先清掉旧记录（同一地址只留
+        // 一份）、暂停意图跟着丢，冷启动又自动续上；建记录前先在主
+        // 线程读 paused，暂停中就记 false，堵住重试间隙那路。
+        let czfPausedBeforeStart = await MainActor.run { paused }
+        CZFDownloadResumeStore.saveRecord(identifier: czfIdentifier, url: url, dest: to, autoResume: !czfPausedBeforeStart)
 
         await MainActor.run {
             // 3.8.603（O-15）：复位移到 download() 入口，这里不再清——
@@ -580,14 +585,24 @@ public final class DownloadHelper : ObservableObject {
     // 不断开、不丢 resumeData；暂停不改 minimized，batchMode 下
     // 暂停不重弹弹窗。重试间隙里没有在途任务时只置标志，新任务
     // 建好后按标志立即挂起（见 downloadOnce 末尾）。
+    // 3.8.668（B-1）：暂停意图要落盘——paused 只在内存里，杀掉重开
+    // 后冷启动自动续只认记录（autoResume=true）；pause() 在此把
+    // 当前会话记录改成 false（cancel() 同款写法），resume() 改回
+    // true；记录不在时 updateAutoResume 直接返回，不报错。
     func pause() {
         paused = true
         downloadTask?.suspend()
+        if let id = czfCurrentSessionIdentifier {
+            CZFDownloadResumeStore.updateAutoResume(identifier: id, autoResume: false)
+        }
     }
 
     func resume() {
         paused = false
         downloadTask?.resume()
+        if let id = czfCurrentSessionIdentifier {
+            CZFDownloadResumeStore.updateAutoResume(identifier: id, autoResume: true)
+        }
     }
 
     func cancel() {

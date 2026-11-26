@@ -1114,6 +1114,10 @@ struct LCSourcesView: View {
     // S-7：存文件下载同名覆盖确认——目标已存在时先问用户，
     // 确认才下载覆盖；取消则不下载。
     @State private var czfDownloadOverwritePending: (url: URL, destURL: URL)?
+    // 3.8.668（F-3）：源页下载完成三选框——下载成功 + 魔数校验通过后
+    // 不再直弹分享表，改弹 confirmationDialog（安装 / 分享 / 取消）；
+    // dylib 不给“安装”按钮（非 IPA，无安装路）。
+    @State private var czfDownloadedFilePending: URL?
     // TwoYi 安卓系统（3.8.628，按需下载，不编进包）：
     // 安装状态派生（见 Shared.swift 的 CZFTwoYi），不另存 key。
     @State private var czfTwoYiDownloading = false
@@ -1499,6 +1503,42 @@ struct LCSourcesView: View {
                     }
                 } message: { pending in
                     Text("\(pending.destURL.lastPathComponent) 已存在，是否覆盖？")
+                }
+        )
+        // 3.8.668（F-3）：下载完成三选框——3.8.589（L121）同款：挪
+        // background 叶子，宿主链上不再留弹窗类修饰符。安装走源页
+        // 待装队列（切 App 页 + CZFSourcePendingInstall，App 页排空
+        // 进 installFromUrl 的 file:// 本地路、不重新下载，
+        // czfProgressBase 默认 0）；分享走现有 shareFile(at:)；
+        // 取消只留文件。dylib 不给安装按钮。
+        .background(
+            EmptyView()
+                .confirmationDialog(
+                    "下载完成",
+                    isPresented: Binding<Bool>(
+                        get: { czfDownloadedFilePending != nil },
+                        set: { if !$0 { czfDownloadedFilePending = nil } }
+                    ),
+                    presenting: czfDownloadedFilePending
+                ) { destURL in
+                    if destURL.pathExtension.lowercased() != "dylib" {
+                        Button("lc.common.install".loc) {
+                            withAnimation {
+                                DataManager.shared.model.selectedTab = .apps
+                            }
+                            CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: destURL, autoReplace: false, preview: true, forceAsNew: false))
+                            czfDownloadedFilePending = nil
+                        }
+                    }
+                    Button("分享") {
+                        shareFile(at: destURL)
+                        czfDownloadedFilePending = nil
+                    }
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        czfDownloadedFilePending = nil
+                    }
+                } message: { destURL in
+                    Text("\(destURL.lastPathComponent) 已下载完成")
                 }
         )
         // TwoYi 安卓系统（3.8.628）：删 guest 前问一次——
@@ -2343,7 +2383,10 @@ struct LCSourcesView: View {
                     throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
                 }
                 await MainActor.run {
-                    shareFile(at: destURL)
+                    // 3.8.668（F-3）：下完不再直弹分享表——改弹三选框
+                    // （安装 / 分享 / 取消），SwiftUI dialog 挂源页
+                    // 视图上，异步完成时不怕已有 sheet 顶掉（L85 同款）。
+                    czfDownloadedFilePending = destURL
                 }
             } catch {
                 await MainActor.run {

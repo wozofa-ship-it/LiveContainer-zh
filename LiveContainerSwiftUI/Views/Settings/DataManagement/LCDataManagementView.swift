@@ -151,6 +151,10 @@ struct LCDataManagementView : View {
     @Environment(\.dismiss) private var dismiss
     @State private var backupSortMode: Int = 0
     @State private var backupLoginOnlyFilter: Bool = false
+    // 3.8.668（F-1）：恢复页备份列表搜索——按备份名搜（文件夹名 +
+    // 已下载 manifest 的 displayName）；空串时走现有排序/筛选，
+    // 不动原有列表口径。
+    @State private var czfBackupSearchText = ""
     @State private var showBackupSelect = false
     @State private var backupSelectedIDs = Set<String>()
     // 3.8.404：范围选择独立成页（CZFScopeChoiceView）——旧 dialog
@@ -468,6 +472,11 @@ struct LCDataManagementView : View {
             // 删备份时 +1 强制整体重建、不走 diff，绕过
             // Invalid update 整类问题（见 backupListVersion）。
             .id(backupListVersion)
+            // 3.8.668（F-1）：恢复页搜索栏——挂 restoreBackupContent
+            // 的 List 上；恢复页是独立 NavigationView，同一页只
+            // 有这一个 searchable，不存在双 searchable 抢占。
+            // prompt 硬编码中文“搜索备份”，沿用 CZF 新增 UI 先例。
+            .searchable(text: $czfBackupSearchText, prompt: "搜索备份")
             .navigationTitle("lc.settings.restoreBackup".loc)
             .onAppear {
                 czfDirectCoverAppeared = true
@@ -476,6 +485,9 @@ struct LCDataManagementView : View {
                 lockedBackupNames = Self.lockedBackupNameSet()
                 restoreSheetNotice = nil
                 refreshBackupSizes()
+                // 3.8.668（B-3）：后台拉未下载的 iCloud manifest，
+                // 落地后刷新列表、排序/筛选按真 manifest 修正。
+                czfPrefetchExternalManifests()
             }
             .toolbar {
                 ToolbarItem(placement: .bottomBar) {
@@ -2602,6 +2614,37 @@ struct LCDataManagementView : View {
         }
     }
 
+    // 3.8.668（B-3）：后台拉 iCloud 备份 manifest——恢复页进页时
+    // 未下载的 manifest 只触发下载、不在主线程等；落地后刷新
+    // 外部备份列表，排序/筛选按真 manifest 修正（与
+    // refreshBackupSizes 同款后台刷新模式）。只拉 manifest.json
+    // 一个文件，不拉整个备份；已下载的不重复拉；10 秒内没下完
+    // 也不卡——mtime 兜底已保住排序，范围仍按“未知保留”。
+    func czfPrefetchExternalManifests() {
+        guard Self.externalBackupFolderURL() != nil else { return }
+        let folders = externalBackupFolderList
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            var pending: [URL] = []
+            for folder in folders {
+                let manifestURL = folder.appendingPathComponent("manifest.json")
+                if !Self.isFileDownloaded(manifestURL, underExternal: true) {
+                    pending.append(manifestURL)
+                    try? fm.startDownloadingUbiquitousItem(at: manifestURL)
+                }
+            }
+            guard !pending.isEmpty else { return }
+            for _ in 0..<20 {
+                Thread.sleep(forTimeInterval: 0.5)
+                if pending.allSatisfy({ Self.isFileDownloaded($0, underExternal: true) }) { break }
+            }
+            guard pending.contains(where: { Self.isFileDownloaded($0, underExternal: true) }) else { return }
+            DispatchQueue.main.async {
+                self.externalBackupFolderList = Self.externalBackupFolderURL() != nil ? self.backupFolders(fromExternal: true) : []
+            }
+        }
+    }
+
     // 单次枚举一棵树、按顶级文件夹归集文件大小。相对路径必须
     // 先解符号链接再剥前缀：枚举器给 /private/var，容器路径
     // 是 /var，直接拼会脏（v146 修过的同款坑）
@@ -2743,17 +2786,56 @@ struct LCDataManagementView : View {
     private func applyBackupSortFilter(to folders: [URL]) -> [URL] {
         var list = folders
         if backupLoginOnlyFilter {
-            list = list.filter { Self.czfDownloadedManifestInfo(of: $0)?.scope == "login" }
+            // 3.8.668（B-3）：manifest 未下载时范围未知——未知的不筛掉、
+            // 仍显示（原来 nil != "login" 直接筛掉，iCloud 备份一开
+            // 开关就消失）；manifest 下完后后台拉取（见
+            // czfPrefetchExternalManifests）落地、列表刷新即按真范围筛。
+            list = list.filter { folder in
+                guard let info = Self.czfDownloadedManifestInfo(of: folder) else { return true }
+                return info.scope == "login"
+            }
         }
         if backupSortMode == 1 {
             list.sort { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
         } else {
-            list.sort { (Self.czfDownloadedManifestInfo(of: $0)?.backupDate ?? "") > (Self.czfDownloadedManifestInfo(of: $1)?.backupDate ?? "") }
+            // 3.8.668（B-3）：日期取数改走 czfBackupSortDateString——
+            // 与 backupDateText 同款 mtime 兜底，manifest 未下载时
+            // 排序位置与行显示日期一致，不再沉底。
+            list.sort { Self.czfBackupSortDateString(of: $0) > Self.czfBackupSortDateString(of: $1) }
+        }
+        // 3.8.668（F-1）：搜索在排序/筛选之后再滤（App 页同款
+        // 先筛后搜）——比文件夹名（含 App 名 + 分身后缀）+ 已下载
+        // manifest 的 displayName；未下载 manifest 的只比文件夹名，
+        // 不触发 iCloud 下载。
+        if !czfBackupSearchText.isEmpty {
+            list = list.filter { folder in
+                folder.lastPathComponent.localizedCaseInsensitiveContains(czfBackupSearchText)
+                    || (Self.czfDownloadedManifestInfo(of: folder)?.displayName ?? "").localizedCaseInsensitiveContains(czfBackupSearchText)
+            }
         }
         return list
     }
     private var sortedLocalBackups: [URL] { applyBackupSortFilter(to: backupFolderList) }
     private var sortedExternalBackups: [URL] { applyBackupSortFilter(to: externalBackupFolderList) }
+
+    // 3.8.668（B-3）：排序/筛选用的备份日期字符串——已下载 manifest
+    // 用 backupDate，未下载时回落文件夹/manifest 的 mtime（与
+    // backupDateText 同款兜底、同一格式 yyyy-MM-dd HH:mm），
+    // 字典序即时间序；都读不到返回 ""（沉底）。只读元数据，
+    // 不触发 iCloud 下载。
+    static func czfBackupSortDateString(of folderURL: URL) -> String {
+        if let date = Self.czfDownloadedManifestInfo(of: folderURL)?.backupDate, !date.isEmpty {
+            return date
+        }
+        let fm = FileManager.default
+        let manifestURL = folderURL.appendingPathComponent("manifest.json")
+        let mtime = (try? fm.attributesOfItem(atPath: manifestURL.path))?[.modificationDate] as? Date
+            ?? (try? fm.attributesOfItem(atPath: folderURL.path))?[.modificationDate] as? Date
+        guard let mtime else { return "" }
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd HH:mm"
+        return fmt.string(from: mtime)
+    }
 
     @ViewBuilder
     func restoreRow(for folderURL: URL) -> some View {
@@ -4123,6 +4205,26 @@ struct LCDataManagementView : View {
             content.body = body
             content.sound = .default
             center.add(UNNotificationRequest(identifier: "CZFBackupDone-\(UUID().uuidString)", content: content, trigger: nil))
+        }
+    }
+
+    // 3.8.668（F-2）：定时备份失败本地通知——czfNotifyBackupDone 的
+    // 静态版（定时备份跑在 static runScheduledBackupIfDue 里、
+    // 后台队列上，实例版调不到）：标题「定时备份失败」，正文复用
+    // 已拼好的 failureParts（失败名单前 3 条在内）；identifier
+    // 前缀 CZFScheduleBackupFailed，与 CZFBackupDone 同走
+    // AppDelegate 默认分支、前台也弹横幅；只在 hadFailure 为真
+    // 时调（调用点即失败记录写入处，条件与 hadFailure 同口径），
+    // 成功/全跳过不发；授权复用同款 requestAuthorization，不另加开关。
+    private static func czfNotifyScheduleBackupFailed(failureText: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "定时备份失败"
+            content.body = failureText
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "CZFScheduleBackupFailed-\(UUID().uuidString)", content: content, trigger: nil))
         }
     }
 
@@ -8190,6 +8292,10 @@ struct LCDataManagementView : View {
                         }
                         UserDefaults.standard.set("\(when)：\(failureParts.joined(separator: "；"))", forKey: "LCScheduleBackupLastFailure")
                         UserDefaults.standard.synchronize()
+                        // 3.8.668（F-2）：失败记录写入处同位置推一条本地
+                        // 通知——只报失败（本 if 条件即 hadFailure 口径），
+                        // 成功/全跳过不发；正文复用已拼好的 failureParts。
+                        Self.czfNotifyScheduleBackupFailed(failureText: failureParts.joined(separator: "；"))
                     }
                 }
                 // 全跳过且无失败时当天同样算结算（见上面 skippedFullCount），
