@@ -342,6 +342,16 @@
     // 双击标题栏切换最大化/还原（maximizeWindow 本身就是切换式）
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(czfTitleBarDoubleTap)];
     doubleTap.numberOfTapsRequired = 2;
+    // P0 标题栏修法（3.8.673 修订，诊断 b）：双击识别器默认
+    // delaysTouchesEnded=YES（手指抬起的 ended 触摸先扣住，等双击
+    // 判定完才决定给不给按钮）且 cancelsTouchesInView=YES（一旦
+    // 认出双击就取消已递送的按钮触摸）；两项都置 NO 后按钮的
+    // touchesEnded 立即送达、双击认出也不取消按钮触摸，而识别器
+    // 自身仍正常收触摸、双击照样触发 czfTitleBarDoubleTap →
+    // maximizeWindow，功能保留。按钮恢复即定罪 2678208e，不恢复
+    // 则下一步查窗口 frame/层级。
+    doubleTap.delaysTouchesEnded = NO;
+    doubleTap.cancelsTouchesInView = NO;
     [self.navigationBar addGestureRecognizer:doubleTap];
 
     // Resize handle (idea stolen from Notes debugging window)
@@ -514,6 +524,9 @@
 }
 
 - (void)closeWindow {
+    // P0 标题栏修法（3.8.673）诊断：动作入口只打一句，确认按钮
+    // 点按是否走到动作（两标志位是 ↗ 卡住的鉴别项）。
+    NSLog(@"[CZF-TitleBar] closeWindow maxAnim=%d pipAnim=%d", (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
     self.czfMinimized = NO;
     // 关窗前记下窗口状态，下次打开还原（用户要的核心点）
     [self czfDismissKeyboard];
@@ -527,6 +540,9 @@
 }
 
 - (void)minimizeWindow {
+    // P0 标题栏修法（3.8.673）诊断：动作入口只打一句（放守卫之前，
+    // 藏着的窗口被误点也能留痕）。
+    NSLog(@"[CZF-TitleBar] minimizeWindow hidden=%d maxAnim=%d pipAnim=%d", (int)self.view.hidden, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
     if (self.view.hidden) return;
     // 最小化先收键盘：只藏窗口视图收不掉键盘——键盘窗口
     // 不随本视图隐藏而消失，游客切最小化后键盘会继续盖在
@@ -626,6 +642,8 @@
 }
 
 - (void)maximizeWindow {
+    // P0 标题栏修法（3.8.673）诊断：动作入口只打一句。
+    NSLog(@"[CZF-TitleBar] maximizeWindow max=%d maxAnim=%d pipAnim=%d", (int)self.isMaximized, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
     // C1：重入守卫——还原 0.3 秒动画内标志还没落位时再调，
     // 旧代码会按旧标志再走一次还原、两套动画同改 frame；
     // 现在进行中直接返回，程序化切换（unmaximizeWindow）
