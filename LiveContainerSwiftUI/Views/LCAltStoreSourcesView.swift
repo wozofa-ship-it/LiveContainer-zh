@@ -3886,7 +3886,11 @@ struct LCSourceAppDetailView: View {
     // 与启动失败弹都挂在详情页自己身上（行上的那份在详情 sheet
     // 盖着时弹不出来，也不走父级 errorMessage），打开逻辑照抄
     // 行上骨架放详情页内（见 czfOpenInstalled）。
-    let installedLookup: CZFInstalledLookup? = nil
+    // 3.8.692 修法 3（构建 run 45892761379 红字原文修）：`let` 属性
+    // 带默认值即已初始化，显式 init 里再赋报 `may only be
+    // initialized once`（3.8.688 修法 4 同款）——默认值只放 init
+    // 参数上，属性本身不带默认值；两调用点都显式传参，不影响。
+    let installedLookup: CZFInstalledLookup?
     // 3.8.692 修法 2（构建 run 45890414484 红字原文修）：显式 init——
     // 网格调用点报 `extra argument 'installedLookup' in call`，行调
     // 用点同款传参却没报；memberwise 合成在 :3518 体检查超时级联
