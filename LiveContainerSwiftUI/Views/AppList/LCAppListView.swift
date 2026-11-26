@@ -2852,6 +2852,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             guard sharedModel.selectedTab == .apps else { return }
             withAnimation { proxy.scrollTo("czfAppListTop", anchor: .top) }
         }
+        // 3.8.688（B2）：搜索后滚列表收键盘——与源页文件夹分支
+        // （20 轮）同款一行现成助手；App 页此前全文件无
+        // scrollDismissesKeyboard 调用。回顶锚点不动。
+        .czfScrollDismissesKeyboard()
     }
     }
 

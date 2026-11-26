@@ -41,6 +41,11 @@ struct LCTweakFolderView : View {
 
     @StateObject private var newFolderInput = InputHelper()
     
+    // 3.8.688（F1）：插件搜索字——插件多了一行行翻，搜名字直达；
+    // 与 App/源页同款（.searchable + displayName 过滤），根 Tab
+    // 与子文件夹两级同受益（同一 struct），不新造搜索组件。
+    @State private var czfSearchText = ""
+
     @StateObject private var renameFileInput = InputHelper()
     
     @State private var choosingTweak = false
@@ -108,6 +113,15 @@ struct LCTweakFolderView : View {
         }
     }
 
+    // 3.8.688（F1）：搜索过滤——按 displayName（文件名去
+    // .disabled 后缀）比，空输入不过滤；搜不到时列表区只留
+    // 下面那行“没有找到匹配的插件”，不留空白。
+    private var czfVisibleTweakItems: [LCTweakItem] {
+        let q = czfSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return tweakItems }
+        return tweakItems.filter { $0.displayName.localizedCaseInsensitiveContains(q) }
+    }
+
     private func czfReloadTweakItems() {
         if case .success(let items) = Self.scanTweakItems(at: baseUrl) {
             tweakItems = items
@@ -164,7 +178,14 @@ struct LCTweakFolderView : View {
                 }
             }
             Section {
-                ForEach(tweakItems, id:\.self) { tweakItem in
+                // 3.8.688（F1）：搜不到的空态——上面“暂无插件”只管
+                // 文件夹本身为空，搜索无匹配走这里；文件夹本身为空
+                // 时不重复再贴一行。
+                if !tweakItems.isEmpty && !czfSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && czfVisibleTweakItems.isEmpty {
+                    Text("没有找到匹配的插件")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(czfVisibleTweakItems, id:\.self) { tweakItem in
                     HStack {
                         Group {
                             if tweakItem.isFolder && !tweakItem.isFramework {
@@ -262,6 +283,9 @@ struct LCTweakFolderView : View {
         .onAppear {
             czfReloadTweakItems()
         }
+        // 3.8.688（F1）：插件搜索——挂 List 链上（NavigationView 内，
+        // 与 App/源页同款挂法）；prompt 硬编码中文，0 新 key。
+        .searchable(text: $czfSearchText, prompt: "搜索插件")
         .navigationTitle(isRoot ? "lc.tabView.tweaks".loc : baseUrl.lastPathComponent)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

@@ -1332,6 +1332,22 @@ struct CZFLocalIpaGridCell: View {
         .contextMenu {
             Button("分享 IPA", systemImage: "square.and.arrow.up", action: onShare)
             Button("复制文件名", systemImage: "doc.on.doc", action: onCopyFileName)
+            // 3.8.688（F3）：复制版本号 / 复制 Bundle ID——与 App 页
+            // 长按菜单同款（3.8.639/647）与源页行同款（3.8.682 F2）；
+            // 版本号读不到或为 "?" 时不显示，Bundle ID 为空时不显示；
+            // 数据现成（item.version / item.bundleIdentifier，
+            // extractIpaInfo 从 Info.plist 读），零新解析、零新 key。
+            // 标题硬编码中文，沿用本菜单“复制文件名”先例。
+            if let version = item.version, version != "?" {
+                Button("复制版本号", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = version
+                }
+            }
+            if let bundleID = item.bundleIdentifier, !bundleID.isEmpty {
+                Button("复制 Bundle ID", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = bundleID
+                }
+            }
             if !czfBatchMode {
                 Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
             }

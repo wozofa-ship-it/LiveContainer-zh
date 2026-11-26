@@ -1135,6 +1135,12 @@ struct LCSourcesView: View {
     // 3.8.672（B-1）：刚装完的插件名——成功提示 alert 用，
     // 弹完清掉；失败仍走 errorMessage。
     @State private var czfDylibInstallSuccessName: String?
+    // 3.8.688（F2）：搜索行“添加为源”失败的本地错误——sheet 内
+    // addError 同款：父级 errorMessage 的 alert 在 sheet 盖着时
+    // 会被 UIKit 静默丢弃（S-9/S-3），这里是列表行直加、sheet
+    // 没开，但失败反馈仍走自己独立的 alert 叶子，不与批量汇总
+    // 的 errorMessage 共用槽位；成功不留文本。
+    @State private var czfAddSourceError: String?
     // TwoYi 安卓系统（3.8.628，按需下载，不编进包）：
     // 安装状态派生（见 Shared.swift 的 CZFTwoYi），不另存 key。
     @State private var czfTwoYiDownloading = false
@@ -1240,6 +1246,46 @@ struct LCSourcesView: View {
                     VStack(spacing: 16) {
                         // 3.8.684（F3）：回到顶部锚点——点当前“源” Tab 即滚到这里。
                         Color.clear.frame(height: 0).id("czfSourcesListTop")
+                        // 3.8.688（F2）：搜不到时输入像 URL 就给一行“添加为源”——
+                        // 原来搜索无匹配时列表只剩 TwoYi 区、无任何空态文案与下一步
+                        // 入口，要加这个源必须点 + → 管理源 sheet → 再粘贴一次。
+                        // App 页搜索快捷行（“打开网址 / 在网上搜索”）同一模式的
+                        // 先例；点一下走现成 handleAddSource，成功清掉搜索词、
+                        // 新源组直接现身，失败进本页独立的 czfAddSourceError
+                        // alert（不走父级 errorMessage，见该 @State 注释）。
+                        // 列表/网格两路共用本 VStack，一处加两路受益。
+                        if isFiltering, totalFilteredAppCount == 0, let czfAddURL = czfSearchSourceURL {
+                            Button {
+                                Task {
+                                    if let error = await handleAddSource(czfAddURL.absoluteString) {
+                                        await MainActor.run { czfAddSourceError = error }
+                                    } else {
+                                        await MainActor.run { searchContext.query = "" }
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "link.badge.plus")
+                                        .font(.title3)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("添加为源")
+                                            .font(.headline)
+                                        Text(czfAddURL.absoluteString)
+                                            .font(.subheadline)
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(10)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 22))
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal)
+                        }
                         // TwoYi 安卓系统（3.8.628）：只在“源”分段出现
                         // （不在“文件夹”分段）、网格与列表两模式都可见、
                         // 与每源一组平级；源为空的空态分支里不出现。
@@ -1398,6 +1444,10 @@ struct LCSourcesView: View {
                     guard sharedModel.selectedTab == .sources else { return }
                     withAnimation { czfSourcesProxy.scrollTo("czfSourcesListTop", anchor: .top) }
                 }
+                // 3.8.688（B2）：搜索后滚列表收键盘——与文件夹分支
+                // （:1201，20 轮）同款一行现成助手；主列表此前漏了。
+                // 回顶锚点（21/22 轮）不动。
+                .czfScrollDismissesKeyboard()
                 // 切换行已收进设置（3.8.419，建议第 3 条）：原来钉在
                 // 顶部的“恢复原生 / 网格设置”行删掉，模式开关收到
                 // 网格设置 sheet 里（CZFAppGridSettingsView 的显示
@@ -1520,6 +1570,20 @@ struct LCSourcesView: View {
                     Button("lc.common.ok".loc, role: .cancel) { errorMessage = nil }
                 } message: {
                     Text(errorMessage ?? "")
+                }
+        )
+        // 3.8.688（F2）：搜索行“添加为源”失败的本地 alert——
+        // 3.8.589（L121）同款：各挪一个 background 叶子、各占一条
+        // 分支，不与 errorMessage 共用槽位。
+        .background(
+            EmptyView()
+                .alert("lc.common.error".loc, isPresented: Binding<Bool>(
+                    get: { czfAddSourceError != nil },
+                    set: { if !$0 { czfAddSourceError = nil } })
+                ) {
+                    Button("lc.common.ok".loc, role: .cancel) { czfAddSourceError = nil }
+                } message: {
+                    Text(czfAddSourceError ?? "")
                 }
         )
         // 3.8.672（B-1）：插件安装成功提示——复用 errorMessage
@@ -1696,6 +1760,15 @@ struct LCSourcesView: View {
                     updatableCountBadge = cachedUpdatableApps.count
                     // 3.8.653（B2）：同上，ID 集与名单同一处写（:1780 同款拼接）。
                     updatableBundleIDs = cachedUpdatableApps.map { czfNormalizedBundleID($0.bundleIdentifier) }.joined(separator: ",")
+                    // 3.8.688（B3）：跳光即关 sheet——onSkip 只剔名单、不碰
+                    // showUpdatableList，名单跳空后 List 为空、标题与底部
+                    // 按钮都变“全部更新(0)”、sheet 赖在屏幕上；点下去
+                    // onUpdateAll 走空 installBatch、czfShowBatchResult
+                    // 直接 return，零反馈。名单变空即事毕，直接关回源页。
+                    // 只动现成 @State，不碰跳过持久化、不碰红点重算。
+                    if cachedUpdatableApps.isEmpty {
+                        showUpdatableList = false
+                    }
                 }
             )
         }
@@ -1706,6 +1779,14 @@ struct LCSourcesView: View {
                     isPresented: $isManagingSources,
                     onAdd: { rawValue in
                         await handleAddSource(rawValue)
+                    },
+                    // 3.8.688（B1）：删源清选中集——22 轮 B1 同款 hazard：
+                    // 删源只清 ViewModel 侧，不碰视图层 selectedIDs；
+                    // 删完选中集变幽灵、顶栏“安装”仍亮、点下去静默空跑。
+                    // 选中键是 czfSourceSelectionKey（源 feed URL + ":" +
+                    // czfStableID），按该源 URL 前缀整批清掉；不碰续签过滤。
+                    onRemove: { item in
+                        selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
                     }
                 )
                 .presentationDetents([.large])
@@ -1715,6 +1796,10 @@ struct LCSourcesView: View {
                     isPresented: $isManagingSources,
                     onAdd: { rawValue in
                         await handleAddSource(rawValue)
+                    },
+                    // 3.8.688（B1）：删源清选中集——与上面 iOS 16+ 分支同款（见该处注释）。
+                    onRemove: { item in
+                        selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
                     }
                 )
             }
@@ -1886,6 +1971,18 @@ struct LCSourcesView: View {
         }
     }
     
+    // 3.8.688（F2）：搜索输入像 http(s) URL 才返回它——App 页
+    // czfSearchURL 同款判法（URLComponents + http/https + host），
+    // 但只认带协议的完整 URL：裸域名不补协议（源地址必须是完整
+    // 链接，补出来的多半不是源）；带空格/其他协议头的不算。
+    private var czfSearchSourceURL: URL? {
+        let q = searchContext.debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, !q.contains(" ") else { return nil }
+        guard let comps = URLComponents(string: q), let scheme = comps.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"), comps.host != nil else { return nil }
+        return comps.url
+    }
+
     @MainActor
     private func handleAddSource(_ rawValue: String) async -> String? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2625,6 +2722,13 @@ private struct ManageSourcesSheet: View {
     @ObservedObject var viewModel: AltStoreSourcesViewModel
     @Binding var isPresented: Bool
     let onAdd: (String) async -> String?
+    // 3.8.688（B1）：删源后的父级回调——sheet 自己不知道父级
+    // LCSourcesView 的 selectedIDs（22 轮 B1 遗留入口：sheet 左滑
+    // 删除只清 ViewModel 侧，选中集变幽灵、顶栏“安装”仍亮、点下去
+    // 静默空跑）。父级在回调里按 czfSourceSelectionKey 前缀清掉
+    // 该源的选中键；不传时按无回调处理，旧调用点不用改。
+    // 带默认值，memberwise init 调用点可省。
+    let onRemove: ((AltStoreSourcesViewModel.SourceItem) -> Void)? = nil
 
     @State private var manualSourceValue = ""
     @State private var isAddingManual = false
@@ -2724,6 +2828,10 @@ private struct ManageSourcesSheet: View {
                 ) { item in
                     Button("lc.common.remove".loc, role: .destructive) {
                         viewModel.removeSource(item)
+                        // 3.8.688（B1）：删源顺带清父级选中集——见上面
+                        // onRemove 注释；只改删除后的清理，不碰本
+                        // confirmationDialog 宿主（S9 回退禁区）。
+                        onRemove?(item)
                         sourcePendingRemoval = nil
                     }
                     Button("lc.common.cancel".loc, role: .cancel) {
