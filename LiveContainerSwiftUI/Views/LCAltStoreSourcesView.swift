@@ -1550,8 +1550,13 @@ struct LCSourcesView: View {
                 // 删完选中集变幽灵、顶栏“安装”仍亮、点下去静默空跑。
                 // 选中键是 czfSourceSelectionKey（源 feed URL + ":" +
                 // czfStableID），按该源 URL 前缀整批清掉；不碰续签过滤。
+                // 3.8.688 修法3：不用 removeAll(where:)——Set 没有它
+                //（那是 RangeReplaceableCollection 的方法，全仓 removeAll
+                // 闭包全在 Array 上），写了编译器把 removeAll 认成无参
+                // 版、尾随闭包报 extra trailing closure；改 filter 重赋。
                 onRemove: { item in
-                    selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
+                    let prefix = item.url.absoluteString + ":"
+                    selectedIDs = selectedIDs.filter { !$0.hasPrefix(prefix) }
                 }
             )
             .presentationDetents([.large])
@@ -1564,7 +1569,8 @@ struct LCSourcesView: View {
                 },
                 // 3.8.688（B1）：删源清选中集——与上面 iOS 16+ 分支同款（见该处注释）。
                 onRemove: { item in
-                    selectedIDs.removeAll { $0.hasPrefix(item.url.absoluteString + ":") }
+                    let prefix = item.url.absoluteString + ":"
+                    selectedIDs = selectedIDs.filter { !$0.hasPrefix(prefix) }
                 }
             )
         }
