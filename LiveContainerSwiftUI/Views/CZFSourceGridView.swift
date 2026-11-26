@@ -168,9 +168,11 @@ struct CZFSourceGridView: View {
         // 3.8.673 修法（红字 1-3）：ForEach 用元组 keypath
         // \.item.id 在本文件里推不出根类型（报成 Binding<C>），
         // 改按下标迭代，行身份用下标；visibleItems 只算一次。
+        // 第二轮补：不用 .indices（会被解析成 indices(where:)
+        // 方法），改用 0..<count（同文件 :399 已有先例）。
         let visibleItems = czfVisibleItems
         return VStack(alignment: .leading, spacing: 16) {
-            ForEach(visibleItems.indices, id: \.self) { index in
+            ForEach(0..<visibleItems.count, id: \.self) { index in
                 let entry = visibleItems[index]
                 let item = entry.item
                 let apps = entry.apps
