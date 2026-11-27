@@ -2270,7 +2270,60 @@ extension Notification.Name {
         czfHitTestLogDecoratedAll(window: window, winPt: winPt)
         czfHitTestLogHostView(window: window)
         czfHitTestLogBannerHit(window: window, winPt: winPt, hit: hit)
+        czfHitTestLogCoverAndZOrder(window: window, winPt: winPt, hit: hit)
         czfHitTestLogDockCount()
+    }
+
+    // 3.8.708 诊断：遮挡归属 + 宿主视图层级链（只观察，不改行为）。
+    // 判据：点按落在客窗框内（DECOR ptInside=1）却命中宿主视图时，
+    // 必须知道是谁盖在客窗上面——面板（PANEL）还是主列表（main）；
+    // 再看 VirtualWindowsHostView 沿父链的层级序号：它若不是
+    // UIHostingView 子视图里的最后一个，就是被主列表埋在下面
+    // （tab 切换/新视图插入会把它顶到后面），窗口再亮也点不到。
+    private static func czfHitTestLogCoverAndZOrder(window: UIWindow, winPt: CGPoint, hit: UIView?) {
+        // 遮挡归属：沿命中视图的父链找面板宿主视图 / 宿主窗口视图。
+        var cover = "nil"
+        if let hitView = hit {
+            var v: UIView? = hitView
+            var found: String? = nil
+            while let cur = v {
+                if let panelView = Self.shared.czfPanelOverlayHost?.view, cur === panelView {
+                    found = "panel"
+                    break
+                }
+                if NSStringFromClass(type(of: cur)) == "VirtualWindowsHostView" {
+                    found = "window"
+                    break
+                }
+                v = cur.superview
+            }
+            cover = found ?? "main"
+        }
+        // 面板状态：开着（未隐藏）且点落在面板框内，才算面板遮挡。
+        var panelStr = "none"
+        if let panelView = Self.shared.czfPanelOverlayHost?.view {
+            let inWin = (panelView.window === window)
+            let f = inWin ? panelView.convert(panelView.bounds, to: window) : .zero
+            let insideStr = inWin ? (f.contains(winPt) ? "1" : "0") : "n/a"
+            panelStr = "hid=\(panelView.isHidden ? 1 : 0) frameWin=(\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.size.width)),\(Int(f.size.height))) ptInside=\(insideStr)"
+        }
+        // 层级链：从 windowHostingView 沿父链到 UIWindow，逐层记
+        // “在父视图子视图里的序号/总数”（序号越大越靠前，最后一个最靠前）。
+        var chain: [String] = []
+        var v: UIView? = Self.shared.windowHostingView
+        var n = 0
+        while let cur = v, n < 8 {
+            let name = NSStringFromClass(type(of: cur))
+            if let parent = cur.superview {
+                let idx = parent.subviews.firstIndex(where: { $0 === cur }) ?? -1
+                chain.append("\(name)[\(idx)/\(parent.subviews.count)]")
+            } else {
+                chain.append("\(name)[root]")
+            }
+            v = cur.superview
+            n += 1
+        }
+        CZFHitTestLog.czfHitTestLogLine("COVER hit=\(cover) PANEL \(panelStr) ZORDER \(chain.joined(separator: " > "))")
     }
 
     private static func czfHitTestLogDecorated(_ d: DecoratedAppSceneViewController, window: UIWindow, winPt: CGPoint, event: UIEvent) {

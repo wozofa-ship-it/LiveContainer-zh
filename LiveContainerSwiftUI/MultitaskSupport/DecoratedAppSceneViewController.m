@@ -524,13 +524,31 @@
     [self czfApplyMinimizedForeground];
 }
 
+// 3.8.708 诊断：记 maximize/minimize/close 的调用方（只观察，不改行为）。
+// [NSThread callStackSymbols] 的帧含模块名与方法名；只取含
+// LiveContainer 的帧、每帧截到 120 字以内、最多 4 帧。标题栏按钮走
+// UIKit sendAction（栈里无 Swift 调用方），面板行/带回路走 Swift
+// 调用链，双击走 czfTitleBarDoubleTap——三者栈形不同，可直接区分。
+- (NSString *)czfTitleBarCallerStack {
+    NSArray<NSString *> *symbols = [NSThread callStackSymbols];
+    NSMutableArray<NSString *> *frames = [NSMutableArray array];
+    for (NSString *s in symbols) {
+        if (![s containsString:@"LiveContainer"]) continue;
+        NSString *t = s;
+        if (t.length > 120) t = [t substringToIndex:120];
+        [frames addObject:t];
+        if (frames.count >= 4) break;
+    }
+    return [frames componentsJoinedByString:@" || "];
+}
+
 - (void)closeWindow {
     // P0 标题栏修法（3.8.673）诊断：动作入口只打一句，确认按钮
     // 点按是否走到动作（两标志位是 ↗ 卡住的鉴别项）。
     NSLog(@"[CZF-TitleBar] closeWindow maxAnim=%d pipAnim=%d", (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
     // P0 hitTest 诊断（3.8.676）：同一句再写进文件日志
     //（NSLog 应用内拿不到，文件日志是判据）。
-    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] closeWindow maxAnim=%d pipAnim=%d", (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating]];
+    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] closeWindow maxAnim=%d pipAnim=%d caller=%@", (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating, [self czfTitleBarCallerStack]]];
     self.czfMinimized = NO;
     // 关窗前记下窗口状态，下次打开还原（用户要的核心点）
     [self czfDismissKeyboard];
@@ -548,7 +566,7 @@
     // 藏着的窗口被误点也能留痕）。
     NSLog(@"[CZF-TitleBar] minimizeWindow hidden=%d maxAnim=%d pipAnim=%d", (int)self.view.hidden, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
     // P0 hitTest 诊断（3.8.676）：同一句再写进文件日志。
-    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] minimizeWindow hidden=%d maxAnim=%d pipAnim=%d", (int)self.view.hidden, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating]];
+    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] minimizeWindow hidden=%d maxAnim=%d pipAnim=%d caller=%@", (int)self.view.hidden, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating, [self czfTitleBarCallerStack]]];
     if (self.view.hidden) return;
     // 最小化先收键盘：只藏窗口视图收不掉键盘——键盘窗口
     // 不随本视图隐藏而消失，游客切最小化后键盘会继续盖在
@@ -651,7 +669,7 @@
     // P0 标题栏修法（3.8.673）诊断：动作入口只打一句。
     NSLog(@"[CZF-TitleBar] maximizeWindow max=%d maxAnim=%d pipAnim=%d", (int)self.isMaximized, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating);
     // P0 hitTest 诊断（3.8.676）：同一句再写进文件日志。
-    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] maximizeWindow max=%d maxAnim=%d pipAnim=%d", (int)self.isMaximized, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating]];
+    [CZFHitTestLog czfHitTestLogLine:[NSString stringWithFormat:@"[CZF-TitleBar] maximizeWindow max=%d maxAnim=%d pipAnim=%d caller=%@", (int)self.isMaximized, (int)self.czfMaximizeAnimating, (int)self.czfPiPMinimizeAnimating, [self czfTitleBarCallerStack]]];
     // C1：重入守卫——还原 0.3 秒动画内标志还没落位时再调，
     // 旧代码会按旧标志再走一次还原、两套动画同改 frame；
     // 现在进行中直接返回，程序化切换（unmaximizeWindow）
