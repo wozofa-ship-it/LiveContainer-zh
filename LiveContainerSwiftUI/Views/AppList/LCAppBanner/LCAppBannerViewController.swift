@@ -495,6 +495,16 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
             self?.delegate.backupApp(app: model)
         })
 
+        // 3.8.726（F-1）：恢复这个 App——单项进批量恢复范围单（复用
+        // batchRestore：人脸门、busy 标志与回执全在那路）；标题硬编码
+        // 中文，同“复制 Bundle ID”先例。
+        sectionChildren.append(UIAction(
+            title: "恢复这个 App",
+            image: UIImage(systemName: "arrow.counterclockwise")
+        ) { [weak self] _ in
+            self?.delegate.restoreApp(app: model)
+        })
+
         // 3.8.641（F1）：置顶/取消置顶——与网格菜单同款（列表置顶键，
         // 与坞固定区无关）；标题硬编码中文，同“复制 Bundle ID”先例。
         sectionChildren.append(UIAction(
@@ -707,6 +717,47 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         UIApplication.shared.open(url)
     }
 
+    // 3.8.726（F-3）：卸载前先备份——单 App 全量备份（batchBackup
+    // 同款：先刷钥匙串快照、锁定的备份先过人脸、后台线程跑
+    // backupOneAppSync）；失败抛错，调用方展示后中止删除（数据
+    // 才不会丢）；只备本地 Backups 根，外部同步文件夹那路是批量
+    // 备份的附加项，这里不跟。返回备份文件夹名。
+    static func backupAppBeforeDelete(_ model: LCAppModel) async throws -> String {
+        await LCDataManagementView.refreshKeychainSnapshot(for: model)
+        let fm = FileManager.default
+        guard let docsURL = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            throw "lc.settings.backupFail".loc
+        }
+        let backupRoot = docsURL.appendingPathComponent("Backups")
+        try? fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+        // 3.8.567（L317-1）同款人脸门：含锁定备份 → 人脸一次；
+        // 失败/取消抛错，调用方中止删除。
+        let czfAllowLocked: Bool
+        if LCDataManagementView.czfHasLockedBackup(in: [model]) {
+            let czfAuthOK = (try? await LCUtils.authenticateUserForced()) ?? false
+            guard czfAuthOK else {
+                throw "需要人脸识别才能备份锁定的备份"
+            }
+            czfAllowLocked = true
+        } else {
+            czfAllowLocked = false
+        }
+        // backupOneAppSync 是同步文件 I/O——batchBackup 同款放后台
+        // 队列跑，主线程不冻住；FileManager.default 在 batchBackup
+        // 里也是这么用的。
+        let folderName: String = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let one = try LCDataManagementView.backupOneAppSync(model, backupRoot: backupRoot, fm: FileManager.default, allowLocked: czfAllowLocked)
+                    continuation.resume(returning: one.folderName)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+        return folderName
+    }
+
     // 新4（3.8.277）：删 App 的文件部分（不含确认弹窗）：删 .app
     // 包、从列表移除、可选删数据容器 + 钥匙串。单个 uninstall()
     // 与批量删除共用这一份，不另写。删包失败直接 throw（App 还
@@ -861,6 +912,30 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                 confirmTitle: "lc.common.delete".loc,
                 cancelTitle: "lc.common.no".loc
             ) == true
+        }
+
+        // 3.8.726（F-3）：删数据会把未锁定的本地备份一并清掉
+        //（deleteAppFiles 注释）——删前给一次备份机会；只在删
+        // 数据那路问，保留数据时备份不动，不问。弹不出（nil）
+        // 就中止，不静默删数据。备份失败报出来、中止删除。
+        if shouldRemoveAppFolders {
+            let backupFirst = await presentConfirmation(
+                title: "卸载前先备份？",
+                message: "删除数据会把未锁定的本地备份一并删掉，先备份一份再卸载吗？",
+                confirmTitle: "先备份再卸载",
+                cancelTitle: "直接卸载"
+            )
+            guard let backupFirst else {
+                return
+            }
+            if backupFirst {
+                do {
+                    _ = try await Self.backupAppBeforeDelete(configuration.model)
+                } catch {
+                    showError(error.localizedDescription)
+                    return
+                }
+            }
         }
 
         do {

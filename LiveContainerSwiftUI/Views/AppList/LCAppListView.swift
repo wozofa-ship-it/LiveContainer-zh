@@ -314,6 +314,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     //（同 Bundle ID 出现两次及以上）的 App；与四现有开关同款
     // @State（不持久化），iOS 15 可用。
     @State private var czfDuplicateOnly = false
+    // 3.8.726（F-2）：仅锁定筛选——打开后列表只显示已锁定的 App；
+    // 判据 appInfo.isLocked（网格锁定按钮同款读法）；与五现有开关
+    // 同款 @State（不持久化），iOS 15 可用。
+    @State private var czfLockedOnly = false
     // 3.8.714（F-3）：装了多个实例的 Bundle ID 集——仅分身筛选的判据；
     // 可见区与隐藏区两处过滤共用同一份（分身常一个在明区一个在隐藏区）。
     // 与安装路 sameBundleIdApp 同款口径：Bundle ID 精确相等；空 ID 不计。
@@ -932,6 +936,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.726（F-2）：仅锁定开关——与“仅分身”开关并列；
+        // 显隐口径同款（topToolsExpanded, !czfIsGuestScene），
+        // 不需 #available；图标 lock（与现有六图标不重）。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, !czfIsGuestScene {
+                Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("仅锁定")
+                    czfLockedOnly.toggle()
+                } label: {
+                    Label("仅锁定", systemImage: "lock")
+                }
+            }
+        }
+
         // 3.8.643（F1）：一键关闭坞内全部窗口——“仅运行中”开关旁；
         // 无坞内运行窗口时隐藏。文案收窄为“关闭坞内全部窗口”：
         // closeAllWindows 只遍历 dockManager.apps，原生窗口模式
@@ -1401,6 +1420,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
+            // 3.8.726（F-2）：仅锁定——“仅分身”行之后同款行。
+            Button {
+                czfLockedOnly.toggle()
+            } label: {
+                HStack {
+                    Label("仅锁定", systemImage: "lock")
+                    Spacer()
+                    if czfLockedOnly {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
             Button {
                 batchMode.toggle()
                 if !batchMode { batchSelectedIDs.removeAll() }
@@ -1717,7 +1753,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.651（UI 打磨）：列表空态文案——任一筛选开着且筛空时，
     // 别显示“去安装 App”的安装提示（App 都在，只是被筛掉了）。
     private var czfEmptyListTip: String {
-        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly {
+        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly {
             return "筛选条件下没有 App"
         }
         if sharedModel.multiLCStatus == 2 {
@@ -1784,6 +1820,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return false }
                 return dups.contains(bid)
             }
+        }
+        // 3.8.726（F-2）：仅锁定——只留已锁定的 App；判据
+        // appInfo.isLocked（网格锁定按钮同款读法）。
+        if czfLockedOnly {
+            apps = apps.filter { $0.appInfo.isLocked }
         }
         if searchContext.debouncedQuery.isEmpty {
             czfFilteredAppsCache = apps
@@ -1900,6 +1941,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return dups.contains(bid)
             }
         }
+        // 3.8.726（F-2）：隐藏区同加锁定条件——与可见区同一判据、同一开关。
+        if czfLockedOnly {
+            apps = apps.filter { $0.appInfo.isLocked }
+        }
         if searchContext.debouncedQuery.isEmpty || !sharedModel.isHiddenAppUnlocked {
             return apps
         } else {
@@ -1964,11 +2009,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 backupStatusCaption(for: app)
             }
-        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly && !czfExpiringOnly && !czfDuplicateOnly {
+        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly && !czfExpiringOnly && !czfDuplicateOnly && !czfLockedOnly {
             // 优2：无搜索时行可长按拖动重排（搜索时显示是
             // 子集，拖了会丢位置，所以不挂拖拽）。
             // 3.8.653（B3）：筛选时显示同样是子集（仅运行中 /
-            // 仅可更新 / 仅无备份 / 仅快过期 / 仅分身），同款不挂拖拽——否则被筛掉
+            // 仅可更新 / 仅无备份 / 仅快过期 / 仅分身 / 仅锁定），同款不挂拖拽——否则被筛掉
             // 的 App 在提交时按名字沉到自定义顺序尾巴。
             VStack(alignment: .leading, spacing: 2) {
                 LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
@@ -2003,7 +2048,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.653（B3）：筛选时同样不启用——显示同样是子集，同款理由。
     private func commitDragReorder(draggedID: String, targetApp: LCAppModel) {
         defer { dragReorderID = nil }
-        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly, !czfExpiringOnly, !czfDuplicateOnly else { return }
+        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly, !czfExpiringOnly, !czfDuplicateOnly, !czfLockedOnly else { return }
         let manager = sharedAppSortManager
         guard filteredApps.contains(where: { manager.getUniqueIdentifier(for: $0) == draggedID }) else { return }
         var visibleIDs = filteredApps.compactMap { manager.getUniqueIdentifier(for: $0) }
@@ -2780,7 +2825,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 isSearching: !searchContext.debouncedQuery.isEmpty,
                 // 3.8.653（B3）：筛选态也传进去——筛选时显示同样是子集，
                 // 网格拖拽与搜索同款禁用（CZFAppGridView.czfFiltering）。
-                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly,
+                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly,
                 expiryDays: czfExpiryDays,
                 actions: CZFAppGridActions(
                     isBatchSelected: { app in self.isBatchSelected(app) },
@@ -2802,11 +2847,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     },
                     // 3.8.682（F1）：备份这个 App——单项写入批量选中
                     // 后弹批量备份范围单，复用 batchBackup(loginOnly:)。
+                    // 3.8.726（F-1）：恢复这个 App——同款接线，弹批量
+                    // 恢复范围单，复用 batchRestore(loginOnly:)。
                     // 位置在最后：CZFAppGridActions 逐成员 init 实参须按
-                    // 声明顺序，onBackupRequest 是末位成员。
+                    // 声明顺序，onRestoreRequest 是末位成员。
                     onBackupRequest: { app in
                         self.batchSelectedIDs = [self.czfBatchKey(for: app)]
                         self.batchBackupScopeConfirm = true
+                    },
+                    onRestoreRequest: { app in
+                        self.batchSelectedIDs = [self.czfBatchKey(for: app)]
+                        self.batchRestoreScopeConfirm = true
                     }
                 ),
                 onRemoveApp: { app in self.removeApp(app: app) },
@@ -3107,6 +3158,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         // 3.8.714（F-3）：开关翻动即重跑过滤（与仅快过期同款）。
         .onChange(of: czfDuplicateOnly) { _ in
+            czfRefreshFilteredApps()
+        }
+        // 3.8.726（F-2）：开关翻动即重跑过滤（与仅分身同款）。
+        .onChange(of: czfLockedOnly) { _ in
             czfRefreshFilteredApps()
         }
         // 3.8.658（B1）：可更新名单变了即重跑过滤——源页刷新完成
@@ -6273,6 +6328,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     func backupApp(app: LCAppModel) {
         batchSelectedIDs = [czfBatchKey(for: app)]
         batchBackupScopeConfirm = true
+    }
+
+    // 3.8.726（F-1）：恢复这个 App（LCAppBannerDelegate）——列表模式
+    // 长按菜单入口；单项写入批量选中后弹批量恢复范围单，复用
+    // batchRestore(loginOnly:)（人脸门、busy 标志与回执全在那路）。
+    // 菜单回调在主线程，@State 直写。
+    func restoreApp(app: LCAppModel) {
+        batchSelectedIDs = [czfBatchKey(for: app)]
+        batchRestoreScopeConfirm = true
     }
     
     func changeAppVisibility(app: LCAppModel) {

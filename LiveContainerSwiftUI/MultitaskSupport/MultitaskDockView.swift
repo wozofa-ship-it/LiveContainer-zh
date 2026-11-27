@@ -5069,7 +5069,13 @@ struct SourcesPanelView: View {
         CZFVPNManager.shared.pingAllNodes { results, rejected in
             self.vpnPinging = false
             var bestIndex: Int? = nil
-            if !rejected {
+            // 3.8.726（B-2）：App 页 L573-2 同款守卫——测速期间增删/
+            // 重排节点后，旧快照结果不能再覆写内存、不能再落盘
+            //（savePingResults 按旧 links 裁剪缓存，会清掉新加节点
+            // 的已缓存结果、把已删节点的条目写回去）；只在列表未变
+            // 时写结果与报最快，停过的核心照常重启。
+            let listUnchanged = CZFVPNManager.shared.nodeLinks == links
+            if !rejected, listUnchanged {
                 var stored: [Int: CZFVPNManager.CZFNodePingResult] = [:]
                 for (idx, r) in results.enumerated() { stored[idx] = r }
                 self.vpnPingResults = stored

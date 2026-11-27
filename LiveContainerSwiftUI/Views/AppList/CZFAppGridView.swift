@@ -108,6 +108,10 @@ struct CZFAppGridActions {
     // 单项 + 弹批量备份范围单，复用 batchBackup）；默认空实现，
     // 老调用点不传也能编。
     var onBackupRequest: (LCAppModel) -> Void = { _ in }
+    // 3.8.726（F-1）：恢复这个 App——列表页接线（置 batchSelectedIDs
+    // 单项 + 弹批量恢复范围单，复用 batchRestore）；默认空实现，
+    // 老调用点不传也能编。
+    var onRestoreRequest: (LCAppModel) -> Void = { _ in }
 }
 
 struct CZFAppGridView: View {
@@ -205,7 +209,10 @@ struct CZFAppGridView: View {
             onToggleVPN: { app in czfToggleVPN(for: app) },
             onCreateAppClip: { app in await czfCreateAppClip(for: app) },
             onSaveIcon: { app in await czfSaveIcon(for: app) },
-            onBackupRequest: actions.onBackupRequest
+            onBackupRequest: actions.onBackupRequest,
+            // 3.8.726（F-1）：恢复这个 App——同款转发，漏了格子
+            // 菜单点了就静默无事。
+            onRestoreRequest: actions.onRestoreRequest
         )
     }
 
@@ -337,6 +344,12 @@ struct CZFAppGridView: View {
             return target
         }
         guard let app else { return }
+        await czfDeleteGridApp(app, removeDataFolders: removeDataFolders)
+    }
+
+    // 3.8.726（F-3）：删 App 的文件部分（目标已定版）——先备份再
+    // 卸载路直接调这里，不用再经过 czfGridDeleteTarget。
+    private func czfDeleteGridApp(_ app: LCAppModel, removeDataFolders: Bool) async {
         do {
             let (failedContainers, keptBackupName) = try await LCAppBannerViewController.deleteAppFiles(
                 app,
@@ -356,6 +369,25 @@ struct CZFAppGridView: View {
         } catch {
             await MainActor.run { czfGridError = error.localizedDescription }
         }
+    }
+
+    // 3.8.726（F-3）：先备份再卸载——备份失败报出来、中止删除；
+    // 备份成了再删 App 及其数据（备份就是为删数据这路准备的，
+    // 保留数据时备份不动，用不着这路）。
+    private func czfBackupThenDeleteGridApp() async {
+        let app: LCAppModel? = await MainActor.run {
+            let target = czfGridDeleteTarget
+            czfGridDeleteTarget = nil
+            return target
+        }
+        guard let app else { return }
+        do {
+            _ = try await LCAppBannerViewController.backupAppBeforeDelete(app)
+        } catch {
+            await MainActor.run { czfGridError = error.localizedDescription }
+            return
+        }
+        await czfDeleteGridApp(app, removeDataFolders: true)
     }
 
     var body: some View {
@@ -455,6 +487,12 @@ struct CZFAppGridView: View {
                     }
                     Button("删除 App 及其数据", role: .destructive) {
                         Task { await czfDeleteGridApp(removeDataFolders: true) }
+                    }
+                    // 3.8.726（F-3）：先备份再卸载——先备一份再删 App
+                    // 及其数据（删数据会把未锁定的本地备份一并清掉）；
+                    // 备份失败报出来、不删。
+                    Button("先备份再卸载", role: .destructive) {
+                        Task { await czfBackupThenDeleteGridApp() }
                     }
                     Button("取消", role: .cancel) {
                         czfGridDeleteTarget = nil
@@ -912,6 +950,12 @@ struct CZFAppGridCell: View {
         // 中文，沿用本菜单“复制 Bundle ID”硬编码先例。
         Button("备份这个 App", systemImage: "square.and.arrow.down") {
             actions.onBackupRequest(app)
+        }
+        // 3.8.726（F-1）：恢复这个 App——单项进批量恢复范围单（复用
+        // batchRestore：人脸门、busy 标志与回执全在那路）；标题硬编码
+        // 中文，沿用本菜单“复制 Bundle ID”硬编码先例。
+        Button("恢复这个 App", systemImage: "arrow.counterclockwise") {
+            actions.onRestoreRequest(app)
         }
         // 3.8.641（F1）：置顶/取消置顶——列表置顶（CZFListPinnedApps 键，
         // 与坞固定区无关）；切换后重排，八种排序下置顶组都固定在前。

@@ -209,6 +209,12 @@ final class AltStoreSourcesViewModel: ObservableObject {
             disabledSourceURLs.remove(key)
         } else {
             disabledSourceURLs.insert(key)
+            // 3.8.726（B-1）：暂停即不再检查——旧 error 再留着行上
+            // 黄三角/错误块永久挂着，用户以为源一直坏；暂停时清
+            // 掉，取消暂停后下次刷新重新填。
+            if let index = sources.firstIndex(where: { $0.url == url }) {
+                sources[index].error = nil
+            }
         }
         persistDisabledSources()
     }
@@ -336,7 +342,11 @@ final class AltStoreSourcesViewModel: ObservableObject {
         // 单源成功已在 refreshSource 成功处写过，这里是整组刷新的
         // 收口；全失败（断网）不写，时间戳才诚实。
         // 3.8.658（F2）：停用源不算——全停用时一个都没查，时间戳不写。
-        let czfRefreshSucceeded = sources.contains(where: { $0.error == nil && !disabledSourceURLs.contains($0.url.absoluteString) })
+        // 3.8.726（B-3）：只计本轮实际刷过的源——刷新中途新增的源
+        // 初始就是 error == nil、isLoading == true（addSource），
+        // 还没刷完不能算成功，否则全失败的一轮也被判成功、盖上
+        // 检查时间戳。
+        let czfRefreshSucceeded = sources.contains(where: { $0.error == nil && !$0.isLoading && !disabledSourceURLs.contains($0.url.absoluteString) })
         if czfRefreshSucceeded {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "CZFSourceLastCheckDate")
         }

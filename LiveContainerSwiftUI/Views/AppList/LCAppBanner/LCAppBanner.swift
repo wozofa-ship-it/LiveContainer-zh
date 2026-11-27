@@ -17,6 +17,9 @@ protocol LCAppBannerDelegate {
     // 3.8.682（F1）：备份这个 App——列表模式长按菜单入口，唯一实现
     // 方 LCAppListView（单项写入批量选中 + 弹批量备份范围单）。
     func backupApp(app: LCAppModel)
+    // 3.8.726（F-1）：恢复这个 App——列表模式长按菜单入口，唯一实现
+    // 方 LCAppListView（单项写入批量选中 + 弹批量恢复范围单）。
+    func restoreApp(app: LCAppModel)
 }
 
 struct LCAppBanner: UIViewControllerRepresentable {
