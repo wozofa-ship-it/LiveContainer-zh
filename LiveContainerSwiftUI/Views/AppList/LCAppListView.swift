@@ -168,10 +168,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // App #8：队列项带稳定 id——原来是无 id 元组，删行按
     // url + autoReplace 找第一个匹配，有重复项时删的是另一行。
     @State var installQueue: [(id: UUID, url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool, customDisplayName: String?)] = []
+    // 3.8.714（B-2）：批量安装失败后重装的待选项——drain 汇总置入，
+    // 通用“提示”alert 里条件出“重新安装失败的”按钮；其余走通用
+    // 提示的流程从不置它，按钮不出现；点“好”或点重装都清掉。
+    @State private var czfFailedRetryItems: [(id: UUID, url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool, customDisplayName: String?)] = []
     // 安装前预览（源里单个安装时，下完先弹信息卡确认再装）
     @State var installPreviewShow = false
     @State var installPreviewText = ""
     @State var installPreviewContinuation: CheckedContinuation<Bool, Never>? = nil
+    // 3.8.714（B-1）：本次预览是不是 5 分钟超时触发的取消——超时 Task
+    // 置 true、每次弹预览时清 false；!proceed 分支按它 + 留没留住
+    // 拼提示（超时报 error 槽、手动取消报提示槽）。
+    @State private var czfInstallPreviewTimedOut = false
     @State var installQueueRunning = false
     // O-9：正在装的那一项（已出队、不在 installQueue 里）：去重键与
     // installQueue / pendingInstalls 共用 (url, autoReplace, preview,
@@ -294,6 +302,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // mobileprovision 的不进表、不显示。与三现有开关同款 @State
     //（不持久化），iOS 15 可用。
     @State private var czfExpiringOnly = false
+    // 3.8.714（F-3）：仅分身筛选——打开后列表只显示装了多个实例
+    //（同 Bundle ID 出现两次及以上）的 App；与四现有开关同款
+    // @State（不持久化），iOS 15 可用。
+    @State private var czfDuplicateOnly = false
+    // 3.8.714（F-3）：装了多个实例的 Bundle ID 集——仅分身筛选的判据；
+    // 可见区与隐藏区两处过滤共用同一份（分身常一个在明区一个在隐藏区）。
+    // 与安装路 sameBundleIdApp 同款口径：Bundle ID 精确相等；空 ID 不计。
+    private var czfDuplicatedBundleIDs: Set<String> {
+        var counts: [String: Int] = [:]
+        for app in sharedModel.apps + sharedModel.hiddenApps {
+            guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { continue }
+            counts[bid, default: 0] += 1
+        }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
     // 3.8.643（F1）：坞内运行中窗口数——“关闭坞内全部窗口”按钮的
     // 显隐口径（0 即藏）；只计坞表条目，不计 isUsing 回落的原生窗——
     // closeAllWindows 只遍历 dockManager.apps，不进坞表的原生窗
@@ -871,6 +894,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
 
+        // 3.8.714（F-3）：仅分身开关——与“仅快过期”开关并列；
+        // 显隐口径同款（topToolsExpanded, !czfIsGuestScene），
+        // 不需 #available；图标 doc.on.doc（与现有五图标不重）。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, !czfIsGuestScene {
+                Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("仅分身")
+                    czfDuplicateOnly.toggle()
+                } label: {
+                    Label("仅分身", systemImage: "doc.on.doc")
+                }
+            }
+        }
+
         // 3.8.643（F1）：一键关闭坞内全部窗口——“仅运行中”开关旁；
         // 无坞内运行窗口时隐藏。文案收窄为“关闭坞内全部窗口”：
         // closeAllWindows 只遍历 dockManager.apps，原生窗口模式
@@ -1302,6 +1340,23 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
+            // 3.8.714（F-3）：仅分身——“仅快过期”行之后同款行。
+            Button {
+                czfDuplicateOnly.toggle()
+            } label: {
+                HStack {
+                    Label("仅分身", systemImage: "doc.on.doc")
+                    Spacer()
+                    if czfDuplicateOnly {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
             Button {
                 batchMode.toggle()
                 if !batchMode { batchSelectedIDs.removeAll() }
@@ -1618,7 +1673,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.651（UI 打磨）：列表空态文案——任一筛选开着且筛空时，
     // 别显示“去安装 App”的安装提示（App 都在，只是被筛掉了）。
     private var czfEmptyListTip: String {
-        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly {
+        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly {
             return "筛选条件下没有 App"
         }
         if sharedModel.multiLCStatus == 2 {
@@ -1664,6 +1719,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             apps = apps.filter { app in
                 guard let daysLeft = CZFAppExpiryCache.shared.daysLeft(for: app) else { return false }
                 return daysLeft <= 7
+            }
+        }
+        // 3.8.714（F-3）：仅分身——只留装了多个实例的 App；判据
+        // 见 czfDuplicatedBundleIDs（两处过滤共用同一份，集只
+        // 算一次、行内只查表）。
+        if czfDuplicateOnly {
+            let dups = czfDuplicatedBundleIDs
+            apps = apps.filter { app in
+                guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return false }
+                return dups.contains(bid)
             }
         }
         if searchContext.debouncedQuery.isEmpty {
@@ -1773,6 +1838,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 return daysLeft <= 7
             }
         }
+        // 3.8.714（F-3）：隐藏区同加分身条件——与可见区同一集、同一开关。
+        if czfDuplicateOnly {
+            let dups = czfDuplicatedBundleIDs
+            apps = apps.filter { app in
+                guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return false }
+                return dups.contains(bid)
+            }
+        }
         if searchContext.debouncedQuery.isEmpty || !sharedModel.isHiddenAppUnlocked {
             return apps
         } else {
@@ -1837,11 +1910,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 backupStatusCaption(for: app)
             }
-        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly && !czfExpiringOnly {
+        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly && !czfExpiringOnly && !czfDuplicateOnly {
             // 优2：无搜索时行可长按拖动重排（搜索时显示是
             // 子集，拖了会丢位置，所以不挂拖拽）。
             // 3.8.653（B3）：筛选时显示同样是子集（仅运行中 /
-            // 仅可更新 / 仅无备份 / 仅快过期），同款不挂拖拽——否则被筛掉
+            // 仅可更新 / 仅无备份 / 仅快过期 / 仅分身），同款不挂拖拽——否则被筛掉
             // 的 App 在提交时按名字沉到自定义顺序尾巴。
             VStack(alignment: .leading, spacing: 2) {
                 LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
@@ -1876,7 +1949,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.653（B3）：筛选时同样不启用——显示同样是子集，同款理由。
     private func commitDragReorder(draggedID: String, targetApp: LCAppModel) {
         defer { dragReorderID = nil }
-        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly, !czfExpiringOnly else { return }
+        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly, !czfExpiringOnly, !czfDuplicateOnly else { return }
         let manager = sharedAppSortManager
         guard filteredApps.contains(where: { manager.getUniqueIdentifier(for: $0) == draggedID }) else { return }
         var visibleIDs = filteredApps.compactMap { manager.getUniqueIdentifier(for: $0) }
@@ -2653,7 +2726,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 isSearching: !searchContext.debouncedQuery.isEmpty,
                 // 3.8.653（B3）：筛选态也传进去——筛选时显示同样是子集，
                 // 网格拖拽与搜索同款禁用（CZFAppGridView.czfFiltering）。
-                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly,
+                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly,
                 expiryDays: czfExpiryDays,
                 actions: CZFAppGridActions(
                     isBatchSelected: { app in self.isBatchSelected(app) },
@@ -2927,6 +3000,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .onChange(of: czfExpiringOnly) { _ in
             czfRefreshFilteredApps()
         }
+        // 3.8.714（F-3）：开关翻动即重跑过滤（与仅快过期同款）。
+        .onChange(of: czfDuplicateOnly) { _ in
+            czfRefreshFilteredApps()
+        }
         // 3.8.658（B1）：可更新名单变了即重跑过滤——源页刷新完成
         // 写新名单时 App 页已在前台、onAppear 不再触发，sortedApps/
         // 搜索/开关又都没变，过滤缓存此前永远不重算，新出现可更
@@ -3016,7 +3093,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 顶栏改实底（3.8.422，建议第 1 条）：导航栏背景改不透明，
             // 内容往上滑不从玻璃顶栏/搜索栏下面透出来（糊成一片、
             // 看着“显示不全”），顶部干净。
-            .navigationTitle("lc.appList.myApps".loc)
+            // 3.8.714（用户 13:37 令）：App 页顶标题改“解剖自我 🅥自用版”——
+            // 只改这里（lc.appList.myApps 全仓仅此一处）；底部 tab 标签是
+            // 另一 key（lc.tabView.apps，LCTabView:43），不动。
+            .navigationTitle("解剖自我 🅥自用版")
             .navigationBarTitleDisplayMode(.inline)
             // 顶栏走超薄材质透壁纸（3.8.453）：之前实底
             // czfSolidToolbarBackground，App 页 .toolbarBackground
@@ -3179,7 +3259,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .background(
             EmptyView()
                 .alert("提示", isPresented: $installInfoShow){
+                    // 3.8.714（B-2）：批量安装失败后重装——只有 drain 汇总置了
+                    // czfFailedRetryItems 时才出现；其余走通用提示的流程从不
+                    // 置它，按钮不出现。点后先取后清、再逐个按原参数重排队
+                    //（入队去重已过：失败项已出队、不在途）；点“好”也清掉，
+                    // 下次通用提示不再带它。
+                    if !czfFailedRetryItems.isEmpty {
+                        Button("重新安装失败的", action: {
+                            let items = czfFailedRetryItems
+                            czfFailedRetryItems = []
+                            for item in items {
+                                enqueueInstall(url: item.url, autoReplace: item.autoReplace, preview: item.preview, forceAsNew: item.forceAsNew, customDisplayName: item.customDisplayName)
+                            }
+                        })
+                    }
                     Button("lc.common.ok".loc, action: {
+                        czfFailedRetryItems = []
                     })
                 } message: {
                     Text(installInfo)
@@ -4859,6 +4954,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             var processed = 0
             var succeeded = 0
             var failedNames: [String] = []
+            // 3.8.714（B-2）：失败只留名字重装不了——连同原队列项一起留，
+            // 汇总时进 czfFailedRetryItems 供“重新安装失败的”重排队。
+            var failedItems: [(id: UUID, url: URL, autoReplace: Bool, preview: Bool, forceAsNew: Bool, customDisplayName: String?)] = []
             // 3.8.428 安装#2：取消单独列——不计成功也不计失败。
             var cancelledNames: [String] = []
             var batch = false
@@ -4997,6 +5095,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     succeeded += 1
                 } else {
                     failedNames.append(item.url.lastPathComponent)
+                    failedItems.append(item)
                 }
                 if let prefetchFile {
                     try? FileManager.default.removeItem(at: prefetchFile)
@@ -5042,6 +5141,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.559（L309-1）：队尾 @State（installQueueRunning/czfInstallCancelRequested）离主线程写；回主线程清。
             await MainActor.run {
                 installQueueRunning = false
+                // 3.8.714（B-3）：队排空时清 installQueueCurrent——原来只在
+                // 装新项时写名、排空不清，下次打开队列名单“正在安装”还显示
+                // 上一个装完的 App 名；与 installQueueRunning 同一跳清掉。
+                installQueueCurrent = ""
                 // 3.8.499（L18）：队排空时清掉残留的取消标志——取消点在
                 // 签名完成后的收尾步骤里（最后一处检查点之后）时，标志没
                 // 人取、队里也没下一项可消耗它；不清掉，下次安装入口
@@ -5074,7 +5177,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     await MainActor.run { installInfo = czfSummary }
                 }
                 // L309-1：同上。
-                await MainActor.run { installInfoShow = true }
+                await MainActor.run {
+                    installInfoShow = true
+                    // 3.8.714（B-2）：失败项进重装待选项（无失败即空数组，
+                    // 通用提示的按钮不出现）；成功分支同样走这里清掉旧值。
+                    czfFailedRetryItems = failedItems
+                }
                 notifyBatchDone(processed, succeeded: succeeded, failedNames: failedNames, cancelledNames: cancelledNames)
             }
         }
@@ -5431,6 +5539,35 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         drainPendingInstalls()
     }
 
+    // 3.8.714（B-1）：预览取消/超时后把刚下好的包挪进本地 IPA 文件夹
+    //（security-scoped 访问内操作；同名先删旧份；挪失败返回 false，
+    // 调用方回落删除）。没设文件夹返回 false。文件名去掉 tmp 里的
+    // UUID 前缀（UUID 36 字符 + "-"）：文件夹里直接显示原包名；
+    // 格式不对（无前缀）就原样用。不碰 @State，裸 Task 里可直调。
+    private func czfMoveCancelledPreviewIPAtoLocalFolder(_ tmpURL: URL) -> Bool {
+        guard let folderURL = CZFLocalIpaFolderStore.restore() else { return false }
+        let started = folderURL.startAccessingSecurityScopedResource()
+        defer { if started { folderURL.stopAccessingSecurityScopedResource() } }
+        let fileName = tmpURL.lastPathComponent
+        let destName: String
+        if fileName.count > 37, fileName[fileName.index(fileName.startIndex, offsetBy: 36)] == "-" {
+            destName = String(fileName.dropFirst(37))
+        } else {
+            destName = fileName
+        }
+        let destURL = folderURL.appendingPathComponent(destName)
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: destURL.path) {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.moveItem(at: tmpURL, to: destURL)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // 3.8.900（L564-5）czfFromQueue：调用方是批量循环时传 true——循环的本项在调
     // 用前已记为在途项，忙时门若按“已在途”豁免排队，本项会被静默丢掉
     // （见门里注释）；直达安装路（网页/粘贴/深链/文件选择器）不传，
@@ -5752,9 +5889,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 3.8.560（L311-1）：installPreviewContinuation/Text/Show 是 @State；本闭包跑在裸 Task 的执行器上，直接写离主线程。continuation 由 withCheckedContinuation 同步创建、alert 靠 Show 弹出——三处回主线程写（Task 跳，alert 晚一拍弹出，不影响按钮/超时取 continuation：按钮在主线程读，超时 Task 也回主线程取）。
                     Task { @MainActor in
                         installPreviewContinuation = cont
+                        czfInstallPreviewTimedOut = false
                         // 3.8.672（B-3）：预览文案加一句超时说明，让用户
                         // 事前知道 5 分钟内未确认会自动取消、文件删除。
-                        installPreviewText = text + "\n\n5 分钟内未确认将自动取消，文件将被删除，需重新下载。"
+                        // 3.8.714（B-1）：超时/取消不再默认删包——有本地 IPA
+                        // 文件夹就挪进去（可从文件夹重装），没设才删；
+                        // 文案按有没有文件夹分两句写，事前说清楚。
+                        if CZFLocalIpaFolderStore.restore() != nil {
+                            installPreviewText = text + "\n\n5 分钟内未确认将自动取消，安装包将保留到本地 IPA 文件夹，可从文件夹重新安装。"
+                        } else {
+                            installPreviewText = text + "\n\n5 分钟内未确认将自动取消，文件将被删除，需重新下载。"
+                        }
                         installPreviewShow = true
                     }
                     // 3.8.428 设置#24：预览 alert 挂着 continuation，
@@ -5769,14 +5914,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             if let cont = installPreviewContinuation {
                                 installPreviewContinuation = nil
                                 installPreviewShow = false
+                                czfInstallPreviewTimedOut = true
                                 cont.resume(returning: false)
-                                // 3.8.672（B-3）：超时只加提示，不改行为——
-                                // 5 分钟超时本身不动、取消删包不动（下面
-                                // !proceed 分支）；手动点取消不走这里、不弹。
-                                // 走现有 errorShow/errorInfo 通用报错槽，
-                                // 文案硬编码中文，0 新 key。
-                                errorInfo = "安装前预览已超时，安装取消，文件已删除，需重新下载"
-                                errorShow = true
+                                // 3.8.714（B-1）：超时只记超时、不写死“文件已删
+                                // 除”——提示改由下面 !proceed 分支按“留没留住”
+                                // 统一写（留住了报保留位置、没留住报删除）；
+                                // 手动点取消不走这里、不弹。文案硬编码中文，
+                                // 0 新 key。
                             }
                         }
                     }
@@ -5784,8 +5928,34 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 if !proceed {
                     // 3.8.428 安装#2：预览点取消或超时=取消，不计失败。
                     // 3.8.560（L311-1）：czfLastInstallWasCancelled 是 @State，回主线程写；收尾走 czfFinishInstall()。
-                    await MainActor.run { czfLastInstallWasCancelled = true }
-                    try? fileManager.removeItem(at: destinationURL)
+                    let timedOut = await MainActor.run {
+                        czfLastInstallWasCancelled = true
+                        return czfInstallPreviewTimedOut
+                    }
+                    // 3.8.714（B-1）：预览点取消/超时不再当场删包——有本地
+                    // IPA 文件夹就挪进去（可从文件夹重装），没设文件夹或
+                    // 挪失败才按现行删掉。挪进去了要告诉用户去哪找（超时
+                    // 走 error 槽、手动取消走提示槽）；删了的超时仍报原句。
+                    let kept = czfMoveCancelledPreviewIPAtoLocalFolder(destinationURL)
+                    if !kept {
+                        try? fileManager.removeItem(at: destinationURL)
+                    }
+                    if kept {
+                        await MainActor.run {
+                            if timedOut {
+                                errorInfo = "安装前预览已超时，安装取消，安装包已保留到本地 IPA 文件夹，可从文件夹重新安装"
+                                errorShow = true
+                            } else {
+                                installInfo = "安装已取消，安装包已保留到本地 IPA 文件夹，可从文件夹重新安装"
+                                installInfoShow = true
+                            }
+                        }
+                    } else if timedOut {
+                        await MainActor.run {
+                            errorInfo = "安装前预览已超时，安装取消，文件已删除，需重新下载"
+                            errorShow = true
+                        }
+                    }
                     await czfFinishInstall()
                     return false
                 }

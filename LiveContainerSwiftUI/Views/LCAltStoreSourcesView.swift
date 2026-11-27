@@ -1259,6 +1259,12 @@ struct LCSourcesView: View {
     // 安装状态派生（见 Shared.swift 的 CZFTwoYi），不另存 key。
     @State private var czfTwoYiDownloading = false
     @State private var czfTwoYiDeleteConfirm = false
+    // 3.8.714（F-2）：TwoYi 托管最新版（API 查到才置；查不到留 nil，
+    // 调用方回落 CZFTwoYi 静态值）+ 上次检查时间（每会话 30 分钟
+    // 内只查一次——托管版一天都难变一次，不必勤查；与
+    // CZFUpdatable 名单 300 秒阈值不同口径）。
+    @State private var czfTwoYiLatest: CZFTwoYiUpdateInfo?
+    @State private var czfTwoYiUpdateCheckedAt: Date?
     private var czfTwoYiApp: LCAppModel? { CZFTwoYi.installedApp(in: sharedModel) }
     
     @State private var isViewAppeared = false
@@ -1422,7 +1428,9 @@ struct LCSourcesView: View {
                             // czfQueuedDownloads——排队名是 czfDisplayDownloadName
                             // （LCDownloadView.swift:851），TwoYi 文件名 27 字
                             // 节、无 UUID 前缀，显示名就是 lastPathComponent 原样。
-                            isQueued: downloadHelper.czfQueuedDownloads.contains(CZFTwoYi.downloadURL.lastPathComponent),
+                            // 3.8.714（F-2）：认有效下载地址的文件名——API 查到
+                            // 新版后排队名是新包名，静态地址的名就认不上了。
+                            isQueued: downloadHelper.czfQueuedDownloads.contains(czfTwoYiEffectiveDownloadURL.lastPathComponent),
                             downloadProgress: downloadHelper.downloadProgress,
                             // 3.8.672（F-1）：下载排队——TwoYi 按钮只在
                             // 自己下载时禁用，别路下载中也能点、点下去
@@ -1445,8 +1453,14 @@ struct LCSourcesView: View {
                                         await MainActor.run { errorMessage = error.localizedDescription }
                                     }
                                 }
-                            }
+                            },
+                            // 3.8.714（F-2）：有新版时显“有新版：x.y.z (build)”
+                            // + “更新”钮（与安装同路，已指最新托管地址）；
+                            // 无新版传 nil，section 显“已安装”。
+                            updateText: czfTwoYiUpdateText,
+                            onUpdate: { czfInstallTwoYi() }
                         )
+                        .onAppear { czfCheckTwoYiUpdateIfNeeded() }
                         .padding(.horizontal)
                         if czfSourceGridMode {
                             CZFSourceGridView(
@@ -2694,11 +2708,69 @@ struct LCSourcesView: View {
     // 前缀对不上，不会被清）。装完走源页待装队列 + preview，
     // 与源页单装同款（App 页排空进安装队列）。
     @MainActor
+    // 3.8.714（F-2）：TwoYi 托管更新检查——每会话 30 分钟内只查一
+    // 次；查到回主线程写 czfTwoYiLatest；失败静默（回落静态托管
+    // 值），不弹错。比对口径与源页更新同款 czfIsNewerVersion。
+    private func czfCheckTwoYiUpdateIfNeeded() {
+        if let checkedAt = czfTwoYiUpdateCheckedAt, Date().timeIntervalSince(checkedAt) < 1800 { return }
+        czfTwoYiUpdateCheckedAt = Date()
+        CZFTwoYiUpdateCheck.check { result in
+            if case .success(let info) = result {
+                Task { @MainActor in czfTwoYiLatest = info }
+            }
+        }
+    }
+
+    /// 3.8.714（F-2）：实际要下的 TwoYi 地址——API 查到的最新托管
+    /// 优先（托管换版后静态地址就旧了）；没查到回落静态地址。
+    /// 排队名册的认名与安装下载共用这一份，别各用各的。
+    private var czfTwoYiEffectiveDownloadURL: URL {
+        czfTwoYiLatest?.downloadURL ?? CZFTwoYi.downloadURL
+    }
+
+    /// 3.8.714（F-2）：托管最新版文案，如 "1.2.6 (940)"——API 查到
+    /// 的优先，没查到用静态托管值。
+    private var czfTwoYiLatestVersionText: String {
+        let version = czfTwoYiLatest?.version ?? CZFTwoYi.hostedVersion
+        let build = czfTwoYiLatest?.build ?? CZFTwoYi.hostedBuild
+        return "\(version) (\(build))"
+    }
+
+    /// 3.8.714（F-2）：TwoYi 有没有新版——已装才比；已装版读 guest
+    /// 的 version/buildVersion；口径与源页更新同款
+    /// czfIsNewerVersion（先比版本、再比构建号）。
+    private var czfTwoYiUpdateAvailable: Bool {
+        guard let app = czfTwoYiApp else { return false }
+        let version = czfTwoYiLatest?.version ?? CZFTwoYi.hostedVersion
+        let build = czfTwoYiLatest?.build ?? CZFTwoYi.hostedBuild
+        return czfIsNewerVersion(version, build: build, newerThan: app.version, installedBuild: app.appInfo.buildVersion())
+    }
+
+    /// 3.8.714（F-2）：section 头显的更新文案，有新版才有值
+    ///（"有新版：1.2.6 (940)"——前缀硬编码中文，设置页“有新版：”
+    // 同款，0 新 key）；无新版为 nil，section 显“已安装”。
+    private var czfTwoYiUpdateText: String? {
+        czfTwoYiUpdateAvailable ? "有新版：\(czfTwoYiLatestVersionText)" : nil
+    }
+
+    // 3.8.714（F-2）：上面插进来的 czfCheckTwoYiUpdateIfNeeded 一组
+    // 占了原来贴在 czfInstallTwoYi 头上的 @MainActor（属性只认紧跟
+    // 的那个声明，见 AGENTS.md L157-1 教训）——这里显式补回来，
+    // czfInstallTwoYi 仍是 @MainActor（它直读写 @State）。
+    @MainActor
     private func czfInstallTwoYi() {
         // 3.8.672（F-1）：下载排队——TwoYi 同款守门改入队：正在
         // 下载时不再顶回去（删掉上面的 isDownloading 守门），
         // 共享 DownloadHelper 的排队名册里等锁，拿到锁自动开始。
-        let need = CZFTwoYi.downloadSize * 3
+        // 3.8.714（F-2）：空间预检按实际要下的包算——API 查到的资产
+        // 体积优先（托管换版后体积变了）；没查到回落静态值。
+        let downloadSize: Int64
+        if let latestSize = czfTwoYiLatest?.size, latestSize > 0 {
+            downloadSize = latestSize
+        } else {
+            downloadSize = CZFTwoYi.downloadSize
+        }
+        let need = downloadSize * 3
         if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let freeSize = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
            freeSize < need {
@@ -2714,7 +2786,9 @@ struct LCSourcesView: View {
             let tmpURL = dirURL.appendingPathComponent("TwoYi.ipa")
             do {
                 try fm.createDirectory(at: dirURL, withIntermediateDirectories: true)
-                try await downloadHelper.download(url: CZFTwoYi.downloadURL, to: tmpURL)
+                // 3.8.714（F-2）：下实际托管最新版（API 地址优先），
+                // 不是写死的静态地址——托管换版后静态地址就旧了。
+                try await downloadHelper.download(url: czfTwoYiEffectiveDownloadURL, to: tmpURL)
                 guard LCUtils.czfFileHasPrefix(tmpURL, prefixes: LCUtils.czfExpectedPrefixes(for: tmpURL)) else {
                     throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
                 }
@@ -3421,6 +3495,10 @@ private struct CZFTwoYiSection: View {
     // 打开块的骨架，见调用点），TwoYi 只有一个 guest 实例，无
     // 多实例选择器问题。
     var onOpen: () -> Void
+    // 3.8.714（F-2）：有新版时头的更新文案（nil = 无新版，显“已安装”）
+    // + “更新”按钮回调（与安装同路，父级传 czfInstallTwoYi）。
+    var updateText: String?
+    var onUpdate: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3445,6 +3523,12 @@ private struct CZFTwoYiSection: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                } else if let updateText {
+                    // 3.8.714（F-2）：已装且托管有新版——显“有新版：x.y.z
+                    // (build)”；下面按钮行并排“打开 + 更新 + 删除”。
+                    Text(updateText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 } else if installed {
                     Text("lc.common.installed".loc)
                         .font(.footnote)
@@ -3464,6 +3548,14 @@ private struct CZFTwoYiSection: View {
                     if installed {
                         // 3.8.692（F3）：已装时并排“打开 + 删除”。
                         Button("lc.common.open".loc, action: onOpen)
+                        // 3.8.714（F-2）：有新版时多一个“更新”——与安装
+                        // 同路（czfInstallTwoYi，已指最新托管地址）；
+                        // 更新走覆盖流程，只换 App 包、数据容器不动
+                        //（installIpaFile 的 I1 口径；清数据只在删除
+                        // 确认框里用户自己选），不悄悄清用户数据。
+                        if updateText != nil {
+                            Button("更新", action: onUpdate)
+                        }
                         Button("lc.common.remove".loc, role: .destructive, action: onRemove)
                     } else {
                         Button("lc.common.install".loc, action: onInstall)
