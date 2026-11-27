@@ -211,8 +211,12 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     @objc private func runButtonTapped() {
+        // 3.8.706 诊断：只记日志
+        let czfBid = configuration.model.appInfo.bundleIdentifier() ?? "?"
+        CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] bannerTap bundle=\(czfBid)")
         if let pressedAt = runControlLongPressAt, Date().timeIntervalSince(pressedAt) < 1.5 {
             runControlLongPressAt = nil
+            CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] bannerTap swallowed-longpress bundle=\(czfBid)")
             return
         }
         Task { [weak self] in

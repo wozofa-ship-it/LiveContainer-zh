@@ -2757,6 +2757,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // .large、走 launchAppWithBundleId（锁屏认证路径不变）、起完
     // 轮询拉满。长按守卫是 banner 按钮独有的，网格不要。
     private func czfGridLaunch(app: LCAppModel) {
+        // 3.8.706 诊断：只记日志
+        CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] gridLaunch bundle=\(app.appInfo.bundleIdentifier() ?? "?")")
         Task {
             // O-3：带回前先认证（与 czfGridLaunchMultitask 共用守卫）：
             // 原来带回成功直接 return，锁了的 App 正在运行时点图标

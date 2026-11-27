@@ -166,6 +166,32 @@ class LCAppModel: ObservableObject, Hashable {
         return frontmost
     }
 
+    /// 3.8.706 诊断：只记日志，行为一字不动——原实现改名
+    /// czfBringRunningAppToFrontImpl，本函数只包一层记结果与
+    /// 条目状态。调用点（横幅/网格/面板/小窗路）一字不用改。
+    static func czfBringRunningAppToFront(_ app: LCAppModel, maximize: Bool) -> Bool {
+        let brought = czfBringRunningAppToFrontImpl(app, maximize: maximize)
+        CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] bringToFront bundle=\(app.appInfo.bundleIdentifier() ?? "?") max=\(maximize) -> \(brought) \(czfLaunchEntryState(app: app))")
+        return brought
+    }
+
+    /// 3.8.706 诊断：只读描述 dock 条目状态，不改行为。
+    /// 条目不在时只写 dockEntry=none；拿不到 Decorated VC 时写 vc=nil。
+    private static func czfLaunchEntryState(app: LCAppModel) -> String {
+        guard let uuid = app.czfInstanceUUID,
+              let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
+            return "dockEntry=none"
+        }
+        let viewDesc = entry.view.map { CZFHitTestLog.czfDescribeView($0) } ?? "view=nil"
+        let vcState: String
+        if let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController {
+            vcState = "max=\(vc.isMaximized)"
+        } else {
+            vcState = "vc=nil"
+        }
+        return "dockEntry uuid=\(uuid) \(viewDesc) \(vcState)"
+    }
+
     /// F-4：带回共用——banner / 网格 / 面板三处原来各写一遍。
     /// dock 里归属对得上的条目 → 带回；maximize=true 时顺手拉满，
     /// false 时顺手还原成小窗（maximizeWindow 是切换式）。
@@ -176,7 +202,7 @@ class LCAppModel: ObservableObject, Hashable {
     /// 小窗路返回 true（旧行为：只还原不重起）。
     /// 没有 dock 条目时：拉满路保留旧行为，只带回不拉满（没 decorated
     /// VC 可拉）；小窗路不试带回（旧行为：直接走未运行分支起新窗）。
-    static func czfBringRunningAppToFront(_ app: LCAppModel, maximize: Bool) -> Bool {
+    static func czfBringRunningAppToFrontImpl(_ app: LCAppModel, maximize: Bool) -> Bool {
         guard #available(iOS 16.0, *) else { return false }
         guard let uuid = app.czfInstanceUUID else { return false }
         let dockManager = MultitaskDockManager.shared
@@ -294,6 +320,8 @@ class LCAppModel: ObservableObject, Hashable {
     /// 中途换了就跟新值（面板同款语义，F-3 同款保护）。
     @available(iOS 16.0, *)
     static func czfPollAndMaximizeFreshWindow(app: LCAppModel) {
+        // 3.8.706 诊断：只记日志
+        CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] pollMax enter bundle=\(app.appInfo.bundleIdentifier() ?? "?")")
         let expectedPath = app.appInfo.relativeBundlePath
         let deadline = Date().addingTimeInterval(6)
         czfWaitUUIDThenMaximizeFreshWindow(app: app, expectedPath: expectedPath, deadline: deadline)
@@ -335,8 +363,14 @@ class LCAppModel: ObservableObject, Hashable {
             owned = false
         }
         if !ownershipKnown { return false }
-        if !owned { return true }
+        if !owned {
+            // 3.8.706 诊断：只记日志（归属不是本 App，停表不再碰）
+            CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] pollTry notOwned bundle=\(app.appInfo.bundleIdentifier() ?? "?") \(czfLaunchEntryState(app: app))")
+            return true
+        }
         guard let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController else { return false }
+        // 3.8.706 诊断：只记日志（条目已找到、归属是本 App，拉满前状态）
+        CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] pollTry owned bundle=\(app.appInfo.bundleIdentifier() ?? "?") maxBefore=\(vc.isMaximized) \(czfLaunchEntryState(app: app))")
         if !vc.isMaximized {
             vc.maximizeWindow()
         }
@@ -346,7 +380,11 @@ class LCAppModel: ObservableObject, Hashable {
     @available(iOS 16.0, *)
     private static func czfRetryMaximizeFreshWindow(app: LCAppModel, deadline: Date) {
         guard !czfTryMaximizeFreshWindow(app: app) else { return }
-        guard Date() < deadline else { return }
+        guard Date() < deadline else {
+            // 3.8.706 诊断：只记日志（6 秒轮询到时仍没拉满，记当时条目状态）
+            CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] pollMax timeout bundle=\(app.appInfo.bundleIdentifier() ?? "?") \(czfLaunchEntryState(app: app))")
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             czfRetryMaximizeFreshWindow(app: app, deadline: deadline)
         }
@@ -1012,13 +1050,20 @@ class LCAppModel: ObservableObject, Hashable {
         // 先抢同步锁再读 isAppRunning：forceResign 也抢同一把
         // 锁（3.8.526/L53），两重守卫各拦一侧。
         guard czfClaimLaunch() else {
+            // 3.8.706 诊断：只记日志
+            CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] runApp claimFailed")
             return
         }
         defer { czfReleaseLaunch() }
         // 3.8.547（L77）：isAppRunning 是 @Published，runApp 是非隔离 async、裸 Task 执行器上读是 L69/L70 同款；回主线程读（锁已抢到手，读与置位之间别的启动进不来）。
         if await MainActor.run(body: { isAppRunning }) {
+            // 3.8.706 诊断：只记日志
+            CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] runApp alreadyRunning")
             return
         }
+        // 3.8.706 诊断：只记日志（bundleID 在主线程上取，纯读）
+        let czfLaunchBid = await MainActor.run { appInfo.bundleIdentifier() ?? "?" }
+        CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] runApp enter bundle=\(czfLaunchBid)")
         // 3.8.900（L595-C #2）：搬移在途时不启动——搬移的在用检查只在 alert 之前做，启动侧原来没有任何在途概念；抛错走 17 处 do/catch 的既有报出来路（reportLaunchError/errorInfo），不静默吞掉。
         if await MainActor.run(body: { czfDataMoveInFlight }) {
             throw "正在搬移数据，请稍后再打开"
@@ -1573,6 +1618,9 @@ class LCAppModel: ObservableObject, Hashable {
             }
             isAppRunning = false
         }
+        // 3.8.706 诊断：只记日志（走到这里 = runApp 正常走完；抛错
+        // 或提前 return 时无此行，与 entry 行对照即能区分）
+        CZFHitTestLog.czfHitTestLogLine("[CZF-Launch] runApp exit bundle=\(czfLaunchBid) launched=\(czfDidLaunch)")
     }
     
     func forceResign() async throws {
