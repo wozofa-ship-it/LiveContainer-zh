@@ -178,11 +178,15 @@ class LCAppModel: ObservableObject, Hashable {
     /// 3.8.706 诊断：只读描述 dock 条目状态，不改行为。
     /// 条目不在时只写 dockEntry=none；拿不到 Decorated VC 时写 vc=nil。
     private static func czfLaunchEntryState(app: LCAppModel) -> String {
+        // 3.8.706 修法：MultitaskDockManager 与 DecoratedAppSceneViewController
+        // 只在 iOS 16+ 可用（构建 run 45920339603 三条红字原文），与
+        // czfBringRunningAppToFrontImpl 同款 guard 打头；iOS 15 下只记一行。
+        guard #available(iOS 16.0, *) else { return "dockEntry=n/a-iOS15" }
         guard let uuid = app.czfInstanceUUID,
               let entry = MultitaskDockManager.shared.apps.first(where: { $0.appUUID == uuid }) else {
             return "dockEntry=none"
         }
-        let viewDesc = entry.view.map { CZFHitTestLog.czfDescribeView($0) } ?? "view=nil"
+        let viewDesc = entry.view.map { CZFHitTestLog.czfDescribe($0) } ?? "view=nil"
         let vcState: String
         if let vc = entry.view?._viewDelegate() as? DecoratedAppSceneViewController {
             vcState = "max=\(vc.isMaximized)"
