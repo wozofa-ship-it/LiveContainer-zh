@@ -1323,6 +1323,27 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
+            // 3.8.718（F-2）：一键备份全部无备份的 App——“仅无备份”
+            // 行之后同款行；只在无备份数 > 0 时出现。选中写进
+            // batchSelectedIDs 后弹现成批量备份范围单，复用
+            // batchBackup(loginOnly:)（人脸门、busy 标志与回执全
+            // 在那路；单项备份 backupApp 同款写法）。不碰设置页
+            // “备份全部”（那是备全部 App，与补无备份两回事）。
+            if !czfNoBackupApps.isEmpty {
+                Button {
+                    batchSelectedIDs = Set(czfNoBackupApps.map { czfBatchKey(for: $0) })
+                    batchBackupScopeConfirm = true
+                } label: {
+                    HStack {
+                        Label("备份全部无备份（\(czfNoBackupApps.count)）", systemImage: "externaldrive.badge.plus")
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
             // 3.8.662（F1）：仅快过期——“仅无备份”行之后同款行。
             Button {
                 czfExpiringOnly.toggle()
@@ -1687,6 +1708,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @available(iOS 16.0, *)
     private func czfRefreshDockRunningCount() {
         czfDockRunningCount = MultitaskDockManager.shared.apps.count
+    }
+    // 3.8.718（F-2）：无备份的 App——判据与“仅无备份”筛选
+    //（czfRefreshFilteredApps）同款（backupStatusByID[id] ==
+    // "无备份"，id 取 getUniqueIdentifier）；备份表是异步填的，
+    // 进页瞬间表是空的、这里就是空集，行不出现（与筛选同款口径）。
+    private var czfNoBackupApps: [LCAppModel] {
+        sortedApps.filter { app in
+            guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { return false }
+            return backupStatusByID[id] == "无备份"
+        }
     }
     private func czfRefreshFilteredApps() {
         var apps = sortedApps

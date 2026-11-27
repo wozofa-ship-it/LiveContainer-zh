@@ -61,6 +61,14 @@ struct LCContainerView : View {
             if !(container.storageBookMark != nil && container.resolvedContainerURL == nil) {
                 
                 Section {
+                    // 3.8.718（B-2）：容器 plist 读失败提示——文件在但
+                    // 读/解析失败时隔离/IDFV/指纹开关全按默认显示，
+                    // 与实际配置不符，挂一行提示（不是静默按默认关）。
+                    if container.czfPlistReadFailed {
+                        Text("容器配置文件读取失败，下面开关显示的可能不是实际配置。")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
                     HStack {
                         Text("lc.container.containerName".loc)
                         Spacer()
@@ -507,6 +515,17 @@ struct LCContainerView : View {
         }
         
         delegate.saveContainer(container: container)
+        // 3.8.718（B-2）：写盘失败不再当成功——makeLCContainerInfoPlist
+        // 里 .atomic 写失败会置 czfPlistWriteFailed；这里报出来并
+        // 返回 false，调用方的 Toggle 拨回旧值（L569-6 同款），开关
+        // 不再看着改了、重进变回去。
+        if container.czfPlistWriteFailed {
+            if showError {
+                errorInfo = "容器配置保存失败，刚才的修改没有存住，请重试。"
+                errorShow = true
+            }
+            return false
+        }
         return true
     }
     

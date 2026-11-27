@@ -1158,7 +1158,19 @@ class LCAppModel: ObservableObject, Hashable {
                             }
                         }
                         if !copied, let fallbackSrc {
-                            try? FileManager.default.copyItem(at: fallbackSrc, to: dst)
+                            // 3.8.718（B-1）：fallback 拷贝失败不再静默
+                            // 吞——精确命中那路 3.8.543（L159）已修（拷
+                            // 失败不记 copied、继续扫 fallback），这路
+                            // 仍是裸 try?、失败直接丢，登录态悄悄丢失。
+                            // 记日志（LCContainer:292 同款 print 口径）；
+                            // 没有干净现成路径把失败带进桥导入结果/恢复
+                            // 汇总（桥状态文件是游客启动后才写的，恢复
+                            // 汇总不在这路），不为此新造一套 alert。
+                            do {
+                                try FileManager.default.copyItem(at: fallbackSrc, to: dst)
+                            } catch {
+                                print("[CZF] 钥匙串排队文件 fallback 拷贝失败：\(fallbackSrc.path) → \(dst.path)，原因：\(error.localizedDescription)")
+                            }
                         }
                     }
                 }

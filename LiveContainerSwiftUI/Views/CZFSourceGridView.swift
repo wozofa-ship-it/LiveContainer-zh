@@ -323,6 +323,17 @@ struct CZFSourceGridGroupHeaderView: View {
                         // 低 #64：源名加 lineLimit(1)，超长源名截断、
                         // 不挤占右侧 Menu（超大字体下也不挤）。
                         .lineLimit(1)
+                    // 3.8.718（F-1）：组头常显“n 个可更新”角标——
+                    // 与菜单“更新本源全部 App（n）”同一份
+                    // updateSourceApps（暂停源子集天然为 0）；无更
+                    // 新不显示。lineLimit + fixedSize，不挤竖排。
+                    if !updateSourceApps.isEmpty {
+                        Text("\(updateSourceApps.count) 个可更新")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
                 }
             }
             .buttonStyle(.plain)

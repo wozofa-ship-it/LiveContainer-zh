@@ -2716,10 +2716,16 @@ struct LCSourcesView: View {
     // 值），不弹错。比对口径与源页更新同款 czfIsNewerVersion。
     private func czfCheckTwoYiUpdateIfNeeded() {
         if let checkedAt = czfTwoYiUpdateCheckedAt, Date().timeIntervalSince(checkedAt) < 1800 { return }
-        czfTwoYiUpdateCheckedAt = Date()
+        // 3.8.718（B-3）：戳只在成功时盖——原来请求发出前就盖戳，
+        // 失败分支静默回落静态托管值、不清戳，弱网一次、30 分钟
+        // 内再进源页直接短路，新版看不到。成功路径与 30 分钟
+        // 节流上限不动；失败不盖戳，下次进源页重试。
         CZFTwoYiUpdateCheck.check { result in
             if case .success(let info) = result {
-                Task { @MainActor in czfTwoYiLatest = info }
+                Task { @MainActor in
+                    czfTwoYiLatest = info
+                    czfTwoYiUpdateCheckedAt = Date()
+                }
             }
         }
     }
@@ -3677,6 +3683,21 @@ private struct AltStoreSourceSectionView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         Text(item.source?.name ?? item.displayName)
                             .font(.system(.title2).bold())
+                            // 3.8.718（F-1）：源名加 lineLimit(1)——
+                            // 角标 fixedSize 后超长源名不再换行挤竖排
+                            //（网格组头低 #64 同款）。
+                            .lineLimit(1)
+                        // 3.8.718（F-1）：组头常显“n 个可更新”角标——
+                        // 与菜单“更新本源全部 App（n）”同一份
+                        // updateSourceApps（暂停源子集天然为 0）；
+                        // 无更新不显示。lineLimit + fixedSize。
+                        if !updateSourceApps.isEmpty {
+                            Text("\(updateSourceApps.count) 个可更新")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
                     }
                 }
                 .buttonStyle(.plain)

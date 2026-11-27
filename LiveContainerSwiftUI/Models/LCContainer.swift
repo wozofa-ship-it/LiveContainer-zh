@@ -16,7 +16,13 @@ class LCContainer : ObservableObject, Hashable {
     @Published var resolvedContainerURL: URL?
     @Published var bookmarkResolved = false
     var bookmarkResolveContinuation: UnsafeContinuation<(), Never>? = nil
-    
+
+    // 3.8.718（B-2）：容器 plist 读/写失败标记——读失败时开关全
+    // 按默认显示、写失败时开关看着改了、重进变回去；空 catch
+    // 原来把两路都吞了。容器页凭这两旗提示，调用方凭写旗报错。
+    @Published var czfPlistReadFailed = false
+    @Published var czfPlistWriteFailed = false
+
     @Published var isolateAppGroup : Bool
 
     @Published var spoofIdentifierForVendor : Bool {
@@ -314,7 +320,14 @@ class LCContainer : ObservableObject, Hashable {
                 applyPlistInfo(plistInfo)
             }
         } catch {
-            
+            // 3.8.718（B-2）：文件不存在 = 全新容器正常路径，一字
+            // 不动（静默）；文件存在但读/解析失败 = 记日志 + 置失
+            // 败标记（容器页可读、挂提示行），隔离/IDFV/指纹开关
+            // 不再全按默认关静默显示。
+            if FileManager.default.fileExists(atPath: infoDictUrl.path) {
+                print("[CZF] 容器 plist 读取失败：\(infoDictUrl.path)，原因：\(error.localizedDescription)")
+                czfPlistReadFailed = true
+            }
         }
     }
 
@@ -434,8 +447,15 @@ class LCContainer : ObservableObject, Hashable {
             // 组 A 其余有内容的写盘点（M:1237、S:388、S:3092）早已是 .atomic，
             // 只剩这一处漏网（V:852 是 0 字节标记文件，无内容可撕，不算）；成功路径一字未变。
             try plistData.write(to: infoDictUrl, options: .atomic)
+            // 3.8.718（B-2）：写成了就清失败标记（上次失败的旧旗
+            // 不留到下次保存误报）。
+            czfPlistWriteFailed = false
         } catch {
-            
+            // 3.8.718（B-2）：.atomic 写失败不再无声——记日志 +
+            // 置标记，调用方（容器页 saveContainer 路）凭标记报
+            // 错并把开关拨回旧值；签名不动（13 处调用点不用改）。
+            print("[CZF] 容器 plist 写入失败：\(infoDictUrl.path)，原因：\(error.localizedDescription)")
+            czfPlistWriteFailed = true
         }
     }
     

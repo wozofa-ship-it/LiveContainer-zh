@@ -728,6 +728,15 @@ struct CZFInlineIpaFolderSection: View {
     // 上移后分段切换不丢勾选。
     @Binding var czfBatchMode: Bool
     @Binding var czfSelectedIDs: Set<UUID>
+    // 3.8.718（F-3）：重复包清理——格子上报的每组待删旧包
+    //（标题行按钮计数/确认框组数用）；清理请求序号（确认后
+    // +1，格子 onChange 收到后删文件重扫）；确认框开关。模型
+    // 在格子里，标题行不直接碰模型（文件夹切换时格子
+    // .id(url) 重建，模型跟着换）。
+    @State private var czfDupExtraGroups: [[CZFLocalIpaItem]] = []
+    @State private var czfDupCleanupRequest = 0
+    @State private var czfShowDupCleanupConfirm = false
+    private var czfDupExtraCount: Int { czfDupExtraGroups.flatMap { $0 }.count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -782,6 +791,27 @@ struct CZFInlineIpaFolderSection: View {
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                         Spacer()
+                        // 3.8.718（F-3）：清理重复——有已知重复组时
+                        // 才出现；删前弹确认框报组数/份数。详情是懒
+                        // 加载的，没滚到的行还没解出包名/版本、进不
+                        // 了分组，按钮只按当前已知重复显示（确认后
+                        // 删时格子再按当时列表重算）。
+                        if !czfDupExtraGroups.isEmpty {
+                            Button("清理重复（\(czfDupExtraCount)）") {
+                                czfShowDupCleanupConfirm = true
+                            }
+                            .font(.footnote)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .confirmationDialog("清理重复包", isPresented: $czfShowDupCleanupConfirm, titleVisibility: .visible) {
+                                Button("删除", role: .destructive) {
+                                    czfDupCleanupRequest += 1
+                                }
+                                Button("取消", role: .cancel) { }
+                            } message: {
+                                Text("发现 \(czfDupExtraGroups.count) 组重复包，共 \(czfDupExtraCount) 个旧包将被删除，每组保留修改时间最新的一份，此操作无法撤销。")
+                            }
+                        }
                         Button("清除文件夹", role: .destructive) {
                             // 3.8.658（B2）：先弹确认再清——与“换文件夹”
                             // 并排，误触即丢绑定；文案不写“无法撤销”
@@ -807,7 +837,7 @@ struct CZFInlineIpaFolderSection: View {
             if let url = folderURL {
                 // 文件夹换了就重建模型重扫（StateObject 的
                 // folderURL 是 let，不重建就还是旧文件夹）。
-                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable, searchText: $czfSearchText)
+                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable, searchText: $czfSearchText, dupExtraGroups: $czfDupExtraGroups, dupCleanupRequest: $czfDupCleanupRequest)
                     .id(url)
             } else {
                 Button(action: onPickFolder) {
@@ -845,10 +875,16 @@ struct CZFInlineIpaFolderGrid: View {
     // 分段切换即丢；上移到源页持有（见 LCAltStoreSourcesView
     // czfFolderSearchText），经 Section 以 Binding 传下来。不持久化。
     @Binding var czfSearchText: String
+    // 3.8.718（F-3）：重复包清理——模型在格子里，标题行不直接碰
+    // 模型：格子把每组待删的旧包上报给标题行（按钮计数/确认框
+    // 组数用），标题行确认后把清理请求序号 +1，格子收到后删
+    // 文件并重扫。请求序号只增不减，onChange 只认变化。
+    @Binding var czfDupExtraGroups: [[CZFLocalIpaItem]]
+    @Binding var czfDupCleanupRequest: Int
 
     @StateObject private var model: CZFLocalIpaFolderModel
 
-    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>, searchText: Binding<String>) {
+    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>, searchText: Binding<String>, dupExtraGroups: Binding<[[CZFLocalIpaItem]]>, dupCleanupRequest: Binding<Int>) {
         self.folderURL = folderURL
         self.onPickFolder = onPickFolder
         self.onInstall = onInstall
@@ -857,6 +893,8 @@ struct CZFInlineIpaFolderGrid: View {
         _czfSelectedIDs = selectedIDs
         _czfOnlyUpdatable = onlyUpdatable
         _czfSearchText = searchText
+        _czfDupExtraGroups = dupExtraGroups
+        _czfDupCleanupRequest = dupCleanupRequest
     }
 
     // 3.8.442：列数跟上面已装 App 网格一致——原来写死 4 列，
@@ -983,6 +1021,19 @@ struct CZFInlineIpaFolderGrid: View {
         czfShowBatchDeleteConfirm = false
         czfSelectedIDs.removeAll()
         czfBatchMode = false
+        model.scan()
+    }
+
+    // 3.8.718（F-3）：删重复包——删前一刻再按当前 model.items
+    // 重算（确认框弹着时详情可能还在加载、新重复可能刚被认出，
+    // 以删时为准）；删完清掉已删项的批量选中、一次重扫。
+    private func czfDeleteDuplicates() {
+        let extras = czfDuplicateExtraGroups(items: model.items).flatMap { $0 }
+        guard !extras.isEmpty else { return }
+        for item in extras {
+            try? FileManager.default.removeItem(at: item.url)
+        }
+        czfSelectedIDs.subtract(extras.map(\.id))
         model.scan()
     }
 
@@ -1132,6 +1183,19 @@ struct CZFInlineIpaFolderGrid: View {
             }
         }
         .onAppear { model.scan() }
+        // 3.8.718（F-3）：详情每读回一批就重算重复组上报标题行
+        //（变了才写绑定，不反复推同一份）；标题行确认清理后
+        // 序号 +1，这里删文件并重扫。
+        .onReceive(model.$items) { _ in
+            let groups = czfDuplicateExtraGroups(items: model.items)
+            if czfDupGroupIDs(groups) != czfDupGroupIDs(czfDupExtraGroups) {
+                czfDupExtraGroups = groups
+            }
+        }
+        .onChange(of: czfDupCleanupRequest) { _ in
+            guard czfDupCleanupRequest > 0 else { return }
+            czfDeleteDuplicates()
+        }
         // 3.8.696（B3）：文件夹分段下拉刷新——源分段同款入口（源页
         // :1487 的 .refreshable）；model.scan() 是同步 void、后台开
         // Task 跑，指示器在闭包返回时即消失，不等到扫完（与源页
@@ -1219,6 +1283,31 @@ struct CZFInlineIpaFolderGrid: View {
 // 的 build 从 extractIpaInfo 读 CFBundleVersion 进 item.build，
 // 短版本号相等时按 build 比（同版高 build 也标）；build 读不到
 // 按 0 比，与源页网格同口径。
+// 3.8.718（F-3）：重复包分组——同 bundleIdentifier + version +
+// build 一组，每组只留 modificationDate 最新的一份，其余是待删
+// 的旧包；bundleIdentifier 为 nil/空的不参与分组（身份不明不删）；
+// 只留一份的组不进结果，每组绝不删光。返回每组待删的旧包。
+func czfDuplicateExtraGroups(items: [CZFLocalIpaItem]) -> [[CZFLocalIpaItem]] {
+    var grouped: [String: [CZFLocalIpaItem]] = [:]
+    for item in items {
+        guard let bid = item.bundleIdentifier, !bid.isEmpty else { continue }
+        let key = "\(bid)\n\(item.version ?? "")\n\(item.build ?? "")"
+        grouped[key, default: []].append(item)
+    }
+    return grouped.values.compactMap { group in
+        guard group.count > 1 else { return nil }
+        let sorted = group.sorted { ($0.modificationDate ?? .distantPast) > ($1.modificationDate ?? .distantPast) }
+        return Array(sorted.dropFirst())
+    }
+}
+
+// 3.8.718（F-3）：重复组比对键——组内 id 排好序、组间按首 id
+// 排好序，Dictionary 分组顺序不定也不误判“变了”。
+private func czfDupGroupIDs(_ groups: [[CZFLocalIpaItem]]) -> [[UUID]] {
+    groups.map { $0.map(\.id).sorted { $0.uuidString < $1.uuidString } }
+        .sorted { ($0.first?.uuidString ?? "") < ($1.first?.uuidString ?? "") }
+}
+
 func czfFolderItemHasUpdate(item: CZFLocalIpaItem, installedLookup: CZFInstalledLookup) -> Bool {
     guard let version = item.version,
           let bid = item.bundleIdentifier, !bid.isEmpty,
