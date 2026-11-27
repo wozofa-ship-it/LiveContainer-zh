@@ -1196,6 +1196,9 @@ struct LCSourcesView: View {
     // 会话内分段切换；过滤逻辑与搜索节流任务不动。
     @State private var czfFolderSearchText = ""
     @State private var czfFolderOnlyUpdatable = false
+    // 3.8.730（F-3）：文件夹“仅未安装”上移到源页持有——与上面
+    // “只看有新版”同款（分段切换不丢）；不持久化。
+    @State private var czfFolderOnlyNotInstalled = false
     // 上次自动刷新源的时间（自动刷新节流：5 分钟内不重复刷）
     @AppStorage("CZFLastSourceAutoRefresh") private var lastSourceAutoRefresh: Double = 0
     // 3.8.653（F2）：上次检查更新时间——ViewModel 在刷新成功处写
@@ -1345,9 +1348,11 @@ struct LCSourcesView: View {
                         },
                         // 3.8.682（B3）：搜索字与“只看有新版”由源页持有
                         // （见上），分段切换不丢。实参须按 Section 声明顺序：
-                        // czfOnlyUpdatable / czfSearchText 在前，批量态与
-                        // 选中集在后（逐成员 init 按声明顺序）。
+                        // czfOnlyUpdatable / czfOnlyNotInstalled /
+                        // czfSearchText 在前，批量态与选中集在后（逐成员
+                        // init 按声明顺序）。
                         czfOnlyUpdatable: $czfFolderOnlyUpdatable,
+                        czfOnlyNotInstalled: $czfFolderOnlyNotInstalled,
                         czfSearchText: $czfFolderSearchText,
                         // 3.8.666（B-alt）：批量态与选中集由源页持有
                         // （见上），分段切换不丢勾选。

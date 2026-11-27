@@ -112,6 +112,11 @@ struct CZFAppGridActions {
     // 单项 + 弹批量恢复范围单，复用 batchRestore）；默认空实现，
     // 老调用点不传也能编。
     var onRestoreRequest: (LCAppModel) -> Void = { _ in }
+    // 3.8.730（B-1）：锁定状态变了要重算可见区过滤——网格长按菜单
+    // 调 setLocked 后列表缓存不知道（“仅锁定”开着时锁了/解了 App
+    // 列表不变）。列表页接线（czfRefreshFilteredApps），默认空实
+    // 现，老调用点不传也能编。
+    var onLockChanged: () -> Void = { }
 }
 
 struct CZFAppGridView: View {
@@ -212,7 +217,9 @@ struct CZFAppGridView: View {
             onBackupRequest: actions.onBackupRequest,
             // 3.8.726（F-1）：恢复这个 App——同款转发，漏了格子
             // 菜单点了就静默无事。
-            onRestoreRequest: actions.onRestoreRequest
+            onRestoreRequest: actions.onRestoreRequest,
+            // 3.8.730（B-1）：锁定状态变化回列表页重算过滤，同款转发。
+            onLockChanged: actions.onLockChanged
         )
     }
 
@@ -1011,7 +1018,11 @@ struct CZFAppGridCell: View {
         }
         Button(app.appInfo.isLocked ? "解锁" : "锁定", systemImage: app.appInfo.isLocked ? "lock.open" : "lock") {
             // 3.8.556（L233）：同横幅卡——!app.appInfo.isLocked 在裸 Task 里算就是离主线程读 _info；整段放主 actor 上算（按钮标题那两处读在 body 求值时、主线程，安全不动）。
-            Task { @MainActor in await app.setLocked(newLockState: !app.appInfo.isLocked) }
+            // 3.8.730（B-1）：锁完回列表页重算可见区过滤——“仅锁定”开着时刚锁/解的 App 立即进出列表，否则缓存不知道。
+            Task { @MainActor in
+                await app.setLocked(newLockState: !app.appInfo.isLocked)
+                actions.onLockChanged()
+            }
         }
         if !app.uiIsShared {
             // 3.8.645（UI 打磨）：卸载是唯一的 destructive 项，与上面

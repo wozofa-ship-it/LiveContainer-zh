@@ -16599,6 +16599,23 @@
         }
       }
     },
+    "lc.folder.onlyNotInstalled" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not installed only"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅未安装"
+          }
+        }
+      }
+    },
     "lc.guestTweak.appSwitchTip %@": {
       "extractionState": "manual",
       "localizations": {

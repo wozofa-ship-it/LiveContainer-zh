@@ -422,6 +422,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         !selectedBatchApps.isEmpty && selectedBatchApps.allSatisfy { CZFListPinnedStore.shared.isPinned($0) }
     }
 
+    // 3.8.730（F-2）：勾中的 App 是不是全已锁定（底栏“锁定”按钮
+    // 禁用条件用；空选时 false，按钮反正禁用；与
+    // batchSelectionAllHidden 同款判法）。
+    private var batchSelectionAllLocked: Bool {
+        !selectedBatchApps.isEmpty && selectedBatchApps.allSatisfy { $0.appInfo.isLocked }
+    }
+
     // 3.8.428 设置#31：批量勾选键——getUniqueIdentifier 在
     // bundleIdentifier 或 relativeBundlePath 为 nil 时返回 nil，
     // 原来 isBatchSelected/toggle 直接 guard-return，格子仍显示
@@ -1474,6 +1481,30 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
+            // 3.8.730（B-2）：一键回全部——客场景顶栏被 gate 掉
+            //（czfRunningTools 里 !czfIsGuestScene），面板里是唯一
+            // 入口；与顶栏“显示全部”同款（六个全清），只在任一筛
+            // 选开着时出现。
+            if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly {
+                Button {
+                    czfLogMenuItemTap("显示全部")
+                    czfRunningOnly = false
+                    czfUpdatableOnly = false
+                    czfNoBackupOnly = false
+                    czfExpiringOnly = false
+                    czfDuplicateOnly = false
+                    czfLockedOnly = false
+                } label: {
+                    HStack {
+                        Label("显示全部", systemImage: "list.bullet")
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
             Button {
                 batchMode.toggle()
                 if !batchMode { batchSelectedIDs.removeAll() }
@@ -2887,7 +2918,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // 3.8.726（F-1）：恢复这个 App——同款接线，弹批量
                     // 恢复范围单，复用 batchRestore(loginOnly:)。
                     // 位置在最后：CZFAppGridActions 逐成员 init 实参须按
-                    // 声明顺序，onRestoreRequest 是末位成员。
+                    // 声明顺序，onLockChanged 是末位成员。
                     onBackupRequest: { app in
                         self.batchSelectedIDs = [self.czfBatchKey(for: app)]
                         self.batchBackupScopeConfirm = true
@@ -2895,7 +2926,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     onRestoreRequest: { app in
                         self.batchSelectedIDs = [self.czfBatchKey(for: app)]
                         self.batchRestoreScopeConfirm = true
-                    }
+                    },
+                    // 3.8.730（B-1）：网格长按锁/解锁后重算可见区过滤。
+                    onLockChanged: { self.czfRefreshFilteredApps() }
                 ),
                 onRemoveApp: { app in self.removeApp(app: app) },
                 onAuthenticateHidden: { Task { await self.authenticateUser() } },
@@ -3366,6 +3399,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         LCAppSortManager.shared.czfResortAfterPinChange()
                     }
                     .disabled(batchSelectedIDs.isEmpty || batchBusy)
+                    // 3.8.730（F-2）：批量锁定——逐个复用 setLocked
+                    //（newLockState: true）；加锁路不走人脸（人脸只
+                    // 在解锁路，LCAppModel.setLocked），已锁的
+                    // setLocked 自己提前返回。按钮只锁不解锁：批量
+                    // 解锁会每 App 弹一次人脸，不做；全锁时禁用。
+                    // 跑完重算可见区过滤（B-1 同款，锁了的在
+                    // “仅锁定”里立即出现）。快照回主线程取（L289-1
+                    // 同款：selectedBatchApps 读 @State + _info）。
+                    Button("锁定") {
+                        Task {
+                            let apps = await MainActor.run { selectedBatchApps }
+                            for app in apps {
+                                await app.setLocked(newLockState: true)
+                            }
+                            await MainActor.run { czfRefreshFilteredApps() }
+                        }
+                    }
+                    .disabled(batchSelectedIDs.isEmpty || batchBusy || batchSelectionAllLocked)
                     Button("删除") {
                         batchDeleteConfirm = true
                     }
@@ -3892,6 +3943,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 guard let url else { return }
                 Task {
                     guard let urlToOpen = await webViewUrlInput.open(initVal: url.absoluteString), urlToOpen != "" else {
+                        return
+                    }
+                    // 3.8.730（B-3）：拖入的 .ipa/.tipa 直链不走网页
+                    // 视图——WKWebView 里装不上；与扫码（3.8.728
+                    // F-1）同款口径（czfIsIpaDirectLink），写待装队
+                    // 列（preview:true）走安装前预览；入队即发通知
+                    // 排空（onReceive 那路），不用另调。
+                    let isIpa = await MainActor.run { czfIsIpaDirectLink(urlToOpen) }
+                    if isIpa, let ipaURL = URL(string: urlToOpen) {
+                        await MainActor.run {
+                            CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: ipaURL, autoReplace: false, preview: true, forceAsNew: false))
+                        }
                         return
                     }
                     await openWebView(urlString: urlToOpen)

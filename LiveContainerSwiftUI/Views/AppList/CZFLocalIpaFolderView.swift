@@ -720,6 +720,11 @@ struct CZFInlineIpaFolderSection: View {
     // （见 LCAltStoreSourcesView czfFolderOnlyUpdatable），本节只读/
     // 改；切分段不再丢。过滤在下面格子里。
     @Binding var czfOnlyUpdatable: Bool
+    // 3.8.730（F-3）：仅未安装——与上面“只看有新版”同款，上移到
+    // 源页持有（见 LCAltStoreSourcesView czfFolderOnlyNotInstalled）；
+    // 只留还没装的包（按包名比对已装 App，空包名算未装）；过滤在
+    // 下面格子里。
+    @Binding var czfOnlyNotInstalled: Bool
     // 3.8.682（B3）：文件夹搜索字——3.8.653（F1）原是本节下格子的
     // @State，分段切换即丢；上移到源页持有（见 LCAltStoreSourcesView
     // czfFolderSearchText），本节只透传给格子。不持久化。
@@ -755,7 +760,7 @@ struct CZFInlineIpaFolderSection: View {
         let fmt = ByteCountFormatter()
         fmt.countStyle = .file
         var text = "\(czfFolderSummary.totalCount) 个包 · 共 \(fmt.string(fromByteCount: czfFolderSummary.totalSize))"
-        if czfOnlyUpdatable || !czfSearchText.isEmpty {
+        if czfOnlyUpdatable || czfOnlyNotInstalled || !czfSearchText.isEmpty {
             text += "（当前显示 \(czfFolderSummary.displayedCount) 个）"
         }
         return text
@@ -813,6 +818,14 @@ struct CZFInlineIpaFolderSection: View {
                             .font(.footnote)
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
+                        // 3.8.730（F-3）：仅未安装——同行第二个 Toggle，
+                        // 反向筛选（只留还没装的）；文案进表
+                        //（lc.folder.onlyNotInstalled）。两 Toggle 各
+                        // fixedSize + lineLimit(1)，不竖排（3.8.712 同款）。
+                        Toggle("lc.folder.onlyNotInstalled".loc, isOn: $czfOnlyNotInstalled)
+                            .font(.footnote)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         Spacer()
                         // 3.8.718（F-3）：清理重复——有已知重复组时
                         // 才出现；删前弹确认框报组数/份数。详情是懒
@@ -865,7 +878,7 @@ struct CZFInlineIpaFolderSection: View {
             if let url = folderURL {
                 // 文件夹换了就重建模型重扫（StateObject 的
                 // folderURL 是 let，不重建就还是旧文件夹）。
-                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable, searchText: $czfSearchText, dupExtraGroups: $czfDupExtraGroups, dupCleanupRequest: $czfDupCleanupRequest, folderSummary: $czfFolderSummary)
+                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable, onlyNotInstalled: $czfOnlyNotInstalled, searchText: $czfSearchText, dupExtraGroups: $czfDupExtraGroups, dupCleanupRequest: $czfDupCleanupRequest, folderSummary: $czfFolderSummary)
                     .id(url)
             } else {
                 Button(action: onPickFolder) {
@@ -899,6 +912,9 @@ struct CZFInlineIpaFolderGrid: View {
     // 3.8.672（F-3）：只看有新版——标题行持有，格子只读；
     // 过滤见下面 czfDisplayedItems。
     @Binding var czfOnlyUpdatable: Bool
+    // 3.8.730（F-3）：仅未安装——标题行持有，格子只读；
+    // 过滤见下面 czfDisplayedItems（与只看有新版可叠加）。
+    @Binding var czfOnlyNotInstalled: Bool
     // 3.8.682（B3）：文件夹搜索字——3.8.653（F1）原是本格子的 @State，
     // 分段切换即丢；上移到源页持有（见 LCAltStoreSourcesView
     // czfFolderSearchText），经 Section 以 Binding 传下来。不持久化。
@@ -915,7 +931,7 @@ struct CZFInlineIpaFolderGrid: View {
 
     @StateObject private var model: CZFLocalIpaFolderModel
 
-    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>, searchText: Binding<String>, dupExtraGroups: Binding<[[CZFLocalIpaItem]]>, dupCleanupRequest: Binding<Int>, folderSummary: Binding<CZFFolderTotalSummary>) {
+    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>, onlyNotInstalled: Binding<Bool>, searchText: Binding<String>, dupExtraGroups: Binding<[[CZFLocalIpaItem]]>, dupCleanupRequest: Binding<Int>, folderSummary: Binding<CZFFolderTotalSummary>) {
         self.folderURL = folderURL
         self.onPickFolder = onPickFolder
         self.onInstall = onInstall
@@ -923,6 +939,7 @@ struct CZFInlineIpaFolderGrid: View {
         _czfBatchMode = batchMode
         _czfSelectedIDs = selectedIDs
         _czfOnlyUpdatable = onlyUpdatable
+        _czfOnlyNotInstalled = onlyNotInstalled
         _czfSearchText = searchText
         _czfDupExtraGroups = dupExtraGroups
         _czfDupCleanupRequest = dupCleanupRequest
@@ -1023,8 +1040,20 @@ struct CZFInlineIpaFolderGrid: View {
     }
 
     private var czfDisplayedItems: [CZFLocalIpaItem] {
-        guard czfOnlyUpdatable else { return czfFilteredItems }
-        return czfFilteredItems.filter { czfFolderItemHasUpdate(item: $0, installedLookup: czfInstalledLookup) }
+        // 3.8.730（F-3）：两筛选可叠加——先只看有新版，再仅未安装；
+        // 未安装判据与行内绿勾同款（czfIsInstalled，空包名算未装，
+        // 免得没解出包名的行被误筛掉）。
+        var items = czfFilteredItems
+        if czfOnlyUpdatable {
+            items = items.filter { czfFolderItemHasUpdate(item: $0, installedLookup: czfInstalledLookup) }
+        }
+        if czfOnlyNotInstalled {
+            items = items.filter { item in
+                guard let bid = item.bundleIdentifier, !bid.isEmpty else { return true }
+                return !czfInstalledLookup.isInstalled(bundleIdentifier: bid)
+            }
+        }
+        return items
     }
 
     private var czfInstalledLookup: CZFInstalledLookup {
@@ -1154,7 +1183,7 @@ struct CZFInlineIpaFolderGrid: View {
                         // 有结果时，是“只看有新版”筛掉的，用 App 页
                         // 3.8.651 同款文案（0 新 key）；搜索本身没结果
                         // 时仍是“没有匹配的 IPA”。
-                        Text(czfOnlyUpdatable && !czfFilteredItems.isEmpty ? "筛选条件下没有 App" : "没有匹配的 IPA")
+                        Text((czfOnlyUpdatable || czfOnlyNotInstalled) && !czfFilteredItems.isEmpty ? "筛选条件下没有 App" : "没有匹配的 IPA")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .center)
