@@ -1138,7 +1138,8 @@ struct LCSourcesView: View {
     @State private var czfKnownSourceIDs: Set<URL> = []
     @State private var isManagingSources = false
     // 3.8.722（F-1）：扫码添加源 sheet 开关——相机扫含源 JSON
-    // 链接的二维码，直接走现有 handleAddSource 加源。
+    // 链接的二维码，直接走现有 handleAddSource 加源；扫到 IPA
+    // 直链走待装队列切 App 页（3.8.728 F-1，见下面 sheet 回调）。
     @State private var czfShowQRScanner = false
     @State private var isBatchMode = false
     @State private var selectedIDs = Set<String>()
@@ -1941,7 +1942,8 @@ struct LCSourcesView: View {
                         }
                         // 3.8.722（F-1）：扫码添加源——“添加源”按钮旁加扫码
                         // 按钮，相机扫含源 JSON 链接的二维码，直接走现有
-                        // handleAddSource 加源；扫码页在下面 sheet。
+                        // handleAddSource 加源（扫到 IPA 直链走待装队列，
+                        // 3.8.728 F-1）；扫码页在下面 sheet。
                         Button("扫码", systemImage: "qrcode.viewfinder") {
                             czfShowQRScanner = true
                         }
@@ -2141,12 +2143,30 @@ struct LCSourcesView: View {
         // 再走 handleAddSource（与搜索行“添加为源”同款）；失败
         // 进本页独立的 czfAddSourceError alert，不走父级
         // errorMessage（sheet 盖着时父级 alert 会被 UIKit 静默丢弃）。
+        // 3.8.728（F-1）：扫到 IPA 直链不走加源——App 页
+        // czfIsIpaDirectLink 同款口径（http(s) + 后缀 .ipa/.tipa；
+        // 跨文件 private 不可见故内联，源页 czfSearchIpaURL 口径
+        // 更宽不套用），写待装队列（preview:true）切 App 页走
+        // 安装前预览（czfSearchIpaRow 同款两行：先切 Tab 再入队，
+        // 切 Tab 与入队都在主线程，见 L411-1）；不是 IPA 才走
+        // handleAddSource。
         .sheet(isPresented: $czfShowQRScanner) {
             CZFQRCodeScannerView(
                 onScanned: { scanned in
                     czfShowQRScanner = false
                     Task {
-                        if let error = await handleAddSource(scanned) {
+                        let trimmed = scanned.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let ipaURL = URL(string: trimmed),
+                           let scheme = ipaURL.scheme?.lowercased(),
+                           scheme == "http" || scheme == "https",
+                           ["ipa", "tipa"].contains(ipaURL.pathExtension.lowercased()) {
+                            await MainActor.run {
+                                withAnimation {
+                                    DataManager.shared.model.selectedTab = .apps
+                                }
+                                CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: ipaURL, autoReplace: false, preview: true, forceAsNew: false))
+                            }
+                        } else if let error = await handleAddSource(scanned) {
                             await MainActor.run { czfAddSourceError = error }
                         }
                     }

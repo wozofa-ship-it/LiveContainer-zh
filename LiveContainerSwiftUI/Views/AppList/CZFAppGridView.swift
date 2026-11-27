@@ -879,6 +879,11 @@ struct CZFAppGridCell: View {
                         app.uiSelectedContainer = container
                         app.uiDefaultDataFolder = container.folderName
                         app.appInfo.dataUUID = container.folderName
+                        // 3.8.728（B-2）：切容器后同步小组件快照——快照的
+                        // folderName 取 uiSelectedContainer，不刷小组件仍指
+                        // 旧容器、点启动进旧分身；模型表从 DataManager 现取
+                        //（固定切换同款，见 MultitaskDockView czfSyncWidgetSnapshot）。
+                        CZFWidgetSnapshot.sync(apps: DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps)
                     } label: {
                         if container == app.uiSelectedContainer {
                             Label(container.name, systemImage: "checkmark")

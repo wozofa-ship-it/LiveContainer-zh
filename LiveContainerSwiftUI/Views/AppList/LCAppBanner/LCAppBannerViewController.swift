@@ -392,6 +392,9 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
                     model.uiSelectedContainer = container
                     model.uiDefaultDataFolder = container.folderName
                     model.appInfo.dataUUID = container.folderName
+                    // 3.8.728（B-2）：切容器后同步小组件快照——与网格
+                    // 同款（CZFAppGridView），否则快照仍指旧容器。
+                    CZFWidgetSnapshot.sync(apps: DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps)
                     self?.refreshView()
                 }
             }

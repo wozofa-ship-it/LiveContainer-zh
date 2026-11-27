@@ -844,8 +844,39 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 唯一红字，LCAppListView.swift:718）。三个开关/按钮（仅运行中/
     // 仅可更新/关闭坞内全部窗口）挪到这里，主 builder 里只占一个分量，
     // 内容一字不动；builder 这一层一个 if 都不留（3.8.334 同款）。
+    // 3.8.728（B-1）：六个筛选开关的可见态——开着的图标染
+    // accent 色、关着的 .secondary（高亮，二选一取高亮；仅无
+    // 备份/仅快过期/仅分身/仅锁定的静态图标不动，不做 fill/
+    // plain 两态；仅运行中/仅可更新的 fill 两态原样保留，
+    // tint 是额外的一层态）。先例：vpnShieldMenu 的绿/
+    // .secondary 两态、行内面板的 accent checkmark。
     @ToolbarContentBuilder
     private var czfRunningTools: some ToolbarContent {
+        // 3.8.728（B-1）：显示全部——六个筛选开关（仅运行中/
+        // 仅可更新/仅无备份/仅快过期/仅分身/仅锁定）各是独立
+        // Bool，点一下只翻自己，之前没有一键回全部的入口
+        //（用户 2026-11-27 亲报“又是bug”：筛了分身就回不去）。
+        // 只在任一筛选开着时出现；点一下六个全清，.onChange
+        // 各自重跑过滤（与逐个关掉同款）；不碰筛选判据本身。
+        // 本组加这一项后 9 个 ToolbarItem，仍在 buildBlock
+        // 10 分量上限内（3.8.643 同款红字不触发）。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, !czfIsGuestScene, czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly {
+                Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("显示全部")
+                    czfRunningOnly = false
+                    czfUpdatableOnly = false
+                    czfNoBackupOnly = false
+                    czfExpiringOnly = false
+                    czfDuplicateOnly = false
+                    czfLockedOnly = false
+                } label: {
+                    Label("显示全部", systemImage: "list.bullet")
+                }
+            }
+        }
+
         // 3.8.641（F2）：仅运行中开关——多选按钮旁；16 以下隐藏
         //（MultitaskDockManager 是 16+ 类型，见 CZFRunningDot 注释）。
         ToolbarItem(placement: .topBarTrailing) {
@@ -854,6 +885,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfRunningOnly.toggle()
                 } label: {
                     Label("仅运行中", systemImage: czfRunningOnly ? "play.circle.fill" : "play.circle")
+                        .foregroundStyle(czfRunningOnly ? Color.accentColor : .secondary)
                 }
             }
         }
@@ -869,6 +901,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfUpdatableOnly.toggle()
                 } label: {
                     Label("仅可更新", systemImage: czfUpdatableOnly ? "arrow.down.circle.fill" : "arrow.down.circle")
+                        .foregroundStyle(czfUpdatableOnly ? Color.accentColor : .secondary)
                 }
             }
         }
@@ -901,6 +934,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfNoBackupOnly.toggle()
                 } label: {
                     Label("仅无备份", systemImage: "externaldrive.badge.questionmark")
+                        .foregroundStyle(czfNoBackupOnly ? Color.accentColor : .secondary)
                 }
             }
         }
@@ -917,6 +951,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfExpiringOnly.toggle()
                 } label: {
                     Label("仅快过期", systemImage: "clock.badge.exclamationmark")
+                        .foregroundStyle(czfExpiringOnly ? Color.accentColor : .secondary)
                 }
             }
         }
@@ -932,6 +967,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfDuplicateOnly.toggle()
                 } label: {
                     Label("仅分身", systemImage: "doc.on.doc")
+                        .foregroundStyle(czfDuplicateOnly ? Color.accentColor : .secondary)
                 }
             }
         }
@@ -947,6 +983,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfLockedOnly.toggle()
                 } label: {
                     Label("仅锁定", systemImage: "lock")
+                        .foregroundStyle(czfLockedOnly ? Color.accentColor : .secondary)
                 }
             }
         }

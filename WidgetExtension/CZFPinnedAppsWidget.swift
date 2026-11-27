@@ -96,9 +96,24 @@ struct CZFPinnedAppsWidgetView: View {
     var entry: CZFWidgetTimelineEntry
     @Environment(\.widgetFamily) var family
 
-    // 中号 8 个、大号 12 个：再多排不下，小组件只截不断行。
+    // 小号 4 个、中号 8 个、大号 12 个：再多排不下；超量在网格
+    // 末尾补一块“+N” tile（B-3），不再静默截掉。
     private var visibleApps: [CZFWidgetApp] {
-        Array(entry.apps.prefix(family == .systemLarge ? 12 : 8))
+        Array(entry.apps.prefix(family == .systemSmall ? 4 : family == .systemLarge ? 12 : 8))
+    }
+
+    /// 超出 visibleApps 的个数；>0 时网格末尾补“+N” tile。
+    private var czfOverflowCount: Int {
+        max(0, entry.apps.count - visibleApps.count)
+    }
+
+    /// 小尺寸放不下第 5 块 tile：有超量时只排 3 个 App，末尾
+    /// 一块留给“+N”，仍是 2×2 不溢出；中/大号 tile 数不变。
+    private var czfGridApps: [CZFWidgetApp] {
+        if family == .systemSmall, czfOverflowCount > 0 {
+            return Array(visibleApps.prefix(3))
+        }
+        return visibleApps
     }
 
     var body: some View {
@@ -108,39 +123,90 @@ struct CZFPinnedAppsWidgetView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding()
+        } else if family == .systemSmall {
+            czfSmallGrid
         } else {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 56), spacing: 12)], spacing: 12) {
-                ForEach(visibleApps) { app in
-                    if let url = app.launchURL {
-                        Link(destination: url) {
-                            VStack(spacing: 4) {
-                                czfIcon(for: app)
-                                Text(app.entry.displayName)
-                                    .font(.caption2)
-                                    .lineLimit(1)
-                            }
-                        }
-                    } else {
-                        VStack(spacing: 4) {
-                            czfIcon(for: app)
-                            Text(app.entry.displayName)
-                                .font(.caption2)
-                                .lineLimit(1)
-                        }
-                    }
+                ForEach(czfGridApps) { app in
+                    czfAppTile(app, iconSize: 56)
+                }
+                if czfOverflowCount > 0 {
+                    czfOverflowTile(size: 56)
                 }
             }
             .padding()
         }
     }
 
+    /// 小尺寸 2×2 紧凑格（F-2）：图标 40 + 名字一行，padding 8、
+    /// 间距 8——两行约 138pt，小组件 155pt 内不溢出。
     @ViewBuilder
-    private func czfIcon(for app: CZFWidgetApp) -> some View {
+    private var czfSmallGrid: some View {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+            ForEach(czfGridApps) { app in
+                czfAppTile(app, iconSize: 40)
+            }
+            if czfOverflowCount > 0 {
+                czfOverflowTile(size: 40)
+            }
+        }
+        .padding(8)
+    }
+
+    /// 一个 App 的 tile（中/大/小号共用，只差图标尺寸）。
+    @ViewBuilder
+    private func czfAppTile(_ app: CZFWidgetApp, iconSize: CGFloat) -> some View {
+        if let url = app.launchURL {
+            Link(destination: url) {
+                VStack(spacing: 4) {
+                    czfIcon(for: app, size: iconSize)
+                    Text(app.entry.displayName)
+                        .font(.caption2)
+                        .lineLimit(1)
+                }
+            }
+        } else {
+            VStack(spacing: 4) {
+                czfIcon(for: app, size: iconSize)
+                Text(app.entry.displayName)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    /// “+N” tile（B-3）：点开 Live App 页——走现成
+    /// livecontainer-launch?bundle-name=ui（只打开界面、
+    /// 不启动 App，App 页 handleURL 的约定），不新造深链；
+    /// 路由：LCTabView.dispatchURL 切 .apps。
+    @ViewBuilder
+    private func czfOverflowTile(size: CGFloat) -> some View {
+        if let url = URL(string: "livecontainer://livecontainer-launch?bundle-name=ui") {
+            Link(destination: url) {
+                VStack(spacing: 4) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 13)
+                            .fill(Color.secondary.opacity(0.25))
+                        Text("+\(czfOverflowCount)")
+                            .font(.title3.bold())
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: size, height: size)
+                    Text("更多")
+                        .font(.caption2)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func czfIcon(for app: CZFWidgetApp, size: CGFloat = 56) -> some View {
         if let icon = app.icon {
             Image(uiImage: icon)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(width: 56, height: 56)
+                .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: 13))
         } else {
             // 无缓存图标时首字母占位（主 App 侧只读缓存、不生成；
@@ -152,7 +218,7 @@ struct CZFPinnedAppsWidgetView: View {
                     .font(.title3.bold())
                     .foregroundStyle(.secondary)
             }
-            .frame(width: 56, height: 56)
+            .frame(width: size, height: size)
         }
     }
 }
@@ -166,7 +232,7 @@ struct CZFPinnedAppsWidget: Widget {
         }
         .configurationDisplayName("置顶 App")
         .description("一点即在 Live 内启动置顶的 App")
-        .supportedFamilies([.systemMedium, .systemLarge])
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
 
