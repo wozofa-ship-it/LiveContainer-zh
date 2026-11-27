@@ -731,54 +731,77 @@ struct CZFInlineIpaFolderSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "folder")
-                    .foregroundStyle(.secondary)
-                Text("本地 IPA 文件夹")
-                    .font(.headline)
-                Spacer()
-                if folderURL != nil {
-                    // 3.8.649（F3）：排序切换——Picker 放 Menu 里
-                    //（App 页排序菜单 LCAppListView:904 同款写法）。
-                    Menu {
-                        Picker("排序", selection: $czfSort) {
-                            ForEach(CZFLocalIpaFolderSort.allCases, id: \.self) { sort in
-                                Text(sort.czfDisplayName).tag(sort)
+            // 3.8.712：表头分两行——单行 7 项理想宽约 540pt > 440pt
+            // 屏宽，SwiftUI 压最低优先级的可换行 Text，Toggle label
+            // “只看有新版”被压成一字宽竖条、排序 Menu 也折两行。
+            // 两行各加 fixedSize + lineLimit(1)，再宽也不竖排。
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "folder")
+                        .foregroundStyle(.secondary)
+                    Text("本地 IPA 文件夹")
+                        .font(.headline)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Spacer()
+                    if folderURL != nil {
+                        // 3.8.649（F3）：排序切换——Picker 放 Menu 里
+                        //（App 页排序菜单 LCAppListView:904 同款写法）。
+                        Menu {
+                            Picker("排序", selection: $czfSort) {
+                                ForEach(CZFLocalIpaFolderSort.allCases, id: \.self) { sort in
+                                    Text(sort.czfDisplayName).tag(sort)
+                                }
                             }
+                        } label: {
+                            // UI 打磨（3.8.649）：按钮直接显示当前排序，
+                            // 不用点开菜单才知道现在按什么排。
+                            Label(czfSort.czfDisplayName, systemImage: "arrow.up.arrow.down")
+                                .font(.footnote)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                    } label: {
-                        // UI 打磨（3.8.649）：按钮直接显示当前排序，
-                        // 不用点开菜单才知道现在按什么排。
-                        Label(czfSort.czfDisplayName, systemImage: "arrow.up.arrow.down")
+                        // 3.8.662（F2）：多选开关——点开后格子点按改为
+                        // 勾选（App 页菜单“多选”同款语义）；关掉即清选中。
+                        Button(czfBatchMode ? "完成" : "多选") {
+                            czfBatchMode.toggle()
+                            if !czfBatchMode { czfSelectedIDs.removeAll() }
+                        }
+                        .font(.footnote)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                if folderURL != nil {
+                    HStack {
+                        // 3.8.672（F-3）：只看有新版——排序 Menu 旁的
+                        // Toggle，与 App 页“仅可更新”同款语义（只留带
+                        // 红箭头的行）；文案进表（lc.folder.onlyUpdatable）。
+                        Toggle("lc.folder.onlyUpdatable".loc, isOn: $czfOnlyUpdatable)
                             .font(.footnote)
-                    }
-                    // 3.8.672（F-3）：只看有新版——排序 Menu 旁的
-                    // Toggle，与 App 页“仅可更新”同款语义（只留带
-                    // 红箭头的行）；文案进表（lc.folder.onlyUpdatable）。
-                    Toggle("lc.folder.onlyUpdatable".loc, isOn: $czfOnlyUpdatable)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer()
+                        Button("清除文件夹", role: .destructive) {
+                            // 3.8.658（B2）：先弹确认再清——与“换文件夹”
+                            // 并排，误触即丢绑定；文案不写“无法撤销”
+                            //（重选即可恢复），只说要重新选择。
+                            czfShowClearFolderConfirm = true
+                        }
                         .font(.footnote)
-                    Button("清除文件夹", role: .destructive) {
-                        // 3.8.658（B2）：先弹确认再清——与“换文件夹”
-                        // 并排，误触即丢绑定；文案不写“无法撤销”
-                        //（重选即可恢复），只说要重新选择。
-                        czfShowClearFolderConfirm = true
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .confirmationDialog("清除文件夹", isPresented: $czfShowClearFolderConfirm, titleVisibility: .visible) {
+                            Button("清除", role: .destructive, action: onClearFolder)
+                            Button("取消", role: .cancel) { }
+                        } message: {
+                            Text("将取消已选文件夹，需重新选择文件夹。文件夹里的 IPA 文件不会被删除。")
+                        }
+                        Button("换文件夹", action: onPickFolder)
+                            .font(.footnote)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
-                    .font(.footnote)
-                    .confirmationDialog("清除文件夹", isPresented: $czfShowClearFolderConfirm, titleVisibility: .visible) {
-                        Button("清除", role: .destructive, action: onClearFolder)
-                        Button("取消", role: .cancel) { }
-                    } message: {
-                        Text("将取消已选文件夹，需重新选择文件夹。文件夹里的 IPA 文件不会被删除。")
-                    }
-                    Button("换文件夹", action: onPickFolder)
-                        .font(.footnote)
-                    // 3.8.662（F2）：多选开关——点开后格子点按改为
-                    // 勾选（App 页菜单“多选”同款语义）；关掉即清选中。
-                    Button(czfBatchMode ? "完成" : "多选") {
-                        czfBatchMode.toggle()
-                        if !czfBatchMode { czfSelectedIDs.removeAll() }
-                    }
-                    .font(.footnote)
                 }
             }
             if let url = folderURL {
