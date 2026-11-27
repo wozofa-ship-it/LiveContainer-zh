@@ -374,6 +374,17 @@ class LCContainer : ObservableObject, Hashable {
     }
     
     func makeLCContainerInfoPlist(appIdentifier : String, keychainGroupId : Int) {
+        // 3.8.720（B-1）：-1 是“读不到”的哨兵值，不是合法组号——
+        // 磁盘已有文件时绝不把 -1 写进去（会永久丢组号与登录态，
+        // 原 plist 还被内存默认值覆盖）；拦下并置写失败标记，
+        // 调用方按写失败报错。新建容器（无文件）不走这里；
+        // 合法调用方传的都是已分配的组号（czfFreeKeychainGroup
+        // 永不回 -1，见 LCAppModel:847；升级路写 0，不受影响）。
+        if keychainGroupId == -1 && FileManager.default.fileExists(atPath: infoDictUrl.path) {
+            print("[CZF] 容器 plist 拒绝写入 keychainGroupId=-1：\(infoDictUrl.path)")
+            czfPlistWriteFailed = true
+            return
+        }
         infoDict = [
             "appIdentifier" : appIdentifier,
             "name" : name,
@@ -470,6 +481,16 @@ class LCContainer : ObservableObject, Hashable {
         let czfDidAccess = storageBookMark != nil && bookmarkResolved && containerURL.startAccessingSecurityScopedResource()
         defer { if czfDidAccess { containerURL.stopAccessingSecurityScopedResource() } }
         infoDict = NSDictionary(contentsOf: infoDictUrl) as? [String : Any]
+        // 3.8.720（B-1）：读失败置标记——文件在但读不出时，
+        // 之后任何保存都会把 keychainGroupId = -1 写进盘
+        //（头上的注释 L573-6 已写明后果）；读成功清标记；
+        // 文件不存在是全新容器，不置标记。
+        if infoDict == nil && FileManager.default.fileExists(atPath: infoDictUrl.path) {
+            print("[CZF] 容器 plist 读取失败：\(infoDictUrl.path)")
+            czfPlistReadFailed = true
+        } else if infoDict != nil {
+            czfPlistReadFailed = false
+        }
     }
 
     func loadName() {

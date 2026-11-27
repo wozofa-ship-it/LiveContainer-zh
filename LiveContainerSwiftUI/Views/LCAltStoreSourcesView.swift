@@ -342,6 +342,16 @@ final class AltStoreSourcesViewModel: ObservableObject {
         }
         return czfRefreshSucceeded
     }
+
+    /// 3.8.720（F-2）：只重试本次刷新失败的源——手动刷新汇总
+    /// alert 的“重试失败的源”按钮用；成功/失败仍按单源规则
+    /// 写 error，不弹新汇总。
+    func czfRetryFailedSources() async {
+        let failedURLs = sources.filter { $0.error != nil }.map { $0.url }
+        for url in failedURLs {
+            await refreshSource(url: url)
+        }
+    }
     
     private func refreshSource(url: URL) async {
         guard let index = sources.firstIndex(where: { $0.url == url }) else {
@@ -1103,6 +1113,9 @@ struct CZFUpdatableAppsSheet: View {
 struct LCSourcesView: View {
     @StateObject private var viewModel = AltStoreSourcesViewModel()
     @State private var errorMessage: String?
+    // 3.8.720（F-2）：手动刷新汇总的待重试源——alert 的“重试失败
+    // 的源”按钮用；alert 关掉即清，不留到下次报错误带。
+    @State private var czfFailedSourceURLs: [URL] = []
     @State private var sourcePendingRemoval: AltStoreSourcesViewModel.SourceItem?
     @ObservedObject public var searchContext: SearchContext = SearchContext()
     @State private var expandedSources: Set<URL> = []
@@ -1258,6 +1271,10 @@ struct LCSourcesView: View {
     // TwoYi 安卓系统（3.8.628，按需下载，不编进包）：
     // 安装状态派生（见 Shared.swift 的 CZFTwoYi），不另存 key。
     @State private var czfTwoYiDownloading = false
+    // 3.8.720（B-2）：TwoYi 下载代次——下载途中点删除时 +1，
+    // 在途下载完成时凭代次丢弃 tmp 包、不推进待装队列；
+    // 只清待装队列里的项不够（还没下完的根本不在队里）。
+    @State private var czfTwoYiDownloadGeneration = 0
     @State private var czfTwoYiDeleteConfirm = false
     // 3.8.714（F-2）：TwoYi 托管最新版（API 查到才置；查不到留 nil，
     // 调用方回落 CZFTwoYi 静态值）+ 上次检查时间（每会话 30 分钟
@@ -1591,7 +1608,7 @@ struct LCSourcesView: View {
                 // refreshAllSources（自带节流、重入守卫与成功判据，
                 // 3.8.660 B2）。iOS 15+ API，无新 key、无新助手。
                 .refreshable {
-                    await viewModel.refreshAllSources()
+                    await czfRefreshAllManuallyAndSummarize()
                 }
                 // 自定义背景（3.8.416）：与 App 页同款——图挂
                 // ScrollView 的 .background，不包 ZStack，
@@ -1745,11 +1762,30 @@ struct LCSourcesView: View {
             // 条仍显示过期；与 autoRefreshSourcesIfNeeded 成功写戳同款）。
             // Task { @MainActor in } 调用（sheet 内按钮同款），戳写在主线程。
             onRefresh: {
-                if await viewModel.refreshAllSources() {
+                if await czfRefreshAllManuallyAndSummarize() {
                     lastSourceAutoRefresh = Date().timeIntervalSince1970
                 }
             }
         )
+    }
+
+    /// 3.8.720（F-2）：手动刷新后失败汇总——顶栏、下拉、全部更新
+    /// sheet 内三路共用。读 isRefreshingAll 与调 refreshAllSources
+    /// 在同一次 MainActor 跳转里（Task { @MainActor in }），不给
+    /// 别的刷新插队留窗口；在途时不汇总（失败是上一轮的）；
+    /// 全成功时安静，不弹任何东西。
+    @discardableResult
+    private func czfRefreshAllManuallyAndSummarize() async -> Bool {
+        await Task { @MainActor in
+            let czfWasRefreshing = viewModel.isRefreshingAll
+            let czfSucceeded = await viewModel.refreshAllSources()
+            guard !czfWasRefreshing else { return czfSucceeded }
+            let failed = viewModel.sources.filter { $0.error != nil }
+            guard !failed.isEmpty else { return czfSucceeded }
+            czfFailedSourceURLs = failed.map { $0.url }
+            errorMessage = "\(failed.count) 个源刷新失败：\(failed.map { $0.displayName }.joined(separator: "、"))"
+            return czfSucceeded
+        }.value
     }
 
     @ViewBuilder
@@ -1818,7 +1854,7 @@ struct LCSourcesView: View {
                         ProgressView()
                     } else {
                         Button("lc.sources.refreshAll".loc, systemImage: "arrow.clockwise") {
-                            Task { await viewModel.refreshAllSources() }
+                            Task { await czfRefreshAllManuallyAndSummarize() }
                         }
                     }
                 }
@@ -1899,8 +1935,18 @@ struct LCSourcesView: View {
             EmptyView()
                 .alert("lc.common.error".loc, isPresented: Binding<Bool>(
                     get: { errorMessage != nil },
-                    set: { if !$0 { errorMessage = nil } })
+                    set: { if !$0 { errorMessage = nil; czfFailedSourceURLs = [] } })
                 ) {
+                    // 3.8.720（F-2）：汇总 alert 的重试按钮——只重试
+                    // 本次失败的源；重试本身不再弹汇总，失败仍可
+                    // 在列表里逐源看到。
+                    if !czfFailedSourceURLs.isEmpty {
+                        Button("重试失败的源") {
+                            czfFailedSourceURLs = []
+                            errorMessage = nil
+                            Task { await viewModel.czfRetryFailedSources() }
+                        }
+                    }
                     Button("lc.common.ok".loc, role: .cancel) { errorMessage = nil }
                 } message: {
                     Text(errorMessage ?? "")
@@ -2796,6 +2842,8 @@ struct LCSourcesView: View {
     // czfInstallTwoYi 仍是 @MainActor（它直读写 @State）。
     @MainActor
     private func czfInstallTwoYi() {
+        // 3.8.720（B-2）：记下本次下载的代次（见下面收尾处的校验）。
+        let czfGen = czfTwoYiDownloadGeneration
         // 3.8.672（F-1）：下载排队——TwoYi 同款守门改入队：正在
         // 下载时不再顶回去（删掉上面的 isDownloading 守门），
         // 共享 DownloadHelper 的排队名册里等锁，拿到锁自动开始。
@@ -2823,12 +2871,21 @@ struct LCSourcesView: View {
                 guard LCUtils.czfFileHasPrefix(tmpURL, prefixes: LCUtils.czfExpectedPrefixes(for: tmpURL)) else {
                     throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载失败，服务器返回了无效文件"])
                 }
-                await MainActor.run {
+                // 3.8.720（B-2）：收尾前凭代次校验——下载途中用户
+                // 删了 TwoYi，代次已变：tmp 包丢弃、不切页、不推进
+                // 待装队列；删掉的 App 不再弹回来。
+                let czfDownloadValid = await MainActor.run { () -> Bool in
                     czfTwoYiDownloading = false
+                    guard czfGen == czfTwoYiDownloadGeneration else { return false }
                     withAnimation {
                         DataManager.shared.model.selectedTab = .apps
                     }
                     CZFSourcePendingInstall.append(CZFSourcePendingInstallItem(url: tmpURL, autoReplace: false, preview: true, forceAsNew: false))
+                    return true
+                }
+                guard czfDownloadValid else {
+                    try? fm.removeItem(at: dirURL)
+                    return
                 }
             } catch {
                 // 下载失败/取消/魔数不对：本次落盘的临时目录没用了
@@ -2859,6 +2916,9 @@ struct LCSourcesView: View {
         // 不在主线程；取目标与清待装队列回主线程做。
         let app: LCAppModel? = await MainActor.run {
             let target = czfTwoYiApp
+            // 3.8.720（B-2）：先把下载代次 +1——在途下载完成时
+            // 凭代次丢弃，不再把刚删掉的 TwoYi 推回待装队列。
+            czfTwoYiDownloadGeneration += 1
             CZFSourcePendingInstall.items.removeAll { item in
                 guard item.url.lastPathComponent == "TwoYi.ipa",
                       item.url.deletingLastPathComponent().lastPathComponent.hasPrefix("LCWebDownload-") else { return false }

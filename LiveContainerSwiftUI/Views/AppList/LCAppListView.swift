@@ -360,6 +360,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // onChange、回前台 scenePhase 三路可并发两路 Task.detached；
     // 只有最新一代才排期、才写回（CZFLocalIpaFolderView.czfScanEpoch 同款）。
     @State private var czfExpiryRefreshEpoch = 0
+    // 3.8.720（B-3）：备份状态刷新的代次——与上面签名天数刷新
+    // 同款：进页 onAppear、批量备份/恢复收尾、安装完成四路可
+    // 并发两路 Task.detached；慢的那路（iCloud 占位下载拖几
+    // 秒）后完成时整表盖掉新表，刚备好的行又翻回“无备份”。
+    // 只有最新一代才写回。
+    @State private var czfBackupStatusRefreshEpoch = 0
     @State private var batchSelectedIDs: Set<String> = []
     @State private var batchDeleteConfirm = false
     // 3.8.302：批量备份范围单开关——App 页多选备份原来点“备份”
@@ -460,6 +466,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 扫盘放后台，查表写表回主线程，行上只查表。
     private func refreshBackupStatus() {
         Task.detached {
+            // 3.8.720（B-3）：代次 +1、取本次代次——与 czfRefreshSignatureExpiry
+            // 同款；调用方不全在主线程，自增放 MainActor.run 里。
+            let czfEpoch: Int = await MainActor.run {
+                czfBackupStatusRefreshEpoch += 1
+                return czfBackupStatusRefreshEpoch
+            }
             // 3.8.662（B1）：在装 UUID 集——回主线程取快照（@Published
             // apps/hiddenApps 不可后台直读，backupFolderName 同款
             // main.sync 取法；本函数有后台路，批量备份/恢复收尾调
@@ -507,6 +519,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             let byUUIDCopy = byUUID
             let byNameBidCopy = byNameBid
             await MainActor.run {
+                // 3.8.720（B-3）：代次过期不写回——旧任务后完成时
+                // 不盖掉新任务刚写好的表。
+                guard czfEpoch == czfBackupStatusRefreshEpoch else { return }
                 var table: [String: String] = [:]
                 for app in sharedModel.apps + sharedModel.hiddenApps {
                     guard let id = sharedAppSortManager.getUniqueIdentifier(for: app) else { continue }
@@ -5289,6 +5304,41 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         } else {
             lines.append("未签名（装后需签名）")
+        }
+        // 3.8.720（F-1）：追加已装对照——已装版本与备份状态。
+        // 预览是覆盖安装前最后一道关口，原来只显新包信息，
+        // 不知已装版本（升级/降级/重装分不清）、不知有无备份
+        // （覆盖丢数据不可逆）。已装列表与备份表都在本页现成，
+        // 快照回主线程读（本函数是 async、可能不在主线程，
+        // @State 的 backupStatusByID 与 @Published 列表不可后台直读）。
+        let newBuild = (plist["CFBundleVersion"] as? String) ?? "?"
+        let czfInstalled: [(name: String, version: String, build: String?, backup: String?)] = await MainActor.run {
+            let normalized = czfNormalizedBundleID(bundleId)
+            return (sharedModel.apps + sharedModel.hiddenApps).compactMap { app in
+                guard czfNormalizedBundleID(app.appInfo.bundleIdentifier() ?? "") == normalized else { return nil }
+                let backup: String? = sharedAppSortManager.getUniqueIdentifier(for: app).flatMap { backupStatusByID[$0] }
+                return (name: app.displayName, version: app.version, build: app.appInfo.buildVersion(), backup: backup)
+            }
+        }
+        if czfInstalled.isEmpty {
+            lines.append("已装情况：未安装，将全新安装")
+        } else {
+            for inst in czfInstalled {
+                let czfDirection: String
+                if version == "?" || inst.version == "?" {
+                    czfDirection = "版本未知"
+                } else if czfIsNewerVersion(version, build: newBuild == "?" ? nil : newBuild, newerThan: inst.version, installedBuild: inst.build) {
+                    czfDirection = "可升级"
+                } else if czfIsNewerVersion(inst.version, build: inst.build, newerThan: version, installedBuild: newBuild == "?" ? nil : newBuild) {
+                    czfDirection = "低于已装版本，将降级"
+                } else {
+                    czfDirection = "与已装版本相同"
+                }
+                lines.append("已装（\(inst.name)）：\(inst.version) → 新版 \(version)（\(czfDirection)）")
+                if let backup = inst.backup {
+                    lines.append(backup == "无备份" ? "备份：无备份，覆盖安装将丢失现有数据，建议先备份" : "备份：\(backup)")
+                }
+            }
         }
         return lines.joined(separator: "\n")
     }

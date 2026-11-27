@@ -514,6 +514,18 @@ struct LCContainerView : View {
             return false
         }
         
+        // 3.8.720（B-1）：plist 读失败时禁存——infoDict 已是 nil，
+        // keychainGroupId 回 -1，存进去就把 -1 写进盘、原配置
+        // 被内存默认值覆盖，登录态与配置一起丢；拒存并报错，
+        // 让用户先处理损坏的 plist（写盘层的 -1 拦截是第二道闸）。
+        if container.czfPlistReadFailed {
+            if showError {
+                errorInfo = "容器配置文件读取失败，本次修改没有保存，请先检查容器数据是否完好。"
+                errorShow = true
+            }
+            return false
+        }
+        
         delegate.saveContainer(container: container)
         // 3.8.718（B-2）：写盘失败不再当成功——makeLCContainerInfoPlist
         // 里 .atomic 写失败会置 czfPlistWriteFailed；这里报出来并

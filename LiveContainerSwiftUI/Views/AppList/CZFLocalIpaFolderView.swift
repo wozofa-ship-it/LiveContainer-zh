@@ -696,6 +696,15 @@ enum CZFLocalIpaFolderSort: String, CaseIterable {
 // 文件夹按钮弹 sheet（sheet 426/429/430/435 四版都没稳住）。
 // 复用 CZFLocalIpaFolderModel 扫描 + CZFLocalIpaGridCell 格子，
 // 点格子直接安装。没选过文件夹时只显示一个“选择文件夹”按钮。
+// 3.8.720（F-3）：文件夹总量汇总——格子上报给标题行（与
+// czfDupExtraGroups 同款上报模式）；显示数是当前筛后可见数，
+// 总数与总大小按全部算。
+struct CZFFolderTotalSummary: Equatable {
+    var totalCount = 0
+    var totalSize: Int64 = 0
+    var displayedCount = 0
+}
+
 struct CZFInlineIpaFolderSection: View {
     var folderURL: URL?
     var onPickFolder: () -> Void
@@ -736,7 +745,21 @@ struct CZFInlineIpaFolderSection: View {
     @State private var czfDupExtraGroups: [[CZFLocalIpaItem]] = []
     @State private var czfDupCleanupRequest = 0
     @State private var czfShowDupCleanupConfirm = false
+    // 3.8.720（F-3）：文件夹总量汇总——格子上报，标题行只读。
+    @State private var czfFolderSummary = CZFFolderTotalSummary()
     private var czfDupExtraCount: Int { czfDupExtraGroups.flatMap { $0 }.count }
+
+    // 3.8.720（F-3）：总量文案——总数按全部算；搜索/只看有新版
+    // 筛选中时括号里补当前显示数，免得筛后数字误导。
+    private var czfFolderSummaryText: String {
+        let fmt = ByteCountFormatter()
+        fmt.countStyle = .file
+        var text = "\(czfFolderSummary.totalCount) 个包 · 共 \(fmt.string(fromByteCount: czfFolderSummary.totalSize))"
+        if czfOnlyUpdatable || !czfSearchText.isEmpty {
+            text += "（当前显示 \(czfFolderSummary.displayedCount) 个）"
+        }
+        return text
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -832,12 +855,17 @@ struct CZFInlineIpaFolderSection: View {
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
+                    // 3.8.720（F-3）：文件夹总量行——n 个包 · 共 X 大小。
+                    Text(czfFolderSummaryText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             if let url = folderURL {
                 // 文件夹换了就重建模型重扫（StateObject 的
                 // folderURL 是 let，不重建就还是旧文件夹）。
-                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable, searchText: $czfSearchText, dupExtraGroups: $czfDupExtraGroups, dupCleanupRequest: $czfDupCleanupRequest)
+                CZFInlineIpaFolderGrid(folderURL: url, onPickFolder: onPickFolder, onInstall: onInstall, batchMode: $czfBatchMode, selectedIDs: $czfSelectedIDs, onlyUpdatable: $czfOnlyUpdatable, searchText: $czfSearchText, dupExtraGroups: $czfDupExtraGroups, dupCleanupRequest: $czfDupCleanupRequest, folderSummary: $czfFolderSummary)
                     .id(url)
             } else {
                 Button(action: onPickFolder) {
@@ -881,10 +909,13 @@ struct CZFInlineIpaFolderGrid: View {
     // 文件并重扫。请求序号只增不减，onChange 只认变化。
     @Binding var czfDupExtraGroups: [[CZFLocalIpaItem]]
     @Binding var czfDupCleanupRequest: Int
+    // 3.8.720（F-3）：总量汇总上报——与上面重复组同款模式
+    //（模型在格子里，标题行不直接碰模型）。
+    @Binding var czfFolderSummary: CZFFolderTotalSummary
 
     @StateObject private var model: CZFLocalIpaFolderModel
 
-    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>, searchText: Binding<String>, dupExtraGroups: Binding<[[CZFLocalIpaItem]]>, dupCleanupRequest: Binding<Int>) {
+    init(folderURL: URL, onPickFolder: @escaping () -> Void, onInstall: @escaping (URL) -> Void, batchMode: Binding<Bool>, selectedIDs: Binding<Set<UUID>>, onlyUpdatable: Binding<Bool>, searchText: Binding<String>, dupExtraGroups: Binding<[[CZFLocalIpaItem]]>, dupCleanupRequest: Binding<Int>, folderSummary: Binding<CZFFolderTotalSummary>) {
         self.folderURL = folderURL
         self.onPickFolder = onPickFolder
         self.onInstall = onInstall
@@ -895,6 +926,7 @@ struct CZFInlineIpaFolderGrid: View {
         _czfSearchText = searchText
         _czfDupExtraGroups = dupExtraGroups
         _czfDupCleanupRequest = dupCleanupRequest
+        _czfFolderSummary = folderSummary
     }
 
     // 3.8.442：列数跟上面已装 App 网格一致——原来写死 4 列，
@@ -969,6 +1001,19 @@ struct CZFInlineIpaFolderGrid: View {
     // 3.8.672（F-3）：只看有新版——在搜索过滤之后再滤一层；
     // 判定口径与行级角标同一份（czfFolderItemHasUpdate），
     // 不动 czfFilteredItems（O-5 短路与搜索都不受影响）。
+    // 3.8.720（F-3）：总量汇总上报——个数 + 大小求和按全部算，
+    // 显示数按当前筛后算；变了才写绑定（与重复组同款）。
+    private func czfReportFolderSummary() {
+        let summary = CZFFolderTotalSummary(
+            totalCount: model.items.count,
+            totalSize: model.items.reduce(Int64(0)) { $0 + $1.fileSize },
+            displayedCount: czfDisplayedItems.count
+        )
+        if summary != czfFolderSummary {
+            czfFolderSummary = summary
+        }
+    }
+
     private var czfDisplayedItems: [CZFLocalIpaItem] {
         guard czfOnlyUpdatable else { return czfFilteredItems }
         return czfFilteredItems.filter { czfFolderItemHasUpdate(item: $0, installedLookup: czfInstalledLookup) }
@@ -1191,6 +1236,12 @@ struct CZFInlineIpaFolderGrid: View {
             if czfDupGroupIDs(groups) != czfDupGroupIDs(czfDupExtraGroups) {
                 czfDupExtraGroups = groups
             }
+            czfReportFolderSummary()
+        }
+        // 3.8.720（F-3）：筛字/只看有新版变了只改显示数——
+        // model.items 不变时 onReceive 不触发，显示数会 stale。
+        .onChange(of: czfDisplayedItems.count) { _ in
+            czfReportFolderSummary()
         }
         .onChange(of: czfDupCleanupRequest) { _ in
             guard czfDupCleanupRequest > 0 else { return }
