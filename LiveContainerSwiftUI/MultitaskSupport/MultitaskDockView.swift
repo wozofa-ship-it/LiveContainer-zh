@@ -4234,6 +4234,12 @@ final class CZFPinnedAppsStore: ObservableObject {
     /// 入参直接是模型对象，不再传裸字符串——传错键（比如包名）
     /// 就是这次 bug 的根源，API 上直接堵死。
     func isPinned(_ app: LCAppModel) -> Bool { pinnedIds.contains(Self.pinKey(for: app)) }
+    /// 3.8.722（F-3）：固定变了就同步小组件快照——主 App 侧写
+    /// App Group 快照（名字/深链/图标），小组件只读快照渲染；
+    /// 模型表从 DataManager 现取（本文件多处同款）。
+    private func czfSyncWidgetSnapshot() {
+        CZFWidgetSnapshot.sync(apps: DataManager.shared.model.apps + DataManager.shared.model.hiddenApps + DataManager.shared.model.arm32EmuApps)
+    }
     func toggle(_ app: LCAppModel) {
         let key = Self.pinKey(for: app)
         if let idx = pinnedIds.firstIndex(of: key) {
@@ -4242,6 +4248,7 @@ final class CZFPinnedAppsStore: ObservableObject {
             pinnedIds.append(key)
         }
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+        czfSyncWidgetSnapshot()
     }
     /// 3.8.291：源固定键——`"src:" + 包名`，与已装 App 的
     /// “包名_dataUUID”键共存于同一 CZFPinnedPanelApps 列表
@@ -4261,6 +4268,7 @@ final class CZFPinnedAppsStore: ObservableObject {
             pinnedIds.append(key)
         }
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+        czfSyncWidgetSnapshot()
     }
     /// 固定区拖动换位（用户 2026-11-03 定：按住图标拖到目标
     /// 位置松手）：to 是换位后该项应占的下标（先删后插，
@@ -4272,6 +4280,7 @@ final class CZFPinnedAppsStore: ObservableObject {
         let key = pinnedIds.remove(at: source)
         pinnedIds.insert(key, at: destination)
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
+        czfSyncWidgetSnapshot()
     }
 
     // 3.8.316：导入设置后重读——UserDefaults 被外部写回后内存
@@ -4279,6 +4288,7 @@ final class CZFPinnedAppsStore: ObservableObject {
     // reloadSortSettings 同款，导入时调一下即直接生效。
     func reload() {
         pinnedIds = LCUtils.appGroupUserDefault.stringArray(forKey: defaultsKey) ?? []
+        czfSyncWidgetSnapshot()
     }
     /// 旧版按包名存的固定项迁移（只跑一次）：单实例的包名直转
     /// 成该实例的键（用户的固定保留）；多实例的包名无法断定
@@ -4319,6 +4329,7 @@ final class CZFPinnedAppsStore: ObservableObject {
         pinnedIds = migrated
         LCUtils.appGroupUserDefault.set(pinnedIds, forKey: defaultsKey)
         LCUtils.appGroupUserDefault.set(true, forKey: migratedKey)
+        czfSyncWidgetSnapshot()
     }
 }
 

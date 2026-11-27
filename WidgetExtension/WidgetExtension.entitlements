@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 3.8.722（F-3）：与 ShareExtension/LaunchAppExtension 同款——小组件读 App Group 快照（置顶列表 + 图标）必须进这两个组。 -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(APP_GROUP_SIDESTORE)</string>
+		<string>$(APP_GROUP_ALTSTORE)</string>
+	</array>
+</dict>
+</plist>

@@ -1124,6 +1124,9 @@ struct LCSourcesView: View {
     // 被用户收起的旧源也不在展开集里，会被误判为新源）。
     @State private var czfKnownSourceIDs: Set<URL> = []
     @State private var isManagingSources = false
+    // 3.8.722（F-1）：扫码添加源 sheet 开关——相机扫含源 JSON
+    // 链接的二维码，直接走现有 handleAddSource 加源。
+    @State private var czfShowQRScanner = false
     @State private var isBatchMode = false
     @State private var selectedIDs = Set<String>()
     // 源页网格模式（3.8.407）：默认 false=原来列表；列数/图标
@@ -1898,6 +1901,12 @@ struct LCSourcesView: View {
                         } label: {
                             Label("网格设置", systemImage: "slider.horizontal.3")
                         }
+                        // 3.8.722（F-1）：扫码添加源——“添加源”按钮旁加扫码
+                        // 按钮，相机扫含源 JSON 链接的二维码，直接走现有
+                        // handleAddSource 加源；扫码页在下面 sheet。
+                        Button("扫码", systemImage: "qrcode.viewfinder") {
+                            czfShowQRScanner = true
+                        }
                         Button("lc.sources.addSource".loc, systemImage: "plus") {
                             isManagingSources = true
                         }
@@ -2089,6 +2098,23 @@ struct LCSourcesView: View {
         }
         .sheet(isPresented: $isManagingSources) {
             czfManageSourcesSheet
+        }
+        // 3.8.722（F-1）：扫码添加源 sheet——扫到链接先关 sheet
+        // 再走 handleAddSource（与搜索行“添加为源”同款）；失败
+        // 进本页独立的 czfAddSourceError alert，不走父级
+        // errorMessage（sheet 盖着时父级 alert 会被 UIKit 静默丢弃）。
+        .sheet(isPresented: $czfShowQRScanner) {
+            CZFQRCodeScannerView(
+                onScanned: { scanned in
+                    czfShowQRScanner = false
+                    Task {
+                        if let error = await handleAddSource(scanned) {
+                            await MainActor.run { czfAddSourceError = error }
+                        }
+                    }
+                },
+                onCancel: { czfShowQRScanner = false }
+            )
         }
         // 本地 IPA 文件夹选择器（3.8.454）：文件夹区移到源页，
         // 选文件夹存在共用 CZFLocalIpaFolderStore；内嵌区直接

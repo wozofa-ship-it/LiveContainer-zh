@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- F-3：390 同款——版本写死在这里，不走 $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION)：本 target 构建设置里那俩值是陈旧的 1.0/1，解析出来就是 1，390 就是这么红的；LaunchAppExtension（L567-4）同款。CI bump（.github/workflows/build.yml）已把本文件纳入升版范围，下次升版自动改，不会留旧版。（注释里不写当前版本号，否则 bump 的 grep 计数会多算。） -->
+	<key>CFBundleShortVersionString</key>
+	<string>3.8.722</string>
+	<key>CFBundleVersion</key>
+	<string>3.8.722</string>
+	<!-- 小组件扩展点：WidgetKit 靠它识别这是一个小组件扩展。 -->
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.widgetkit-extension</string>
+	</dict>
+	<!-- 3.8.900（L578-C1）同款：GENERATE_INFOPLIST_FILE 已改 NO（project.pbxproj 本 target 两档），GEN=YES 时构建设置生成的版本（MARKETING_VERSION 1.0 / CURRENT_PROJECT_VERSION 1）会覆盖上面写死的版本键；下面 7 键是生成步骤原先带入、源 plist 里没有的，逐字抄 LaunchAppExtension 的源 plist——GEN=NO 后构建步骤不再补这五键，不写进来建成包会缺 CFBundleExecutable/CFBundleIdentifier，扩展加载失败。 -->
+	<key>CFBundleDisplayName</key>
+	<string>WidgetExtension</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>NSHumanReadableCopyright</key>
+	<string></string>
+</dict>
+</plist>

@@ -227,6 +227,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     @EnvironmentObject var downloadHelper: DownloadHelper
     @StateObject private var installUrlInput = InputHelper()
+    // 3.8.722（F-2）：剪贴板 IPA 直链横条——当前要提示的链接（nil
+    // = 不显示）；上次提示过的链接（同一链接不反复弹）；读不到
+    // 值时那次剪贴板的 changeCount（用户点了不允许粘贴时，剪贴
+    // 板没变就不反复读、反复弹系统粘贴提示）。
+    @State private var czfClipboardIpaLink: String?
+    @State private var czfLastClipboardIpaPrompt: String?
+    @State private var czfClipboardDeniedChangeCount: Int?
     
     @State private var jitLog = ""
     @StateObject private var jitAlert = YesNoHelper()
@@ -2930,6 +2937,48 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
     }
 
+    // 3.8.722（F-2）：剪贴板 IPA 直链横条——进页/回前台读一次剪贴板，
+    // 是 .ipa/.tipa 直链且与上次提示过的不同才出现（见
+    // czfCheckClipboardForIpaLink）；点行直接走 installFromUrl
+    // 安装，成功清掉横条；× 只关本次横条（同一链接不再反复弹）。
+    @ViewBuilder
+    private var czfClipboardIpaBanner: some View {
+        if let link = czfClipboardIpaLink {
+            HStack(spacing: 8) {
+                Button {
+                    Task {
+                        if await installFromUrl(urlStr: link) {
+                            await MainActor.run { czfClipboardIpaLink = nil }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.badge.arrow.down")
+                            .foregroundStyle(.blue)
+                        Text("安装剪贴板链接：\(czfClipboardIpaFileName(link))")
+                            .font(.footnote)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+                Button {
+                    czfClipboardIpaLink = nil
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(10)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal)
+        }
+    }
+
     // 把最大的块——ScrollView（含背景/onAppear/onChange）
     // 抽出来，body 只剩 NavigationView + 修饰符。只拆不改逻辑。
     @ViewBuilder
@@ -2939,6 +2988,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // 3.8.684（F3）：回到顶部锚点——点当前“App” Tab 即滚到这里。
             Color.clear.frame(height: 0).id("czfAppListTop")
             czfUpdatableStaleHint
+            czfClipboardIpaBanner
             // P0（3.8.655）/ 回归（3.8.665）：客场景 LC 分身
             //（LiveProcess 客进程，czfIsGuestScene）的 App 页跑在
             // 客进程的虚拟窗里（Decorated 窗），系统顶栏溢出菜单
@@ -3011,6 +3061,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // R-3：进页时从共用缓存恢复测速结果（VPN 页测完的
             // 毫秒数也能在盾牌菜单里显示）；内存表空着才恢复。
             czfRestorePingResultsFromCache()
+            // 3.8.722（F-2）：进页读一次剪贴板，是 IPA 直链就出顶部横条。
+            czfCheckClipboardForIpaLink()
+            // 3.8.722（F-3）：进页同步小组件快照（新装/更新/改名后
+            // 小组件的名字与图标跟着变，不用等下次固定切换）。
+            CZFWidgetSnapshot.sync(apps: sharedModel.apps + sharedModel.hiddenApps)
         }
         .onChange(of: czfBackgroundVersion) { _ in
             czfBackgroundImage = CZFAppBackground.loadImage()
@@ -3027,6 +3082,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // F1（3.8.635）：列表变了（冷启动扫描换模型/新装 App 追加）
             // 也刷签名剩余天数——装完即显示，不用等下次进页。
             czfRefreshSignatureExpiry()
+            // 3.8.722（F-3）：列表变了也同步小组件快照（新装 App
+            // 追加后置顶项的名字与图标即时对上）。
+            CZFWidgetSnapshot.sync(apps: sharedModel.apps + sharedModel.hiddenApps)
         }
         // 3.8.641（F2）：开关翻动即重跑过滤；坞表变化（窗口开关）也重跑，
         // 否则开着筛选时 App 退出后仍赖在列表里——订阅走下面后台挂的
@@ -3096,6 +3154,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 // F1（3.8.635）：回前台也刷签名剩余天数（重签后回来即更新）。
                 czfRefreshSignatureExpiry()
+                // 3.8.722（F-2）：切回前台也读一次剪贴板（在别处复制
+                // 链接后切回来，横条当场出现，不用重进 App 页）。
+                czfCheckClipboardForIpaLink()
             }
         }
         .onChange(of: topToolsExpanded) { expanded in
@@ -4478,15 +4539,27 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             signSuccess = false
         }
         
-        // we leave it unsigned even if signing failed
+        // 3.8.722（B-1）：签名真失败（signSuccess == false）按取消/
+        // 初始化失败同款处理：旧包搬回来再抛错，调用方弹错；不删
+        // .czf-old、不把模型换成新版——原来只弹错、不回滚不抛错
+        //（注释原文 we leave it unsigned even if signing failed），
+        // 函数正常返回、随后照常 copy 模型、成功尾部还删掉唯一
+        // 回滚副本，覆盖更新后新版打不开、旧版也丢了。
+        // 用户主动不签名（dontSign / LCDontSignApp / 无证书密码 /
+        // 32 位）在 patchExecAndSignIfNeed 里走
+        // completionHandler(YES, nil)，signSuccess 为 true，不进
+        // 这里；signSuccess == true 但带 signError 只是警告，原样
+        // 弹提示、继续安装。超时路在上面已把 signSuccess 置 false，
+        // 同款进失败分支。失败分支不在这里预弹 errorInfo——抛错后
+        // 调用方（installFromUrl 各路 catch）会弹一次，预弹就双弹窗。
+        if !signSuccess {
+            czfRestoreOldBackup()
+            throw signError?.loc ?? "签名失败，请重试"
+        }
         if let signError {
             // 3.8.560（L311-1）：errorInfo/errorShow 是 @State，回主线程写。
             await MainActor.run {
-                if signSuccess {
-                    errorInfo = "\("lc.appList.signSuccessWithError".loc)\n\n\(signError)"
-                } else {
-                    errorInfo = signError.loc
-                }
+                errorInfo = "\("lc.appList.signSuccessWithError".loc)\n\n\(signError)"
                 errorShow = true
             }
         }
@@ -4822,6 +4895,44 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             installInfoShow = true
         }
+    }
+
+    // 3.8.722（F-2）：剪贴板 IPA 直链一键安装——进页 onAppear 与
+    // 切回前台 scenePhase 各读一次（见两处调用点）。只读、不写
+    // 剪贴板。hasURLs/hasStrings 只是类型检查，不弹系统粘贴提示；
+    // 真读值（.url/.string）才可能弹提示：用户点了不允许时读回
+    // nil，记下当次 changeCount，剪贴板没变就不反复读、反复弹；
+    // 剪贴板一变（changeCount 变了）就重新读。直链口径：http(s)
+    // + 路径后缀 .ipa/.tipa（itms-services 是 plist 链接，不走这里）。
+    private func czfIsIpaDirectLink(_ s: String) -> Bool {
+        guard let url = URL(string: s), let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return false }
+        let ext = url.pathExtension.lowercased()
+        return ext == "ipa" || ext == "tipa"
+    }
+
+    private func czfClipboardIpaFileName(_ link: String) -> String {
+        URL(string: link)?.lastPathComponent ?? link
+    }
+
+    private func czfCheckClipboardForIpaLink() {
+        let pb = UIPasteboard.general
+        guard pb.hasURLs || pb.hasStrings else { return }
+        if let denied = czfClipboardDeniedChangeCount, denied == pb.changeCount { return }
+        var found: String?
+        if let url = pb.url, czfIsIpaDirectLink(url.absoluteString) {
+            found = url.absoluteString
+        } else if let s = pb.string?.trimmingCharacters(in: .whitespacesAndNewlines), czfIsIpaDirectLink(s) {
+            found = s
+        }
+        guard let found else {
+            czfClipboardDeniedChangeCount = pb.changeCount
+            return
+        }
+        czfClipboardDeniedChangeCount = nil
+        guard found != czfLastClipboardIpaPrompt else { return }
+        czfLastClipboardIpaPrompt = found
+        czfClipboardIpaLink = found
     }
 
     func startInstallFromUrl() async {

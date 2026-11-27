@@ -5855,8 +5855,15 @@ struct LCDataManagementView : View {
             if !files.isEmpty { await MainActor.run { onProgress?(0, files.count) } }
             for _ in 0..<maxSeconds {
                 remaining = remaining.filter { file in
-                    guard let status = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus else { return false }
-                    return status != .current
+                    // 3.8.722（B-3）：与 isFileDownloaded / czfEnsureFileDownloaded
+                    // 对齐——原来只认 .current，.downloaded 文件永远留在
+                    // remaining 里，每次恢复每文件夹白等满 120 秒、结尾误报
+                    // downloadIncomplete；.downloaded 且不在下载中即本地副本
+                    // 完整，视为下完。读不到状态按已下完处理（原来语义，不变）。
+                    guard let values = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey, .ubiquitousItemIsDownloadingKey]) else { return false }
+                    if values.ubiquitousItemDownloadingStatus == .current { return false }
+                    if values.ubiquitousItemDownloadingStatus == .downloaded && values.ubiquitousItemIsDownloading != true { return false }
+                    return true
                 }
                 if !files.isEmpty {
                     let done = files.count - remaining.count
@@ -7869,10 +7876,19 @@ struct LCDataManagementView : View {
     /// 已下载；iCloud 源按 ubiquitousItemDownloadingStatus 判，
     /// 读不到状态按已下载处理（与 waitForUbiquitousDownload 语义一致，
     /// 不卡住）。本函数只读元数据，不触发下载。
+    /// 3.8.722（B-3）：判据与安装路 czfEnsureFileDownloaded 对齐——
+    /// 原来只认 .current，.downloaded（本地副本完整，只是不是最新
+    /// 云端版）也被判未下载：两处 15 秒等待循环（自动/批量恢复）里
+    /// 第一个卡住的 manifest 就把共用预算烧光，后面所有外部备份
+    /// 文件夹全跳过；角标类只读调用点（backupScope/
+    /// backupKeychainHealth/czfDownloadedManifestInfo）上 .downloaded
+    /// 的本地副本本来就可读，Data(contentsOf:) 不会触发下载，语义
+    /// 仍成立。
     static func isFileDownloaded(_ url: URL, underExternal: Bool) -> Bool {
         guard underExternal else { return true }
-        guard let status = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus else { return true }
-        return status == .current
+        guard let values = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey, .ubiquitousItemIsDownloadingKey]) else { return true }
+        return values.ubiquitousItemDownloadingStatus == .current ||
+            (values.ubiquitousItemDownloadingStatus == .downloaded && values.ubiquitousItemIsDownloading != true)
     }
 
     /// v216：恢复前备份清单预览。单个 App 文件夹（有 manifest）

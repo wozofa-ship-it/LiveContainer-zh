@@ -377,10 +377,17 @@ class LCContainer : ObservableObject, Hashable {
         // 3.8.720（B-1）：-1 是“读不到”的哨兵值，不是合法组号——
         // 磁盘已有文件时绝不把 -1 写进去（会永久丢组号与登录态，
         // 原 plist 还被内存默认值覆盖）；拦下并置写失败标记，
-        // 调用方按写失败报错。新建容器（无文件）不走这里；
-        // 合法调用方传的都是已分配的组号（czfFreeKeychainGroup
-        // 永不回 -1，见 LCAppModel:847；升级路写 0，不受影响）。
-        if keychainGroupId == -1 && FileManager.default.fileExists(atPath: infoDictUrl.path) {
+        // 调用方按写失败报错。
+        // 3.8.722（B-2）：拦截改无条件——原来只拦“文件已存在”时，
+        // 文件不存在（容器 plist 缺失、infoDict 读不到回 -1）时
+        // 直接放行，把 -1 写进新建的 plist；写死后文件已存在且含
+        // -1，下次保存反被守卫拒写，配置锁死；-1 组也不在授权表内，
+        // SecItemAdd 报 -34018。文件不存在也不写 -1，直接置写失败
+        // 标记返回，调用方（容器页 saveContainer 路）凭标记报错并
+        // 把开关拨回旧值。合法调用方传的都是已分配的组号
+        //（czfFreeKeychainGroup / czfRestoreKeychainGroup 永不回
+        // -1，升级路写 0），不受影响。
+        if keychainGroupId == -1 {
             print("[CZF] 容器 plist 拒绝写入 keychainGroupId=-1：\(infoDictUrl.path)")
             czfPlistWriteFailed = true
             return
