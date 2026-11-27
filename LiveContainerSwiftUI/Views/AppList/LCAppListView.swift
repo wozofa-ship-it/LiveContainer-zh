@@ -233,6 +233,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 板没变就不反复读、反复弹系统粘贴提示）。
     @State private var czfClipboardIpaLink: String?
     @State private var czfLastClipboardIpaPrompt: String?
+    @State private var czfLastClipboardIpaPromptChangeCount: Int?
     @State private var czfClipboardDeniedChangeCount: Int?
     
     @State private var jitLog = ""
@@ -2948,7 +2949,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Button {
                     Task {
                         if await installFromUrl(urlStr: link) {
-                            await MainActor.run { czfClipboardIpaLink = nil }
+                            await MainActor.run { czfClipboardIpaLink = nil; czfLastClipboardIpaPrompt = nil; czfLastClipboardIpaPromptChangeCount = nil }
                         }
                     }
                 } label: {
@@ -4930,8 +4931,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         czfClipboardDeniedChangeCount = nil
-        guard found != czfLastClipboardIpaPrompt else { return }
+        guard found != czfLastClipboardIpaPrompt || pb.changeCount != czfLastClipboardIpaPromptChangeCount else { return }
         czfLastClipboardIpaPrompt = found
+        czfLastClipboardIpaPromptChangeCount = pb.changeCount
         czfClipboardIpaLink = found
     }
 

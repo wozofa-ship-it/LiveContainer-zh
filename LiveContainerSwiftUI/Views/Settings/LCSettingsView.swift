@@ -424,13 +424,20 @@ struct LCSettingsView: View {
     // 3.8.690（F3）：设置搜索——按查询关键字过滤各区显示；空查询
     // 全显。匹配口径与插件页同款（可见文案子串，大小写不敏感）；
     // 关键字走各区可见文案的硬编码中文（段名/行文案的中文值已逐
-    // 项对过 xcstrings），0 新 key。只做显隐过滤，各区内容一字
-    // 不动（keepAliveSection 尤其只显隐，保活默认与档位不动，
-    // H-1 等用户定）。
+    // 项对过 xcstrings），3.8.724（F-2）补英文别名（仍硬编码），
+    // 0 新 key。只做显隐过滤，各区内容一字不动（keepAliveSection
+    // 尤其只显隐，保活默认与档位不动，H-1 等用户定）。
+    // 3.8.724（F-2）：多词分词 + 英文别名 + WiFi 归一——查询按空
+    // 白分词、多词 AND 匹配（单 token 时退化为现状，无回归）；
+    // 查询侧与关键词侧都转小写并去掉连字符（WiFi ≡ Wi-Fi）；
+    // 英文别名见下面两处关键词表（同步改，一字不差）。0 新 key。
     private func czfSettingsSectionMatches(_ keywords: String) -> Bool {
         let q = czfSearchText.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return true }
-        return keywords.localizedCaseInsensitiveContains(q)
+        let normalizedKeywords = keywords.lowercased().replacingOccurrences(of: "-", with: "")
+        return q.split(whereSeparator: { $0.isWhitespace }).allSatisfy { token in
+            normalizedKeywords.contains(token.lowercased().replacingOccurrences(of: "-", with: ""))
+        }
     }
 
     // 3.8.694（B1）：搜不到时空态——查询非空且 12 区全不匹配时，
@@ -444,12 +451,12 @@ struct LCSettingsView: View {
         return !czfSettingsSectionMatches("免JIT模式 证书 导入证书 删除证书 诊断")
             && !czfSettingsSectionMatches("多LiveContainer 多开 分身 诊断")
             && !czfSettingsSectionMatches("JIT 启用工具 地址 UDID StikDebug SideJITServer")
-            && !czfSettingsSectionMatches("模拟器 32位")
-            && !czfSettingsSectionMatches("外观 界面 动态颜色 深色模式图标")
-            && !czfSettingsSectionMatches("下载 仅Wi-Fi下载 自动安装 Wi-Fi")
+            && !czfSettingsSectionMatches("模拟器 32位 emulator")
+            && !czfSettingsSectionMatches("外观 界面 动态颜色 深色模式图标 dark mode appearance")
+            && !czfSettingsSectionMatches("下载 仅Wi-Fi下载 自动安装 Wi-Fi WiFi download")
             && !czfSettingsSectionMatches("杂项设置 多任务 更多设置 快捷图标 边框 静默切换App 打开链接 严格隐藏模式 不签名新App")
-            && !czfSettingsSectionMatches("通知 清除通知 通知权限 证书到期提醒 首档提前提醒")
-            && !czfSettingsSectionMatches("存储管理 数据管理 存储 数据 备份 恢复 定时备份 选择备份")
+            && !czfSettingsSectionMatches("通知 清除通知 通知权限 证书到期提醒 首档提前提醒 notification")
+            && !czfSettingsSectionMatches("存储管理 数据管理 存储 数据 备份 恢复 定时备份 选择备份 backup storage")
             && !czfSettingsSectionMatches("后台保活 保活 白名单")
             && !czfSettingsSectionMatches("关于 检查更新 更新 SideInstaller Seal 复制安装链接")
             && !czfSettingsSectionMatches("开发者模式 注入 JIT 调试器 证书 导出")
@@ -462,12 +469,12 @@ struct LCSettingsView: View {
         if czfSettingsSectionMatches("免JIT模式 证书 导入证书 删除证书 诊断") { jitLessSection }
         if czfSettingsSectionMatches("多LiveContainer 多开 分身 诊断") { multiLCSection }
         if czfSettingsSectionMatches("JIT 启用工具 地址 UDID StikDebug SideJITServer") { jitSection }
-        if czfSettingsSectionMatches("模拟器 32位") { emulatorSection }
-        if czfSettingsSectionMatches("外观 界面 动态颜色 深色模式图标") { interfaceSection }
-        if czfSettingsSectionMatches("下载 仅Wi-Fi下载 自动安装 Wi-Fi") { downloadSection }
+        if czfSettingsSectionMatches("模拟器 32位 emulator") { emulatorSection }
+        if czfSettingsSectionMatches("外观 界面 动态颜色 深色模式图标 dark mode appearance") { interfaceSection }
+        if czfSettingsSectionMatches("下载 仅Wi-Fi下载 自动安装 Wi-Fi WiFi download") { downloadSection }
         if czfSettingsSectionMatches("杂项设置 多任务 更多设置 快捷图标 边框 静默切换App 打开链接 严格隐藏模式 不签名新App") { miscSection }
-        if czfSettingsSectionMatches("通知 清除通知 通知权限 证书到期提醒 首档提前提醒") { notificationSection }
-        if czfSettingsSectionMatches("存储管理 数据管理 存储 数据 备份 恢复 定时备份 选择备份") { storageSection }
+        if czfSettingsSectionMatches("通知 清除通知 通知权限 证书到期提醒 首档提前提醒 notification") { notificationSection }
+        if czfSettingsSectionMatches("存储管理 数据管理 存储 数据 备份 恢复 定时备份 选择备份 backup storage") { storageSection }
         if czfSettingsSectionMatches("后台保活 保活 白名单") { keepAliveSection }
         if czfSettingsSectionMatches("关于 检查更新 更新 SideInstaller Seal 复制安装链接") { aboutSection }
         if czfSettingsSectionMatches("开发者模式 注入 JIT 调试器 证书 导出") { developerSection }

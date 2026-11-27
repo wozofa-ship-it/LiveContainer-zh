@@ -347,7 +347,10 @@ final class AltStoreSourcesViewModel: ObservableObject {
     /// alert 的“重试失败的源”按钮用；成功/失败仍按单源规则
     /// 写 error，不弹新汇总。
     func czfRetryFailedSources() async {
-        let failedURLs = sources.filter { $0.error != nil }.map { $0.url }
+        // 3.8.724（B-1）：重试只刷未停用的失败源——与 :324 刷新
+        // 跳过停用源同款口径；refreshSource 本身不动（单源手动
+        // 刷新不拦，3.8.658 注释保留）。
+        let failedURLs = sources.filter { $0.error != nil && !disabledSourceURLs.contains($0.url.absoluteString) }.map { $0.url }
         for url in failedURLs {
             await refreshSource(url: url)
         }
@@ -1441,50 +1444,55 @@ struct LCSourcesView: View {
                         // TwoYi 安卓系统（3.8.628）：只在“源”分段出现
                         // （不在“文件夹”分段）、网格与列表两模式都可见、
                         // 与每源一组平级；源为空的空态分支里不出现。
-                        CZFTwoYiSection(
-                            installed: czfTwoYiApp != nil,
-                            isDownloading: czfTwoYiDownloading,
-                            // 3.8.690（B2）：还在不在队里直接认共享排队名册
-                            // czfQueuedDownloads——排队名是 czfDisplayDownloadName
-                            // （LCDownloadView.swift:851），TwoYi 文件名 27 字
-                            // 节、无 UUID 前缀，显示名就是 lastPathComponent 原样。
-                            // 3.8.714（F-2）：认有效下载地址的文件名——API 查到
-                            // 新版后排队名是新包名，静态地址的名就认不上了。
-                            isQueued: downloadHelper.czfQueuedDownloads.contains(czfTwoYiEffectiveDownloadURL.lastPathComponent),
-                            downloadProgress: downloadHelper.downloadProgress,
-                            // 3.8.672（F-1）：下载排队——TwoYi 按钮只在
-                            // 自己下载时禁用，别路下载中也能点、点下去
-                            // 进排队（:2144 守门已删，按钮再拦就白改了）；
-                            // 重复点按仍由 czfTwoYiDownloading 拦。
-                            installDisabled: czfTwoYiDownloading,
-                            onInstall: { czfInstallTwoYi() },
-                            onRemove: { czfTwoYiDeleteConfirm = true },
-                            // 3.8.692（F3）：打开 TwoYi——照抄行上打开块的
-                            // 骨架（锁守卫 + runApp + 失败写父级
-                            // errorMessage，裸 Task、回主线程写）；
-                            // 只有一个 guest 实例，无多实例选择器。
-                            onOpen: {
-                                guard let app = czfTwoYiApp else { return }
-                                Task {
-                                    guard await app.czfAuthenticateIfLocked() else { return }
-                                    do {
-                                        try await app.runApp()
-                                    } catch {
-                                        await MainActor.run { errorMessage = error.localizedDescription }
+                        // 3.8.724（F-3）：搜索零结果时隐藏——搜不到 App
+                        // 时卡片占位又无意义；搜清后重现，onAppear 再跑
+                        // 更新检查（30 分钟节流在内，不丢不重复查）。
+                        if !(isFiltering && totalFilteredAppCount == 0) {
+                            CZFTwoYiSection(
+                                installed: czfTwoYiApp != nil,
+                                isDownloading: czfTwoYiDownloading,
+                                // 3.8.690（B2）：还在不在队里直接认共享排队名册
+                                // czfQueuedDownloads——排队名是 czfDisplayDownloadName
+                                // （LCDownloadView.swift:851），TwoYi 文件名 27 字
+                                // 节、无 UUID 前缀，显示名就是 lastPathComponent 原样。
+                                // 3.8.714（F-2）：认有效下载地址的文件名——API 查到
+                                // 新版后排队名是新包名，静态地址的名就认不上了。
+                                isQueued: downloadHelper.czfQueuedDownloads.contains(czfTwoYiEffectiveDownloadURL.lastPathComponent),
+                                downloadProgress: downloadHelper.downloadProgress,
+                                // 3.8.672（F-1）：下载排队——TwoYi 按钮只在
+                                // 自己下载时禁用，别路下载中也能点、点下去
+                                // 进排队（:2144 守门已删，按钮再拦就白改了）；
+                                // 重复点按仍由 czfTwoYiDownloading 拦。
+                                installDisabled: czfTwoYiDownloading,
+                                onInstall: { czfInstallTwoYi() },
+                                onRemove: { czfTwoYiDeleteConfirm = true },
+                                // 3.8.692（F3）：打开 TwoYi——照抄行上打开块的
+                                // 骨架（锁守卫 + runApp + 失败写父级
+                                // errorMessage，裸 Task、回主线程写）；
+                                // 只有一个 guest 实例，无多实例选择器。
+                                onOpen: {
+                                    guard let app = czfTwoYiApp else { return }
+                                    Task {
+                                        guard await app.czfAuthenticateIfLocked() else { return }
+                                        do {
+                                            try await app.runApp()
+                                        } catch {
+                                            await MainActor.run { errorMessage = error.localizedDescription }
+                                        }
                                     }
-                                }
-                            },
-                            // 3.8.714（F-2）：有新版时显“有新版：x.y.z (build)”
-                            // + “更新”钮（与安装同路，已指最新托管地址）；
-                            // 无新版传 nil，section 显“已安装”。
-                            updateText: czfTwoYiUpdateText,
-                            onUpdate: { czfInstallTwoYi() },
-                            // 3.8.714（F-2 补）：卡片常显已装版本 + 动态包大小。
-                            installedStatusText: czfTwoYiInstalledStatusText,
-                            downloadSizeText: czfTwoYiDownloadSizeText
-                        )
-                        .onAppear { czfCheckTwoYiUpdateIfNeeded() }
-                        .padding(.horizontal)
+                                },
+                                // 3.8.714（F-2）：有新版时显“有新版：x.y.z (build)”
+                                // + “更新”钮（与安装同路，已指最新托管地址）；
+                                // 无新版传 nil，section 显“已安装”。
+                                updateText: czfTwoYiUpdateText,
+                                onUpdate: { czfInstallTwoYi() },
+                                // 3.8.714（F-2 补）：卡片常显已装版本 + 动态包大小。
+                                installedStatusText: czfTwoYiInstalledStatusText,
+                                downloadSizeText: czfTwoYiDownloadSizeText
+                            )
+                            .onAppear { czfCheckTwoYiUpdateIfNeeded() }
+                            .padding(.horizontal)
+                        }
                         if czfSourceGridMode {
                             CZFSourceGridView(
                                 items: viewModel.sources,
@@ -1580,9 +1588,25 @@ struct LCSourcesView: View {
                         // “没有 App”，等加载完、计数仍为 0 时再显示。
                         if totalFilteredAppCount == 0 && !viewModel.sources.contains(where: { $0.isLoading }) {
                             VStack(spacing: 8) {
-                                Text("lc.sources.section.noApps".loc)
-                                    .foregroundStyle(.gray)
-                                    .multilineTextAlignment(.center)
+                                // 3.8.724（F-3）：搜索零结果换搜索专用空态——
+                                // 原文案“此源中无App。”搜不到时是错的；带查
+                                // 询词 + “清除搜索”（清 searchContext.query，
+                                // :1415 同款先例；debouncedQuery 0.2 秒后跟
+                                // 随归空，isFiltering 翻回 false、空态消失）。
+                                // 硬编码中文，App 页“筛选条件下没有 App”同款
+                                // 先例，0 新 L() key。
+                                if isFiltering {
+                                    Text("没有找到与“\(searchContext.debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines))”匹配的 App")
+                                        .foregroundStyle(.gray)
+                                        .multilineTextAlignment(.center)
+                                    Button("清除搜索") {
+                                        searchContext.query = ""
+                                    }
+                                } else {
+                                    Text("lc.sources.section.noApps".loc)
+                                        .foregroundStyle(.gray)
+                                        .multilineTextAlignment(.center)
+                                }
                             }
                             .frame(maxWidth: .infinity)
                             .frame(minHeight: 160, alignment: .center)
@@ -1783,7 +1807,11 @@ struct LCSourcesView: View {
             let czfWasRefreshing = viewModel.isRefreshingAll
             let czfSucceeded = await viewModel.refreshAllSources()
             guard !czfWasRefreshing else { return czfSucceeded }
-            let failed = viewModel.sources.filter { $0.error != nil }
+            // 3.8.724（B-1）：停用源不进失败汇总——停用源跳过刷新
+            //（:324），旧 error 永久残留，原来每次汇总都误报它；
+            // 全是停用源失败时汇总为空、不弹 alert。disabledSourceURLs
+            // 是 private(set)，视图侧可读（:2177 onChange 同款）。
+            let failed = viewModel.sources.filter { $0.error != nil && !viewModel.disabledSourceURLs.contains($0.url.absoluteString) }
             guard !failed.isEmpty else { return czfSucceeded }
             czfFailedSourceURLs = failed.map { $0.url }
             errorMessage = "\(failed.count) 个源刷新失败：\(failed.map { $0.displayName }.joined(separator: "、"))"

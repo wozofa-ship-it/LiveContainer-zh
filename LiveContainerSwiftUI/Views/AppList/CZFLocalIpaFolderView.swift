@@ -971,7 +971,15 @@ struct CZFInlineIpaFolderGrid: View {
     private var czfSortedItems: [CZFLocalIpaItem] {
         switch czfSort {
         case .name:
-            return model.items
+            // 3.8.724（F-1）：渲染层按当前 displayName 排（详情读回后
+            // 是 Info.plist 真名，未读详情时 displayName 即文件名，
+            // 天然退化为文件名序）；文件名作平局 tiebreak 保稳定。
+            // model.items 本身不动，仍保持文件名序。
+            return model.items.sorted {
+                let byName = $0.displayName.localizedStandardCompare($1.displayName)
+                if byName != .orderedSame { return byName == .orderedAscending }
+                return $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending
+            }
         case .size:
             return model.items.sorted { $0.fileSize > $1.fileSize }
         case .recent:
@@ -1342,7 +1350,10 @@ func czfDuplicateExtraGroups(items: [CZFLocalIpaItem]) -> [[CZFLocalIpaItem]] {
     var grouped: [String: [CZFLocalIpaItem]] = [:]
     for item in items {
         guard let bid = item.bundleIdentifier, !bid.isEmpty else { continue }
-        let key = "\(bid)\n\(item.version ?? "")\n\(item.build ?? "")"
+        // 3.8.724（B-2）：version 或 build 任一读不到（nil）的不参与
+        // 分组——版本未知的不算重复，缺失不再折成 "" 被当成相同。
+        guard let version = item.version, let build = item.build else { continue }
+        let key = "\(bid)\n\(version)\n\(build)"
         grouped[key, default: []].append(item)
     }
     return grouped.values.compactMap { group in
