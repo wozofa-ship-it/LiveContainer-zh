@@ -34250,7 +34250,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Install the Android system on demand (about 609 MB download). Other downloads wait while it downloads."
+            "value": "Install the Android system on demand (about %@ download). Other downloads wait while it downloads."
           }
         },
         "es": {
@@ -34322,13 +34322,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "按需下载安装安卓系统（约 609 MB），下载期间其他下载会排队等待。"
+            "value": "按需下载安装安卓系统（约 %@），下载期间其他下载会排队等待。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "按需下載安裝安卓系統（約 609 MB），下載期間其他下載會排隊等待。"
+            "value": "按需下載安裝安卓系統（約 %@），下載期間其他下載會排隊等待。"
           }
         }
       }

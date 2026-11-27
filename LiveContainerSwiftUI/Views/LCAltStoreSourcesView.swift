@@ -1458,7 +1458,10 @@ struct LCSourcesView: View {
                             // + “更新”钮（与安装同路，已指最新托管地址）；
                             // 无新版传 nil，section 显“已安装”。
                             updateText: czfTwoYiUpdateText,
-                            onUpdate: { czfInstallTwoYi() }
+                            onUpdate: { czfInstallTwoYi() },
+                            // 3.8.714（F-2 补）：卡片常显已装版本 + 动态包大小。
+                            installedStatusText: czfTwoYiInstalledStatusText,
+                            downloadSizeText: czfTwoYiDownloadSizeText
                         )
                         .onAppear { czfCheckTwoYiUpdateIfNeeded() }
                         .padding(.horizontal)
@@ -2753,6 +2756,34 @@ struct LCSourcesView: View {
         czfTwoYiUpdateAvailable ? "有新版：\(czfTwoYiLatestVersionText)" : nil
     }
 
+    /// 3.8.714（F-2 补）：实际要下的包体积——API 查到的资产体积优先，
+    /// 没查到用静态值；空间预检与卡片文案共用这一份。
+    private var czfTwoYiEffectiveDownloadSize: Int64 {
+        if let latestSize = czfTwoYiLatest?.size, latestSize > 0 {
+            return latestSize
+        }
+        return CZFTwoYi.downloadSize
+    }
+
+    /// 3.8.714（F-2 补）：包体积文案，如“613 MB”——ByteCountFormatter
+    /// file 口径（与空间预检的报错文案同款）；供卡片 desc 的 %@ 占位。
+    private var czfTwoYiDownloadSizeText: String {
+        let fmt = ByteCountFormatter()
+        fmt.countStyle = .file
+        return fmt.string(fromByteCount: czfTwoYiEffectiveDownloadSize)
+    }
+
+    /// 3.8.714（F-2 补）：已装状态行，如“已安装 1.1.0 (932)”——已装才
+    /// 有值；build 缺省 "0" 时只显版本号（与搜索 build 匹配口径同款）。
+    private var czfTwoYiInstalledStatusText: String? {
+        guard let app = czfTwoYiApp else { return nil }
+        let build = app.appInfo.buildVersion() ?? ""
+        if build.isEmpty || build == "0" {
+            return "\("lc.common.installed".loc) \(app.version)"
+        }
+        return "\("lc.common.installed".loc) \(app.version) (\(build))"
+    }
+
     // 3.8.714（F-2）：上面插进来的 czfCheckTwoYiUpdateIfNeeded 一组
     // 占了原来贴在 czfInstallTwoYi 头上的 @MainActor（属性只认紧跟
     // 的那个声明，见 AGENTS.md L157-1 教训）——这里显式补回来，
@@ -2762,15 +2793,9 @@ struct LCSourcesView: View {
         // 3.8.672（F-1）：下载排队——TwoYi 同款守门改入队：正在
         // 下载时不再顶回去（删掉上面的 isDownloading 守门），
         // 共享 DownloadHelper 的排队名册里等锁，拿到锁自动开始。
-        // 3.8.714（F-2）：空间预检按实际要下的包算——API 查到的资产
-        // 体积优先（托管换版后体积变了）；没查到回落静态值。
-        let downloadSize: Int64
-        if let latestSize = czfTwoYiLatest?.size, latestSize > 0 {
-            downloadSize = latestSize
-        } else {
-            downloadSize = CZFTwoYi.downloadSize
-        }
-        let need = downloadSize * 3
+        // 3.8.714（F-2 补）：空间预检按实际要下的包算（与卡片文案
+        // 共用 czfTwoYiEffectiveDownloadSize）。
+        let need = czfTwoYiEffectiveDownloadSize * 3
         if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let freeSize = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
            freeSize < need {
@@ -3499,6 +3524,10 @@ private struct CZFTwoYiSection: View {
     // + “更新”按钮回调（与安装同路，父级传 czfInstallTwoYi）。
     var updateText: String?
     var onUpdate: () -> Void
+    // 3.8.714（F-2 补）：已装状态行（如“已安装 1.1.0 (932)”，未装为
+    // nil）+ 动态包体积文案（如“613 MB”，供 desc 的 %@ 占位）。
+    var installedStatusText: String?
+    var downloadSizeText: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3523,16 +3552,20 @@ private struct CZFTwoYiSection: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                } else if let updateText {
-                    // 3.8.714（F-2）：已装且托管有新版——显“有新版：x.y.z
-                    // (build)”；下面按钮行并排“打开 + 更新 + 删除”。
-                    Text(updateText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 } else if installed {
-                    Text("lc.common.installed".loc)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    // 3.8.714（F-2 补）：已装版本常显——头行“已安装 1.1.0
+                    // (932)”；有新版时第二行再显“有新版：1.2.6 (940)”；
+                    // 下面按钮行并排“打开 + 更新 + 删除”。
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(installedStatusText ?? "lc.common.installed".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if let updateText {
+                            Text(updateText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 } else {
                     Text("lc.twoyi.notInstalled".loc)
                         .font(.footnote)
@@ -3540,7 +3573,10 @@ private struct CZFTwoYiSection: View {
                 }
             }
             VStack(alignment: .leading, spacing: 8) {
-                Text("lc.twoyi.desc".loc)
+                // 3.8.714（F-2 补）：包大小动态读——desc 里“约 609 MB”是
+                // 1.1.0 的数；zh/en/zh-Hant 已改 %@ 占位，其余语言无占位、
+                // 参数忽略不崩。大小取 API 资产体积（无则静态值）。
+                Text("lc.twoyi.desc".localizeWithFormat(downloadSizeText))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 HStack {
