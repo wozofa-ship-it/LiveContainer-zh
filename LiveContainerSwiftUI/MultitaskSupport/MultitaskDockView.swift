@@ -426,25 +426,46 @@ extension Notification.Name {
         setupGlobalSwipeRecognizer()
     }
     
-    /// 把窗口宿主视图挂到根视图的第一个子视图上（挂载目标与
-    /// 原实现一致）。原实现是同步三重强解包
-    /// keyWindow!.rootViewController!.view.subviews.first!：
-    /// 管理器以前只在打开第一个游客 App 时才建、那时窗口层级
-    /// 早已齐全；改为 LiveContainer 主界面出现时提前建后
-    /// （任意位置调面板），init 发生在首帧渲染求值中，层级
-    /// 还没建好，强解包当场陷阱闪退（2026-10-23 21:16 日志
-    /// 符号化实证：LCTabView.body → shared 初始化 → 本 init）。
-    /// 改成就绪才挂、没就绪 0.1 秒重试（上限 50 次约 5 秒），
-    /// 齐了仍挂同一位置，行为与原来一致
+    /// 3.8.710（P0 回归定罪）：窗口宿主视图直接挂 keyWindow、位于主 UI 之上。
+    /// 原来挂在 keyWindow.rootViewController.view.subviews.first——3.8.684
+    /// 加了 Tab 栏重点击感知桥（.background 的 CZFTabBarTapBridgeView）后，
+    /// subviews.first 变成了桥的背景视图：ZORDER 实测桥在 UIHostingView 里排
+    /// [0/2]、主列表 [1/2] 盖在它上面，宿主窗被埋在主列表下面。窗口建得出、
+    /// 看得见（hid=0/a=1），点按却全落在主列表上（12:40 日志：30 条 COVER
+    /// 全是 hit=main/panel、0 条 hit=window；HIT 链全是主列表 scroll view、
+    /// hostViewInChain=0；3.8.681 无桥时用户验过“好了”，桥进 3.8.684 后坏）。
+    /// 改挂 keyWindow 直接子视图（与坞面板 ensurePanelOverlay 同款路子）：
+    /// 覆盖层（面板/源面板）开着时插到最下面那个覆盖元素之下、免得盖住面板；
+    /// 都没开时搬到最前。空区穿透靠 VirtualWindowsHostView 自身的 pointInside
+    ///（子窗外返 NO）。没就绪 0.1 秒重试（上限 50 次约 5 秒），沿用旧逻辑。
     private func attachWindowHostingViewWhenReady() {
-        if let hostView = keyWindow?.rootViewController?.view.subviews.first {
-            hostView.addSubview(self.windowHostingView)
+        guard let window = keyWindow else {
+            windowAttachRetries += 1
+            guard windowAttachRetries <= 50 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.attachWindowHostingViewWhenReady()
+            }
             return
         }
-        windowAttachRetries += 1
-        guard windowAttachRetries <= 50 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.attachWindowHostingViewWhenReady()
+        if windowHostingView.superview !== window {
+            if let backdrop = czfPanelOverlayBackdrop, !backdrop.isHidden, backdrop.superview === window {
+                window.insertSubview(windowHostingView, belowSubview: backdrop)
+            } else if let panelView = czfPanelOverlayHost?.view, !panelView.isHidden, panelView.superview === window {
+                window.insertSubview(windowHostingView, belowSubview: panelView)
+            } else if let srcBackdrop = czfSourcesOverlayBackdrop, !srcBackdrop.isHidden, srcBackdrop.superview === window {
+                window.insertSubview(windowHostingView, belowSubview: srcBackdrop)
+            } else if let srcView = czfSourcesOverlayHost?.view, !srcView.isHidden, srcView.superview === window {
+                window.insertSubview(windowHostingView, belowSubview: srcView)
+            } else {
+                window.addSubview(windowHostingView)
+            }
+        }
+        // 覆盖层没开着时搬到最前（主 UI 之上）；开着时不动顺序（覆盖层在上）。
+        let anyOverlayVisible = [czfPanelOverlayHost?.view, czfSourcesOverlayHost?.view]
+            .compactMap { $0 }
+            .contains { !$0.isHidden && $0.superview === window }
+        if !anyOverlayVisible {
+            window.bringSubviewToFront(windowHostingView)
         }
     }
 
