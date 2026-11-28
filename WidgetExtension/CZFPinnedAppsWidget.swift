@@ -240,5 +240,7 @@ struct CZFPinnedAppsWidget: Widget {
 struct CZFPinnedAppsWidgetBundle: WidgetBundle {
     var body: some Widget {
         CZFPinnedAppsWidget()
+        // 3.8.732（F-3）：第二种小组件——签名快到期，kind 与置顶的不同。
+        CZFExpiryWidget()
     }
 }

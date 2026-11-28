@@ -87,4 +87,35 @@ enum CZFWidgetSnapshot {
         // 部署目标 iOS 15，WidgetCenter（iOS 14+）恒可用，无需 #available。
         WidgetCenter.shared.reloadAllTimelines()
     }
+
+    /// 3.8.732（F-3）：签名快到期快照文件名（App Group 根目录下）。
+    static let expiryFileName = "CZFWidgetExpiry.json"
+
+    /// 快照里的一个快到期签名（字段与扩展侧 CZFWidgetExpiryEntry 一一对应）。
+    struct ExpiryEntry: Codable {
+        /// 显示名。
+        var name: String
+        /// 剩余天数（负数=已过期）。
+        var daysLeft: Int
+        /// 到期日短串（如“12月2日”，CZFSignatureExpiry.dateText 同款）。
+        var dateText: String
+    }
+
+    /// 签名快到期同步：取已按到期日排好序的 loaded 前 4 项写盘，
+    /// 写完调 WidgetCenter 刷新时间线。只做 JSON 编码 + 原子写盘，
+    /// 不读盘、不自己扫 mobileprovision（loadAll 是后台读盘活，
+    /// 调用方 czfRefreshSignatureExpiry 已算好 loaded 数组传进来；
+    /// sync() 是主线程调的，里面调 loadAll 会堵界面）。
+    /// loaded 为空时写空数组（小组件显示空态，旧快照不残留）。
+    /// dateText 读主线程专用的静态格式器——调用方在 MainActor.run
+    /// 写回块里调（主线程），安全。
+    static func syncExpiry(items: [CZFSignatureExpiry]) {
+        guard let groupURL = appGroupURL() else { return }
+        let entries = items.prefix(4).map { ExpiryEntry(name: $0.name, daysLeft: $0.daysLeft, dateText: $0.dateText) }
+        let url = groupURL.appendingPathComponent(expiryFileName)
+        if let data = try? JSONEncoder().encode(entries) {
+            try? data.write(to: url, options: .atomic)
+        }
+        WidgetCenter.shared.reloadAllTimelines()
+    }
 }

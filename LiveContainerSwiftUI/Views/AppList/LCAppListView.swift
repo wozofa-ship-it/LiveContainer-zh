@@ -318,14 +318,22 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 判据 appInfo.isLocked（网格锁定按钮同款读法）；与五现有开关
     // 同款 @State（不持久化），iOS 15 可用。
     @State private var czfLockedOnly = false
+    // 3.8.732（F-1）：仅从未启动过筛选——打开后列表只显示
+    // lastLaunched 为 nil（从未启动过）的 App；判据与按启动
+    // 时间排序同款（LCAppSortManager:515-524，nil 沉底）；
+    // 与六现有开关同款 @State（不持久化），iOS 15 可用。
+    @State private var czfNeverLaunchedOnly = false
     // 3.8.714（F-3）：装了多个实例的 Bundle ID 集——仅分身筛选的判据；
     // 可见区与隐藏区两处过滤共用同一份（分身常一个在明区一个在隐藏区）。
-    // 与安装路 sameBundleIdApp 同款口径：Bundle ID 精确相等；空 ID 不计。
+    // 3.8.732（B-1）：计数键走归一 Bundle ID（czfNormalizedBundleID，
+    // 去 10 位队尾段）：个人 ID 签名把 Bundle ID 改写成
+    // `原ID.团队ID`，两队签的同款分身精确比对永远不等、筛不出来；
+    // 空 ID 仍不计。
     private var czfDuplicatedBundleIDs: Set<String> {
         var counts: [String: Int] = [:]
         for app in sharedModel.apps + sharedModel.hiddenApps {
             guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { continue }
-            counts[bid, default: 0] += 1
+            counts[czfNormalizedBundleID(bid), default: 0] += 1
         }
         return Set(counts.filter { $0.value > 1 }.keys)
     }
@@ -851,24 +859,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 唯一红字，LCAppListView.swift:718）。三个开关/按钮（仅运行中/
     // 仅可更新/关闭坞内全部窗口）挪到这里，主 builder 里只占一个分量，
     // 内容一字不动；builder 这一层一个 if 都不留（3.8.334 同款）。
-    // 3.8.728（B-1）：六个筛选开关的可见态——开着的图标染
+    // 3.8.728（B-1）：七个筛选开关的可见态——开着的图标染
     // accent 色、关着的 .secondary（高亮，二选一取高亮；仅无
-    // 备份/仅快过期/仅分身/仅锁定的静态图标不动，不做 fill/
+    // 备份/仅快过期/仅分身/仅锁定/仅从未启动过的静态图标不动，不做 fill/
     // plain 两态；仅运行中/仅可更新的 fill 两态原样保留，
     // tint 是额外的一层态）。先例：vpnShieldMenu 的绿/
     // .secondary 两态、行内面板的 accent checkmark。
     @ToolbarContentBuilder
     private var czfRunningTools: some ToolbarContent {
-        // 3.8.728（B-1）：显示全部——六个筛选开关（仅运行中/
-        // 仅可更新/仅无备份/仅快过期/仅分身/仅锁定）各是独立
+        // 3.8.728（B-1）：显示全部——七个筛选开关（仅运行中/
+        // 仅可更新/仅无备份/仅快过期/仅分身/仅锁定/仅从未启动过）各是独立
         // Bool，点一下只翻自己，之前没有一键回全部的入口
         //（用户 2026-11-27 亲报“又是bug”：筛了分身就回不去）。
-        // 只在任一筛选开着时出现；点一下六个全清，.onChange
+        // 只在任一筛选开着时出现；点一下七个全清，.onChange
         // 各自重跑过滤（与逐个关掉同款）；不碰筛选判据本身。
-        // 本组加这一项后 9 个 ToolbarItem，仍在 buildBlock
-        // 10 分量上限内（3.8.643 同款红字不触发）。
+        // 本组加这一项后 10 个 ToolbarItem，正好顶到 buildBlock
+        // 10 分量上限（3.8.643 同款红字不触发，10 能编；本轮
+        // 新加“仅从未启动过”是第 10 个，再加就得拆 builder）。
         ToolbarItem(placement: .topBarTrailing) {
-            if topToolsExpanded, !czfIsGuestScene, czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly {
+            if topToolsExpanded, !czfIsGuestScene, czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly || czfNeverLaunchedOnly {
                 Button {
                     // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
                     czfLogMenuItemTap("显示全部")
@@ -878,6 +887,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfExpiringOnly = false
                     czfDuplicateOnly = false
                     czfLockedOnly = false
+                    czfNeverLaunchedOnly = false
                 } label: {
                     Label("显示全部", systemImage: "list.bullet")
                 }
@@ -991,6 +1001,24 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 } label: {
                     Label("仅锁定", systemImage: "lock")
                         .foregroundStyle(czfLockedOnly ? Color.accentColor : .secondary)
+                }
+            }
+        }
+
+        // 3.8.732（F-1）：仅从未启动过开关——与“仅锁定”开关并列；
+        // 显隐口径同款（topToolsExpanded, !czfIsGuestScene），
+        // 不需 #available；图标 play.slash（与现有七图标不重）。
+        // 本项是 czfRunningTools 第 10 个 ToolbarItem，正好顶到
+        // buildBlock 10 分量上限（10 能编，再加就得拆 builder）。
+        ToolbarItem(placement: .topBarTrailing) {
+            if topToolsExpanded, !czfIsGuestScene {
+                Button {
+                    // P0 hitTest 诊断（3.8.678）：只记项名，不改行为。
+                    czfLogMenuItemTap("仅从未启动过")
+                    czfNeverLaunchedOnly.toggle()
+                } label: {
+                    Label("仅从未启动过", systemImage: "play.slash")
+                        .foregroundStyle(czfNeverLaunchedOnly ? Color.accentColor : .secondary)
                 }
             }
         }
@@ -1378,8 +1406,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             // 3.8.698（F1）：面板里同款“全部更新(n)”行——与顶栏
             // 按钮同一动作（czfOpenUpdateListFromApps），仅可更新
-            // 筛选态且有可更新 App 时出现；门控与顶栏同款。
-            if topToolsExpanded, !czfIsGuestScene, czfUpdatableOnly, czfUpdatableCount > 0 {
+            // 筛选态且有可更新 App 时出现。
+            // 3.8.732（B-3）：门控删掉 !czfIsGuestScene——面板只在
+            // 客场景渲染（czfAppScrollContent 里 if topToolsExpanded,
+            // czfIsGuestScene），这行照抄顶栏门控等于永远不出现；
+            // 顶栏的 !czfIsGuestScene 不动。
+            if topToolsExpanded, czfUpdatableOnly, czfUpdatableCount > 0 {
                 Button {
                     czfOpenUpdateListFromApps()
                 } label: {
@@ -1481,11 +1513,28 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
+            // 3.8.732（F-1）：仅从未启动过——“仅锁定”行之后同款行。
+            Button {
+                czfNeverLaunchedOnly.toggle()
+            } label: {
+                HStack {
+                    Label("仅从未启动过", systemImage: "play.slash")
+                    Spacer()
+                    if czfNeverLaunchedOnly {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
             // 3.8.730（B-2）：一键回全部——客场景顶栏被 gate 掉
             //（czfRunningTools 里 !czfIsGuestScene），面板里是唯一
-            // 入口；与顶栏“显示全部”同款（六个全清），只在任一筛
+            // 入口；与顶栏“显示全部”同款（七个全清），只在任一筛
             // 选开着时出现。
-            if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly {
+            if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly || czfNeverLaunchedOnly {
                 Button {
                     czfLogMenuItemTap("显示全部")
                     czfRunningOnly = false
@@ -1494,6 +1543,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     czfExpiringOnly = false
                     czfDuplicateOnly = false
                     czfLockedOnly = false
+                    czfNeverLaunchedOnly = false
                 } label: {
                     HStack {
                         Label("显示全部", systemImage: "list.bullet")
@@ -1821,7 +1871,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.651（UI 打磨）：列表空态文案——任一筛选开着且筛空时，
     // 别显示“去安装 App”的安装提示（App 都在，只是被筛掉了）。
     private var czfEmptyListTip: String {
-        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly {
+        if czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly || czfNeverLaunchedOnly {
             return "筛选条件下没有 App"
         }
         if sharedModel.multiLCStatus == 2 {
@@ -1881,18 +1931,25 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         // 3.8.714（F-3）：仅分身——只留装了多个实例的 App；判据
         // 见 czfDuplicatedBundleIDs（两处过滤共用同一份，集只
-        // 算一次、行内只查表）。
+        // 算一次、行内只查表）。3.8.732（B-1）：行内比对键同款
+        // 走归一 Bundle ID，与计数键一致。
         if czfDuplicateOnly {
             let dups = czfDuplicatedBundleIDs
             apps = apps.filter { app in
                 guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return false }
-                return dups.contains(bid)
+                return dups.contains(czfNormalizedBundleID(bid))
             }
         }
         // 3.8.726（F-2）：仅锁定——只留已锁定的 App；判据
         // appInfo.isLocked（网格锁定按钮同款读法）。
         if czfLockedOnly {
             apps = apps.filter { $0.appInfo.isLocked }
+        }
+        // 3.8.732（F-1）：仅从未启动过——只留 lastLaunched 为
+        // nil 的 App；启动时写 lastLaunched（LCAppModel:1633），
+        // 没启动过的恒为 nil。
+        if czfNeverLaunchedOnly {
+            apps = apps.filter { $0.appInfo.lastLaunched == nil }
         }
         if searchContext.debouncedQuery.isEmpty {
             czfFilteredAppsCache = apps
@@ -1947,6 +2004,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // 3.8.651（F1）：天数顺手喂给排序缓存——按到期日排序
                 // 不自己读盘，只读这份表；就绪后 onChange 回来重排。
                 CZFAppExpiryCache.shared.setDays(days)
+                // 3.8.732（F-3）：签名快到期小组件快照——loaded 已按
+                // 到期日排好序（loadAll），取前 4 项写 App Group JSON；
+                // 只复用已算好的 loaded 数组，不在这里调 loadAll
+                //（后台读盘，sync() 主线程调会堵界面）。
+                CZFWidgetSnapshot.syncExpiry(items: loaded)
             }
         }
     }
@@ -2002,16 +2064,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         // 3.8.714（F-3）：隐藏区同加分身条件——与可见区同一集、同一开关。
+        // 3.8.732（B-1）：行内比对键同款走归一 Bundle ID，与计数键一致。
         if czfDuplicateOnly {
             let dups = czfDuplicatedBundleIDs
             apps = apps.filter { app in
                 guard let bid = app.appInfo.bundleIdentifier(), !bid.isEmpty else { return false }
-                return dups.contains(bid)
+                return dups.contains(czfNormalizedBundleID(bid))
             }
         }
         // 3.8.726（F-2）：隐藏区同加锁定条件——与可见区同一判据、同一开关。
         if czfLockedOnly {
             apps = apps.filter { $0.appInfo.isLocked }
+        }
+        // 3.8.732（F-1）：隐藏区同加从未启动过条件——与可见区同一判据、同一开关。
+        if czfNeverLaunchedOnly {
+            apps = apps.filter { $0.appInfo.lastLaunched == nil }
         }
         if searchContext.debouncedQuery.isEmpty || !sharedModel.isHiddenAppUnlocked {
             return apps
@@ -2077,11 +2144,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 }
                 backupStatusCaption(for: app)
             }
-        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly && !czfExpiringOnly && !czfDuplicateOnly && !czfLockedOnly {
+        } else if searchContext.debouncedQuery.isEmpty && !czfRunningOnly && !czfUpdatableOnly && !czfNoBackupOnly && !czfExpiringOnly && !czfDuplicateOnly && !czfLockedOnly && !czfNeverLaunchedOnly {
             // 优2：无搜索时行可长按拖动重排（搜索时显示是
             // 子集，拖了会丢位置，所以不挂拖拽）。
             // 3.8.653（B3）：筛选时显示同样是子集（仅运行中 /
-            // 仅可更新 / 仅无备份 / 仅快过期 / 仅分身 / 仅锁定），同款不挂拖拽——否则被筛掉
+            // 仅可更新 / 仅无备份 / 仅快过期 / 仅分身 / 仅锁定 / 仅从未启动过），同款不挂拖拽——否则被筛掉
             // 的 App 在提交时按名字沉到自定义顺序尾巴。
             VStack(alignment: .leading, spacing: 2) {
                 LCAppBanner(appModel: app, delegate: self, expiryDaysLeft: czfExpiryDays[app.appInfo.bundlePath()])
@@ -2116,7 +2183,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // 3.8.653（B3）：筛选时同样不启用——显示同样是子集，同款理由。
     private func commitDragReorder(draggedID: String, targetApp: LCAppModel) {
         defer { dragReorderID = nil }
-        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly, !czfExpiringOnly, !czfDuplicateOnly, !czfLockedOnly else { return }
+        guard searchContext.debouncedQuery.isEmpty, !czfRunningOnly, !czfUpdatableOnly, !czfNoBackupOnly, !czfExpiringOnly, !czfDuplicateOnly, !czfLockedOnly, !czfNeverLaunchedOnly else { return }
         let manager = sharedAppSortManager
         guard filteredApps.contains(where: { manager.getUniqueIdentifier(for: $0) == draggedID }) else { return }
         var visibleIDs = filteredApps.compactMap { manager.getUniqueIdentifier(for: $0) }
@@ -2893,7 +2960,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 isSearching: !searchContext.debouncedQuery.isEmpty,
                 // 3.8.653（B3）：筛选态也传进去——筛选时显示同样是子集，
                 // 网格拖拽与搜索同款禁用（CZFAppGridView.czfFiltering）。
-                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly,
+                czfFiltering: czfRunningOnly || czfUpdatableOnly || czfNoBackupOnly || czfExpiringOnly || czfDuplicateOnly || czfLockedOnly || czfNeverLaunchedOnly,
                 expiryDays: czfExpiryDays,
                 actions: CZFAppGridActions(
                     isBatchSelected: { app in self.isBatchSelected(app) },
@@ -3232,6 +3299,10 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         // 3.8.726（F-2）：开关翻动即重跑过滤（与仅分身同款）。
         .onChange(of: czfLockedOnly) { _ in
+            czfRefreshFilteredApps()
+        }
+        // 3.8.732（F-1）：开关翻动即重跑过滤（与仅锁定同款）。
+        .onChange(of: czfNeverLaunchedOnly) { _ in
             czfRefreshFilteredApps()
         }
         // 3.8.658（B1）：可更新名单变了即重跑过滤——源页刷新完成
@@ -5556,6 +5627,17 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         var lines = ["\(name)（版本 \(version)）", "Bundle ID：\(bundleId)", "大小：\(sizeText)"]
         lines.append(perms.isEmpty ? "声明的权限：无特殊权限" : "声明的权限：\(perms.joined(separator: "、"))")
+        // 3.8.732（F-2）：最低系统版本行——读 Info.plist 的
+        // MinimumOSVersion（全仓此前无读法），与本机系统版本比；
+        // 只警告、不拦截安装（安装流程一字不动）；纯字符串拼接
+        // 与纯函数比较（czfIsVersion，LCAltStoreSourcesView:3977），
+        // 本函数是 async、可能不在主线程，不碰 @State。
+        if let minOS = plist["MinimumOSVersion"] as? String {
+            let device = UIDevice.current.systemVersion
+            lines.append(czfIsVersion(minOS, newerThan: device)
+                ? "最低系统：iOS \(minOS)（本机 iOS \(device)，版本不够，装后可能无法打开）"
+                : "最低系统：iOS \(minOS)")
+        }
         // 3.8.670（F-2）：预览末尾加签名行——从 IPA 流式抽
         // embedded.mobileprovision，CMS 扫 plist 复用
         // CZFSignatureExpiryReader；有签名显团队 + 到期日（剩 N 天），
@@ -6093,6 +6175,98 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             if await MainActor.run(body: { czfTakeInstallCancel() }) {
                 await czfFinishInstall()
                 return false
+            }
+
+            // 3.8.732（B-2）：本地分支补安装前预览——远程分支同款
+            //（continuation + 5 分钟超时 + 取消处理）；本地分支
+            // 的 installUrl 就是文件本身，直接传 installUrl，不传
+            // destinationURL（远程分支才有下载目标）。preview == false
+            // 时保持现状直装；文件夹 IPA 安装走 preview: false（:2835），
+            // 不受影响。
+            if preview, let text = await makeInstallPreviewText(forIpa: installUrl) {
+                // 先弹信息卡：用户点「安装」才继续，
+                // 点「取消」什么都不装
+                let proceed = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                    // 3.8.560（L311-1）：installPreviewContinuation/Text/Show 是 @State；本闭包跑在裸 Task 的执行器上，直接写离主线程。continuation 由 withCheckedContinuation 同步创建、alert 靠 Show 弹出——三处回主线程写（Task 跳，alert 晚一拍弹出，不影响按钮/超时取 continuation：按钮在主线程读，超时 Task 也回主线程取）。
+                    Task { @MainActor in
+                        installPreviewContinuation = cont
+                        czfInstallPreviewTimedOut = false
+                        // 3.8.672（B-3）：预览文案加一句超时说明，让用户
+                        // 事前知道 5 分钟内未确认会自动取消、文件删除。
+                        // 3.8.714（B-1）：超时/取消不再默认删包——有本地 IPA
+                        // 文件夹就挪进去（可从文件夹重装），没设才删；
+                        // 文案按有没有文件夹分两句写，事前说清楚。
+                        if CZFLocalIpaFolderStore.restore() != nil {
+                            installPreviewText = text + "\n\n5 分钟内未确认将自动取消，安装包将保留到本地 IPA 文件夹，可从文件夹重新安装。"
+                        } else {
+                            installPreviewText = text + "\n\n5 分钟内未确认将自动取消，文件将被删除，需重新下载。"
+                        }
+                        installPreviewShow = true
+                    }
+                    // 3.8.428 设置#24：预览 alert 挂着 continuation，
+                    // 若被别的 alert 顶掉就永远挂起；5 分钟超时自动
+                    // 按取消 resume（与安装#2 的取消信号打通）。
+                    // 按钮与超时都在主线程串行，先抢到 continuation
+                    // 的那方 resume 并置 nil，另一方看到 nil 不动，
+                    // resume 只调一次。
+                    Task {
+                        try? await Task.sleep(nanoseconds: 300_000_000_000)
+                        await MainActor.run {
+                            if let cont = installPreviewContinuation {
+                                installPreviewContinuation = nil
+                                installPreviewShow = false
+                                czfInstallPreviewTimedOut = true
+                                cont.resume(returning: false)
+                                // 3.8.714（B-1）：超时只记超时、不写死“文件已删
+                                // 除”——提示改由下面 !proceed 分支按“留没留住”
+                                // 统一写（留住了报保留位置、没留住报删除）；
+                                // 手动点取消不走这里、不弹。文案硬编码中文，
+                                // 0 新 key。
+                            }
+                        }
+                    }
+                }
+                if !proceed {
+                    // 3.8.428 安装#2：预览点取消或超时=取消，不计失败。
+                    // 3.8.560（L311-1）：czfLastInstallWasCancelled 是 @State，回主线程写；收尾走 czfFinishInstall()。
+                    let timedOut = await MainActor.run {
+                        czfLastInstallWasCancelled = true
+                        return czfInstallPreviewTimedOut
+                    }
+                    // 3.8.714（B-1）：预览点取消/超时不再当场删包——有本地
+                    // IPA 文件夹就挪进去（可从文件夹重装），没设文件夹或
+                    // 挪失败才按现行删掉。挪进去了要告诉用户去哪找（超时
+                    // 走 error 槽、手动取消走提示槽）；删了的超时仍报原句。
+                    // 3.8.732（B-2）：本地分支只对可丢弃的下载件走这条——
+                    // installUrl 已在本地 IPA 文件夹里时不动（move helper
+                    // 会把同名目标先删再挪，源与目标同一文件等于删用户文件）；
+                    // 两处已知的本地 preview:true 调用方（TwoYi tmp 包、
+                    // 已下载文件）都不在文件夹里，不受影响。
+                    let czfLocalFolderURL = CZFLocalIpaFolderStore.restore()
+                    let czfAlreadyInLocalFolder = czfLocalFolderURL.map { installUrl.standardizedFileURL.path.hasPrefix($0.standardizedFileURL.path + "/") } ?? false
+                    let kept = czfAlreadyInLocalFolder ? true : czfMoveCancelledPreviewIPAtoLocalFolder(installUrl)
+                    if !kept {
+                        try? fm.removeItem(at: installUrl)
+                    }
+                    if kept {
+                        await MainActor.run {
+                            if timedOut {
+                                errorInfo = "安装前预览已超时，安装取消，安装包已保留到本地 IPA 文件夹，可从文件夹重新安装"
+                                errorShow = true
+                            } else {
+                                installInfo = "安装已取消，安装包已保留到本地 IPA 文件夹，可从文件夹重新安装"
+                                installInfoShow = true
+                            }
+                        }
+                    } else if timedOut {
+                        await MainActor.run {
+                            errorInfo = "安装前预览已超时，安装取消，文件已删除，需重新下载"
+                            errorShow = true
+                        }
+                    }
+                    await czfFinishInstall()
+                    return false
+                }
             }
 
             var installOK = true
