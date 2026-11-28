@@ -458,6 +458,24 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             .appendingPathComponent("CZFIpaFolderCache", isDirectory: true)
     }
 
+    // 3.8.734（B-3）：文件指纹（修改时间 + 大小，与 czfCacheKey 同口径）——
+    // loadDetails 入口抓一次，写回与存缓存前各校验一次；重扫重建后旧 Task 的
+    // 解包结果不再凭 detailsCancelled 旗（scan 里先 cancel 后同步复位，旗已
+    // 失效）写回新列表。指纹取不到（文件已删）按已变处理。
+    nonisolated private static func czfFileFingerprint(for url: URL) -> (mtime: Double, size: Int64)? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970,
+              let size = (attrs[.size] as? NSNumber)?.int64Value else { return nil }
+        return (mtime, size)
+    }
+
+    // 3.8.734（B-3）：指纹比对——逐字段比（元组不遵 Equatable，3.8.665 同款红字）；
+    // 任一指纹取不到都按已变处理，不写回、不存缓存。
+    nonisolated private static func czfFingerprintMatches(_ url: URL, entry: (mtime: Double, size: Int64)?) -> Bool {
+        guard let entry, let now = czfFileFingerprint(for: url) else { return false }
+        return now.mtime == entry.mtime && now.size == entry.size
+    }
+
     nonisolated private static func czfCacheKey(for url: URL, relativeTo folderRoot: URL?) -> String? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970,
@@ -567,10 +585,14 @@ final class CZFLocalIpaFolderModel: ObservableObject {
     }
 
     nonisolated private func loadDetails(for item: CZFLocalIpaItem, folderRoot: URL) async {
+        // 3.8.734（B-3）：入口指纹——写回与存缓存前各校验一次；文件被替换/
+        // 重扫后旧解包结果不再写回、也不污染磁盘缓存。
+        let czfEntryFingerprint = Self.czfFileFingerprint(for: item.url)
         // 先读磁盘缓存：命中直接用，不解包。
         if let cached = Self.czfLoadCachedDetail(for: item.url, relativeTo: folderRoot) {
             await MainActor.run {
                 guard !self.detailsCancelled else { return }
+                guard Self.czfFingerprintMatches(item.url, entry: czfEntryFingerprint) else { return }
                 if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
                     if let name = cached.name { self.items[idx].displayName = name }
                     if let version = cached.version { self.items[idx].version = version }
@@ -583,10 +605,15 @@ final class CZFLocalIpaFolderModel: ObservableObject {
             return
         }
         let info = Self.extractIpaInfo(url: item.url)
+        // 3.8.734（B-3）：存缓存前校验指纹——文件已换时不把旧解包结果按新文
+        // 件重算的缓存键存进去（czfSaveCachedDetail 当场按当前文件重算键），
+        // 也不写回（下面 MainActor.run 里同款再验一次）。
+        guard Self.czfFingerprintMatches(item.url, entry: czfEntryFingerprint) else { return }
         // 解出来了就存缓存，下次切回来直接读（无图标也存 .json）。
         Self.czfSaveCachedDetail(for: item.url, relativeTo: folderRoot, name: info.name, version: info.version, build: info.build, icon: info.icon, bundleIdentifier: info.bundleIdentifier)
         await MainActor.run {
             guard !self.detailsCancelled else { return }
+            guard Self.czfFingerprintMatches(item.url, entry: czfEntryFingerprint) else { return }
             if let idx = self.items.firstIndex(where: { $0.id == item.id }) {
                 if let name = info.name { self.items[idx].displayName = name }
                 if let version = info.version { self.items[idx].version = version }

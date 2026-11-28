@@ -70,10 +70,13 @@ private enum CZFDownloadResumeStore {
         // 3.8.670（B-3）：换 identifier 不清失败计数——同一地址的旧
         // 记录带过来的 failCount 要留着，不然每轮重试/每次冷启动
         // 都从 0 开始，死链永远到不了 3 次阈值。
+        // 3.8.734（B-2）：只清旧 .json、不清旧 .resume——旧轮断点续传
+        // 数据要留到新轮失败回调存下新续传数据之后（新轮还没产生替代
+        // 数据就被杀进程时，旧断点还在、可续；全删就只能从 0 重下）。
         var czfOldFailCount = 0
         for old in allRecords() where old.record.urlString == url.absoluteString && old.identifier != identifier {
             czfOldFailCount = max(czfOldFailCount, old.record.failCount)
-            clearRecord(identifier: old.identifier)
+            clearRecordJSONOnly(identifier: old.identifier)
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var record = CZFDownloadResumeRecord(identifier: identifier, urlString: url.absoluteString, destPath: dest.path, autoResume: autoResume)
@@ -134,6 +137,17 @@ private enum CZFDownloadResumeStore {
         }
         if let resumeURL = resumeURL(for: identifier) {
             try? FileManager.default.removeItem(at: resumeURL)
+        }
+    }
+
+    // 3.8.734（B-2）：只清记录的 .json、不清 .resume——旧轮 .resume
+    // 留在盘上（新 identifier 的键不同，不会被新轮误读；旧 .json 没了，
+    // 启动自动续也找不回旧 identifier），新轮失败回调存下新续传数据后
+    // 旧 .resume 即成孤儿（Caches 目录，系统可清）。成功/取消路仍走
+    // 上面的 clearRecord（两样一起清），行为不变。
+    static func clearRecordJSONOnly(identifier: String) {
+        if let jsonURL = jsonURL(for: identifier) {
+            try? FileManager.default.removeItem(at: jsonURL)
         }
     }
 }

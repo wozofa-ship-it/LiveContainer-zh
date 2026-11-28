@@ -126,9 +126,14 @@ struct LCAppSettingsView: View {
     
     @EnvironmentObject private var sharedModel : SharedModel
     
-    init(model: LCAppModel) {
+    // 3.8.734（F-1）：备份状态——列表页 backupStatusByID 表里的那行
+    //（“已备份 · 日期”/“无备份”），由调用方传入；nil = 调用方没传，不渲染本行。
+    private let czfBackupStatus: String?
+
+    init(model: LCAppModel, backupStatus: String? = nil) {
         self.appInfo = model.appInfo
         self._model = ObservedObject(wrappedValue: model)
+        self.czfBackupStatus = backupStatus
     }
 
     // 定时最小化打开：开关与时间按实例稳定键（`relativeBundlePath`，
@@ -1135,6 +1140,17 @@ struct LCAppSettingsView: View {
                                 .foregroundStyle(.gray)
                                 .lineLimit(1)
                         }
+                    }
+                }
+                // 3.8.734（F-1）：备份状态只读行——数据源是列表页 backupStatusByID
+                // 表（“已备份 · 日期”/“无备份”，与行下小字同口径）；调用方没传
+                // 时不渲染本行，不另扫盘。
+                if let czfBackupStatus {
+                    HStack {
+                        Text("备份状态")
+                        Spacer()
+                        Text(czfBackupStatus)
+                            .foregroundStyle(.gray)
                     }
                 }
             } header: {

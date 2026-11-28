@@ -117,6 +117,9 @@ struct CZFAppGridActions {
     // 列表不变）。列表页接线（czfRefreshFilteredApps），默认空实
     // 现，老调用点不传也能编。
     var onLockChanged: () -> Void = { }
+    // 3.8.734（F-1）：查看备份——列表页接线（直进数据管理恢复页，
+    // 搜索预填该 App 显示名）；默认空实现，老调用点不传也能编。
+    var onViewBackups: (LCAppModel) -> Void = { _ in }
 }
 
 struct CZFAppGridView: View {
@@ -219,7 +222,9 @@ struct CZFAppGridView: View {
             // 菜单点了就静默无事。
             onRestoreRequest: actions.onRestoreRequest,
             // 3.8.730（B-1）：锁定状态变化回列表页重算过滤，同款转发。
-            onLockChanged: actions.onLockChanged
+            onLockChanged: actions.onLockChanged,
+            // 3.8.734（F-1）：查看备份——同款转发，漏了格子菜单点了就静默无事。
+            onViewBackups: actions.onViewBackups
         )
     }
 
@@ -968,6 +973,11 @@ struct CZFAppGridCell: View {
         // 中文，沿用本菜单“复制 Bundle ID”硬编码先例。
         Button("恢复这个 App", systemImage: "arrow.counterclockwise") {
             actions.onRestoreRequest(app)
+        }
+        // 3.8.734（F-1）：查看备份——直进数据管理恢复页（搜索预填该 App
+        // 显示名）；标题硬编码中文，沿用本菜单“复制 Bundle ID”硬编码先例。
+        Button("查看备份", systemImage: "externaldrive") {
+            actions.onViewBackups(app)
         }
         // 3.8.641（F1）：置顶/取消置顶——列表置顶（CZFListPinnedApps 键，
         // 与坞固定区无关）；切换后重排，八种排序下置顶组都固定在前。

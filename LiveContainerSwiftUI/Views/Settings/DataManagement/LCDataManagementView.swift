@@ -125,10 +125,17 @@ struct LCDataManagementView : View {
     // 选页 CZFScopeChoiceView；非 nil = 面板已让用户选过，
     // 直接按它备份，不再出选页）。
     let preselectedLoginOnly: Bool?
+    // 3.8.734（F-1）：恢复页搜索预填——App 页长按“查看备份”直进恢复页时
+    // 带该 App 显示名，恢复列表当场只剩它的备份；默认空串，不预填。
+    let czfInitialBackupSearchText: String
     @State private var didApplyInitialSheet = false
     
     @StateObject private var appFolderRemovalAlert = YesNoHelper()
     @State private var folderRemoveCount = 0
+    // 3.8.734（F-3）：清理无主备份——确认框与待删清单（YesNoHelper 同款，见 cleanUpUnusedFolders）。
+    @StateObject private var czfOrphanCleanupAlert = YesNoHelper()
+    @State private var czfOrphanBackupCount = 0
+    @State private var czfOrphanLockedSkipped = 0
     
     @StateObject private var keyChainRemovalAlert = YesNoHelper()
     @StateObject private var tmpRemovalAlert = YesNoHelper()
@@ -293,10 +300,12 @@ struct LCDataManagementView : View {
         !selectBackupFolders.isEmpty && selectBackupFolders.allSatisfy { selectedBackupFolderURLs.contains($0) }
     }
 
-    init(initialSheet: LCDataManagementInitialSheet? = nil, directBackupApps: [LCAppModel] = [], preselectedLoginOnly: Bool? = nil) {
+    init(initialSheet: LCDataManagementInitialSheet? = nil, directBackupApps: [LCAppModel] = [], preselectedLoginOnly: Bool? = nil, czfInitialBackupSearchText: String = "") {
         self.initialSheet = initialSheet
         self.directBackupApps = directBackupApps
         self.preselectedLoginOnly = preselectedLoginOnly
+        self.czfInitialBackupSearchText = czfInitialBackupSearchText
+        _czfBackupSearchText = State(initialValue: czfInitialBackupSearchText)
         _folderPaths = State(initialValue: [
             LCFolderPath(path: LCPath.docPath, desc: "Private Container"),
             LCFolderPath(path: LCPath.lcGroupDocPath, desc: "App Group Container"),
@@ -962,6 +971,15 @@ struct LCDataManagementView : View {
                     }
 
                 Button(role:.destructive) {
+                    Task { await czfCleanOrphanBackups() }
+                } label: {
+                    HStack {
+                        LCSettingsIcon(systemName: "trash", color: .red)
+                        Text("清理无主备份")
+                    }
+                }
+
+                Button(role:.destructive) {
                     Task { await removeKeyChain() }
                 } label: {
                     HStack {
@@ -1242,6 +1260,29 @@ struct LCDataManagementView : View {
                         Text("lc.settings.noDataFolderToClean".loc)
                     }
 
+                }
+        )
+        // 3.8.734（F-3）：清理无主备份确认也挪叶子（同款，见上）。
+        .background(
+            EmptyView()
+                .alert("清理无主备份", isPresented: $czfOrphanCleanupAlert.show) {
+                    if czfOrphanBackupCount > 0 {
+                        Button(role: .destructive) {
+                            czfOrphanCleanupAlert.close(result: true)
+                        } label: {
+                            Text("lc.common.delete".loc)
+                        }
+                    }
+
+                    Button("lc.common.cancel".loc, role: .cancel) {
+                        czfOrphanCleanupAlert.close(result: false)
+                    }
+                } message: {
+                    if czfOrphanBackupCount > 0 {
+                        Text("将删除 \(czfOrphanBackupCount) 个无主备份（本地 + iCloud 份一起删），此操作不可恢复" + (czfOrphanLockedSkipped > 0 ? "，\(czfOrphanLockedSkipped) 个已锁定不会删" : ""))
+                    } else {
+                        Text("没有无主备份" + (czfOrphanLockedSkipped > 0 ? "（\(czfOrphanLockedSkipped) 个已锁定未删）" : ""))
+                    }
                 }
         )
         // 3.8.588（L120）：清钥匙串确认也挪叶子（见上）。
@@ -2176,6 +2217,75 @@ struct LCDataManagementView : View {
         
     }
     
+    // 3.8.734（F-3）：清理无主备份——枚举本地 Backups + 外部备份根，manifest
+    // 的 dataUUID 对不上任何已装 App（apps + hiddenApps 的 dataUUID 集）的就是
+    // 无主备份（批量删除选“删除 App（保留数据）”时备份原样留下，越攒越多）。
+    // 三条红线：①只认 manifest 的 dataUUID 配对，绝不按文件夹名猜——没 manifest
+    // 或 dataUUID 为空的不断定、不删（未下载的外部 manifest 读不到也按不定处理）；
+    // ②动手前按 3.8.584 同款重取一次快照，防止确认等待期间刚恢复的备份被误删；
+    // ③锁定的备份跳过、走现有 deleteBackupUnlocked 的人脸/锁门（本函数只把未锁定
+    // 的放进待删清单，删时再验一次锁）。本地 + 外部同删（deleteBackupUnlocked
+    // 同款：删本地 URL 时同名外部份一起删，同名只传一次）。
+    func czfCleanOrphanBackups() async {
+        // 快照 1：在装 dataUUID 集（MainActor.run 一次取齐，cleanUpUnusedFolders 同款）。
+        let installedUUIDs: Set<String> = await MainActor.run {
+            Set((sharedModel.apps + sharedModel.hiddenApps).compactMap { $0.appInfo.dataUUID })
+        }
+        // 枚举两根、同名只算一次；判无主只认已下载 manifest 的 dataUUID。
+        var orphans: [URL] = []
+        var lockedSkipped = 0
+        var seenNames = Set<String>()
+        for folder in backupFolders(fromExternal: false) + backupFolders(fromExternal: true) {
+            guard seenNames.insert(folder.lastPathComponent).inserted else { continue }
+            guard let info = Self.czfDownloadedManifestInfo(of: folder),
+                  !info.dataUUID.isEmpty,
+                  !installedUUIDs.contains(info.dataUUID) else { continue }
+            if Self.isBackupLocked(folder.lastPathComponent) {
+                lockedSkipped += 1
+                continue
+            }
+            orphans.append(folder)
+        }
+        let czfOrphans = orphans
+        let czfLockedSkipped = lockedSkipped
+        await MainActor.run {
+            czfOrphanBackupCount = czfOrphans.count
+            czfOrphanLockedSkipped = czfLockedSkipped
+        }
+        guard let result = await czfOrphanCleanupAlert.open(), result else {
+            return
+        }
+        // 3.8.584 同款：动手前重取一次快照——确认等待期间刚恢复的备份
+        //（dataUUID 重新在装）不再是无主，逐个重验 manifest 后再删。
+        let installedNow: Set<String> = await MainActor.run {
+            Set((sharedModel.apps + sharedModel.hiddenApps).compactMap { $0.appInfo.dataUUID })
+        }
+        var deleted = 0
+        var failedNames: [String] = []
+        for url in czfOrphans {
+            guard let info = Self.czfDownloadedManifestInfo(of: url),
+                  !info.dataUUID.isEmpty,
+                  !installedNow.contains(info.dataUUID),
+                  !Self.isBackupLocked(url.lastPathComponent),
+                  FileManager.default.fileExists(atPath: url.path) else { continue }
+            await deleteBackupUnlocked(at: url)
+            if FileManager.default.fileExists(atPath: url.path) {
+                failedNames.append(url.lastPathComponent)
+            } else {
+                deleted += 1
+            }
+        }
+        await MainActor.run {
+            if !failedNames.isEmpty {
+                errorInfo = "以下无主备份删除失败（已跳过，仍在原处）：\n" + failedNames.joined(separator: "\n")
+                errorShow = true
+            } else {
+                successInfo = "已删除 \(deleted) 个无主备份" + (czfLockedSkipped > 0 ? "，\(czfLockedSkipped) 个已锁定未删" : "")
+                successShow = true
+            }
+        }
+    }
+
     func removeKeyChain() async {
         guard let result = await keyChainRemovalAlert.open(), result else {
             return
